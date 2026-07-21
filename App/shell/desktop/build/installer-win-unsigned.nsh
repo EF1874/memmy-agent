@@ -2,6 +2,16 @@
   !define MEMMY_WM_SETTINGCHANGE 0x001A
 !endif
 
+!ifndef MEMMY_STORE_TRANSITION_COMPATIBLE
+  !define MEMMY_STORE_TRANSITION_COMPATIBLE "$%MEMMY_STORE_TRANSITION_COMPATIBLE%"
+!endif
+
+!if "${MEMMY_STORE_TRANSITION_COMPATIBLE}" == "1"
+  !ifndef MEMMY_STORE_AUMID
+    !define MEMMY_STORE_AUMID "$%MEMMY_STORE_AUMID%"
+  !endif
+!endif
+
 !macro customHeader
   !ifdef BUILD_UNINSTALLER
     ; Keep unsigned QA uninstallers usable if Windows or transfer tools touch the NSIS stub.
@@ -92,6 +102,9 @@ Function MemmyInstallLaunchProxy
   SetOutPath "$0"
   File /oname=Memmy.ico "${BUILD_RESOURCES_DIR}\icon.ico"
   File /oname=MemmyUpdatePrompt.ps1 "${BUILD_RESOURCES_DIR}\MemmyUpdatePrompt.ps1"
+  !if "${MEMMY_STORE_TRANSITION_COMPATIBLE}" == "1"
+  File /oname=MemmyStoreActivate.ps1 "${BUILD_RESOURCES_DIR}\MemmyStoreActivate.ps1"
+  !endif
 
   FileOpen $1 "$0\MemmyLauncher.vbs" w
   FileWrite $1 "Set shell = CreateObject($\"WScript.Shell$\")$\r$\n"
@@ -99,10 +112,22 @@ Function MemmyInstallLaunchProxy
   FileWrite $1 "appExe = $\"$INSTDIR\${PRODUCT_FILENAME}.exe$\"$\r$\n"
   FileWrite $1 "powerShellPath = shell.ExpandEnvironmentStrings($\"%SystemRoot%$\") & $\"\System32\WindowsPowerShell\v1.0\powershell.exe$\"$\r$\n"
   FileWrite $1 "promptPath = $\"$0\MemmyUpdatePrompt.ps1$\"$\r$\n"
+  !if "${MEMMY_STORE_TRANSITION_COMPATIBLE}" == "1"
+  FileWrite $1 "storeActivatePath = $\"$0\MemmyStoreActivate.ps1$\"$\r$\n"
+  FileWrite $1 "storeAumId = $\"${MEMMY_STORE_AUMID}$\"$\r$\n"
+  !endif
   FileWrite $1 "languagePath = shell.ExpandEnvironmentStrings($\"%APPDATA%$\") & $\"\Memmy\update-prompt-language.txt$\"$\r$\n"
   FileWrite $1 "markerPath = shell.ExpandEnvironmentStrings($\"%APPDATA%$\") & $\"\Memmy\prepared-required-update.json$\"$\r$\n"
   FileWrite $1 "lockPath = markerPath & $\".lock$\"$\r$\n"
   FileWrite $1 "promptMarkerPath = markerPath & $\".prompt$\"$\r$\n"
+  !if "${MEMMY_STORE_TRANSITION_COMPATIBLE}" == "1"
+  FileWrite $1 "If fso.FileExists(powerShellPath) And fso.FileExists(storeActivatePath) Then$\r$\n"
+  FileWrite $1 "  storeExitCode = shell.Run(Chr(34) & powerShellPath & Chr(34) & $\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File $\" & Chr(34) & storeActivatePath & Chr(34) & $\" -AumId $\" & Chr(34) & storeAumId & Chr(34), 0, True)$\r$\n"
+  FileWrite $1 "  If storeExitCode = 0 Then$\r$\n"
+  FileWrite $1 "    WScript.Quit 0$\r$\n"
+  FileWrite $1 "  End If$\r$\n"
+  FileWrite $1 "End If$\r$\n"
+  !endif
   FileWrite $1 "If fso.FolderExists(lockPath) And fso.FileExists(promptMarkerPath) Then$\r$\n"
   FileWrite $1 "  If fso.FileExists(powerShellPath) And fso.FileExists(promptPath) Then$\r$\n"
   FileWrite $1 "    shell.Run Chr(34) & powerShellPath & Chr(34) & $\" -STA -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $\" & Chr(34) & promptPath & Chr(34) & $\" -LockPath $\" & Chr(34) & lockPath & Chr(34) & $\" -AppExe $\" & Chr(34) & appExe & Chr(34) & $\" -LanguagePath $\" & Chr(34) & languagePath & Chr(34), 0, True$\r$\n"
@@ -139,7 +164,6 @@ FunctionEnd
     Pop $5
     StrCmp $5 "1" memmy_point_shortcuts_done
 
-    StrCmp $keepShortcuts "false" memmy_point_new_desktop_shortcut
     StrCmp $oldDesktopLink $newDesktopLink memmy_point_existing_new_desktop_shortcut
     IfFileExists "$oldDesktopLink" 0 memmy_point_existing_new_desktop_shortcut
     Rename "$oldDesktopLink" "$newDesktopLink"

@@ -182,7 +182,8 @@ describe("desktop pet window mode", () => {
 
     // The replacement instance started by macOS "Quit & Reopen" retries the lock until the old
     // instance finishes cleanup, instead of quitting immediately or relaunching heuristically.
-    expect(source).toContain("let hasSingleInstanceLock = app.requestSingleInstanceLock();");
+    expect(source).toContain("let hasSingleInstanceLock = !shouldExitForWindowsStoreTransition && app.requestSingleInstanceLock();");
+    expect(source).toContain("if (shouldExitForWindowsStoreTransition) {\n  app.quit();\n}");
     expect(source).toContain("const SINGLE_INSTANCE_LOCK_RETRY_INTERVAL_MS = 500;");
     expect(source).toContain("const SINGLE_INSTANCE_LOCK_WAIT_DEADLINE_MS = 10000;");
     expect(source).toContain("const SECOND_INSTANCE_ACTIVATE_DEBOUNCE_MS = 3000;");

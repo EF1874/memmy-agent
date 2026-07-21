@@ -75,6 +75,20 @@ resolve_electron_dist() {
 
 node "$ROOT_DIR/scripts/sync-project-version.mjs"
 DESKTOP_VERSION="${MEMMY_DESKTOP_VERSION:-$(read_package_version "$DESKTOP_DIR/package.json")}"
+STORE_TRANSITION_COMPATIBLE="${MEMMY_STORE_TRANSITION_COMPATIBLE:-0}"
+if [ "$STORE_TRANSITION_COMPATIBLE" != "0" ] && [ "$STORE_TRANSITION_COMPATIBLE" != "1" ]; then
+  echo "MEMMY_STORE_TRANSITION_COMPATIBLE must be 0 or 1." >&2
+  exit 1
+fi
+export MEMMY_STORE_TRANSITION_COMPATIBLE="$STORE_TRANSITION_COMPATIBLE"
+if [ "$STORE_TRANSITION_COMPATIBLE" = "1" ]; then
+  STORE_AUMID="${MEMMY_STORE_AUMID:-Memmy.Development_fvzhnh4ztget6!Memmy}"
+  if [[ ! "$STORE_AUMID" =~ ^[A-Za-z0-9._-]{1,64}![A-Za-z0-9._-]{1,64}$ ]]; then
+    echo "MEMMY_STORE_AUMID must be <package-family-name>!<application-id> using only letters, digits, dot, underscore, or hyphen." >&2
+    exit 1
+  fi
+  export MEMMY_STORE_AUMID="$STORE_AUMID"
+fi
 configure_npm_script_shell
 
 if [ "${MEMMY_SKIP_CODESIGN:-}" = "1" ]; then
@@ -84,6 +98,9 @@ else
   BUILDER_CONFIG="electron-builder.win.yml"
   PACKAGE_SIGNING="signed"
 fi
+
+BUILDER_CONFIG="${MEMMY_WINDOWS_BUILDER_CONFIG:-$BUILDER_CONFIG}"
+PACKAGE_TARGET="${MEMMY_WINDOWS_TARGET:-nsis}"
 
 case "${MEMMY_ACCOUNT_CHANNEL:-phone}" in
   email)
@@ -99,7 +116,11 @@ case "${MEMMY_ACCOUNT_CHANNEL:-phone}" in
 esac
 
 FINAL_EXE="$DESKTOP_DIR/release/Memmy-$DESKTOP_VERSION-win32-$PACKAGE_ARCH-$PACKAGE_EDITION-$PACKAGE_SIGNING.exe"
+FINAL_ARTIFACT="${MEMMY_WINDOWS_FINAL_ARTIFACT:-$FINAL_EXE}"
 ARTIFACT_NAME="Memmy-$DESKTOP_VERSION-win32-$PACKAGE_ARCH-$PACKAGE_EDITION-$PACKAGE_SIGNING.\${ext}"
+if [ -n "${MEMMY_WINDOWS_ARTIFACT_NAME:-}" ]; then
+  ARTIFACT_NAME="$MEMMY_WINDOWS_ARTIFACT_NAME"
+fi
 
 log() {
   printf '\n[%s] %s\n' "$(date '+%H:%M:%S')" "$*"
@@ -274,11 +295,17 @@ write_desktop_edition_manifest() {
       ;;
   esac
 
+  local store_transition_compatible="false"
+  if [ "$STORE_TRANSITION_COMPATIBLE" = "1" ]; then
+    store_transition_compatible="true"
+  fi
+
   cat > "$DESKTOP_DIR/dist/main/desktop-edition.json" <<EOF
 {
   "edition": "$edition",
   "accountChannel": "$account_channel",
-  "signing": "$PACKAGE_SIGNING"
+  "signing": "$PACKAGE_SIGNING",
+  "storeTransitionCompatible": $store_transition_compatible
 }
 EOF
 }
@@ -460,8 +487,10 @@ verify_packaged_windows_unpacked_artifacts() {
 
 npm_ci_win_x64() {
   local package_dir="$1"
+  local package_dir_windows
+  package_dir_windows="$(to_node_readable_path "$package_dir")"
 
-  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --prefix "$package_dir" --omit=dev --ignore-scripts --os=win32 --cpu=x64
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 MSYS2_ARG_CONV_EXCL="*" cmd.exe /d /c npm.cmd ci --prefix "$package_dir_windows" --omit=dev --ignore-scripts --os=win32 --cpu=x64
 }
 
 install_better_sqlite3_win_x64() {
@@ -481,52 +510,78 @@ else
   log "MEMMY_SKIP_CODESIGN=1, building unsigned Windows smoke package"
 fi
 
-if [ ! -d "$ROOT_DIR/node_modules" ]; then
-  log "Installing root workspace dependencies"
-  npm_with_configured_script_shell install
+if [ "${MEMMY_WINDOWS_SOURCES_PREBUILT:-}" = "1" ]; then
+  log "Using source builds prepared by the Windows Store PowerShell wrapper"
+else
+  if [ ! -d "$ROOT_DIR/node_modules" ]; then
+    log "Installing root workspace dependencies"
+    npm_with_configured_script_shell install
+  fi
+
+  npm_with_configured_script_shell install --workspace @memmy/migrations --include=dev
+
+  log "Building migrations package"
+  npm_with_configured_script_shell run build --prefix "$MIGRATIONS_DIR"
+
+  log "Installing memmy-agent dependencies"
+  if [ "${MEMMY_SKIP_AGENT_INSTALL_SCRIPTS:-}" = "1" ]; then
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm_with_configured_script_shell ci --prefix "$AGENT_DIR" --ignore-scripts
+  else
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm_with_configured_script_shell ci --prefix "$AGENT_DIR"
+  fi
+
+  log "Building Memory workspace"
+  npm_with_configured_script_shell run build -w @memmy/memory
+
+  log "Building memmy-agent CLI"
+  npm_with_configured_script_shell run build --prefix "$AGENT_DIR"
+
+  log "Building Electron desktop shell"
+  npm_with_configured_script_shell run build -w @memmy/desktop
 fi
-npm_with_configured_script_shell install --workspace @memmy/migrations --include=dev
-
-log "Building migrations package"
-npm_with_configured_script_shell run build --prefix "$MIGRATIONS_DIR"
-
-log "Installing memmy-agent dependencies"
-PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm_with_configured_script_shell ci --prefix "$AGENT_DIR"
-
-log "Building Memory workspace"
-npm_with_configured_script_shell run build -w @memmy/memory
-
-log "Building memmy-agent CLI"
-npm_with_configured_script_shell run build --prefix "$AGENT_DIR"
-
-log "Building Electron desktop shell"
-npm_with_configured_script_shell run build -w @memmy/desktop
 write_desktop_edition_manifest
 
-log "Preparing Windows x64 packaged runtime"
-rm -rf "$RUNTIME_DIR"
-rm -rf "$MIGRATIONS_STAGING_DIR"
-mkdir -p "$RUNTIME_DIR/memory" "$RUNTIME_DIR/memmy-agent" "$CLI_BIN_DIR"
-mkdir -p "$MIGRATIONS_STAGING_DIR"
-cp "$MIGRATIONS_DIR/package.json" "$MIGRATIONS_STAGING_DIR/package.json"
-cp -R "$MIGRATIONS_DIR/dist" "$MIGRATIONS_STAGING_DIR/dist"
+if [ "${MEMMY_WINDOWS_RUNTIME_PREPARED:-}" = "1" ]; then
+  log "Using Windows x64 packaged runtime prepared by the Store PowerShell wrapper"
+else
+  log "Preparing Windows x64 packaged runtime"
+  rm -rf "$RUNTIME_DIR"
+  rm -rf "$MIGRATIONS_STAGING_DIR"
+  mkdir -p "$RUNTIME_DIR/memory" "$RUNTIME_DIR/memmy-agent" "$CLI_BIN_DIR"
+  mkdir -p "$MIGRATIONS_STAGING_DIR"
+  cp "$MIGRATIONS_DIR/package.json" "$MIGRATIONS_STAGING_DIR/package.json"
+  cp -R "$MIGRATIONS_DIR/dist" "$MIGRATIONS_STAGING_DIR/dist"
 
-cp -R "$MEMORY_DIR/dist/src" "$RUNTIME_DIR/memory/src"
-create_memory_runtime_manifest
+  cp -R "$MEMORY_DIR/dist/src" "$RUNTIME_DIR/memory/src"
+  create_memory_runtime_manifest
 
-log "Installing Windows x64 Memory runtime dependencies"
-npm_ci_win_x64 "$RUNTIME_DIR/memory"
-install_better_sqlite3_win_x64
-verify_windows_native_module
-verify_windows_onnxruntime_module
-verify_windows_sharp_module
+  log "Installing Windows x64 Memory runtime dependencies"
+  npm_ci_win_x64 "$RUNTIME_DIR/memory"
+  install_better_sqlite3_win_x64
+  verify_windows_native_module
+  verify_windows_onnxruntime_module
+  verify_windows_sharp_module
 
-cp -R "$AGENT_DIR/dist" "$RUNTIME_DIR/memmy-agent/dist"
-cp "$AGENT_DIR/package.json" "$RUNTIME_DIR/memmy-agent/package.json"
-cp "$AGENT_DIR/package-lock.json" "$RUNTIME_DIR/memmy-agent/package-lock.json"
+  cp -R "$AGENT_DIR/dist" "$RUNTIME_DIR/memmy-agent/dist"
+  cp "$AGENT_DIR/package.json" "$RUNTIME_DIR/memmy-agent/package.json"
+  cp "$AGENT_DIR/package-lock.json" "$RUNTIME_DIR/memmy-agent/package-lock.json"
 
-log "Installing Windows x64 memmy-agent runtime dependencies"
-npm_ci_win_x64 "$RUNTIME_DIR/memmy-agent"
+  if [ "${MEMMY_WINDOWS_STOP_BEFORE_AGENT_RUNTIME_INSTALL:-}" = "1" ]; then
+    log "Agent runtime is ready for native PowerShell dependency installation"
+    exit 0
+  fi
+
+  log "Installing Windows x64 memmy-agent runtime dependencies"
+  npm_ci_win_x64 "$RUNTIME_DIR/memmy-agent"
+fi
+
+if [ ! -f "$MIGRATIONS_STAGING_DIR/dist/index.js" ]; then
+  rm -rf -- "$MIGRATIONS_STAGING_DIR"
+  mkdir -p "$MIGRATIONS_STAGING_DIR"
+  cp "$MIGRATIONS_DIR/package.json" "$MIGRATIONS_STAGING_DIR/package.json"
+  cp -R "$MIGRATIONS_DIR/dist" "$MIGRATIONS_STAGING_DIR/dist"
+fi
+
 RUNTIME_MIGRATIONS_DIR="$RUNTIME_DIR/memmy-agent/node_modules/@memmy/migrations"
 rm -rf "$RUNTIME_MIGRATIONS_DIR"
 mkdir -p "$RUNTIME_MIGRATIONS_DIR"
@@ -577,9 +632,11 @@ log "Creating Windows CLI launchers"
 create_windows_cli_launcher "$CLI_BIN_DIR/memmy-memory.cmd" "dist\\runtime\\memory\\src\\cli\\index.js"
 create_windows_cli_launcher "$CLI_BIN_DIR/memmy.cmd" "dist\\runtime\\memmy-agent\\dist\\main.js"
 
-patch_electron_builder_nsis_refresh
+if [ "$PACKAGE_TARGET" = "nsis" ]; then
+  patch_electron_builder_nsis_refresh
+fi
 
-log "Packaging Windows x64 installer"
+log "Packaging Windows x64 $PACKAGE_TARGET artifact"
 cd "$DESKTOP_DIR"
 
 BUILDER_ARGS=(--config "$BUILDER_CONFIG")
@@ -593,12 +650,16 @@ if [ "${#WINDOWS_SIGNING_BUILDER_ARGS[@]}" -gt 0 ]; then
   BUILDER_ARGS+=("${WINDOWS_SIGNING_BUILDER_ARGS[@]}")
 fi
 
-npx electron-builder "${BUILDER_ARGS[@]}" --win nsis --x64 "$@" --config.artifactName="$ARTIFACT_NAME"
+if [ "$PACKAGE_TARGET" = "nsis" ]; then
+  npx electron-builder "${BUILDER_ARGS[@]}" --win nsis --x64 "$@" --config.artifactName="$ARTIFACT_NAME"
+else
+  npx electron-builder "${BUILDER_ARGS[@]}" --win "$PACKAGE_TARGET" --x64 "$@" --config.artifactName="$ARTIFACT_NAME"
+fi
 verify_packaged_windows_unpacked_artifacts
 
-if [ ! -f "$FINAL_EXE" ]; then
-  echo "Packaging completed without the expected installer: $FINAL_EXE" >&2
+if [ ! -f "$FINAL_ARTIFACT" ]; then
+  echo "Packaging completed without the expected artifact: $FINAL_ARTIFACT" >&2
   exit 1
 fi
 
-log "Done. Windows installer is ready: $FINAL_EXE"
+log "Done. Windows artifact is ready: $FINAL_ARTIFACT"

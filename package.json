@@ -41,6 +41,8 @@
     "package:win:x64:cn:signed": "bash scripts/package-win-x64-cn-signed.sh",
     "package:win:x64:intl:unsigned": "bash scripts/package-win-x64-intl-unsigned.sh",
     "package:win:x64:intl:signed": "bash scripts/package-win-x64-intl-signed.sh",
+    "package:win:store": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/internal/package-windows-store.ps1",
+    "package:win:store:unsigned": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/internal/package-windows-store.ps1 -Unsigned",
     "worker:run": "npm run memory:worker:run",
     "memory:build": "npm run build -w @memmy/memory",
     "memory:package": "npm run package:npm -w @memmy/memory",

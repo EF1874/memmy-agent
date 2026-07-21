@@ -16,7 +16,7 @@ import type {
 } from "@memmy/desktop-interface";
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, shell, systemPreferences, Tray, type Event as ElectronEvent, type FileFilter, type IpcMainEvent, type MenuItemConstructorOptions, type Rectangle, type WebContents } from "electron";
 import { spawn } from "node:child_process";
-import { constants as fsConstants, existsSync, readFileSync } from "node:fs";
+import { constants as fsConstants, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { access, appendFile, chmod, copyFile, lstat, mkdir, open, readFile, readdir, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
@@ -88,6 +88,8 @@ import {
 } from "./logger.js";
 import { persistSharedAnalyticsClientId } from "./analytics-client-id-store.js";
 import { backupSqliteDatabase } from "./sqlite-backup.js";
+import { resolveWindowsStoreUserDataPath } from "./windows-store-paths.js";
+import { claimLegacyWindowsInstance } from "./windows-store-transition-barrier.js";
 
 let mainWindow: BrowserWindow | null = null;
 let petWindow: BrowserWindow | null = null;
@@ -127,6 +129,8 @@ let preparedManagedBackgroundUpdateVersion: string | null = null;
 let updateInstallForceExitTimer: ReturnType<typeof setTimeout> | null = null;
 let isManagedUpdateInstallerRunning = false;
 let shouldSuppressActivateAfterPetWindowClose = false;
+let pendingWindowsStoreMigration: { legacyUserDataPath: string; targetUserDataPath: string } | null = null;
+let shouldExitForWindowsStoreTransition = false;
 const programmaticPetWindowCloses = new WeakSet<BrowserWindow>();
 
 type MainWindowUserAction = "close" | "minimize";
@@ -286,10 +290,11 @@ async function stopPackagedRendererServer(): Promise<void> {
 async function boot(): Promise<void> {
   try {
     process.env.MEMMY_APP_EDITION = resolveCurrentDesktopEdition();
+    await runPendingWindowsStoreMigration();
     initLogger();
     forceLightWindowChrome();
     await writePackagedStartupLog("boot:start");
-    if (await installPreparedRequiredUpdateBeforeBoot()) {
+    if (!isWindowsStoreApp() && await installPreparedRequiredUpdateBeforeBoot()) {
       await writePackagedStartupLog("boot:prepared-required-update-started");
       return;
     }
@@ -315,6 +320,7 @@ async function boot(): Promise<void> {
     }
     setDevelopmentDockIcon();
     await writePackagedStartupLog("boot:ready");
+    await runWindowsStoreLegacyCleanup();
     startRequiredUpdateBackgroundChecks();
     // Fallback cleanup of leftover packages in the updates directory: deferred and async, to avoid
     // the startup peak and not block the window from showing.
@@ -333,17 +339,68 @@ async function boot(): Promise<void> {
 function configureAppIdentity(): void {
   const edition = resolveCurrentDesktopEdition();
   const memmyHome = join(homedir(), desktopRuntimeHomeDirectoryName(edition));
+  const legacyUserDataPath = join(app.getPath("appData"), desktopUserDataDirectoryName(edition));
+  const storeUserDataPath = resolveWindowsStoreUserDataPath({
+    isWindowsStore: isWindowsStoreApp(),
+    resourcesPath: process.resourcesPath,
+    localAppDataPath: process.env.LOCALAPPDATA
+  });
+  if (process.platform === "win32" && app.isPackaged && !isWindowsStoreApp() &&
+      isCurrentDesktopStoreTransitionCompatible()) {
+    shouldExitForWindowsStoreTransition = claimLegacyWindowsInstance(legacyUserDataPath).blocked;
+  }
   app.setName("Memmy");
-  if (process.platform === "win32") {
+  if (process.platform === "win32" && !isWindowsStoreApp()) {
     app.setAppUserModelId(WINDOWS_APP_USER_MODEL_ID);
   }
-  app.setPath("userData", join(app.getPath("appData"), desktopUserDataDirectoryName(edition)));
+  if (storeUserDataPath) {
+    mkdirSync(storeUserDataPath, { recursive: true });
+    pendingWindowsStoreMigration = {
+      legacyUserDataPath,
+      targetUserDataPath: storeUserDataPath
+    };
+  }
+  app.setPath("userData", storeUserDataPath ?? legacyUserDataPath);
   if (app.isPackaged) {
     process.env.MEMMY_HOME = memmyHome;
     process.env.MEMMY_CONFIG = join(memmyHome, "config.yaml");
   } else {
     process.env.MEMMY_HOME ??= memmyHome;
     process.env.MEMMY_CONFIG ??= join(memmyHome, "config.yaml");
+  }
+}
+
+function isWindowsStoreApp(): boolean {
+  return process.platform === "win32" && process.windowsStore === true;
+}
+
+async function runPendingWindowsStoreMigration(): Promise<void> {
+  if (!pendingWindowsStoreMigration) {
+    return;
+  }
+  const { migrateWindowsStoreData } = await import("./windows-store-migration.js");
+  migrateWindowsStoreData(pendingWindowsStoreMigration);
+  pendingWindowsStoreMigration = null;
+}
+
+async function runWindowsStoreLegacyCleanup(): Promise<void> {
+  if (!isWindowsStoreApp() || !process.env.LOCALAPPDATA) {
+    return;
+  }
+  const edition = resolveCurrentDesktopEdition();
+  const roamingAppDataPath = app.getPath("appData");
+  const legacyUserDataPath = join(roamingAppDataPath, desktopUserDataDirectoryName(edition));
+  try {
+    const { uninstallLegacyWindowsApp } = await import("./windows-legacy-uninstall.js");
+    const result = await uninstallLegacyWindowsApp({
+      legacyUserDataPath,
+      storeUserDataPath: app.getPath("userData"),
+      localAppDataPath: process.env.LOCALAPPDATA,
+      roamingAppDataPath
+    });
+    await writePackagedStartupLog(`boot:legacy-uninstall:${result}`);
+  } catch (error) {
+    await writePackagedStartupLog(`boot:legacy-uninstall:failed:${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -370,6 +427,18 @@ function resolveCurrentDesktopPlatformType(): string {
 function readCurrentDesktopEditionManifest(): string | null {
   const manifestPath = join(import.meta.dirname, "desktop-edition.json");
   return existsSync(manifestPath) ? readFileSync(manifestPath, "utf8") : null;
+}
+
+function isCurrentDesktopStoreTransitionCompatible(): boolean {
+  const source = readCurrentDesktopEditionManifest();
+  if (!source) {
+    return false;
+  }
+  try {
+    return (JSON.parse(source) as { storeTransitionCompatible?: unknown }).storeTransitionCompatible === true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -1430,7 +1499,7 @@ function shouldManageRequiredUpdates(): boolean {
     return isInstalledApplicationsApp();
   }
 
-  return process.platform === "win32";
+  return process.platform === "win32" && !isWindowsStoreApp();
 }
 
 /**
@@ -1795,6 +1864,7 @@ async function downloadUpdate(
   options: DesktopUpdateDownloadOptions = {},
   progressTarget?: WebContents
 ): Promise<DesktopUpdateInstallResult> {
+  assertLegacyInstallerUpdaterAvailable();
   if (update.status !== "available" || !update.downloadUrl) {
     throw new Error("no update package is available");
   }
@@ -1945,6 +2015,7 @@ async function removeFileIfExists(filePath: string): Promise<void> {
  * @returns The installer package's local path and open state.
  */
 async function openUpdateInstaller(filePath: string): Promise<DesktopUpdateInstallResult> {
+  assertLegacyInstallerUpdaterAvailable();
   const safeFilePath = resolveDownloadedUpdatePath(filePath);
   if (shouldInstallMacDmgUpdateInBackground(safeFilePath)) {
     const result = await installMacDmgUpdateInBackground(safeFilePath);
@@ -2804,10 +2875,19 @@ function resolveDownloadedUpdatePath(filePath: string): string {
  * @returns A usable manifest URL; null when it is not configured.
  */
 function resolveUpdateManifestUrl(): string | null {
+  if (isWindowsStoreApp()) {
+    return null;
+  }
   const url = new URL(normalizeHttpUrl(DEFAULT_UPDATE_MANIFEST_URL));
   url.searchParams.set("platformType", resolveCurrentDesktopPlatformType());
   url.searchParams.set("version", resolveDesktopAppVersion());
   return url.toString();
+}
+
+function assertLegacyInstallerUpdaterAvailable(): void {
+  if (isWindowsStoreApp()) {
+    throw new Error("The legacy installer updater is unavailable in a Windows Store package");
+  }
 }
 
 /**
@@ -4438,12 +4518,16 @@ async function sendAppExitEventBeforeQuit(): Promise<void> {
   await Promise.race([exitEvent, delay(APP_QUIT_ANALYTICS_GRACE_MS)]);
 }
 
-let hasSingleInstanceLock = app.requestSingleInstanceLock();
+let hasSingleInstanceLock = !shouldExitForWindowsStoreTransition && app.requestSingleInstanceLock();
 let lastSecondInstanceActivateAt = 0;
 let didWaitForSingleInstanceLock = false;
 let hasIgnoredStaleReopenQuit = false;
 let shouldRelaunchAfterQuitCleanup = false;
 const appProcessStartedAt = Date.now();
+
+if (shouldExitForWindowsStoreTransition) {
+  app.quit();
+}
 
 /**
  * Waits for the single-instance lock while a previous instance finishes exiting.
@@ -4506,6 +4590,10 @@ app.on("second-instance", () => {
 });
 
 app.whenReady().then(async () => {
+  if (shouldExitForWindowsStoreTransition) {
+    return;
+  }
+
   if (!(await waitForSingleInstanceLock())) {
     // An instance is already running: this instance exits directly, to avoid a second instance
     // contending for the fixed ports (memory 18960 / agent gateway) and causing a startup failure.
