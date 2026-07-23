@@ -894,6 +894,7 @@ export class SessionTurnService {
           key: `trace:${session.id}:${step.turnId}:${step.stepIndex}`,
           value: this.deps.renderTraceMemoryValue({
             ...step,
+            summary: "",
             rawTurnId: stepRawTurnId
           }),
           tags: step.tags,
@@ -902,14 +903,14 @@ export class SessionTurnService {
             raw_turn_id: stepRawTurnId,
             episode_id: episode.id,
             status: rawTurn.status,
-            summary: step.summary
+            summary: ""
           },
           internal: {
             source: "turn.complete",
             plugin_algorithm: "capture.v7",
             source_raw_turn_id: stepRawTurnId,
             source_memory_ids: rawTurn.sourceMemoryIds,
-            summary: step.summary,
+            summary: "",
             reflection: step.reflection.text,
             alpha: step.reflection.alpha,
             value: step.value,
@@ -942,7 +943,8 @@ export class SessionTurnService {
               alpha: step.reflection.alpha,
               usable: step.reflection.usable,
               reflection_source: step.reflection.source,
-              summary: step.summary,
+              summary: "",
+              summary_deferred_until_reflection: true,
               tags: step.tags,
               value: step.value,
               priority: step.priority,
@@ -972,51 +974,11 @@ export class SessionTurnService {
         });
         this.deps.repos.runtime.appendEpisodeTurn(episode.id, stepRawTurnId, upsert.memory.id, at);
         if (!this.deps.repos.processing.get(upsert.memory.id)) {
-          const summaryRequired = this.deps.llm.isConfigured();
-          const embeddingRequired = this.deps.config.algorithm.capture.embedAfterCapture;
-          const job = summaryRequired
-            ? this.deps.enqueueJob({
-              jobType: "trace_summary",
-              userId: session.userId,
-              sessionId: session.id,
-              episodeId: episode.id,
-              targetMemoryId: upsert.memory.id,
-              payload: {
-                turnId: step.turnId,
-                rawTurnId: stepRawTurnId,
-                source: "turn.complete.capture.v7",
-                contentHash: upsert.memory.contentHash
-              },
-              maxAttempts: 3,
-              createdAt: at
-            })
-            : embeddingRequired
-              ? this.deps.enqueueJob({
-                jobType: "embedding",
-                userId: session.userId,
-                sessionId: session.id,
-                episodeId: episode.id,
-                targetMemoryId: upsert.memory.id,
-                payload: {
-                  turnId: step.turnId,
-                  rawTurnId: stepRawTurnId,
-                  source: "turn.complete.capture.v7",
-                  contentHash: upsert.memory.contentHash
-                },
-                maxAttempts: 6,
-                createdAt: at
-              })
-              : undefined;
-          if (job) jobs.push(job);
           this.deps.repos.processing.save({
             memoryId: upsert.memory.id,
-            state: summaryRequired
-              ? "summary_pending"
-              : embeddingRequired
-                ? "embedding_pending"
-                : "ready_text_only",
-            stage: summaryRequired ? "summary" : embeddingRequired ? "embedding" : null,
-            activeJobId: job?.id ?? null,
+            state: "summary_pending",
+            stage: "summary",
+            activeJobId: null,
             attemptCount: 0,
             manualRetryCount: 0,
             retryAction: "retry",

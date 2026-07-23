@@ -396,12 +396,12 @@ describe("MemoryService / read model / panel", () => {
 
     const list = service.panelItems({ namespace, layer: "L1" });
     const itemBeforeEmbedding = list.items.find((item) => item.id === complete.l1MemoryId);
-    expect(itemBeforeEmbedding?.tags).toContain("索引建立中");
+    expect(itemBeforeEmbedding?.tags).toContain("摘要总结中");
     expect(itemBeforeEmbedding?.tags).not.toContain("openclaw");
     expect(itemBeforeEmbedding?.metadata?.source).toBe("openclaw");
 
     const detail = service.getMemory(complete.l1MemoryId, { namespace });
-    expect(detail.item.tags).toContain("索引建立中");
+    expect(detail.item.tags).toContain("摘要总结中");
     expect(detail.item.tags).not.toContain("openclaw");
     expect(detail.item.metadata.source).toBe("openclaw");
     expect(detail.refs.episode).toMatchObject({
@@ -410,6 +410,8 @@ describe("MemoryService / read model / panel", () => {
       status: "open"
     });
 
+    service.closeSession(session.sessionId);
+    await service.runWorkerOnce(20);
     await service.runWorkerOnce(20);
     expect(embeddingTexts.length).toBeGreaterThan(0);
     const listAfterEmbedding = service.panelItems({ namespace, layer: "L1" });

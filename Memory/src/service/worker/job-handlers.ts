@@ -354,7 +354,6 @@ export function enqueueEpisodeReflection(
   trigger: string
 ): EvolutionJobRecord[] {
   if (
-    !deps.capture.synthReflection ||
     episode.status !== "closed" ||
     deps.repos.runtime.hasEpisodeJob(episode.id, "reflection", ["queued", "leased", "failed"])
   ) return [];

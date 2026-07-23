@@ -105,9 +105,7 @@ describe("MemoryService / session / turn capture", () => {
         };
       };
     };
-    expect(properties.internal_info.summary).toBe(expectedTrace.summary);
-    expect(properties.internal_info.summary).toContain("start-");
-    expect(properties.internal_info.summary).toContain("…[truncated]…");
+    expect(properties.internal_info.summary).toBe("");
     expect(properties.internal_info.trace.tool_calls[0]?.output).toBeUndefined();
     expect(defaultTrace.errorSignatures).toContain("SENTINEL_ERROR_CODE");
     expect(expectedTrace.errorSignatures).not.toContain("SENTINEL_ERROR_CODE");
@@ -287,7 +285,7 @@ describe("MemoryService / session / turn capture", () => {
         agent: "The command completed."
       })
     ]);
-    expect(memoryAddOutput.details[0]?.summary).toContain("Run pwd in the terminal");
+    expect(memoryAddOutput.details[0]?.summary).toMatch(/^RawTurn:/);
 
     db.close();
   });

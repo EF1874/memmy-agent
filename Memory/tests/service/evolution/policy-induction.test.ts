@@ -553,6 +553,7 @@ describe("MemoryService / evolution / policy induction", () => {
       magnitude: 1,
       rationale: "positive but minGain is intentionally high"
     });
+    service.closeSession(session.sessionId);
     for (let i = 0; i < 4; i += 1) {
       await service.runWorkerOnce(50);
     }
@@ -657,6 +658,7 @@ describe("MemoryService / evolution / policy induction", () => {
       magnitude: 1,
       rationale: "this focused pytest workflow worked"
     });
+    service.closeSession(session.sessionId);
     for (let i = 0; i < 4; i += 1) {
       await service.runWorkerOnce(50);
     }

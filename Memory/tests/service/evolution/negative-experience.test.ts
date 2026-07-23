@@ -155,7 +155,7 @@ describe("MemoryService / evolution / negative experience", () => {
     });
     expect(detail.body).toContain("Wrong port");
     expect(detail.body).toContain("443");
-    expect(operations).toEqual(["capture.summarize", "reward.reward.r_human.v6"]);
+    expect(operations).toEqual(["reward.reward.r_human.v6"]);
 
     const initialVersion = policies[0]!.version;
     await service.runWorkerOnce(50);
@@ -253,7 +253,7 @@ describe("MemoryService / evolution / negative experience", () => {
     expect(service.getMemory(policies[0]!.id, { namespace }).body).toContain(
       "TLS verification was skipped"
     );
-    expect(operations).toEqual(["capture.summarize", "reward.reward.r_human.v6"]);
+    expect(operations).toEqual(["reward.reward.r_human.v6"]);
     db.close();
   });
 

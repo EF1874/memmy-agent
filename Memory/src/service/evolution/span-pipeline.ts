@@ -1,5 +1,6 @@
 import {
   BATCH_REFLECTION_PROMPT,
+  REFLECTED_TRACE_SUMMARY_PROMPT,
   REFLECTION_SCORE_PROMPT,
   detectDominantLanguage,
   languageSteeringLine,
@@ -32,6 +33,7 @@ import type { EnqueueJobInput } from "../worker/job-handlers.js";
 type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
 
 const pipelineLogger = createMemoryLogger("pipeline");
+const REFLECTED_TRACE_SUMMARY_BATCH_SIZE = 20;
 
 export interface SpanPipelineDeps {
   repos: Repositories;
@@ -399,6 +401,13 @@ private async applyBatchReflectionScores(
     scores: BatchReflectionScore[]
   ): Promise<void> {
     const at = nowIso();
+    const pending: Array<{
+      memory: MemoryRow;
+      trace: TraceMeta;
+      score: BatchReflectionScore;
+      reflection: string;
+      source: "adapter" | "extracted" | "synth" | "none";
+    }> = [];
     for (const [index, score] of scores.entries()) {
       const memory = memories[index];
       if (!memory || traceReflectionWasScored(memory)) {
@@ -410,23 +419,34 @@ private async applyBatchReflectionScores(
       }
       const incoming = trace.reflection?.trim() ?? "";
       const reflection = incoming || score.reflectionText;
-      const usable = score.usable;
-      const alpha = clampNumber(score.alpha, 0, 1);
-      const summary = await this.summarizeTraceForCapture({
+      pending.push({
+        memory,
         trace,
-        userText: trace.userText,
-        agentText: trace.agentText,
-        toolCalls: trace.toolCalls,
-        reflectionText: reflection
+        score,
+        reflection,
+        source: incoming
+          ? traceReflectionSource(memory)
+          : score.reflectionText === "RELATED_DEFAULT"
+            ? "none"
+            : "synth"
       });
+    }
+
+    const summaries = await this.summarizeReflectedTraces(pending);
+    for (const [index, item] of pending.entries()) {
+      const summary = summaries[index];
+      if (!summary) {
+        throw new Error(`reflected trace summary missing index: ${index}`);
+      }
+      const { memory, score, reflection, source } = item;
       const previous = memory;
       const saved = this.deps.repos.memories.update(updateImportPipelineStatus(updateTraceReflection(memory, {
         summary,
         reflection,
-        alpha,
-        usable,
+        alpha: clampNumber(score.alpha, 0, 1),
+        usable: score.usable,
         reason: score.reason,
-        source: incoming ? traceReflectionSource(memory) : score.reflectionText === "RELATED_DEFAULT" ? "none" : "synth",
+        source,
         tags: memoryHasImportPipeline(memory) ? importStatusTags(memory.tags, "indexing") : memory.tags,
         updatedAt: at
       }), "indexing", at));
@@ -445,6 +465,79 @@ private async applyBatchReflectionScores(
       });
       this.enqueuePostReflectionEmbedding(saved, job, at);
     }
+  }
+
+private async summarizeReflectedTraces(input: Array<{
+    memory: MemoryRow;
+    trace: TraceMeta;
+    reflection: string;
+  }>): Promise<string[]> {
+    const output: string[] = [];
+    for (let start = 0; start < input.length; start += REFLECTED_TRACE_SUMMARY_BATCH_SIZE) {
+      const batch = input.slice(start, start + REFLECTED_TRACE_SUMMARY_BATCH_SIZE);
+      const language = detectDominantLanguage(batch.flatMap(({ trace, reflection }) => [
+        trace.userText,
+        trace.agentText,
+        reflection
+      ]));
+      const messages = [
+        {
+          role: "system" as const,
+          content: REFLECTED_TRACE_SUMMARY_PROMPT.system
+        },
+        {
+          role: "system" as const,
+          content: languageSteeringLine(language)
+        },
+        {
+          role: "user" as const,
+          content: stableStringify({
+            traces: batch.map(({ memory, trace, reflection }, index) => ({
+              index,
+              id: memory.id,
+              userText: clip(trace.userText, 1200),
+              agentText: clip(trace.agentText, 1200),
+              toolCalls: trace.toolCalls.map((call) => ({
+                name: call.name,
+                input: clip(stringifyForMemory(call.input), 240),
+                output: clip(stringifyForMemory(call.output), 360),
+                error: call.error ? clip(call.error, 240) : null
+              })),
+              reflection: clip(reflection, 500)
+            }))
+          })
+        }
+      ];
+      const clients = [this.deps.llm, this.deps.skillLlm].filter((client, index, all) =>
+        client.isConfigured() && all.indexOf(client) === index
+      );
+      let lastError: unknown;
+      let summaries: string[] | undefined;
+      for (const client of clients) {
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          try {
+            const result = await client.completeJson<{ summaries?: unknown }>(messages, {
+              operation: REFLECTED_TRACE_SUMMARY_OPERATION,
+              thinkingMode: "disabled",
+              temperature: 0,
+              maxTokens: Math.max(500, batch.length * 160)
+            });
+            summaries = normalizeReflectedTraceSummaries(result.summaries, batch.length);
+            break;
+          } catch (error) {
+            lastError = error;
+          }
+        }
+        if (summaries) break;
+      }
+      if (!summaries) {
+        throw lastError instanceof Error
+          ? lastError
+          : new Error("reflected trace summary has no configured model");
+      }
+      output.push(...summaries);
+    }
+    return output;
   }
 
 private applyUnconfiguredEpisodeDefault(job: EvolutionJobRecord): boolean {
@@ -721,6 +814,8 @@ private enqueuePostReflectionEmbedding(memory: MemoryRow, job: EvolutionJobRecor
 }
 
 const BATCH_REFLECTION_OPERATION = `capture.${BATCH_REFLECTION_PROMPT.id}.v${BATCH_REFLECTION_PROMPT.version}`;
+const REFLECTED_TRACE_SUMMARY_OPERATION =
+  `capture.${REFLECTED_TRACE_SUMMARY_PROMPT.id}.v${REFLECTED_TRACE_SUMMARY_PROMPT.version}`;
 
 function renderTraceMemoryValue(step: {
   summary: string;
@@ -772,8 +867,12 @@ function updateTraceReflection(memory: MemoryRow, input: {
   const internalTrace = isRecord(memory.properties.internal_info.trace)
     ? memory.properties.internal_info.trace
     : {};
+  const {
+    summary_deferred_until_reflection: _summaryDeferredUntilReflection,
+    ...settledTrace
+  } = internalTrace;
   const nextTrace = {
-    ...internalTrace,
+    ...settledTrace,
     summary: input.summary,
     reflection: input.reflection,
     alpha: input.alpha,
@@ -1099,6 +1198,28 @@ function sanitizeSummaryText(value: string): string {
     .replace(/```$/i, "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function normalizeReflectedTraceSummaries(value: unknown, traceCount: number): string[] {
+  if (!Array.isArray(value) || value.length !== traceCount) {
+    throw new Error("reflected trace summary returned wrong summary count");
+  }
+  const summaries = new Array<string>(traceCount);
+  for (const item of value) {
+    if (!isRecord(item)) {
+      throw new Error("reflected trace summary returned invalid item");
+    }
+    const index = Math.floor(numberOr(item.index, -1));
+    const summary = clip(sanitizeSummaryText(stringOr(item.summary, "")), 200);
+    if (index < 0 || index >= traceCount || !summary || summaries[index]) {
+      throw new Error("reflected trace summary returned invalid summary item");
+    }
+    summaries[index] = summary;
+  }
+  if (summaries.some((summary) => !summary)) {
+    throw new Error("reflected trace summary did not cover all traces");
+  }
+  return summaries;
 }
 
 function reflectionContextIncludesDownstream(mode: string): boolean {

@@ -44,6 +44,29 @@ function createDecisionRepairLlm(
       options: LlmCompletionOptions
     ): Promise<T> {
       calls.push({ messages, options });
+      if (options.operation === "capture.reflection.batch.v13") {
+        const payload = JSON.parse(messages.find((message) => message.role === "user")?.content ?? "{}") as {
+          steps?: Array<{ idx: number }>;
+        };
+        return {
+          scores: (payload.steps ?? []).map((step) => ({
+            idx: step.idx,
+            relevance: "RELATED",
+            reason: "batch scored"
+          }))
+        } as unknown as T;
+      }
+      if (options.operation === "capture.reflected_trace_summary.v1") {
+        const payload = JSON.parse(messages.find((message) => message.role === "user")?.content ?? "{}") as {
+          traces?: Array<{ index: number; userText?: string }>;
+        };
+        return {
+          summaries: (payload.traces ?? []).map((trace) => ({
+            index: trace.index,
+            summary: trace.userText || "sqlite migration workflow"
+          }))
+        } as unknown as T;
+      }
       if (options.operation === "decision.repair.v1") {
         return {
           preference: "Inspect migration output before retrying the sqlite query.",
@@ -680,16 +703,26 @@ describe("MemoryService / feedback / decision repair", () => {
       magnitude: 1,
       rationale: "this sqlite migration workflow succeeded"
     });
+    service.closeSession(session.sessionId);
+    await service.runWorkerOnce(100);
+    await service.runWorkerOnce(100);
     await service.runWorkerOnce(100);
 
+    const negativeSession = service.openSession({
+      namespace: {
+        source: "codex",
+        profileId: "jiang",
+        userId: "user-value-distribution-repair"
+      }
+    });
     const negative = service.completeTurn("turn-value-distribution-negative", {
-      sessionId: session.sessionId,
+      sessionId: negativeSession.sessionId,
       episodeId: "episode-value-distribution-negative",
       query: "sqlite database sql migration workflow should inspect schema first",
       answer: "Repeated the same SQL query without reading the migration output."
     });
     await service.feedback({
-      sessionId: session.sessionId,
+      sessionId: negativeSession.sessionId,
       episodeId: negative.episodeId,
       l1MemoryId: negative.l1MemoryId,
       channel: "explicit",

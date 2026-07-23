@@ -46,6 +46,13 @@ describe("MemoryService / embedding / processing", () => {
       .prepare(`SELECT version FROM memories WHERE id = ?`)
       .get(complete.l1MemoryId) as { version: number };
 
+    service.closeSession(session.sessionId);
+    const reflectionRun = await service.runWorkerOnce(20);
+    expect(reflectionRun.jobs.some((job) => job.jobType === "reflection" && job.status === "succeeded")).toBe(true);
+    const reflectedMemory = db.db
+      .prepare(`SELECT version FROM memories WHERE id = ?`)
+      .get(complete.l1MemoryId) as { version: number };
+
     const firstRun = await service.runWorkerOnce(20);
     expect(firstRun.jobs.some((job) => job.jobType === "embedding" && job.status === "failed")).toBe(true);
     const queued = db.db
@@ -93,7 +100,8 @@ describe("MemoryService / embedding / processing", () => {
       .get(complete.l1MemoryId) as { embedding_model: string | null; embedding_dim: number; version: number };
     expect(memory.embedding_model).toBe("flaky-test-embedding");
     expect(memory.embedding_dim).toBe(3);
-    expect(memory.version).toBe(initialMemory.version);
+    expect(reflectedMemory.version).toBeGreaterThan(initialMemory.version);
+    expect(memory.version).toBe(reflectedMemory.version);
 
     db.close();
   });
@@ -119,6 +127,8 @@ describe("MemoryService / embedding / processing", () => {
       answer: "I will run the focused migration test before broad checks."
     });
 
+    service.closeSession(session.sessionId);
+    await service.runWorkerOnce(10);
     await service.runWorkerOnce(10);
 
     expect(seenTexts).toHaveLength(1);
@@ -147,7 +157,7 @@ describe("MemoryService / embedding / processing", () => {
     db.close();
   });
 
-  it("summarizes captured L1 traces before embedding open episodes", async () => {
+  it("defers captured L1 summary and embedding until episode reflection", async () => {
     const llmCalls: Array<{
       messages: Array<{ role: string; content: string }>;
       options: { operation: string };
@@ -157,13 +167,12 @@ describe("MemoryService / embedding / processing", () => {
       llm: createBatchReflectionLlm(llmCalls, "SQLite migrations should run focused checks before broad checks."),
       embedder: createCapturingEmbedder(embeddingTexts)
     });
-    const session = service.openSession({
-      namespace: {
-        source: "codex",
-        profileId: "jiang",
-        userId: "user-live-trace-summary"
-      }
-    });
+    const namespace = {
+      source: "codex",
+      profileId: "jiang",
+      userId: "user-live-trace-summary"
+    };
+    const session = service.openSession({ namespace });
 
     const complete = service.completeTurn("turn-live-trace-summary", {
       sessionId: session.sessionId,
@@ -171,17 +180,27 @@ describe("MemoryService / embedding / processing", () => {
       answer: "Use focused checks first, then broaden only after the migration path is verified."
     });
 
-    expect(complete.jobs.map((job) => job.jobType)).toEqual(["trace_summary", "episode_idle_close"]);
-    const summaryRun = await service.runWorkerOnce(10);
-    expect(summaryRun.jobs.map((job) => job.jobType)).toEqual(["episode_idle_close", "trace_summary"]);
-    expect(new Repositories(db.db).processing.get(complete.l1MemoryId)?.state).toBe("embedding_pending");
-    const embeddingRun = await service.runWorkerOnce(10);
-    expect(embeddingRun.jobs.map((job) => job.jobType)).toEqual(["embedding"]);
-    expect(llmCalls.some((call) => call.options.operation === "capture.summarize")).toBe(true);
-    expect(embeddingTexts).toHaveLength(1);
-    expect(embeddingTexts[0]).toContain("Summary: SQLite migrations should run focused checks before broad checks.");
-    expect(embeddingTexts[0]).toContain("Remember the SQLite migration workflow");
-    expect(embeddingTexts[0]).toContain("Use focused checks first");
+    expect(complete.jobs.map((job) => job.jobType)).toEqual(["episode_idle_close"]);
+    expect(new Repositories(db.db).processing.get(complete.l1MemoryId)).toMatchObject({
+      state: "summary_pending",
+      stage: "summary",
+      activeJobId: null
+    });
+    const recall = await service.search({
+      namespace,
+      query: "SQLite migration workflow",
+      layers: ["L1"]
+    });
+    expect(recall.hits.some((hit) => hit.id === complete.l1MemoryId)).toBe(true);
+    const openEpisodeRun = await service.runWorkerOnce(10);
+    expect(openEpisodeRun.jobs.map((job) => job.jobType)).toEqual(["episode_idle_close"]);
+    expect(llmCalls.some((call) => call.options.operation.includes("summar"))).toBe(false);
+    expect(embeddingTexts).toHaveLength(0);
+    service.reconcileWorkerStartup();
+    expect(db.db.prepare(
+      `SELECT COUNT(*) AS count FROM evolution_jobs
+       WHERE target_memory_id = ? AND job_type IN ('trace_summary', 'embedding')`
+    ).get(complete.l1MemoryId)).toEqual({ count: 0 });
     const row = db.db.prepare(
       `SELECT info_json, properties_json
        FROM memories
@@ -193,18 +212,20 @@ describe("MemoryService / embedding / processing", () => {
         summary?: string;
         trace: {
           summary?: string;
+          summary_deferred_until_reflection?: boolean;
           vec_summary?: number[];
         };
       };
     };
-    expect(info.summary).toBe("SQLite migrations should run focused checks before broad checks.");
-    expect(properties.internal_info.summary).toBe("SQLite migrations should run focused checks before broad checks.");
-    expect(properties.internal_info.trace.summary).toBe("SQLite migrations should run focused checks before broad checks.");
+    expect(info.summary).toBe("");
+    expect(properties.internal_info.summary).toBe("");
+    expect(properties.internal_info.trace.summary).toBe("");
+    expect(properties.internal_info.trace.summary_deferred_until_reflection).toBe(true);
     expect(properties.internal_info.trace.vec_summary).toBeUndefined();
     expect(db.db.prepare(
       `SELECT embedding_dim FROM memory_vector_entries
        WHERE memory_id = ? AND vector_field = 'vec_summary'`
-    ).get(complete.l1MemoryId)).toEqual({ embedding_dim: 3 });
+    ).get(complete.l1MemoryId)).toBeUndefined();
     db.close();
   });
 });

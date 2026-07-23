@@ -2190,6 +2190,37 @@ export class RuntimeRepository {
            WHERE (status = 'queued'
               OR (status = 'leased' AND leased_until IS NOT NULL AND leased_until <= ?))
              AND attempts < max_attempts
+             AND NOT (
+               job_type = 'reward'
+               AND json_extract(payload_json, '$.l1MemoryId') IS NOT NULL
+               AND (
+                 json_extract(payload_json, '$.polarity') IS NULL
+                 OR json_extract(payload_json, '$.polarity') = 'positive'
+               )
+               AND EXISTS (
+                 SELECT 1
+                 FROM memory_processing_state
+                 JOIN memories ON memories.id = memory_processing_state.memory_id
+                 WHERE memory_processing_state.memory_id =
+                   CAST(json_extract(evolution_jobs.payload_json, '$.l1MemoryId') AS TEXT)
+                   AND NOT EXISTS (
+                     SELECT 1
+                     FROM memory_vector_entries
+                     WHERE memory_vector_entries.memory_id = memory_processing_state.memory_id
+                       AND memory_vector_entries.vector_field = 'vec_summary'
+                   )
+                   AND (
+                     memory_processing_state.state IN ('embedding_pending', 'embedding')
+                     OR (
+                       memory_processing_state.state IN ('summary_pending', 'summarizing')
+                       AND json_extract(
+                         memories.properties_json,
+                         '$.internal_info.trace.summary_deferred_until_reflection'
+                       ) = 1
+                     )
+                   )
+               )
+             )
              AND (
                json_extract(payload_json, '$.runAfter') IS NULL
                OR CAST(json_extract(payload_json, '$.runAfter') AS TEXT) <= ?

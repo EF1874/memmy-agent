@@ -122,7 +122,7 @@ describe("MemoryService / evolution / reward", () => {
       query: "finish the migration scaffold with durable sqlite state and a worker queue",
       answer: "implemented the service scaffold, sqlite schema, raw turn capture, and asynchronous worker queue"
     });
-    expect(complete.jobs.map((job) => job.jobType)).toEqual(["embedding", "episode_idle_close"]);
+    expect(complete.jobs.map((job) => job.jobType)).toEqual(["episode_idle_close"]);
 
     const rewardBeforeClose = db.db.prepare(
       `SELECT COUNT(*) AS count
@@ -171,7 +171,7 @@ describe("MemoryService / evolution / reward", () => {
       userId: "user-implicit-reward",
       status: "queued"
     }).items.map((job) => job.jobType);
-    expect(queuedOrder.slice(0, 3)).toEqual(["episode_idle_close", "embedding", "reflection"]);
+    expect(queuedOrder.slice(0, 2)).toEqual(["episode_idle_close", "reflection"]);
 
     const run = await service.runWorkerOnce(20);
     expect(run.changeSeq).toBeGreaterThan(0);
@@ -462,6 +462,9 @@ describe("MemoryService / evolution / reward", () => {
       rationale: "accepted"
     });
 
+    service.closeSession(session.sessionId);
+    await service.runWorkerOnce(50);
+    await service.runWorkerOnce(50);
     await service.runWorkerOnce(50);
 
     expect(rewardCalls.some((call) => call.options.operation === "reward.reward.r_human.v6")).toBe(true);
@@ -503,6 +506,7 @@ describe("MemoryService / evolution / reward", () => {
       db,
       mode: "dev",
       llm: createCapturingRewardSummaryLlm(rewardCalls),
+      skillLlm: createBatchReflectionLlm([], "reflected reward summary"),
       config: {
         ...DEFAULT_MEMMY_CONFIG,
         algorithm: {
@@ -561,6 +565,9 @@ describe("MemoryService / evolution / reward", () => {
       magnitude: 1,
       rationale: "accepted, but process was only partial"
     });
+    service.closeSession(session.sessionId);
+    await service.runWorkerOnce(50);
+    await service.runWorkerOnce(50);
     await service.runWorkerOnce(50);
 
     const rewardCall = rewardCalls.find((call) => call.options.operation === "reward.reward.r_human.v6");

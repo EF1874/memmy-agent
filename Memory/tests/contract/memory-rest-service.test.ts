@@ -303,6 +303,16 @@ describe("MemoryService / REST contract", () => {
     const complete = await completeResponse.json() as { l1MemoryId: string };
     expect(completeResponse.status).toBe(200);
 
+    const closeResponse = await fetch(
+      `${baseUrl}/sessions/${encodeURIComponent(session.sessionId)}/close`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}"
+      }
+    );
+    expect(closeResponse.status).toBe(200);
+
     await waitFor(() => {
       const row = db.db.prepare(
         `SELECT embedding_dim
@@ -496,6 +506,7 @@ describe("MemoryService / REST contract", () => {
        WHERE memory_id = ? AND vector_field = 'vec_summary'`
     ).get(complete.l1MemoryId) as { embedding_dim: number } | undefined;
     expect(queuedRow).toBeUndefined();
+    service.closeSession(session.sessionId);
 
     const server = createMemoryHttpServer({ service, workerStartupFallbackMs: 0 });
     await withServerClosed(server, async () => {
