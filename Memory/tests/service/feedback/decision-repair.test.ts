@@ -495,7 +495,8 @@ describe("MemoryService / feedback / decision repair", () => {
     expect(third.repair?.repairId).toMatch(/^repair_/);
 
     const repair = db.db.prepare(
-      `SELECT context_hash, issue, preference, anti_pattern, source_json, meta_json
+      `SELECT context_hash, issue, preference, anti_pattern, source_json, meta_json,
+              attached_policy_memory_ids_json
        FROM decision_repairs
        WHERE id = ?`
     ).get(third.repair!.repairId) as {
@@ -505,12 +506,14 @@ describe("MemoryService / feedback / decision repair", () => {
       anti_pattern: string;
       source_json: string;
       meta_json: string;
+      attached_policy_memory_ids_json: string;
     } | undefined;
     expect(repair?.issue).toContain("Repeated shell failure");
     expect(repair?.preference).toContain("switch strategy");
     expect(repair?.anti_pattern).toContain("missing sqlite migration");
     expect((JSON.parse(repair!.source_json) as { trigger?: string }).trigger).toBe("failure-burst");
     expect((JSON.parse(repair!.meta_json) as { severity?: string }).severity).toBe("warn");
+    expect(JSON.parse(repair!.attached_policy_memory_ids_json)).toEqual([]);
 
     const change = db.db.prepare(
       `SELECT seq, kind, op
@@ -521,7 +524,32 @@ describe("MemoryService / feedback / decision repair", () => {
       kind: "repair",
       op: "created"
     });
-    expect(third.changeSeq).toBe(change?.seq);
+    expect(third.changeSeq).toBeGreaterThanOrEqual(change!.seq);
+    expect(service.panelJobs({
+      userId: "user-tool-repair",
+      status: "queued"
+    }).items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ jobType: "negative_experience" })
+    ]));
+
+    await service.runWorkerOnce(50);
+    const avoidancePolicies = service.panelItems({
+      userId: "user-tool-repair",
+      layer: "L2"
+    }).items;
+    expect(avoidancePolicies).toHaveLength(1);
+    expect(service.getMemory(avoidancePolicies[0]!.id).metadata).toMatchObject({
+      properties: {
+        internal_info: {
+          negative_experience_sources: ["tool_failure_burst"],
+          policy: {
+            experience_type: "failure_avoidance",
+            evidence_polarity: "negative",
+            skill_eligible: false
+          }
+        }
+      }
+    });
 
     const suggestion = await service.repairSuggestion({
       sessionId: session.sessionId,
@@ -672,7 +700,8 @@ describe("MemoryService / feedback / decision repair", () => {
     await service.runWorkerOnce(100);
 
     const repair = db.db.prepare(
-      `SELECT id, context_hash, high_value_memory_ids_json, low_value_memory_ids_json, source_json
+      `SELECT id, context_hash, high_value_memory_ids_json, low_value_memory_ids_json, source_json,
+              attached_policy_memory_ids_json
        FROM decision_repairs
        WHERE source_json LIKE '%value-distribution%'
        LIMIT 1`
@@ -682,6 +711,7 @@ describe("MemoryService / feedback / decision repair", () => {
       high_value_memory_ids_json: string;
       low_value_memory_ids_json: string;
       source_json: string;
+      attached_policy_memory_ids_json: string;
     } | undefined;
     expect(repair).toBeTruthy();
     expect(JSON.parse(repair!.high_value_memory_ids_json)).toContain(positive.l1MemoryId);
@@ -690,6 +720,7 @@ describe("MemoryService / feedback / decision repair", () => {
       trigger: "value-distribution",
       synthesis: "llm"
     });
+    expect(JSON.parse(repair!.attached_policy_memory_ids_json)).toEqual([]);
     const repairCall = calls.find((call) =>
       call.options.operation === "decision.repair.v1"
       && call.messages[1]?.content.includes("TRIGGER: value-distribution")
@@ -718,6 +749,28 @@ describe("MemoryService / feedback / decision repair", () => {
       kind: "repair",
       op: "created"
     });
+    expect(service.panelJobs({
+      userId: "user-value-distribution-repair",
+      status: "queued"
+    }).items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ jobType: "negative_experience" })
+    ]));
+    await service.runWorkerOnce(100);
+    const policies = service.panelItems({
+      userId: "user-value-distribution-repair",
+      layer: "L2"
+    }).items;
+    const avoidance = policies
+      .map((item) => service.getMemory(item.id))
+      .find((item) => {
+        const properties = item.metadata.properties as {
+          internal_info?: {
+            negative_experience_sources?: string[];
+          };
+        };
+        return properties.internal_info?.negative_experience_sources?.includes("value_distribution");
+      });
+    expect(avoidance).toBeTruthy();
     db.close();
   });
 

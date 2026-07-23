@@ -1380,7 +1380,7 @@ export class SessionTurnService {
       antiPattern,
       highValueMemoryIds: evidence.highValueMemories.map((memory) => memory.id),
       lowValueMemoryIds: evidence.lowValueMemories.map((memory) => memory.id),
-      attachedPolicyMemoryIds: evidence.policyIds,
+      attachedPolicyMemoryIds: [],
       validated: false,
       source: {
         source: "tools.observe.decision_repair.v7",
@@ -1408,9 +1408,6 @@ export class SessionTurnService {
       createdAt: at
     });
     this.deps.repos.runtime.appendEpisodeDecisionRepair(episode.id, repair.id, at);
-    const attachedPolicyIds = evidence.policyIds.length > 0
-      ? this.deps.attachRepairToPolicies(repair.id, evidence.policyIds, repair.preference, repair.antiPattern, at)
-      : [];
     this.deps.repos.runtime.appendChange({
       memoryId: repair.id,
       namespaceId: this.deps.namespaceIdFromSession(session),
@@ -1423,11 +1420,25 @@ export class SessionTurnService {
       source: "tools.observe.decision_repair.v7",
       createdAt: at
     });
+    this.deps.enqueueJob({
+      jobType: "negative_experience",
+      userId: session.userId,
+      sessionId: session.id,
+      episodeId: episode.id,
+      payload: {
+        source: "tool_failure_burst",
+        sourceEventId: repair.id,
+        repairId: repair.id,
+        triggerCondition: `${burst.toolId}:${burst.context}`,
+        confidence: repair.meta.confidence
+      },
+      createdAt: at
+    });
     return {
       repairId: repair.id,
       contextHash: burst.contextHash,
       skipped: false,
-      attachedPolicyIds
+      attachedPolicyIds: []
     };
   }
 
@@ -1439,7 +1450,6 @@ export class SessionTurnService {
   }): {
     highValueMemories: MemoryRow[];
     lowValueMemories: MemoryRow[];
-    policyIds: string[];
   } {
     const query = `${input.toolId}\n${input.reason}`;
     const policies = this.deps.repos.memories.search(
@@ -1496,8 +1506,7 @@ export class SessionTurnService {
     }
     return {
       highValueMemories,
-      lowValueMemories,
-      policyIds
+      lowValueMemories
     };
   }
 
@@ -1507,7 +1516,6 @@ export class SessionTurnService {
     evidence: {
       highValueMemories: MemoryRow[];
       lowValueMemories: MemoryRow[];
-      policyIds: string[];
     }
   ): Promise<DecisionRepairLlmDraft | undefined> {
     return this.deps.synthesizeDecisionRepairDraft({

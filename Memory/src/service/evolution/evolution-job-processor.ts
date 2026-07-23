@@ -23,6 +23,7 @@ import {
   projectIdFromMemory
 } from "../namespace/namespace-scope.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
+import { NegativeExperiencePipeline } from "./negative-experience-pipeline.js";
 import { PolicyInductionEngine } from "./policy-induction.js";
 import {
   RewardPipeline,
@@ -64,18 +65,12 @@ export interface EvolutionJobProcessorDeps {
   decisionRepairTraceSources(memories: MemoryRow[]): DecisionRepairTraceSource[];
   synthesizeDecisionRepairDraft: SynthesizeDecisionRepairDraft;
   scheduleEmbeddingAfterTextUpdate(input: ScheduleEmbeddingAfterTextUpdateInput): void;
-  attachRepairToPolicies(
-    repairId: string,
-    policyIds: string[],
-    preference: string | undefined,
-    antiPattern: string | undefined,
-    at: string
-  ): string[];
   repairEvidenceValueDiff(highValue: MemoryRow[], lowValue: MemoryRow[]): number;
 }
 
 export class EvolutionJobProcessor {
   private readonly policy: PolicyInductionEngine;
+  private readonly negativeExperience: NegativeExperiencePipeline;
   private readonly reward: RewardPipeline;
   private readonly skill: SkillPipeline;
   private readonly span: SpanPipeline;
@@ -144,10 +139,17 @@ export class EvolutionJobProcessor {
       resolvePendingSkillTrialsForReward: deps.resolvePendingSkillTrialsForReward,
       decisionRepairTraceSources: deps.decisionRepairTraceSources,
       synthesizeDecisionRepairDraft: deps.synthesizeDecisionRepairDraft,
-      attachRepairToPolicies: deps.attachRepairToPolicies,
       isTraceEligibleForL2: this.policy.isTraceEligibleForL2.bind(this.policy),
       recordCandidatePoolTrace: this.policy.recordCandidatePoolTrace.bind(this.policy),
       repairEvidenceValueDiff: deps.repairEvidenceValueDiff
+    });
+    this.negativeExperience = new NegativeExperiencePipeline({
+      repos: deps.repos,
+      get config() { return owner.deps.config; },
+      buildMemory: deps.buildMemory,
+      upsertEvolutionMemory: this.upsertEvolutionMemory.bind(this),
+      enqueueJob: deps.enqueueJob,
+      namespaceIdFromMemory: deps.namespaceIdFromMemory
     });
   }
 
@@ -173,6 +175,10 @@ export class EvolutionJobProcessor {
 
   applyReward(job: EvolutionJobRecord): Promise<void> {
     return this.reward.applyReward(job);
+  }
+
+  materializeNegativeExperience(job: EvolutionJobRecord): void {
+    this.negativeExperience.materialize(job);
   }
 
   summarizeTraceForCapture(input: {

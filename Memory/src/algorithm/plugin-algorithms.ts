@@ -3629,6 +3629,8 @@ export function buildWorldModelDraft(args: {
   const clusterMinSimilarity = args.clusterMinSimilarity ?? 0.3;
   const eligible = args.policies.filter((policy) =>
     policy.status === "active" &&
+    policy.experienceType !== "failure_avoidance" &&
+    policy.evidencePolarity !== "negative" &&
     policy.support >= minPolicySupport &&
     policy.gain >= minPolicyGain
   );

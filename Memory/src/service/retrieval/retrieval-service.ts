@@ -303,14 +303,22 @@ export function buildInjectedContext(
   const guidance = decisionGuidanceSection(
     contextMemoriesForInjectedSources(contextMemories, sourceMemoryIds)
   );
+  const avoidance = failureAvoidanceSection(
+    contextMemoriesForInjectedSources(contextMemories, sourceMemoryIds)
+  );
   if (guidance) {
     const estimate = guidance.tokenEstimate ?? 0;
     sections.push(guidance);
     sourceMemoryIds.push(...guidance.memoryIds);
     used += estimate;
   }
+  if (avoidance) {
+    sections.push(avoidance);
+    sourceMemoryIds.push(...avoidance.memoryIds);
+    used += avoidance.tokenEstimate ?? 0;
+  }
 
-  const markdown = renderInjectedMarkdown(renderedSections, guidance, retrievalMode, options);
+  const markdown = renderInjectedMarkdown(renderedSections, guidance, avoidance, retrievalMode, options);
 
   return {
     injectedContext: {
@@ -488,12 +496,13 @@ function labeledInjectedBlock(label: string, value: string): string[] {
 function renderInjectedMarkdown(
   sections: RenderedInjectedSection[],
   guidance: InjectedContext["sections"][number] | undefined,
+  avoidance: InjectedContext["sections"][number] | undefined,
   retrievalMode: RetrievalMode,
   options: InjectedRenderOptions
 ): string {
   const standaloneMathFinalAnswer = isStandaloneMathInjected(options);
   const taskProtocol = injectedTaskProtocol(options.query);
-  if (sections.length === 0 && !guidance && !standaloneMathFinalAnswer && !taskProtocol) return "";
+  if (sections.length === 0 && !guidance && !avoidance && !standaloneMathFinalAnswer && !taskProtocol) return "";
   const parts: string[] = [];
   const header = injectedHeaderForMode(retrievalMode, standaloneMathFinalAnswer, Boolean(taskProtocol));
   if (header) parts.push(header);
@@ -536,6 +545,7 @@ function renderInjectedMarkdown(
   }
 
   if (guidance) parts.push(standaloneMathFinalAnswer ? mathDecisionGuidance(guidance) : guidance.content);
+  if (avoidance) parts.push(avoidance.content);
   const footer = injectedFooterFor(sections, options.skillInjectionMode ?? "summary", standaloneMathFinalAnswer);
   if (footer) parts.push(footer);
   return prependResearchPlaybook(parts.join("\n\n"), options.domain);
@@ -926,6 +936,13 @@ function decisionGuidanceSection(memories: MemoryRow[]): InjectedContext["sectio
   const preference = new Map<string, { text: string; sourceIds: Set<string> }>();
   const antiPattern = new Map<string, { text: string; sourceIds: Set<string> }>();
   for (const memory of memories) {
+    const policy = policyMetaFromMemory(memory);
+    if (
+      policy?.experienceType === "failure_avoidance"
+      || policy?.evidencePolarity === "negative"
+    ) {
+      continue;
+    }
     const guidance = decisionGuidanceFromMemory(memory);
     for (const item of guidance.preference) {
       addDecisionGuidanceLine(preference, item, memory.id);
@@ -968,6 +985,63 @@ function decisionGuidanceSection(memories: MemoryRow[]): InjectedContext["sectio
   return {
     id: "decision-guidance",
     title: "Decision guidance",
+    kind: "policy",
+    memoryLayer: "L2",
+    memoryIds: [...memoryIds],
+    content,
+    tokenEstimate: estimateTokens(content)
+  };
+}
+
+function failureAvoidanceSection(memories: MemoryRow[]): InjectedContext["sections"][number] | undefined {
+  const safer = new Map<string, { text: string; sourceIds: Set<string> }>();
+  const avoid = new Map<string, { text: string; sourceIds: Set<string> }>();
+  for (const memory of memories) {
+    const policy = policyMetaFromMemory(memory);
+    if (
+      !policy
+      || (
+        policy.experienceType !== "failure_avoidance"
+        && policy.evidencePolarity !== "negative"
+      )
+    ) {
+      continue;
+    }
+    for (const item of policy.decisionGuidance.preference) {
+      addDecisionGuidanceLine(safer, item, memory.id);
+    }
+    for (const item of policy.decisionGuidance.antiPattern) {
+      addDecisionGuidanceLine(avoid, item, memory.id);
+    }
+  }
+  const saferEntries = rankedDecisionGuidanceLines(safer).slice(0, 3);
+  const avoidEntries = rankedDecisionGuidanceLines(avoid).slice(0, 3);
+  if (saferEntries.length === 0 && avoidEntries.length === 0) return undefined;
+  const memoryIds = new Set<string>();
+  for (const entry of [...saferEntries, ...avoidEntries]) {
+    for (const id of entry.sourceIds) memoryIds.add(id);
+  }
+  const contentLines = [
+    "## Failure avoidance",
+    "",
+    "Apply these as guardrails only when the current task matches the historical failure context."
+  ];
+  if (avoidEntries.length > 0) {
+    contentLines.push("", "**Avoid**");
+    avoidEntries.forEach((entry, index) => {
+      contentLines.push(`  ${index + 1}. ${entry.text}`);
+    });
+  }
+  if (saferEntries.length > 0) {
+    contentLines.push("", "**Safer behavior**");
+    saferEntries.forEach((entry, index) => {
+      contentLines.push(`  ${index + 1}. ${entry.text}`);
+    });
+  }
+  const content = contentLines.join("\n");
+  return {
+    id: "failure-avoidance",
+    title: "Failure avoidance",
     kind: "policy",
     memoryLayer: "L2",
     memoryIds: [...memoryIds],
@@ -1151,12 +1225,17 @@ export class RetrievalService {
     const searchAt = Date.now();
     const candidateCount = layers.length === 0
       ? 0
-      : this.candidatePool.retrievalCandidateCount({ layers, tags: request.tags });
+      : this.candidatePool.retrievalCandidateCount({
+          negativeExperienceUserId: context.userId,
+          layers,
+          tags: request.tags
+        });
     const retrievalQuery = focusResearchRetrievalQuery(request.query, tuning.domain).text;
     const queryExtract = candidateCount > 0 ? await this.extractRetrievalQuery(retrievalQuery) : null;
     const queryVectorText = queryExtract?.queryVecText?.trim() || retrievalQuery;
     const retrievalLimit = request.limit ?? this.deps.turnStartRetrievalLimit();
     const retrievalOutput = await this.retrieveSearchMemories({
+      negativeExperienceUserId: context.userId,
       query: retrievalQuery,
       queryVectorText,
       queryExtract,
@@ -1275,6 +1354,7 @@ export class RetrievalService {
   }
 
   private async retrieveSearchMemories(input: {
+    negativeExperienceUserId: string;
     query: string;
     queryVectorText: string;
     queryExtract: RetrievalQueryExtract | null;
@@ -1298,11 +1378,13 @@ export class RetrievalService {
         domain: config.domain
       });
       const hasVectorCandidates = this.candidatePool.hasRetrievalVectorCandidates({
+        negativeExperienceUserId: input.negativeExperienceUserId,
         layers: input.layers,
         tags: input.tags
       });
       const queryVector = hasVectorCandidates ? await this.queryVector(queryVectorText) : undefined;
       const candidatePool = await this.candidatePool.indexedRetrievalCandidatePool({
+        negativeExperienceUserId: input.negativeExperienceUserId,
         compiledQuery,
         queryVector,
         layers: input.layers,

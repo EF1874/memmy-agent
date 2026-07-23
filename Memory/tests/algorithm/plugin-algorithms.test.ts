@@ -1259,6 +1259,14 @@ describe("plugin algorithm parity helpers", () => {
     expect(buildWorldModelDraft({
       policies: [policy("p-enough-gain", "Parse SEC 13F infotable holdings with sec-api", [1, 0], 0.03)]
     })).toHaveLength(1);
+    expect(buildWorldModelDraft({
+      policies: [{
+        ...policy("p-negative-caveat", "Avoid repeating a failed SEC 13F parser path", [1, 0], 0.8),
+        experienceType: "failure_avoidance",
+        evidencePolarity: "negative",
+        skillEligible: false
+      }]
+    })).toHaveLength(0);
 
     expect(buildSkillDraft({
       policy: policy("p-skill-low-gain", "Parse SEC 13F infotable holdings with sec-api", [1, 0], 0.01),

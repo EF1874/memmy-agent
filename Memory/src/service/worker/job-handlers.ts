@@ -58,6 +58,7 @@ export interface WorkerJobProcessors {
   };
   evolution: {
     induceL2(job: EvolutionJobRecord): MaybePromise<void>;
+    materializeNegativeExperience(job: EvolutionJobRecord): MaybePromise<void>;
     abstractL3(job: EvolutionJobRecord): MaybePromise<void>;
     crystallizeSkill(job: EvolutionJobRecord): MaybePromise<void>;
     associateL2(job: EvolutionJobRecord): MaybePromise<void>;
@@ -220,6 +221,9 @@ export async function processJob(
       return;
     case "l2_induction":
       await deps.processors.evolution.induceL2(job);
+      return;
+    case "negative_experience":
+      await deps.processors.evolution.materializeNegativeExperience(job);
       return;
     case "l3_abstraction":
       await deps.processors.evolution.abstractL3(job);
@@ -480,6 +484,15 @@ export function evolutionJobDedupeKey(input: Pick<EnqueueJobInput, "jobType" | "
       return input.episodeId ? `reflection:${input.episodeId}` : target ? `reflection:${target}` : undefined;
     case "reward":
       return input.episodeId ? `reward:${input.episodeId}` : target ? `reward:${target}` : undefined;
+    case "negative_experience": {
+      const source = payloadString("source");
+      const sourceEventId = payloadString("sourceEventId");
+      return source && sourceEventId
+        ? `negative_experience:${source}:${sourceEventId}`
+        : input.episodeId
+          ? `negative_experience:${input.episodeId}`
+          : undefined;
+    }
     case "l2_association":
       return target ? `l2_association:${target}` : undefined;
     case "l2_induction": {

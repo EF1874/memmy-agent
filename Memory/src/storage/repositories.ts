@@ -504,18 +504,18 @@ export class MemoryRepository {
   }
 
   getByKey(userId: string, memoryLayer: MemoryLayer, key: string): MemoryRow | undefined {
-    void userId;
     const row = this.db
       .prepare(
         `SELECT *
          FROM memories
          WHERE memory_layer = ?
            AND memory_key = ?
+           AND user_id = ?
            AND deleted_at IS NULL
          ORDER BY updated_at DESC
          LIMIT 1`
       )
-      .get(memoryLayer, key) as MemorySqlRow | undefined;
+      .get(memoryLayer, key, userId) as MemorySqlRow | undefined;
     return row ? this.hydrate(memoryFromSql(row)) : undefined;
   }
 
@@ -2850,7 +2850,10 @@ export class RuntimeRepository {
   } = {}): DecisionRepairRecord[] {
     const clauses = ["1=1"];
     const params: SqlValue[] = [];
-    void input.userId;
+    if (input.userId) {
+      clauses.push("user_id = ?");
+      params.push(input.userId);
+    }
     if (input.contextHash) {
       clauses.push("context_hash = ?");
       params.push(input.contextHash);
@@ -2869,6 +2872,13 @@ export class RuntimeRepository {
       )
       .all(...params, input.limit ?? 50) as SqlDecisionRepairRow[];
     return rows.map(decisionRepairFromSql);
+  }
+
+  getDecisionRepair(id: string): DecisionRepairRecord | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM decision_repairs WHERE id = ?`)
+      .get(id) as SqlDecisionRepairRow | undefined;
+    return row ? decisionRepairFromSql(row) : undefined;
   }
 
   upsertCandidatePoolTrace(input: {
@@ -3791,6 +3801,7 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
   addArrayClause("status", filter.status);
   addArrayClause("id", filter.ids);
   addTagClauses(filter.tags);
+  addNegativeExperienceScope(filter.negativeExperienceUserId);
 
   return {
     where: clauses.join(" AND "),
@@ -3819,6 +3830,19 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
       )`);
       params.push(...excluded);
     }
+  }
+
+  function addNegativeExperienceScope(userId: string | undefined): void {
+    if (!userId) return;
+    clauses.push(`(
+      user_id = ?
+      OR memory_layer <> 'L2'
+      OR (
+        COALESCE(json_extract(properties_json, '$.internal_info.policy.experience_type'), '') <> 'failure_avoidance'
+        AND COALESCE(json_extract(properties_json, '$.internal_info.policy.evidence_polarity'), '') <> 'negative'
+      )
+    )`);
+    params.push(userId);
   }
 
   function addArrayClause(column: string, value: string | string[] | undefined): void {

@@ -44,6 +44,7 @@ export type JobType =
   | "reflection"
   | "embedding"
   | "reward"
+  | "negative_experience"
   | "l2_association"
   | "l2_induction"
   | "l3_abstraction"
@@ -128,6 +129,7 @@ export interface MemoryRow {
 
 export interface MemoryFilter {
   userId?: string;
+  negativeExperienceUserId?: string;
   sessionId?: string;
   conversationId?: string;
   agentId?: string;

@@ -259,6 +259,7 @@ export class MemoryService {
         },
         evolution: {
           induceL2: (job) => this.evolutionJobs.induceL2(job),
+          materializeNegativeExperience: (job) => this.evolutionJobs.materializeNegativeExperience(job),
           abstractL3: (job) => this.evolutionJobs.abstractL3(job),
           crystallizeSkill: (job) => this.evolutionJobs.crystallizeSkill(job),
           associateL2: (job) => this.evolutionJobs.associateL2(job)
@@ -292,7 +293,6 @@ export class MemoryService {
         llm: this.skillLlm
       }),
       scheduleEmbeddingAfterTextUpdate: (input) => this.embeddingJobs.scheduleEmbeddingAfterTextUpdate(input),
-      attachRepairToPolicies: (...args) => this.feedbackExperience.attachRepairToPolicies(...args),
       repairEvidenceValueDiff: sessionRepairEvidenceValueDiff
     });
     const trialOwner = this;
@@ -485,7 +485,6 @@ export class MemoryService {
       assertMemoryAddEnabled: this.assertMemoryAddEnabled.bind(this),
       assertRawTurnInScope: this.assertRawTurnInScope.bind(this),
       assertSessionInScope: this.assertSessionInScope.bind(this),
-      attachRepairToPolicies: this.feedbackExperience.attachRepairToPolicies.bind(this.feedbackExperience),
       buildMemory: this.buildMemory.bind(this),
       closeSessionNoWrite: this.closeSessionNoWrite.bind(this),
       completeTurnNoWrite: this.completeTurnNoWrite.bind(this),

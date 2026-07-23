@@ -143,18 +143,53 @@ describe("MemoryService / feedback / experience", () => {
       rawPayload: { source: "verifier", score: -1 }
     });
 
-    const merged = db.db.prepare(
+    const beforeWorker = db.db.prepare(
       `SELECT id, properties_json
        FROM memories
        WHERE user_id = 'user-feedback-experience'
          AND memory_layer = 'L2'`
     ).all() as Array<{ id: string; properties_json: string }>;
-    expect(merged).toHaveLength(1);
-    expect(merged[0]!.id).toBe(created[0]!.id);
-    const mergedPolicy = (JSON.parse(merged[0]!.properties_json) as {
+    expect(beforeWorker).toHaveLength(1);
+    expect(beforeWorker[0]!.id).toBe(created[0]!.id);
+    expect(avoid.jobs.map((job) => job.jobType)).not.toContain("negative_experience");
+    expect(avoid.jobs.map((job) => job.jobType)).toContain("reward");
+    expect(avoid.jobs.map((job) => job.jobType)).not.toContain("l3_abstraction");
+    expect(avoid.jobs.map((job) => job.jobType)).not.toContain("skill_crystallization");
+
+    await service.runWorkerOnce(100);
+    await service.runWorkerOnce(100);
+
+    const policies = db.db.prepare(
+      `SELECT id, properties_json
+       FROM memories
+       WHERE user_id = 'user-feedback-experience'
+         AND memory_layer = 'L2'`
+    ).all() as Array<{ id: string; properties_json: string }>;
+    expect(policies).toHaveLength(2);
+    const positivePolicy = (JSON.parse(
+      policies.find((row) => row.id === created[0]!.id)!.properties_json
+    ) as {
       internal_info: {
         policy: {
           support?: number;
+          experience_type?: string;
+          evidence_polarity?: string;
+          skill_eligible?: boolean;
+          source_feedback_ids?: string[];
+        };
+      };
+    }).internal_info.policy;
+    expect(positivePolicy.support).toBe(1);
+    expect(positivePolicy.experience_type).toBe("success_pattern");
+    expect(positivePolicy.evidence_polarity).toBe("positive");
+    expect(positivePolicy.skill_eligible).toBe(true);
+    expect(positivePolicy.source_feedback_ids).toEqual([ok.feedbackId]);
+    const negativePolicy = (JSON.parse(
+      policies.find((row) => row.id !== created[0]!.id)!.properties_json
+    ) as {
+      internal_info: {
+        policy: {
+          status?: string;
           experience_type?: string;
           evidence_polarity?: string;
           skill_eligible?: boolean;
@@ -163,12 +198,12 @@ describe("MemoryService / feedback / experience", () => {
         };
       };
     }).internal_info.policy;
-    expect(mergedPolicy.support).toBe(2);
-    expect(mergedPolicy.experience_type).toBe("repair_validated");
-    expect(mergedPolicy.evidence_polarity).toBe("mixed");
-    expect(mergedPolicy.skill_eligible).toBe(true);
-    expect(mergedPolicy.source_feedback_ids?.sort()).toEqual([avoid.feedbackId, ok.feedbackId].sort());
-    expect(mergedPolicy.decision_guidance?.anti_pattern?.join("\n")).toContain("filename");
+    expect(negativePolicy.status).toBe("candidate");
+    expect(negativePolicy.experience_type).toBe("failure_avoidance");
+    expect(negativePolicy.evidence_polarity).toBe("negative");
+    expect(negativePolicy.skill_eligible).toBe(false);
+    expect(negativePolicy.source_feedback_ids).toEqual([avoid.feedbackId]);
+    expect(negativePolicy.decision_guidance?.anti_pattern?.join("\n")).toContain("filename");
     db.close();
   });
 
@@ -230,13 +265,11 @@ describe("MemoryService / feedback / experience", () => {
       rawPayload: { source: "verifier", score: -1 }
     });
 
-    const refineCall = calls.find((call) => call.options.operation === "failure.experience.sink.v5");
-    expect(refineCall).toBeTruthy();
-    expect(refineCall!.options.thinkingMode).toBe("enabled");
-    expect(refineCall!.messages[0]!.content).toContain("corrective_signals");
-    expect(refineCall!.messages[0]!.content).toContain("repair_instruction");
-    expect(refineCall!.messages[1]!.content).toContain("corrective_signals");
-    expect(refineCall!.messages[1]!.content).toContain("SEC 13F filing");
+    expect(calls.find((call) => call.options.operation === "failure.experience.sink.v5")).toBeUndefined();
+    expect(feedbackResponse.jobs.map((job) => job.jobType)).not.toContain("negative_experience");
+    expect(feedbackResponse.jobs.map((job) => job.jobType)).toContain("reward");
+    await service.runWorkerOnce(100);
+    await service.runWorkerOnce(100);
 
     const row = db.db.prepare(
       `SELECT properties_json
@@ -257,9 +290,9 @@ describe("MemoryService / feedback / experience", () => {
         };
       };
     }).internal_info.policy;
-    expect(policy.trigger).toContain("SEC 13F holdings");
-    expect(policy.procedure).toContain("issuer and CUSIP");
-    expect(policy.verification).toContain("CUSIP");
+    expect(policy.trigger).toContain("SEC 13F filing");
+    expect(policy.procedure).toContain("filename");
+    expect(policy.verification).toContain("historical failure mode");
     expect(policy.decision_guidance?.anti_pattern?.join("\n")).toContain("filename");
     expect(policy.policy_confidence).toBeGreaterThanOrEqual(0.91);
 
@@ -270,24 +303,7 @@ describe("MemoryService / feedback / experience", () => {
          AND memory_layer = 'Skill'
        LIMIT 1`
     ).get() as { id: string; properties_json: string } | undefined;
-    expect(skillRow).toBeTruthy();
-    const skill = (JSON.parse(skillRow!.properties_json) as {
-      internal_info: {
-        skill: {
-          repair_origin?: boolean;
-          strict_trial?: boolean;
-          status?: string;
-          eta?: number;
-        };
-      };
-    }).internal_info.skill;
-    expect(skill.repair_origin).toBe(true);
-    expect(skill.strict_trial).toBe(true);
-    expect(skill.status).toBe("candidate");
-    expect(skill.eta).toBe(0.1);
-    expect(feedbackResponse.jobs).toEqual(expect.arrayContaining([
-      expect.objectContaining({ jobType: "embedding", targetMemoryId: skillRow!.id })
-    ]));
+    expect(skillRow).toBeUndefined();
     db.close();
   });
 });

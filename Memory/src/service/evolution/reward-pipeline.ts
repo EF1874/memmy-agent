@@ -59,13 +59,6 @@ export interface RewardPipelineDeps {
   }): void;
   decisionRepairTraceSources(memories: MemoryRow[]): DecisionRepairTraceSource[];
   synthesizeDecisionRepairDraft: SynthesizeDecisionRepairDraft;
-  attachRepairToPolicies(
-    repairId: string,
-    policyIds: string[],
-    preference: string | undefined,
-    antiPattern: string | undefined,
-    at: string
-  ): string[];
   isTraceEligibleForL2(trace: TraceMeta): boolean;
   recordCandidatePoolTrace(trace: TraceMeta, signature: string, at: string): void;
   repairEvidenceValueDiff(highValue: MemoryRow[], lowValue: MemoryRow[]): number;
@@ -188,6 +181,31 @@ export class RewardPipeline {
           source: "worker.reward.backprop.v7",
           createdAt: savedEpisode.updatedAt
         });
+        if (
+          this.deps.config.algorithm.negativeExperience.enabled
+          && feedback.rHuman <= this.deps.config.algorithm.negativeExperience.failureRTaskThreshold
+        ) {
+          const feedbackId = typeof job.payload.feedbackId === "string"
+            ? job.payload.feedbackId
+            : undefined;
+          const repairId = typeof job.payload.repairId === "string"
+            ? job.payload.repairId
+            : undefined;
+          this.deps.enqueueJob({
+            jobType: "negative_experience",
+            userId: savedEpisode.userId,
+            sessionId: savedEpisode.sessionId,
+            episodeId: savedEpisode.id,
+            payload: {
+              source: feedbackId ? "negative_feedback" : "episode_reward",
+              sourceEventId: feedbackId ?? savedEpisode.id,
+              rewardReason: feedback.reason,
+              ...(feedbackId ? { feedbackId } : {}),
+              ...(repairId ? { repairId } : {})
+            },
+            createdAt: savedEpisode.updatedAt
+          });
+        }
       }
       this.deps.resolvePendingSkillTrialsForReward({
         userId: source.userId,
@@ -406,7 +424,7 @@ export class RewardPipeline {
       antiPattern,
       highValueMemoryIds: evidence.highValueMemories.map((memory) => memory.id),
       lowValueMemoryIds: evidence.lowValueMemories.map((memory) => memory.id),
-      attachedPolicyMemoryIds: evidence.policyIds,
+      attachedPolicyMemoryIds: [],
       validated: false,
       source: {
         source: "worker.reward.value_distribution_repair.v7",
@@ -425,9 +443,6 @@ export class RewardPipeline {
       createdAt: at
     });
     if (triggerTrace.episodeId) this.deps.repos.runtime.appendEpisodeDecisionRepair(triggerTrace.episodeId, repair.id, at);
-    const attachedPolicyIds = evidence.policyIds.length > 0
-      ? this.deps.attachRepairToPolicies(repair.id, evidence.policyIds, repair.preference, repair.antiPattern, at)
-      : [];
     this.deps.repos.runtime.appendChange({
       memoryId: repair.id,
       namespaceId: this.deps.namespaceIdFromMemory(triggerMemory),
@@ -440,42 +455,49 @@ export class RewardPipeline {
       source: "worker.reward.value_distribution_repair.v7",
       createdAt: at
     });
-    return { repairId: repair.id, contextHash, skipped: false, attachedPolicyIds };
+    if (triggerTrace.episodeId) {
+      this.deps.enqueueJob({
+        jobType: "negative_experience",
+        userId: triggerTrace.userId,
+        sessionId: triggerTrace.sessionId,
+        episodeId: triggerTrace.episodeId,
+        payload: {
+          source: "value_distribution",
+          sourceEventId: repair.id,
+          repairId: repair.id,
+          confidence: repair.meta.confidence
+        },
+        createdAt: at
+      });
+    }
+    return { repairId: repair.id, contextHash, skipped: false, attachedPolicyIds: [] };
   }
 
   valueDistributionRepairEvidence(trace: TraceMeta, limit: number): {
     highValueMemories: MemoryRow[];
     lowValueMemories: MemoryRow[];
-    policyIds: string[];
   } {
     const highValueMemories: MemoryRow[] = [];
     const lowValueMemories: MemoryRow[] = [];
-    const policyIds = new Set<string>();
     const memories = this.deps.repos.memories.list({ userId: trace.userId, memoryLayer: "L1", status: "activated" }, 1000);
     for (const memory of memories) {
       const candidate = this.deps.traceMeta(memory);
       if (!candidate || candidate.signature !== trace.signature) continue;
       if (candidate.value > 0 && highValueMemories.length < limit) highValueMemories.push(memory);
       if (candidate.value < -this.deps.config.algorithm.feedback.minLowValueThreshold && lowValueMemories.length < limit) lowValueMemories.push(memory);
-      if (highValueMemories.includes(memory) || lowValueMemories.includes(memory)) {
-        for (const link of this.deps.repos.runtime.listTracePolicyLinks({ userId: trace.userId, l1MemoryId: memory.id, limit: 20 })) {
-          policyIds.add(link.l2MemoryId);
-        }
-      }
     }
     highValueMemories.sort((a, b) => (this.deps.traceMeta(b)?.value ?? 0) - (this.deps.traceMeta(a)?.value ?? 0));
     lowValueMemories.sort((a, b) => (this.deps.traceMeta(a)?.value ?? 0) - (this.deps.traceMeta(b)?.value ?? 0));
     return {
       highValueMemories: highValueMemories.slice(0, limit),
-      lowValueMemories: lowValueMemories.slice(0, limit),
-      policyIds: [...policyIds].slice(0, limit)
+      lowValueMemories: lowValueMemories.slice(0, limit)
     };
   }
 
   private async maybeSynthesizeValueDistributionDecisionRepair(
     contextHash: string,
     trace: TraceMeta,
-    evidence: { highValueMemories: MemoryRow[]; lowValueMemories: MemoryRow[]; policyIds: string[] }
+    evidence: { highValueMemories: MemoryRow[]; lowValueMemories: MemoryRow[] }
   ): Promise<DecisionRepairLlmDraft | undefined> {
     const request: DecisionRepairSynthesisRequest = {
       trigger: "value-distribution",
