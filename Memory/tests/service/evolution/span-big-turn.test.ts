@@ -84,7 +84,7 @@ function createSpanBigTurnLlm(
           }]
         } as unknown as T;
       }
-      if (options.operation === "reward.reward.r_human.v6") {
+      if (options.operation === "reward.reward.r_human.v7") {
         return {
           goal_achievement: 1,
           process_quality: 0.9,

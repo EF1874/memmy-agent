@@ -184,7 +184,7 @@ export function createNoToolSkillLlm(calls: Array<{
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string }
     ): Promise<T> {
-      if (options.operation === "reward.reward.r_human.v6") {
+      if (options.operation === "reward.reward.r_human.v7") {
         calls.push({ messages, options });
         return {
           goal_achievement: 1,

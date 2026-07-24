@@ -40,7 +40,7 @@ function createCountingLlm(
       options: { operation: string }
     ): Promise<T> {
       operations.push(options.operation);
-      if (options.operation === "reward.reward.r_human.v6" && reward) {
+      if (options.operation === "reward.reward.r_human.v7" && reward) {
         return reward as unknown as T;
       }
       return {} as T;
@@ -155,7 +155,7 @@ describe("MemoryService / evolution / negative experience", () => {
     });
     expect(detail.body).toContain("Wrong port");
     expect(detail.body).toContain("443");
-    expect(operations).toEqual(["reward.reward.r_human.v6"]);
+    expect(operations).toEqual(["reward.reward.r_human.v7"]);
 
     const initialVersion = policies[0]!.version;
     await service.runWorkerOnce(50);
@@ -253,7 +253,7 @@ describe("MemoryService / evolution / negative experience", () => {
     expect(service.getMemory(policies[0]!.id, { namespace }).body).toContain(
       "TLS verification was skipped"
     );
-    expect(operations).toEqual(["reward.reward.r_human.v6"]);
+    expect(operations).toEqual(["reward.reward.r_human.v7"]);
     db.close();
   });
 

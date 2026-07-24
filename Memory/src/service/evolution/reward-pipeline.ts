@@ -12,7 +12,6 @@ import type { LlmClient } from "../../model/types.js";
 import type {
   EpisodeRecord,
   EvolutionJobRecord,
-  RawTurnRecord,
   Repositories
 } from "../../storage/repositories.js";
 import { kindFromMemory } from "../../storage/repositories.js";
@@ -327,18 +326,7 @@ export class RewardPipeline {
   }): Promise<HumanScoreResult> {
     if (!this.deps.config.algorithm.reward.llmScoring || !this.deps.llm.isConfigured()) return input.fallback;
     try {
-      const rawTurnId = rawTurnIdFromMemory(input.source);
-      const rawTurn = rawTurnId ? this.deps.repos.runtime.getRawTurn(rawTurnId) : undefined;
       const episode = input.trace.episodeId ? this.deps.repos.runtime.getEpisode(input.trace.episodeId) : undefined;
-      const rawTurns = episode
-        ? this.deps.repos.runtime.listRawTurnsByEpisode(episode.id, 100)
-        : rawTurn ? [rawTurn] : [];
-      const hostAgentContext = {
-        hostAgentKind: input.source.agentId ?? undefined,
-        hostAppId: input.source.appId ?? undefined,
-        hostSessionId: input.source.sessionId ?? rawTurn?.sessionId,
-        hostConversationId: input.source.conversationId ?? rawTurn?.conversationId
-      };
       const result = await this.deps.llm.completeJson<{
         goal_achievement?: unknown;
         process_quality?: unknown;
@@ -350,22 +338,17 @@ export class RewardPipeline {
         reason?: unknown;
       }>([
         { role: "system", content: REWARD_R_HUMAN_PROMPT.system },
-        { role: "user", content: [
-          "HOST_AGENT_CONTEXT:", stableStringify(hostAgentContext), "", "TASK_SUMMARY:",
-          buildRewardTaskSummary({
+        {
+          role: "user",
+          content: stableStringify(buildRewardEpisodeInput({
             source: input.source,
             trace: input.trace,
             episode,
-            rawTurns,
             episodeTraces: input.episodeTraces,
-            maxChars: this.deps.config.algorithm.reward.summaryMaxChars,
-            evaluator: {
-              scorerProvider: this.deps.llm.config.provider,
-              scorerModel: this.deps.llm.config.model
-            }
-          }),
-          "", "FEEDBACK:", stableStringify(input.payload)
-        ].join("\n\n") }
+            feedbackPayload: input.payload,
+            summaryMaxChars: this.deps.config.algorithm.reward.summaryMaxChars
+          }))
+        }
       ], {
         operation: `reward.${REWARD_R_HUMAN_PROMPT.id}.v${REWARD_R_HUMAN_PROMPT.version}`,
         thinkingMode: "disabled",
@@ -547,35 +530,67 @@ export class RewardPipeline {
 
 }
 
-export function buildRewardTaskSummary(input: {
+export interface RewardEpisodeInput {
+  mission: string;
+  turnSummaries: string[];
+  finalExchange: {
+    user: string;
+    assistant: string;
+  };
+  execution: {
+    totalToolCalls: number;
+    successCount: number;
+    errorCount: number;
+    lastResult: "success" | "error" | "none";
+    completedByTool: "yes" | "no" | "unknown";
+    lastTool?: string;
+    lastErrorCode?: string;
+  };
+  feedback?: {
+    channel: "explicit" | "implicit";
+    polarity: "positive" | "neutral" | "negative";
+    magnitude: number;
+    rationale?: string;
+  };
+  host?: {
+    agent?: string;
+    agentIdentity?: string;
+    provider?: string;
+    model?: string;
+    apiMode?: string;
+  };
+}
+
+export function buildRewardEpisodeInput(input: {
   source: MemoryRow;
   trace: TraceMeta;
   episode?: EpisodeRecord;
-  rawTurns: readonly RawTurnRecord[];
   episodeTraces: readonly TraceMeta[];
-  maxChars: number;
-  evaluator?: { scorerProvider?: string; scorerModel?: string };
-}): string {
-  const pairs = input.rawTurns.length
-    ? input.rawTurns.map(rewardPairFromRawTurn).filter((pair): pair is RewardExchangePair => Boolean(pair))
-    : input.episodeTraces.map(rewardPairFromTrace).filter((pair): pair is RewardExchangePair => Boolean(pair));
-  const userQuery = pairs[0]?.userText || input.trace.userText || "(no user text)";
-  const outcome = pairs[pairs.length - 1]?.agentText || input.trace.agentText || "(no agent text)";
-  const hostContext = rewardHostAgentContext(input);
-  const pairText = pairs.length
-    ? pairs.map((pair, index) => rewardFormatPair(pair, index, index === pairs.length - 1)).join("\n\n")
-    : "(no recorded exchanges)";
-  const agentActions = input.episodeTraces.map((trace, index) => rewardTraceOneLiner(trace, index)).filter(Boolean).join("\n");
-  const body = [
-    hostContext ? "HOST_AGENT_CONTEXT:" : "", hostContext, hostContext ? "" : "",
-    "EPISODE_MISSION:", rewardOneLine(rewardEpisodeMission(input.episode, userQuery), 800), "",
-    `USER_ASKS_AND_AGENT_REPLIES (${pairs.length}, in order):`, pairText, "",
-    `AGENT_STEPS (${input.episodeTraces.length}):`, agentActions || "(no recorded steps)", "",
-    "MOST_RECENT_USER_ASK:", rewardOneLine(pairs[pairs.length - 1]?.userText || userQuery, 500), "",
-    "MOST_RECENT_AGENT_REPLY:", rewardClampAgentText(pairs[pairs.length - 1]?.agentText || outcome), "",
-    rewardExecutionOutcome(input.episodeTraces)
-  ].join("\n");
-  return rewardClampHeadTail(body, input.maxChars);
+  feedbackPayload: Record<string, unknown>;
+  summaryMaxChars: number;
+}): RewardEpisodeInput {
+  const traces = input.episodeTraces.length
+    ? [...input.episodeTraces].sort((a, b) => a.ts - b.ts)
+    : [input.trace];
+  const perTurnCap = Math.min(
+    200,
+    Math.max(1, Math.floor(Math.max(input.summaryMaxChars, traces.length) / traces.length))
+  );
+  const first = traces[0] ?? input.trace;
+  const last = traces[traces.length - 1] ?? input.trace;
+  const feedback = rewardFeedbackInput(input.feedbackPayload);
+  const host = rewardHostInput(input.source, input.episode);
+  return {
+    mission: rewardOneLine(rewardEpisodeMission(input.episode, first.userText), 400),
+    turnSummaries: traces.map((trace) => rewardTurnSummary(trace, perTurnCap)),
+    finalExchange: {
+      user: rewardOneLine(last.userText || "(no user text)", 240),
+      assistant: rewardOneLine(last.agentText || "(no agent text)", 480)
+    },
+    execution: rewardExecutionOutcome(traces),
+    ...(feedback ? { feedback } : {}),
+    ...(host ? { host } : {})
+  };
 }
 
 function rewardEpisodeMission(episode: EpisodeRecord | undefined, fallback: string): string {
@@ -586,45 +601,20 @@ function rewardEpisodeMission(episode: EpisodeRecord | undefined, fallback: stri
   return initialUserText || fallback;
 }
 
-interface RewardExchangePair { userText: string; agentText: string; toolHint?: string }
-
-function rewardPairFromRawTurn(rawTurn: RawTurnRecord): RewardExchangePair | null {
-  const userText = rawTurn.userText?.trim() ?? "";
-  const agentText = rawTurn.assistantText?.trim() ?? "";
-  if (!userText && !agentText) return null;
-  const toolHint = rawTurn.toolCalls.length
-    ? rawTurn.toolCalls.map((call) => objectField(call, "name") ?? "tool").join(", ")
-    : undefined;
-  return { userText, agentText, toolHint };
-}
-
-function rewardPairFromTrace(trace: TraceMeta): RewardExchangePair | null {
+function rewardTurnSummary(trace: TraceMeta, maxChars: number): string {
+  const summary = trace.summary.trim();
+  if (summary) return rewardOneLine(summary, maxChars);
   const userText = trace.userText.trim();
   const agentText = trace.agentText.trim();
-  if (!userText && !agentText) return null;
-  const toolHint = trace.toolCalls.length
-    ? trace.toolCalls.map((call) => call.error ? `${call.name}[ERR:${call.error}]` : call.name).join(", ")
-    : undefined;
-  return { userText, agentText, toolHint };
+  if (!userText || !agentText) return rewardOneLine(userText || agentText || "trace memory", maxChars);
+  const separator = " → ";
+  if (maxChars <= separator.length + 2) return rewardOneLine(`${userText}${separator}${agentText}`, maxChars);
+  const userMaxChars = Math.floor((maxChars - separator.length) / 2);
+  const agentMaxChars = maxChars - separator.length - userMaxChars;
+  return `${rewardOneLine(userText, userMaxChars)}${separator}${rewardOneLine(agentText, agentMaxChars)}`;
 }
 
-function rewardFormatPair(pair: RewardExchangePair, index: number, isLast: boolean): string {
-  const lines = [`[${index + 1}] USER: ${rewardOneLine(pair.userText, 300)}`];
-  if (pair.toolHint) lines.push(`    TOOLS: ${pair.toolHint}`);
-  lines.push(`    AGENT: ${isLast ? rewardClampAgentText(pair.agentText) : rewardOneLine(pair.agentText, 400)}`);
-  return lines.join("\n");
-}
-
-function rewardTraceOneLiner(trace: TraceMeta, index: number): string {
-  const toolNames = trace.toolCalls
-    .map((call) => call.error ? `${call.name}[ERR:${call.error}]` : call.name)
-    .filter(Boolean)
-    .join(", ");
-  const action = toolNames || rewardOneLine(trace.agentText, 120) || "(text only)";
-  return `  ${index + 1}. ${action}`;
-}
-
-function rewardExecutionOutcome(traces: readonly TraceMeta[]): string {
+function rewardExecutionOutcome(traces: readonly TraceMeta[]): RewardEpisodeInput["execution"] {
   let totalToolCalls = 0;
   let successCount = 0;
   let errorCount = 0;
@@ -637,40 +627,72 @@ function rewardExecutionOutcome(traces: readonly TraceMeta[]): string {
       lastToolCall = call;
     }
   }
-  const lines = ["EXECUTION_OUTCOME:"];
   if (!lastToolCall) {
-    lines.push("  total_tool_calls: 0", "  last_tool_result: NONE", "  task_completed_by_tool: unknown");
-    return lines.join("\n");
+    return {
+      totalToolCalls: 0,
+      successCount: 0,
+      errorCount: 0,
+      lastResult: "none",
+      completedByTool: "unknown"
+    };
   }
   const failed = Boolean(lastToolCall.error || lastToolCall.errorCode || lastToolCall.success === false);
-  lines.push(`  total_tool_calls: ${totalToolCalls}  (success: ${successCount}, error: ${errorCount})`);
-  lines.push(`  last_tool_result: ${failed ? "ERROR" : "SUCCESS"}  [tool: ${lastToolCall.name}]${lastToolCall.errorCode ? `, code: ${lastToolCall.errorCode}` : ""}`);
-  lines.push(`  task_completed_by_tool: ${failed ? "no" : "yes"}`);
-  return lines.join("\n");
+  return {
+    totalToolCalls,
+    successCount,
+    errorCount,
+    lastResult: failed ? "error" : "success",
+    completedByTool: failed ? "no" : "yes",
+    ...(lastToolCall.name ? { lastTool: rewardOneLine(lastToolCall.name, 120) } : {}),
+    ...(lastToolCall.errorCode ? { lastErrorCode: rewardOneLine(lastToolCall.errorCode, 80) } : {})
+  };
 }
 
-function rewardHostAgentContext(input: {
-  source: MemoryRow;
-  episode?: EpisodeRecord;
-  evaluator?: { scorerProvider?: string; scorerModel?: string };
-}): string {
-  const meta = input.episode?.meta ?? {};
+function rewardFeedbackInput(payload: Record<string, unknown>): RewardEpisodeInput["feedback"] | undefined {
+  const hasFeedback = ["channel", "polarity", "magnitude", "rationale"]
+    .some((key) => payload[key] !== undefined);
+  if (!hasFeedback) return undefined;
+  const channel = payload.channel === "implicit" ? "implicit" : "explicit";
+  const polarity = payload.polarity === "negative"
+    ? "negative"
+    : payload.polarity === "neutral"
+      ? "neutral"
+      : "positive";
+  const magnitude = typeof payload.magnitude === "number" && Number.isFinite(payload.magnitude)
+    ? payload.magnitude
+    : 1;
+  const rationale = typeof payload.rationale === "string" && payload.rationale.trim()
+    ? rewardOneLine(payload.rationale, 240)
+    : undefined;
+  return {
+    channel,
+    polarity,
+    magnitude,
+    ...(rationale ? { rationale } : {})
+  };
+}
+
+function rewardHostInput(
+  source: MemoryRow,
+  episode: EpisodeRecord | undefined
+): RewardEpisodeInput["host"] | undefined {
+  const meta = episode?.meta ?? {};
   const hints = isRecord(meta.contextHints) ? meta.contextHints : {};
-  const fields: Array<[string, unknown]> = [
-    ["agent", input.source.agentId],
-    ["agentIdentity", hints.agentIdentity ?? meta.agentIdentity],
-    ["hostProvider", hints.hostProvider ?? meta.hostProvider],
-    ["hostModel", hints.hostModel ?? meta.hostModel],
-    ["hostApiMode", hints.hostApiMode ?? meta.hostApiMode],
-    ["scorerProvider", input.evaluator?.scorerProvider],
-    ["scorerModel", input.evaluator?.scorerModel]
-  ];
-  const lines = fields
-    .filter(([, value]) => typeof value === "string" && value.trim().length > 0)
-    .map(([key, value]) => `${key}: ${rewardOneLine(String(value), 240)}`);
-  if (lines.length === 0) return "";
-  lines.push("gradingInstruction: Evaluate the host agent's answer in this host context; do not project the evaluator model's own identity, provider, or capabilities onto the host agent.");
-  return lines.join("\n");
+  const field = (value: unknown): string | undefined =>
+    typeof value === "string" && value.trim() ? rewardOneLine(value, 120) : undefined;
+  const agent = field(source.agentId);
+  const agentIdentity = field(hints.agentIdentity ?? meta.agentIdentity);
+  const provider = field(hints.hostProvider ?? meta.hostProvider);
+  const model = field(hints.hostModel ?? meta.hostModel);
+  const apiMode = field(hints.hostApiMode ?? meta.hostApiMode);
+  if (!agent && !agentIdentity && !provider && !model && !apiMode) return undefined;
+  return {
+    ...(agent ? { agent } : {}),
+    ...(agentIdentity ? { agentIdentity } : {}),
+    ...(provider ? { provider } : {}),
+    ...(model ? { model } : {}),
+    ...(apiMode ? { apiMode } : {})
+  };
 }
 
 export function rewardSkipReason(traces: readonly TraceMeta[], cfg: MemmyConfig["algorithm"]["reward"]): string | null {
@@ -791,29 +813,17 @@ function rawTurnIdFromMemory(memory: MemoryRow): string | undefined {
   return isRecord(trace) && typeof trace.raw_turn_id === "string" ? trace.raw_turn_id : undefined;
 }
 
-function objectField(value: unknown, field: string): string | undefined {
-  return isRecord(value) && typeof value[field] === "string" ? value[field] : undefined;
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function rewardOneLine(value: string, maxChars: number): string {
   const line = value.replace(/\s+/g, " ").trim();
-  return line.length <= maxChars ? line : `${line.slice(0, maxChars - 3).trimEnd()}...`;
+  if (line.length <= maxChars) return line;
+  if (maxChars <= 3) return line.slice(0, Math.max(0, maxChars));
+  return `${line.slice(0, maxChars - 3).trimEnd()}...`;
 }
 
-function rewardClampHeadTail(value: string, maxChars: number): string {
-  if (value.length <= maxChars) return value;
-  const marker = "\n...[truncated]...\n";
-  if (maxChars <= marker.length + 20) return value.slice(0, Math.max(0, maxChars - 3)) + "...";
-  const headChars = Math.floor((maxChars - marker.length) * 0.55);
-  const tailChars = Math.max(0, maxChars - marker.length - headChars);
-  return `${value.slice(0, headChars).trimEnd()}${marker}${value.slice(value.length - tailChars).trimStart()}`;
-}
-
-function rewardClampAgentText(value: string): string { return rewardOneLine(value || "(no agent text)", 800); }
 function clampNumber(value: number, min: number, max: number): number { return Math.max(min, Math.min(max, value)); }
 function stringOr(value: unknown, fallback: string): string { return typeof value === "string" && value.trim() ? value.trim() : fallback; }
 function stringArray(value: unknown): string[] { return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []; }
