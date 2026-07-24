@@ -665,6 +665,7 @@ describe("MemoryService / evolution / policy induction", () => {
 
     const l2Call = l2Calls.find((call) => call.options.operation === "l2.induction.v3");
     expect(l2Call).toBeTruthy();
+    expect(l2Calls.filter((call) => call.options.operation === "l2.induction.v3")).toHaveLength(1);
     expect(l2Call!.options.thinkingMode).toBe("enabled");
     expect(l2Call!.messages[0]!.content).toContain("procedural policies");
     expect(l2Call!.messages[0]!.content).toContain("Same fact, two framings");
@@ -839,7 +840,7 @@ describe("MemoryService / evolution / policy induction", () => {
     db.close();
   });
 
-  it("skips L2 induction when configured LLM returns an invalid draft", async () => {
+  it("retries invalid L2 drafts three times before recording a terminal skip", async () => {
     const root = createTestRoot("mindock-memory-");
     const db = new MemoryDb({
       path: join(root, "memory.sqlite")
@@ -852,10 +853,16 @@ describe("MemoryService / evolution / policy induction", () => {
     const service = createTestMemoryService({
       db,
       mode: "dev",
-      skillLlm: createCapturingL2Llm(calls, undefined, {
+      skillLlm: createCapturingL2Llm(calls, undefined, [{
+        trigger: "pytest workflow fails around sqlite migration output",
+        procedure: "Run the focused pytest workflow."
+      }, {
+        title: "Invalid L2 policy",
+        procedure: "Run the focused pytest workflow."
+      }, {
         title: "Invalid L2 policy",
         trigger: "pytest workflow fails around sqlite migration output"
-      }),
+      }]),
       config: {
         ...DEFAULT_MEMMY_CONFIG,
         algorithm: {
@@ -910,7 +917,7 @@ describe("MemoryService / evolution / policy induction", () => {
       }
     }
 
-    expect(calls.some((call) => call.options.operation === "l2.induction.v3")).toBe(true);
+    expect(calls.filter((call) => call.options.operation === "l2.induction.v3")).toHaveLength(3);
     const l2Count = db.db.prepare(
       `SELECT COUNT(*) AS count
        FROM memories
@@ -931,6 +938,158 @@ describe("MemoryService / evolution / policy induction", () => {
       return after.reason;
     });
     expect(skippedReasons).toContain("llm-failed: l2.induction.invalid: missing procedure");
+    expect(skippedReasons).toHaveLength(1);
+    const job = db.db.prepare(
+      `SELECT status, attempts, last_error
+       FROM evolution_jobs
+       WHERE user_id = ? AND job_type = 'l2_induction'
+       ORDER BY created_at DESC
+       LIMIT 1`
+    ).get(userId) as { status: string; attempts: number; last_error: string | null };
+    expect(job).toMatchObject({
+      status: "succeeded",
+      attempts: 1,
+      last_error: null
+    });
+    const downstreamCount = db.db.prepare(
+      `SELECT COUNT(*) AS count
+       FROM evolution_jobs
+       WHERE user_id = ?
+         AND (
+           job_type IN ('l3_abstraction', 'skill_crystallization')
+           OR (
+             job_type = 'embedding'
+             AND json_extract(payload_json, '$.reason') = 'l2.upserted'
+           )
+         )`
+    ).get(userId) as { count: number };
+    expect(downstreamCount.count).toBe(0);
+
+    db.close();
+  });
+
+  it("creates L2 when the third draft attempt supplies all required fields", async () => {
+    const root = createTestRoot("mindock-memory-");
+    const db = new MemoryDb({
+      path: join(root, "memory.sqlite")
+    });
+    const calls: Array<{
+      messages: Array<{ role: string; content: string }>;
+      options: { operation: string };
+    }> = [];
+    const userId = "user-l2-third-draft-valid";
+    const service = createTestMemoryService({
+      db,
+      mode: "dev",
+      skillLlm: createCapturingL2Llm(calls, undefined, [{
+        title: "Focused migration diagnosis",
+        trigger: "pytest migration output needs focused diagnosis"
+      }, {
+        title: "Focused migration diagnosis",
+        procedure: "Run the focused pytest workflow and inspect the exact failure."
+      }, {
+        title: "Focused migration diagnosis",
+        trigger: "pytest migration output needs focused diagnosis",
+        procedure: "Run the focused pytest workflow and inspect the exact failure."
+      }]),
+      config: {
+        ...DEFAULT_MEMMY_CONFIG,
+        algorithm: {
+          ...DEFAULT_MEMMY_CONFIG.algorithm,
+          l2Induction: {
+            ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction,
+            traceCharCap: 700
+          },
+          l3Abstraction: {
+            ...DEFAULT_MEMMY_CONFIG.algorithm.l3Abstraction,
+            useLlm: false
+          },
+          skill: {
+            ...DEFAULT_MEMMY_CONFIG.algorithm.skill,
+            useLlm: false
+          }
+        }
+      }
+    });
+    const session = service.openSession({
+      namespace: {
+        source: "codex",
+        profileId: "jiang",
+        userId
+      }
+    });
+    const complete = service.completeTurn("turn-l2-third-draft-valid", {
+      sessionId: session.sessionId,
+      episodeId: "episode-l2-third-draft-valid",
+      query: "pytest migration output needs focused diagnosis",
+      answer: "Run focused tests and inspect the exact failure.",
+      toolCalls: [{
+        name: "shell",
+        input: { cmd: "npm test -- migration" },
+        output: "ok",
+        success: true
+      }]
+    });
+    await service.feedback({
+      sessionId: session.sessionId,
+      l1MemoryId: complete.l1MemoryId,
+      channel: "explicit",
+      polarity: "positive",
+      magnitude: 1,
+      rationale: "the focused migration diagnosis worked"
+    });
+    makeTraceEligibleForL2(db, complete.l1MemoryId);
+    for (let i = 0; i < 8; i += 1) {
+      await service.runWorkerOnce(50);
+      if (calls.some((call) => call.options.operation === "l2.induction.v3")) {
+        break;
+      }
+    }
+
+    expect(calls.filter((call) => call.options.operation === "l2.induction.v3")).toHaveLength(3);
+    const l2Rows = db.db.prepare(
+      `SELECT id
+       FROM memories
+       WHERE user_id = ? AND memory_layer = 'L2'`
+    ).all(userId) as Array<{ id: string }>;
+    expect(l2Rows).toHaveLength(1);
+    const skippedCount = db.db.prepare(
+      `SELECT COUNT(*) AS count
+       FROM memory_change_log
+       WHERE user_id = ?
+         AND change_type = 'l2_induction_skipped'`
+    ).get(userId) as { count: number };
+    expect(skippedCount.count).toBe(0);
+    const job = db.db.prepare(
+      `SELECT status, attempts, last_error
+       FROM evolution_jobs
+       WHERE user_id = ? AND job_type = 'l2_induction'
+       ORDER BY created_at DESC
+       LIMIT 1`
+    ).get(userId) as { status: string; attempts: number; last_error: string | null };
+    expect(job).toMatchObject({
+      status: "succeeded",
+      attempts: 1,
+      last_error: null
+    });
+    const downstreamJobs = db.db.prepare(
+      `SELECT job_type
+       FROM evolution_jobs
+       WHERE user_id = ?
+         AND (
+           job_type = 'l3_abstraction'
+           OR (
+             job_type = 'embedding'
+             AND target_memory_id = ?
+             AND json_extract(payload_json, '$.reason') = 'l2.upserted'
+           )
+         )
+       ORDER BY job_type`
+    ).all(userId, l2Rows[0]!.id) as Array<{ job_type: string }>;
+    expect(downstreamJobs.map((item) => item.job_type)).toEqual([
+      "embedding",
+      "l3_abstraction"
+    ]);
 
     db.close();
   });
