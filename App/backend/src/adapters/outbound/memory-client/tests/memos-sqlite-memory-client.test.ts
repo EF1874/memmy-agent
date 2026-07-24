@@ -19,6 +19,31 @@ afterEach(() => {
 });
 
 describe("createMemosSqliteMemoryClient", () => {
+  it("preserves Span memory kinds in panel responses", async () => {
+    const dbPath = createMemoryDatabase({
+      id: "span_sqlite_1",
+      sessionId: "codex-session-span",
+      agentId: "codex",
+      tagsJson: JSON.stringify(["span"]),
+      infoJson: JSON.stringify({ source: "worker.span_big_turn.v1" }),
+      propertiesJson: JSON.stringify({
+        internal_info: {
+          memory_layer: "L1",
+          memory_kind: "span",
+          source: "worker.span_big_turn.v1"
+        }
+      })
+    });
+    const client = createMemosSqliteMemoryClient({
+      sources: [{ id: "memmy-memory", label: "memmy", dbPath }],
+      now: () => NOW
+    });
+
+    await expect(client.panelItems({ layer: "L1", page: 1 })).resolves.toMatchObject({
+      items: [{ id: "memmy-memory::span_sqlite_1", kind: "span" }]
+    });
+  });
+
   it("derives Hermes source from the session id when the row agent is the default", async () => {
     const dbPath = createMemoryDatabase({
       id: "trace_hermes_1",

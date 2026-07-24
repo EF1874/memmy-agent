@@ -973,7 +973,13 @@ function itemMatchesQueryAndTags(item: Pick<MemoryListItem, "id" | "title" | "su
 
 function kindForRow(row: LocalMemoryRow): MemoryKind {
   const parsedKind = stringValue(objectAt(readJsonObject(row.properties_json), ["internal_info"]).memory_kind);
-  if (parsedKind === "trace" || parsedKind === "policy" || parsedKind === "world_model" || parsedKind === "skill") {
+  if (
+    parsedKind === "trace" ||
+    parsedKind === "span" ||
+    parsedKind === "policy" ||
+    parsedKind === "world_model" ||
+    parsedKind === "skill"
+  ) {
     return parsedKind;
   }
 

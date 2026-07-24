@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { type MemoryRow } from "../../../src/index.js";
+import { changeLogToPanelChange } from "../../../src/service/read-model/panel-read.js";
 import { Repositories } from "../../../src/storage/repositories.js";
 import {
   createCapturingEmbedder,
@@ -14,6 +15,25 @@ const {
 afterEach(cleanup);
 
 describe("MemoryService / read model / panel", () => {
+  it("preserves Span kinds in panel change records", () => {
+    expect(changeLogToPanelChange({
+      seq: 1,
+      memoryId: "span_panel_change",
+      kind: "span",
+      op: "created",
+      entityId: "span_panel_change",
+      userId: "user-panel-span-change",
+      changeType: "span_created",
+      source: "worker.span_big_turn.v1",
+      createdAt: "2026-07-24T06:38:21.017Z"
+    })).toMatchObject({
+      kind: "span",
+      id: "span_panel_change",
+      op: "created",
+      source: "worker"
+    });
+  });
+
   it("stores source Agent directly on memory_add and memory_search logs", async () => {
     const { db, service } = createTestService();
     service.addMemory({
