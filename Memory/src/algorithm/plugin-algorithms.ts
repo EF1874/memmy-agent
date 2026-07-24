@@ -122,7 +122,7 @@ export interface SkillVerificationResult {
   reason?: string;
 }
 
-export type TurnRelation = "revision" | "follow_up" | "new_task" | "unknown";
+export type TurnRelation = "revision" | "follow_up" | "new_task" | "end_topic" | "unknown";
 export type IntentKind = "task" | "memory_probe" | "chitchat" | "meta" | "unknown";
 
 export interface IntentRetrievalPlan {
@@ -206,7 +206,7 @@ const RELATION_PRONOUN_REF_RE = /^[那这它其还哪啥]/;
 const RELATION_IDLE_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const RELATION_STRONG_HEURISTIC_THRESHOLD = 0.85;
 const RELATION_ARBITRATION_THRESHOLD = 0.8;
-const RELATION_ALLOWED: TurnRelation[] = ["revision", "follow_up", "new_task", "unknown"];
+const RELATION_ALLOWED: TurnRelation[] = ["revision", "follow_up", "new_task", "end_topic", "unknown"];
 const RELATION_GENERIC_TAGS = new Set(["trace", "turn", "memory", "openclaw", "codex", "hermes"]);
 export function classifyIntent(text: string): IntentDecision {
   const trimmed = text.trim();
@@ -777,11 +777,12 @@ Return ONE of:
   - "revision"  — user is correcting / refining the PREVIOUS answer (same task).
   - "follow_up" — continuing, following up, refining, or asking about the SAME topic/domain.
   - "new_task"  — COMPLETELY UNRELATED domain/topic.
+  - "end_topic" — the user's sole intent is to stop the current topic/conversation.
   - "unknown"   — truly ambiguous.
 
 Return JSON ONLY:
 {
-  "relation": one of the four labels,
+  "relation": one of the five labels,
   "confidence": number in [0, 1],
   "reason": short justification (≤ 80 chars)
 }
@@ -805,10 +806,18 @@ Return JSON ONLY:
 - Introduces a subject from a COMPLETELY DIFFERENT domain (e.g., tech → cooking, work → personal life)
 - Has NO logical connection to what was being discussed — no shared entities, events, or themes
 - Starts a request about a different project, system, or life area
+- Ends the old topic and also introduces a new request (e.g., "结束这个话题，我们聊旅游")
+
+## end_topic — the new message:
+- Has the sole intent to stop the current topic or conversation
+- Explicitly says "结束话题", "结束对话", "结束", "就这样吧，不聊了", "that's all", or "let's stop here"
+- Does NOT contain another request or a new topic
+- Do not use end_topic for questions about ending something (e.g., "如何结束进程", "什么时候结束")
+- Do not use end_topic when the user says not to stop (e.g., "不要结束，继续说")
 
 ## Key principles:
 - DEFAULT to follow_up unless the topic domain CLEARLY changed. When in doubt, choose follow_up.
-- CRITICAL: Short messages (under ~30 chars) that use pronouns or ask "what about X" / "哪些" / "那XX呢" are almost always follow_up. Only mark them new_task if they explicitly name a completely unrelated domain.
+- CRITICAL: Short messages (under ~30 chars) are usually follow_up, except an explicit end_topic. Only mark them new_task if they explicitly name a completely unrelated domain.
 - Different aspects of the SAME project/system are follow_up (e.g., Nginx SSL → Nginx gzip = follow_up)
 - Asking about tools, systems, or methods for the current topic is follow_up
 - If unsure, lean follow_up with low confidence rather than unknown.
@@ -1445,12 +1454,15 @@ export const REFLECTED_TRACE_SUMMARY_PROMPT = {
 Return JSON only: {"summaries":[{"index":0,"summary":"..."}]}.
 Rules:
 - Return exactly one item for every input trace index.
-- Keep each summary concise, normally within 200 characters.
-- Preserve concrete user intent, decisions, preferences, names, dates, paths,
-  commands, identifiers, errors, tool parameters, observed results, and the
-  reflection's useful conclusion.
-- State what was attempted and what happened when tool use is present.
-- Use the source trace's language.
+- Write a highly condensed retrieval summary: retain only the primary intent,
+  key decision or outcome, and the reflection's most useful conclusion.
+- Do not enumerate every detail. Include names, dates, paths, commands,
+  identifiers, errors, tool parameters, or observed results only when they are
+  essential to understanding or retrieving the trace.
+- When tool use is present, summarize the overall attempt and outcome instead
+  of listing intermediate calls or results.
+- Keep each summary normally within 200 characters.
+- Write in English, the language of this template.
 - Do not invent facts, merge traces, or omit an input index.`
 } as const;
 

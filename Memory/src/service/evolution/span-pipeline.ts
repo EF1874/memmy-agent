@@ -33,7 +33,7 @@ import type { EnqueueJobInput } from "../worker/job-handlers.js";
 type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
 
 const pipelineLogger = createMemoryLogger("pipeline");
-const REFLECTED_TRACE_SUMMARY_BATCH_SIZE = 20;
+const REFLECTED_TRACE_SUMMARY_BATCH_SIZE = 10;
 
 export interface SpanPipelineDeps {
   repos: Repositories;

@@ -8,7 +8,8 @@ import {
   retrievalLayersForMode,
   retrievePluginMemories,
   signatureFromTraceParts,
-  traceMetaFromMemory
+  traceMetaFromMemory,
+  type TurnRelationDecision
 } from "../../algorithm/plugin-algorithms.js";
 import {
   type MemmyConfig
@@ -89,6 +90,8 @@ type SessionTurnDependencies = {
   synthesizeDecisionRepairDraft: SynthesizeDecisionRepairDraft;
 } & Record<string, any>;
 interface CompleteTurnResponse { turnId: string; sessionId: string; episodeId: string; rawTurnId: string; l1MemoryId: string; l1MemoryIds: string[]; closedEpisodeIds: string[]; scheduledEvolution: boolean; jobs: JobRef[]; changeSeq: number; syncCursor: string; etag: string; serverTime: string; duplicate?: boolean; }
+type EndTopicDecision = TurnRelationDecision & { relation: "end_topic" };
+interface EpisodeTurnRoute { episode: EpisodeRecord; pendingEndTopicDecision?: EndTopicDecision; }
 
 export interface ToolOutcomeObservation { toolId: string; success?: boolean; reason?: string; }
 
@@ -125,6 +128,42 @@ function isToolCallPayload(value: unknown): value is ToolCallPayload { return is
 
 function uniq<T>(values: readonly T[]): T[] { return [...new Set(values)]; }
 function objectField(value: unknown, key: string): string | undefined { return isRecord(value) && typeof value[key] === "string" ? value[key] as string : undefined; }
+function episodeTurnRoute(episode: EpisodeRecord, pendingEndTopicDecision?: EndTopicDecision): EpisodeTurnRoute {
+  return { episode, pendingEndTopicDecision };
+}
+
+function endTopicDecisionFromRawTurn(rawTurn: RawTurnRecord): EndTopicDecision | undefined {
+  const turnStart = isRecord(rawTurn.messagePayload?.turn_start)
+    ? rawTurn.messagePayload.turn_start
+    : undefined;
+  const close = turnStart && isRecord(turnStart.episode_close)
+    ? turnStart.episode_close
+    : undefined;
+  const decision = close && isRecord(close.decision) ? close.decision : undefined;
+  if (
+    close?.closeAfterComplete !== true ||
+    decision?.relation !== "end_topic" ||
+    typeof decision.confidence !== "number" ||
+    typeof decision.reason !== "string" ||
+    !Array.isArray(decision.signals) ||
+    !decision.signals.every((signal) => typeof signal === "string")
+  ) {
+    return undefined;
+  }
+  return {
+    relation: "end_topic",
+    confidence: decision.confidence,
+    reason: decision.reason,
+    signals: decision.signals,
+    ...(typeof decision.llmModel === "string" ? { llmModel: decision.llmModel } : {})
+  };
+}
+
+function episodeClosedByEndTopicTurn(episode: EpisodeRecord, turnId: string): boolean {
+  return episode.status === "closed" &&
+    episode.meta.closeReason === "end_topic" &&
+    episode.meta.endTopicTurnId === turnId;
+}
 
 export function closedEpisodeIdsFromBoundary(
   before: EpisodeRecord | undefined,
@@ -656,9 +695,13 @@ export class SessionTurnService {
     const latestEpisodeBefore = existingRawTurn
       ? undefined
       : this.deps.repos.runtime.latestEpisodeForSession(session.id);
-    const episode = existingRawTurn
-      ? this.deps.requireEpisode(existingRawTurn.episodeId)
+    const route = existingRawTurn
+      ? episodeTurnRoute(
+          this.deps.requireEpisode(existingRawTurn.episodeId),
+          endTopicDecisionFromRawTurn(existingRawTurn)
+        )
       : await this.ensureEpisodeForTurnWithLlm(session, undefined, request.query, "turn.start");
+    const episode = route.episode;
     const closedEpisodeIds = closedEpisodeIdsFromBoundary(
       latestEpisodeBefore,
       episode,
@@ -681,7 +724,11 @@ export class SessionTurnService {
       episodeId: episode.id,
       turnId,
       query: buildSearchQuery({ ...request, contextHints }, this.deps.config.domain),
-      layers: intentDecision ? this.deps.memoryLayersForIntent(intentDecision.kind) : ["Skill", "L2", "L1", "L3"],
+      layers: route.pendingEndTopicDecision
+        ? []
+        : intentDecision
+          ? this.deps.memoryLayersForIntent(intentDecision.kind)
+          : ["Skill", "L2", "L1", "L3"],
       limit: this.deps.turnStartRetrievalLimit(),
       contextBudget: typeof request.contextBudget === "number" ? request.contextBudget : undefined,
       includeInjectedContext: true,
@@ -708,7 +755,15 @@ export class SessionTurnService {
         messagePayload: {
           turn_start: {
             contextPacketId,
-            searchEventId: search.searchEventId
+            searchEventId: search.searchEventId,
+            ...(route.pendingEndTopicDecision
+              ? {
+                  episode_close: {
+                    closeAfterComplete: true,
+                    decision: route.pendingEndTopicDecision
+                  }
+                }
+              : {})
           }
         },
         status: "started",
@@ -744,7 +799,8 @@ export class SessionTurnService {
         ...search.status,
         ...(intentDecision && (intentDecision.kind === "chitchat" || intentDecision.kind === "meta")
           ? [`intent:${intentDecision.kind}:retrieval_skipped`]
-          : [])
+          : []),
+        ...(route.pendingEndTopicDecision ? ["relation:end_topic"] : [])
       ],
       serverTime: nowIso()
     };
@@ -787,9 +843,15 @@ export class SessionTurnService {
       const latestEpisodeBefore = existingRawTurn
         ? undefined
         : this.deps.repos.runtime.latestEpisodeForSession(session.id);
-      const episode = existingRawTurn
-        ? this.deps.requireEpisode(existingRawTurn.episodeId)
-        : this.ensureEpisodeForTurn(session, request.episodeId, request.query, "turn.complete");
+      const route = existingRawTurn
+        ? episodeTurnRoute(
+            this.deps.requireEpisode(existingRawTurn.episodeId),
+            endTopicDecisionFromRawTurn(existingRawTurn)
+          )
+        : episodeTurnRoute(
+            this.ensureEpisodeForTurn(session, request.episodeId, request.query, "turn.complete")
+          );
+      const episode = route.episode;
       const closedEpisodeIds = closedEpisodeIdsFromBoundary(
         latestEpisodeBefore,
         episode,
@@ -1023,7 +1085,37 @@ export class SessionTurnService {
           createdAt: at
         });
       }
-      if (rawTurnFirstCompleted) {
+      const endTopicDecision = route.pendingEndTopicDecision ?? endTopicDecisionFromRawTurn(rawTurn);
+      if (rawTurnFirstCompleted && endTopicDecision) {
+        const beforeClose = this.deps.repos.runtime.getEpisode(episode.id) ?? episode;
+        const closed = this.deps.repos.runtime.closeEpisode(episode.id, {
+          closeReason: "end_topic",
+          topicState: "ended",
+          relationDecision: endTopicDecision,
+          endTopicTurnId: turnId,
+          closedBy: "turn.complete"
+        }, at);
+        if (closed) {
+          this.deps.repos.runtime.appendChange({
+            memoryId: closed.id,
+            namespaceId: this.deps.namespaceIdFromSession(session),
+            kind: "episode",
+            op: "updated",
+            entityId: closed.id,
+            userId: closed.userId,
+            changeType: "episode_closed",
+            before: beforeClose,
+            after: closed,
+            source: "turn.complete.end_topic",
+            createdAt: at
+          });
+          jobs.push(...this.deps.finalizeClosedEpisode(closed, at, "end_topic"));
+          closedEpisodeIds.push(closed.id);
+        }
+      } else if (episodeClosedByEndTopicTurn(episode, turnId)) {
+        closedEpisodeIds.push(episode.id);
+      }
+      if (rawTurnFirstCompleted && !endTopicDecision) {
         jobs.push(this.deps.enqueueJob({
           jobType: "episode_idle_close",
           userId: session.userId,
@@ -1038,6 +1130,7 @@ export class SessionTurnService {
           createdAt: at
         }));
       }
+      const uniqueClosedEpisodeIds = uniq(closedEpisodeIds);
       const responseChangeSeq = this.deps.repos.runtime.latestChangeSeq(session.userId, this.deps.namespaceIdFromSession(session));
       const body: CompleteTurnResponse = {
         turnId,
@@ -1046,7 +1139,7 @@ export class SessionTurnService {
         rawTurnId: rawTurn.id,
         l1MemoryId: l1MemoryIds[0] ?? "",
         l1MemoryIds,
-        closedEpisodeIds,
+        closedEpisodeIds: uniqueClosedEpisodeIds,
         scheduledEvolution: true,
         jobs: jobs.map(jobToRef),
         changeSeq: responseChangeSeq,
@@ -1807,17 +1900,21 @@ export class SessionTurnService {
     episodeId: string | undefined,
     userText: string | undefined,
     source: string
-  ): Promise<EpisodeRecord> {
+  ): Promise<EpisodeTurnRoute> {
     if (episodeId || !userText?.trim()) {
-      return this.ensureEpisode(session, episodeId);
+      return episodeTurnRoute(this.ensureEpisode(session, episodeId));
     }
     const latest = this.deps.repos.runtime.latestEpisodeForSession(session.id);
     if (!latest) {
-      return this.ensureEpisode(session);
+      return episodeTurnRoute(this.ensureEpisode(session));
+    }
+    const pendingEndTopicRoute = this.routeAfterPendingEndTopic(session, latest);
+    if (pendingEndTopicRoute) {
+      return episodeTurnRoute(pendingEndTopicRoute);
     }
     const relationContext = this.episodeRelationContext(latest);
     if (!relationContext.prevUserText) {
-      return this.ensureEpisode(session);
+      return episodeTurnRoute(this.ensureEpisode(session));
     }
     const decision = await classifyTurnRelationWithLlm({
       prevUserText: relationContext.prevUserText,
@@ -1830,7 +1927,18 @@ export class SessionTurnService {
     }, {
       llm: this.deps.llm
     });
-    return this.applyEpisodeRelationDecision(session, latest, decision, userText, source, relationContext.lastTurnAtMs);
+    if (decision.relation === "end_topic") {
+      const next = latest.status === "open" ? undefined : this.ensureEpisode(session);
+      const episode = next
+        ? this.deps.repos.runtime.updateEpisodeMeta(next.id, {
+          previousEpisodeId: latest.id
+        }) ?? next
+        : latest;
+      return episodeTurnRoute(episode, decision as EndTopicDecision);
+    }
+    return episodeTurnRoute(
+      this.applyEpisodeRelationDecision(session, latest, decision, userText, source, relationContext.lastTurnAtMs)
+    );
   }
 
   private ensureEpisodeForTurn(
@@ -1845,6 +1953,10 @@ export class SessionTurnService {
     const latest = this.deps.repos.runtime.latestEpisodeForSession(session.id);
     if (!latest) {
       return this.ensureEpisode(session);
+    }
+    const pendingEndTopicRoute = this.routeAfterPendingEndTopic(session, latest);
+    if (pendingEndTopicRoute) {
+      return pendingEndTopicRoute;
     }
     const relationContext = this.episodeRelationContext(latest);
     if (!relationContext.prevUserText) {
@@ -1951,6 +2063,15 @@ export class SessionTurnService {
       }) ?? latest;
     }
 
+    if (latest.meta.closeReason === "end_topic") {
+      const next = this.ensureEpisode(session);
+      return this.deps.repos.runtime.updateEpisodeMeta(next.id, {
+        relation: decision.relation,
+        relationDecision: decision,
+        previousEpisodeId: latest.id
+      }) ?? next;
+    }
+
     const shouldReopenClosed =
       decision.relation === "revision" ||
       (mergeMode &&
@@ -2009,6 +2130,27 @@ export class SessionTurnService {
         withinMergeWindow,
         gapMs
       }
+    }) ?? next;
+  }
+
+  private routeAfterPendingEndTopic(
+    session: SessionRecord,
+    episode: EpisodeRecord
+  ): EpisodeRecord | undefined {
+    const hasPendingEndTopic = episode.status === "open" && episode.rawTurnIds.some((rawTurnId) => {
+      const rawTurn = this.deps.repos.runtime.getRawTurn(rawTurnId);
+      return Boolean(
+        rawTurn &&
+        endTopicDecisionFromRawTurn(rawTurn) &&
+        !isRecord(rawTurn.messagePayload?.turn_complete)
+      );
+    });
+    if (!hasPendingEndTopic) {
+      return undefined;
+    }
+    const next = this.ensureEpisode(session, newId("episode"));
+    return this.deps.repos.runtime.updateEpisodeMeta(next.id, {
+      previousEpisodeId: episode.id
     }) ?? next;
   }
 

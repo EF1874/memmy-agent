@@ -30,7 +30,7 @@ export type ProcessingStage = "summary" | "embedding";
 export const EPISODE_IDLE_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 export type JobChangeOperation = "queued" | "leased" | "succeeded" | "failed" | "dead_letter";
 export type EmbeddingRetryChangeOperation = "queued" | "retry" | "succeeded" | "failed";
-export type ClosedEpisodeTrigger = "topic_boundary" | "session_closed" | "episode_rewarded" | "idle_timeout";
+export type ClosedEpisodeTrigger = "topic_boundary" | "session_closed" | "episode_rewarded" | "idle_timeout" | "end_topic";
 
 export interface EnqueueJobInput {
   jobType: JobType;

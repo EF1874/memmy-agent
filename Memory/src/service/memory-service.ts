@@ -135,6 +135,7 @@ import {
 } from "./turn/turn-normalization.js";
 import {
   createWorkerJobHandlers,
+  type ClosedEpisodeTrigger,
   type EnqueueJobInput
 } from "./worker/job-handlers.js";
 import { WorkerRunner } from "./worker/worker-runner.js";
@@ -1659,7 +1660,7 @@ export class MemoryService {
   private finalizeClosedEpisode(
     episode: EpisodeRecord,
     at: string,
-    trigger: "topic_boundary" | "session_closed" | "episode_rewarded" | "idle_timeout"
+    trigger: ClosedEpisodeTrigger
   ): EvolutionJobRecord[] {
     return this.workerHandlers.finalizeClosedEpisode(episode, at, trigger);
   }

@@ -23,8 +23,10 @@ afterEach(cleanup);
 
 function createRelationClassifierLlm(
   calls: string[],
-  optionCalls?: Array<{ operation: string; thinkingMode?: string }>
+  optionCalls?: Array<{ operation: string; thinkingMode?: string }>,
+  relation: "new_task" | "follow_up" | "end_topic" | Array<"new_task" | "follow_up" | "end_topic"> = "new_task"
 ): LlmClient {
+  let relationIndex = 0;
   return {
     config: {
       ...DEFAULT_MEMMY_CONFIG.summary,
@@ -48,10 +50,15 @@ function createRelationClassifierLlm(
       calls.push(options.operation);
       optionCalls?.push({ operation: options.operation, thinkingMode: options.thinkingMode });
       if (options.operation === "relation.classify.v1") {
+        const currentRelation = Array.isArray(relation)
+          ? relation[Math.min(relationIndex++, relation.length - 1)] ?? "follow_up"
+          : relation;
         return {
-          relation: "new_task",
-          confidence: 0.7,
-          reason: "database certificate rotation appears adjacent"
+          relation: currentRelation,
+          confidence: currentRelation === "end_topic" ? 0.98 : 0.7,
+          reason: currentRelation === "end_topic"
+            ? "user explicitly ends the current topic"
+            : "database certificate rotation appears adjacent"
         } as unknown as T;
       }
       return {
@@ -116,6 +123,213 @@ function createFollowUpRelationClassifierLlm(calls: string[]): LlmClient {
 }
 
 describe("MemoryService / session / episode relation", () => {
+  it("closes an explicitly ended topic only after preserving its final turn", async () => {
+    const { service } = createTestService({
+      llm: createRelationClassifierLlm([], undefined, "end_topic")
+    });
+    const session = service.openSession({
+      namespace: {
+        source: "codex",
+        profileId: "jiang",
+        userId: "user-end-topic"
+      }
+    });
+    const first = service.completeTurn("turn-end-topic-first", {
+      sessionId: session.sessionId,
+      query: "Configure nginx TLS for the service",
+      answer: "Use port 443 and verify the certificate chain."
+    });
+
+    const prepared = await service.startTurn({
+      turnId: "turn-end-topic-close",
+      sessionId: session.sessionId,
+      query: "结束话题"
+    });
+
+    expect(prepared).toMatchObject({
+      episodeId: first.episodeId,
+      closedEpisodeIds: [],
+      hits: [],
+      sourceMemoryIds: []
+    });
+    expect(prepared.status).toContain("relation:end_topic");
+    expect(service.getMemory(first.episodeId)).toMatchObject({
+      kind: "episode",
+      status: "open"
+    });
+
+    const completed = service.completeTurn("turn-end-topic-close", {
+      sessionId: session.sessionId,
+      query: "结束话题",
+      answer: "好的，本话题到这里结束。"
+    });
+
+    expect(completed.closedEpisodeIds).toEqual([first.episodeId]);
+    expect(completed.jobs.map((job) => job.jobType)).toContain("reflection");
+    expect(completed.jobs.map((job) => job.jobType)).not.toContain("episode_idle_close");
+    const detail = service.getMemory(first.episodeId);
+    expect(detail).toMatchObject({
+      kind: "episode",
+      status: "closed"
+    });
+    if (detail.kind !== "episode") {
+      throw new Error("expected episode detail");
+    }
+    expect(detail.metadata).toMatchObject({
+      episode: {
+        meta: {
+          closeReason: "end_topic",
+          topicState: "ended",
+          endTopicTurnId: "turn-end-topic-close",
+          relationDecision: { relation: "end_topic" }
+        }
+      }
+    });
+    expect(detail.timeline.rawTurns).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        rawTurnId: completed.rawTurnId,
+        userText: "结束话题",
+        assistantText: "好的，本话题到这里结束。"
+      })
+    ]));
+    expect(detail.timeline.items.map((item) => item.id)).toEqual(
+      expect.arrayContaining(completed.l1MemoryIds)
+    );
+  });
+
+  it("keeps end-topic start and complete retries idempotent", async () => {
+    const relationCalls: string[] = [];
+    const { service } = createTestService({
+      llm: createRelationClassifierLlm(relationCalls, undefined, "end_topic")
+    });
+    const session = service.openSession({
+      namespace: {
+        source: "codex",
+        profileId: "jiang",
+        userId: "user-end-topic-retry"
+      }
+    });
+    service.completeTurn("turn-end-topic-retry-first", {
+      sessionId: session.sessionId,
+      query: "Configure nginx TLS",
+      answer: "Use port 443."
+    });
+    const request = {
+      turnId: "turn-end-topic-retry-close",
+      sessionId: session.sessionId,
+      query: "结束话题"
+    };
+
+    const firstStart = await service.startTurn(request);
+    const secondStart = await service.startTurn(request);
+
+    expect(secondStart.episodeId).toBe(firstStart.episodeId);
+    expect(relationCalls.filter((operation) => operation === "relation.classify.v1")).toHaveLength(1);
+
+    const completeRequest = {
+      sessionId: session.sessionId,
+      query: "结束话题",
+      answer: "好的，本话题结束。"
+    };
+    const firstComplete = service.completeTurn(request.turnId, completeRequest);
+    const secondComplete = service.completeTurn(request.turnId, completeRequest);
+
+    expect(secondComplete.closedEpisodeIds).toEqual(firstComplete.closedEpisodeIds);
+    expect(secondComplete.jobs).toEqual([]);
+  });
+
+  it("does not reopen an episode after an explicit end-topic boundary", async () => {
+    const { service } = createTestService({
+      llm: createRelationClassifierLlm([], undefined, ["end_topic", "follow_up"])
+    });
+    const session = service.openSession({
+      namespace: {
+        source: "codex",
+        profileId: "jiang",
+        userId: "user-end-topic-boundary"
+      }
+    });
+    const first = service.completeTurn("turn-end-topic-boundary-first", {
+      sessionId: session.sessionId,
+      query: "Configure nginx TLS",
+      answer: "Use port 443."
+    });
+    await service.startTurn({
+      turnId: "turn-end-topic-boundary-close",
+      sessionId: session.sessionId,
+      query: "结束话题"
+    });
+    service.completeTurn("turn-end-topic-boundary-close", {
+      sessionId: session.sessionId,
+      query: "结束话题",
+      answer: "好的，本话题结束。"
+    });
+
+    const next = await service.startTurn({
+      turnId: "turn-end-topic-boundary-next",
+      sessionId: session.sessionId,
+      query: "继续说明证书续期"
+    });
+
+    expect(next.episodeId).not.toBe(first.episodeId);
+    expect(service.getMemory(first.episodeId)).toMatchObject({
+      kind: "episode",
+      status: "closed"
+    });
+    expect(service.getMemory(next.episodeId)).toMatchObject({
+      kind: "episode",
+      status: "open"
+    });
+  });
+
+  it("keeps a new turn out of an episode awaiting end-topic completion", async () => {
+    const relationCalls: string[] = [];
+    const { service } = createTestService({
+      llm: createRelationClassifierLlm(relationCalls, undefined, ["end_topic", "follow_up"])
+    });
+    const session = service.openSession({
+      namespace: {
+        source: "codex",
+        profileId: "jiang",
+        userId: "user-pending-end-topic"
+      }
+    });
+    const first = service.completeTurn("turn-pending-end-topic-first", {
+      sessionId: session.sessionId,
+      query: "Configure nginx TLS",
+      answer: "Use port 443."
+    });
+    await service.startTurn({
+      turnId: "turn-pending-end-topic-close",
+      sessionId: session.sessionId,
+      query: "结束话题"
+    });
+
+    const next = await service.startTurn({
+      turnId: "turn-after-pending-end-topic",
+      sessionId: session.sessionId,
+      query: "继续说明证书续期"
+    });
+
+    expect(next.episodeId).not.toBe(first.episodeId);
+    expect(relationCalls.filter((operation) => operation === "relation.classify.v1")).toHaveLength(1);
+
+    service.completeTurn("turn-pending-end-topic-close", {
+      sessionId: session.sessionId,
+      query: "结束话题",
+      answer: "好的，本话题结束。"
+    });
+
+    expect(service.getMemory(first.episodeId)).toMatchObject({
+      kind: "episode",
+      status: "closed"
+    });
+    expect(service.getMemory(next.episodeId)).toMatchObject({
+      kind: "episode",
+      status: "open"
+    });
+  });
+
   it("splits a new-task turn into a fresh episode using the plugin relation heuristic", async () => {
     const { db, service } = createTestService();
     const session = service.openSession({

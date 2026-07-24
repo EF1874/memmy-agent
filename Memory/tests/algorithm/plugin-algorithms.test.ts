@@ -736,6 +736,39 @@ describe("plugin algorithm parity helpers", () => {
     expect(decision.signals).toContain("llm_skipped");
   });
 
+  it("accepts an explicit end-topic decision from the relation LLM", async () => {
+    const decision = await classifyTurnRelationWithLlm({
+      prevUserText: "Configure nginx TLS for the service",
+      prevAssistantText: "Use port 443 and verify the certificate chain.",
+      newUserText: "结束话题"
+    }, {
+      llm: relationLlm([], undefined, {
+        "relation.classify.v1": {
+          relation: "end_topic",
+          confidence: 0.98,
+          reason: "user explicitly ends the current topic"
+        }
+      })
+    });
+
+    expect(decision).toMatchObject({
+      relation: "end_topic",
+      confidence: 0.98
+    });
+  });
+
+  it("does not synthesize end-topic decisions without the relation LLM", async () => {
+    const decision = await classifyTurnRelationWithLlm({
+      prevUserText: "Configure nginx TLS for the service",
+      prevAssistantText: "Use port 443 and verify the certificate chain.",
+      newUserText: "结束话题"
+    }, {
+      disableLlm: true
+    });
+
+    expect(decision.relation).toBe("follow_up");
+  });
+
   it("uses the plugin relation LLM prompt and arbitration framing", async () => {
     const calls: string[] = [];
     const messages = new Map<string, Array<{ role: "system" | "user" | "assistant"; content: string }>>();
@@ -751,6 +784,11 @@ describe("plugin algorithm parity helpers", () => {
 
     const primary = messages.get("relation.classify.v1");
     expect(primary?.[0]?.content).toContain("DEFAULT to follow_up");
+    expect(primary?.[0]?.content).toContain('"end_topic"');
+    expect(primary?.[0]?.content).toContain("sole intent");
+    expect(primary?.[0]?.content).toContain("结束这个话题，我们聊旅游");
+    expect(primary?.[0]?.content).toContain("如何结束进程");
+    expect(primary?.[0]?.content).toContain("except an explicit end_topic");
     expect(primary?.[0]?.content).toContain("Nginx SSL");
     expect(primary?.[0]?.content).toContain("tools, systems, or methods");
     expect(primary?.[1]?.content).toContain("PREVIOUS_USER_MESSAGE");
