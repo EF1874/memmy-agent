@@ -123,6 +123,56 @@ describe("MemoriesSubPage", () => {
     })).toBe("修复自动扫描卡顿和标题占位");
   });
 
+  it("span 列表展示标题，详情只展示子目标和摘要", () => {
+    const spanItem = {
+      ...memoryListItemFixture,
+      id: "span_38dff97911bbdf533513",
+      kind: "span" as const,
+      title: "读取并分析源码，分类金融策略",
+      summary: "阅读策略、指标和组合模型相关文件。"
+    };
+    const spanDetail = {
+      item: {
+        ...spanItem,
+        body: "Goal: 读取并分析源码，分类金融策略\nSummary: 阅读策略、指标和组合模型相关文件。",
+        sourceMemoryIds: [],
+        metadata: {
+          spanDetail: {
+            toolCallStart: 1,
+            toolCalls: [
+              { id: "tool-1", name: "rg", input: { pattern: "span" }, output: "match" },
+              { id: "tool-2", name: "npm_test", output: "passed" }
+            ]
+          },
+          properties: {
+            internal_info: {
+              span: { span_goal: "读取并分析源码，分类金融策略" }
+            }
+          }
+        }
+      },
+      version: 1,
+      etag: "span-detail"
+    };
+
+    const html = renderMemories({
+      status: "ready",
+      data: panelItemsOutput([spanItem]),
+      detail: { status: "ready", data: spanDetail }
+    });
+
+    expect(html).toContain("读取并分析源码，分类金融策略");
+    expect(html).toContain("子目标");
+    expect(html).toContain("摘要");
+    expect(html).toContain("阅读策略、指标和组合模型相关文件。");
+    expect(html).toContain("相关步骤");
+    expect(html).toContain("工具调用 · rg");
+    expect(html).toContain("工具调用 · npm_test");
+    expect(html).not.toContain("正文");
+    expect(html).not.toContain("Goal:");
+    expect(html).not.toContain("Summary:");
+  });
+
   it("搜索列表和点击详情都调用 memoryRuntime client", async () => {
     const client = createMemoryRuntimeClientStub({
       listPanelItems: vi.fn(async () => panelItemsFixture),

@@ -1126,8 +1126,10 @@ function withSourceTag(sourceLabel: string, tags: string[]): string[] {
 }
 
 function metadataForRow(row: MemoryRow, parsed: ParsedRow, sources?: readonly MemosSqliteSource[]): Record<string, unknown> {
+  const kind = kindForRow(row.row);
   return removeUndefined({
-    traceDetail: kindForRow(row.row) === "trace" ? traceDetailForRow(row, parsed, sources) : undefined,
+    traceDetail: kind === "trace" ? traceDetailForRow(row, parsed, sources) : undefined,
+    spanDetail: kind === "span" ? spanDetailForRow(row, parsed) : undefined,
     source: sourceLabelForRow(row, parsed),
     sourceId: row.source.id,
     dbPath: row.source.dbPath,
@@ -1139,6 +1141,24 @@ function metadataForRow(row: MemoryRow, parsed: ParsedRow, sources?: readonly Me
       info_json: undefined,
       properties_json: undefined
     })
+  });
+}
+
+function spanDetailForRow(row: MemoryRow, parsed: ParsedRow): Record<string, unknown> | undefined {
+  const internalInfo = objectAt(parsed.properties, ["internal_info"]);
+  const span = objectAt(internalInfo, ["span"]);
+  const rawTurnId = stringValue(span.raw_turn_id);
+  const rawTurn = readRawTurn(row.source, rawTurnId, undefined);
+  const toolCallStart = numberValue(span.tool_call_start);
+  const toolCallEnd = numberValue(span.tool_call_end);
+  if (!rawTurn || toolCallStart === undefined || toolCallEnd === undefined) {
+    return undefined;
+  }
+
+  return removeUndefined({
+    toolCallStart,
+    toolCallEnd,
+    toolCalls: readToolCalls(rawTurn.tool_calls_json).slice(toolCallStart, toolCallEnd + 1)
   });
 }
 

@@ -290,6 +290,15 @@ describe("MemoryService / evolution / span big turn", () => {
     expect(parentProperties.internal_info.trace.span_ids).toEqual(
       expect.arrayContaining(storedSpanIds)
     );
+    const firstSpanId = l1Items.find((item) => item.title === "定位构建失败的根本原因")?.id;
+    const spanDetail = service.getMemory(firstSpanId!, { namespace }) as {
+      item: { metadata: { spanDetail?: { toolCallStart?: number; toolCallEnd?: number; toolCalls?: Array<{ id?: string }> } } };
+    };
+    expect(spanDetail.item.metadata.spanDetail).toMatchObject({
+      toolCallStart: 0,
+      toolCallEnd: 3,
+      toolCalls: toolCalls.slice(0, 4).map(({ id, name, input }) => ({ id, name, input }))
+    });
     expect(completed.l1MemoryIds).toHaveLength(1);
     db.close();
   });
