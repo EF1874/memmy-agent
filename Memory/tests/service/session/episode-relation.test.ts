@@ -123,7 +123,7 @@ function createFollowUpRelationClassifierLlm(calls: string[]): LlmClient {
 }
 
 describe("MemoryService / session / episode relation", () => {
-  it("closes an explicitly ended topic only after preserving its final turn", async () => {
+  it("closes an explicitly ended topic without capturing the control turn as L1", async () => {
     const { service } = createTestService({
       llm: createRelationClassifierLlm([], undefined, "end_topic")
     });
@@ -165,6 +165,8 @@ describe("MemoryService / session / episode relation", () => {
     });
 
     expect(completed.closedEpisodeIds).toEqual([first.episodeId]);
+    expect(completed.l1MemoryId).toBe("");
+    expect(completed.l1MemoryIds).toEqual([]);
     expect(completed.jobs.map((job) => job.jobType)).toContain("reflection");
     expect(completed.jobs.map((job) => job.jobType)).not.toContain("episode_idle_close");
     const detail = service.getMemory(first.episodeId);
@@ -192,9 +194,8 @@ describe("MemoryService / session / episode relation", () => {
         assistantText: "好的，本话题到这里结束。"
       })
     ]));
-    expect(detail.timeline.items.map((item) => item.id)).toEqual(
-      expect.arrayContaining(completed.l1MemoryIds)
-    );
+    expect(detail.timeline.items.map((item) => item.id)).toContain(first.l1MemoryId);
+    expect(detail.timeline.items).toHaveLength(1);
   });
 
   it("keeps end-topic start and complete retries idempotent", async () => {

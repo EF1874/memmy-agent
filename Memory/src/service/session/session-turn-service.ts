@@ -159,6 +159,19 @@ function endTopicDecisionFromRawTurn(rawTurn: RawTurnRecord): EndTopicDecision |
   };
 }
 
+function rawTurnIsExcludedFromMemory(rawTurn: RawTurnRecord): boolean {
+  if (endTopicDecisionFromRawTurn(rawTurn)) {
+    return true;
+  }
+  const turnStart = isRecord(rawTurn.messagePayload?.turn_start)
+    ? rawTurn.messagePayload.turn_start
+    : undefined;
+  const intentDecision = turnStart && isRecord(turnStart.intent_decision)
+    ? turnStart.intent_decision
+    : undefined;
+  return intentDecision?.kind === "chitchat";
+}
+
 function episodeClosedByEndTopicTurn(episode: EpisodeRecord, turnId: string): boolean {
   return episode.status === "closed" &&
     episode.meta.closeReason === "end_topic" &&
@@ -707,10 +720,8 @@ export class SessionTurnService {
       episode,
       latestEpisodeBefore ? this.deps.repos.runtime.getEpisode(latestEpisodeBefore.id) : undefined
     );
-    const intentDecision = episode.rawTurnIds.length === 0
-      ? classifyIntent(request.query)
-      : undefined;
-    if (intentDecision) {
+    const intentDecision = classifyIntent(request.query);
+    if (episode.rawTurnIds.length === 0) {
       this.deps.repos.runtime.updateEpisodeMeta(episode.id, {
         intentDecision
       });
@@ -726,9 +737,7 @@ export class SessionTurnService {
       query: buildSearchQuery({ ...request, contextHints }, this.deps.config.domain),
       layers: route.pendingEndTopicDecision
         ? []
-        : intentDecision
-          ? this.deps.memoryLayersForIntent(intentDecision.kind)
-          : ["Skill", "L2", "L1", "L3"],
+        : this.deps.memoryLayersForIntent(intentDecision.kind),
       limit: this.deps.turnStartRetrievalLimit(),
       contextBudget: typeof request.contextBudget === "number" ? request.contextBudget : undefined,
       includeInjectedContext: true,
@@ -756,6 +765,7 @@ export class SessionTurnService {
           turn_start: {
             contextPacketId,
             searchEventId: search.searchEventId,
+            intent_decision: intentDecision,
             ...(route.pendingEndTopicDecision
               ? {
                   episode_close: {
@@ -797,7 +807,7 @@ export class SessionTurnService {
       droppedDueToBudget: search.droppedDueToBudget,
       status: [
         ...search.status,
-        ...(intentDecision && (intentDecision.kind === "chitchat" || intentDecision.kind === "meta")
+        ...(intentDecision.kind === "chitchat" || intentDecision.kind === "meta"
           ? [`intent:${intentDecision.kind}:retrieval_skipped`]
           : []),
         ...(route.pendingEndTopicDecision ? ["relation:end_topic"] : [])
@@ -882,6 +892,9 @@ export class SessionTurnService {
           sourceMemoryIds: normalizeCompleteTurnSourceMemoryIds(request),
           usage: isRecord(request.usage) ? request.usage : {},
           messagePayload: {
+            turn_start: {
+              intent_decision: classifyIntent(request.query)
+            },
             turn_complete: {
               completed_at: at,
               source_memory_ids: normalizeCompleteTurnSourceMemoryIds(request)
@@ -1877,6 +1890,7 @@ export class SessionTurnService {
       .filter((rawTurn): rawTurn is RawTurnRecord =>
         Boolean(rawTurn && (rawTurn.id === currentRawTurn.id || !seenRawTurnIds.has(rawTurn.id)))
       )
+      .filter((rawTurn) => !rawTurnIsExcludedFromMemory(rawTurn))
       .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
     return rawTurns.flatMap((rawTurn) =>
       captureTurnSteps({

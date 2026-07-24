@@ -461,6 +461,99 @@ describe("MemoryService / session / turn capture", () => {
     db.close();
   });
 
+  it("keeps a chitchat turn as a raw observation without creating an L1 memory", async () => {
+    const { service } = createTestService();
+    const session = service.openSession({
+      namespace: {
+        source: "codex",
+        profileId: "jiang",
+        userId: "chitchat-capture-user"
+      }
+    });
+    const task = service.completeTurn("turn-before-chitchat", {
+      sessionId: session.sessionId,
+      query: "Configure nginx TLS",
+      answer: "Use port 443 and verify the certificate chain."
+    });
+
+    const prepared = await service.startTurn({
+      turnId: "turn-chitchat-capture",
+      sessionId: session.sessionId,
+      query: "谢谢"
+    });
+    const completed = service.completeTurn("turn-chitchat-capture", {
+      sessionId: session.sessionId,
+      query: "谢谢",
+      answer: "不客气。"
+    });
+
+    expect(prepared.status).toContain("intent:chitchat:retrieval_skipped");
+    expect(completed.l1MemoryId).toBe("");
+    expect(completed.l1MemoryIds).toEqual([]);
+    const episode = service.getMemory(task.episodeId);
+    if (episode.kind !== "episode") {
+      throw new Error("expected episode detail");
+    }
+    expect(episode.timeline.rawTurns).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        rawTurnId: completed.rawTurnId,
+        userText: "谢谢",
+        assistantText: "不客气。"
+      })
+    ]));
+
+    await service.startTurn({
+      turnId: "turn-after-chitchat",
+      sessionId: session.sessionId,
+      query: "继续配置证书续期"
+    });
+    const resumed = service.completeTurn("turn-after-chitchat", {
+      sessionId: session.sessionId,
+      query: "继续配置证书续期",
+      answer: "可以使用自动续期任务。"
+    });
+    expect(resumed.l1MemoryIds).toHaveLength(1);
+    const resumedEpisode = service.getMemory(task.episodeId);
+    if (resumedEpisode.kind !== "episode") {
+      throw new Error("expected episode detail");
+    }
+    expect(resumedEpisode.timeline.items.map((item) => item.id)).toEqual([
+      task.l1MemoryId,
+      resumed.l1MemoryId
+    ]);
+  });
+
+  it("excludes chitchat completed without a preceding turn start from L1 capture", () => {
+    const { service } = createTestService();
+    const session = service.openSession({
+      namespace: {
+        source: "codex",
+        profileId: "jiang",
+        userId: "direct-chitchat-capture-user"
+      }
+    });
+
+    const completed = service.completeTurn("turn-direct-chitchat", {
+      sessionId: session.sessionId,
+      query: "谢谢",
+      answer: "不客气。"
+    });
+
+    expect(completed.l1MemoryId).toBe("");
+    expect(completed.l1MemoryIds).toEqual([]);
+    const episode = service.getMemory(completed.episodeId);
+    if (episode.kind !== "episode") {
+      throw new Error("expected episode detail");
+    }
+    expect(episode.timeline.rawTurns).toEqual([
+      expect.objectContaining({
+        rawTurnId: completed.rawTurnId,
+        userText: "谢谢",
+        assistantText: "不客气。"
+      })
+    ]);
+  });
+
   it("uses plugin-style structural error signatures for capture and recall", async () => {
     const { service } = createTestService();
     const session = service.openSession({

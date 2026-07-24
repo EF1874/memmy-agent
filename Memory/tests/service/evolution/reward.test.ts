@@ -346,7 +346,7 @@ describe("MemoryService / evolution / reward", () => {
     db.close();
   });
 
-  it("skips trivial implicit reward episodes with the plugin reward gate", async () => {
+  it("does not schedule implicit reward for a chitchat-only episode", async () => {
     const { db, service } = createTestService();
     const session = service.openSession({
       namespace: {
@@ -361,6 +361,8 @@ describe("MemoryService / evolution / reward", () => {
       query: "hi",
       answer: "ok"
     });
+    expect(complete.l1MemoryId).toBe("");
+    expect(complete.l1MemoryIds).toEqual([]);
     service.closeSession(session.sessionId);
     await service.runWorkerOnce(20);
 
@@ -388,10 +390,7 @@ describe("MemoryService / evolution / reward", () => {
          AND job_type = 'reward'
          AND status = 'queued'`
     ).get(complete.episodeId) as { payload_json: string } | undefined;
-    expect(JSON.parse(queuedReward!.payload_json)).toMatchObject({
-      trigger: "implicit_fallback",
-      targetKind: "episode"
-    });
+    expect(queuedReward).toBeUndefined();
 
     const rewardUpdates = db.db.prepare(
       `SELECT COUNT(*) AS count
