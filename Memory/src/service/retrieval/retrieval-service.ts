@@ -58,6 +58,7 @@ import {
   normalizeRetrievalExtractKeywords
 } from "../turn/turn-normalization.js";
 import { IndexedCandidatePool } from "./indexed-candidate-pool.js";
+import { filterL1TraceSpanRecallHits } from "./l1-trace-span-filter.js";
 
 type InternalMemorySearchRequest = MemorySearchRequest & {
   episodeId?: string;
@@ -224,6 +225,7 @@ function llmFilterFallbackCap(hits: RecallHit[], maxKeep: number): RecallHit[] {
 
 function estimateTokens(text: string): number { return Math.ceil(text.length / 4); }
 function stringArray(value: unknown): string[] { return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []; }
+function stringValue(value: unknown): string | undefined { return typeof value === "string" && value.trim() ? value.trim() : undefined; }
 function uniq<T>(values: readonly T[]): T[] { return [...new Set(values)]; }
 
 type InjectedSnippetRefKind = "skill" | "episode" | "trace" | "experience" | "world-model";
@@ -396,6 +398,25 @@ function renderInjectedSnippet(
       refKind: "episode",
       title: "Episode",
       body: truncateInjectedSnippet(renderInjectedEpisodeBody(hit))
+    };
+  }
+
+  if (hit.kind === "span") {
+    const internalSpan = memory && isRecord(memory.properties.internal_info.span)
+      ? memory.properties.internal_info.span
+      : {};
+    const goal = stringValue(internalSpan.span_goal) ?? hit.title ?? "Subtask";
+    const summary = stringValue(internalSpan.summary) ?? hit.snippet;
+    return {
+      refKind: "trace",
+      title: "Span",
+      body: truncateInjectedSnippet([
+        `id: ${hit.id}`,
+        "",
+        ...labeledInjectedBlock("Goal", goal),
+        "",
+        ...labeledInjectedBlock("Summary", summary)
+      ].join("\n"))
     };
   }
 
@@ -1250,7 +1271,7 @@ export class RetrievalService {
     const memories = retrievalOutput.memories;
     const rerankAt = Date.now();
     const filteredHits = await this.filterRecallHits(queryVectorText, retrieval.hits);
-    const hits = filteredHits.hits;
+    const hits = filterL1TraceSpanRecallHits(filteredHits.hits,memories);
     const contextPacket = buildInjectedContext(
       hits,
       request.contextBudget ?? 1800,

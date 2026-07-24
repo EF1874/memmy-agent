@@ -263,7 +263,8 @@ export class MemoryService {
           materializeNegativeExperience: (job) => this.evolutionJobs.materializeNegativeExperience(job),
           abstractL3: (job) => this.evolutionJobs.abstractL3(job),
           crystallizeSkill: (job) => this.evolutionJobs.crystallizeSkill(job),
-          associateL2: (job) => this.evolutionJobs.associateL2(job)
+          associateL2: (job) => this.evolutionJobs.associateL2(job),
+          splitBigTurn: (job) => this.evolutionJobs.splitBigTurn(job)
         },
         feedback: {
           applyReward: (job) => this.evolutionJobs.applyReward(job),
@@ -2085,6 +2086,7 @@ function stringFromMeta(meta: Record<string, unknown> | undefined, key: string):
 }
 
 function memoryIdPrefix(layer: MemoryLayer, kind: MemoryKind): string {
+  if (kind === "span") return "span";
   if (layer === "L1" || kind === "trace") return "trace";
   if (layer === "L2" || kind === "policy") return "policy";
   if (layer === "L3" || kind === "world_model") return "world";

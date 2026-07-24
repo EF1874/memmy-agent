@@ -62,6 +62,7 @@ export interface WorkerJobProcessors {
     abstractL3(job: EvolutionJobRecord): MaybePromise<void>;
     crystallizeSkill(job: EvolutionJobRecord): MaybePromise<void>;
     associateL2(job: EvolutionJobRecord): MaybePromise<void>;
+    splitBigTurn(job: EvolutionJobRecord): MaybePromise<void>;
   };
   feedback: {
     applyReward(job: EvolutionJobRecord): MaybePromise<void>;
@@ -233,6 +234,9 @@ export async function processJob(
       return;
     case "reward":
       await deps.processors.feedback.applyReward(job);
+      return;
+    case "span_big_turn":
+      await deps.processors.evolution.splitBigTurn(job);
       return;
     case "embedding":
       await deps.processors.embedding.embedMemory(job);
@@ -483,6 +487,8 @@ export function evolutionJobDedupeKey(input: Pick<EnqueueJobInput, "jobType" | "
       return input.episodeId ? `reflection:${input.episodeId}` : target ? `reflection:${target}` : undefined;
     case "reward":
       return input.episodeId ? `reward:${input.episodeId}` : target ? `reward:${target}` : undefined;
+    case "span_big_turn":
+      return target ? `span_big_turn:${target}` : undefined;
     case "negative_experience": {
       const source = payloadString("source");
       const sourceEventId = payloadString("sourceEventId");

@@ -52,6 +52,17 @@ export function embeddingTextForMemory(memory: MemoryRow): string {
 }
 
 export function traceSummaryEmbeddingText(memory: MemoryRow): string | undefined {
+  const span = isRecord(memory.properties.internal_info.span)
+    ? memory.properties.internal_info.span
+    : undefined;
+  const spanGoal = span ? stringFromRecord(span, "span_goal") : undefined;
+  const spanSummary = span ? stringFromRecord(span, "summary") : undefined;
+  if (spanGoal && spanSummary) {
+    return [
+      `Goal: ${spanGoal}`,
+      `Summary: ${spanSummary}`
+    ].join("\n");
+  }
   const trace = traceMetaFromMemory(memory);
   const summary = firstRealSummary(
     trace?.summary,

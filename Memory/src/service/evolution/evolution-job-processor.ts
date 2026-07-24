@@ -24,6 +24,7 @@ import {
 } from "../namespace/namespace-scope.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
 import { NegativeExperiencePipeline } from "./negative-experience-pipeline.js";
+import { BigTurnSpanPipeline } from "./big-turn-span-pipeline.js";
 import { PolicyInductionEngine } from "./policy-induction.js";
 import {
   RewardPipeline,
@@ -74,6 +75,7 @@ export class EvolutionJobProcessor {
   private readonly reward: RewardPipeline;
   private readonly skill: SkillPipeline;
   private readonly span: SpanPipeline;
+  private readonly bigTurnSpan: BigTurnSpanPipeline;
   private readonly worldModel: WorldModelPipeline;
 
   constructor(private readonly deps: EvolutionJobProcessorDeps) {
@@ -126,6 +128,14 @@ export class EvolutionJobProcessor {
       enqueueEpisodeRewardAfterReflection: deps.enqueueEpisodeRewardAfterReflection,
       scheduleEmbeddingAfterTextUpdate: deps.scheduleEmbeddingAfterTextUpdate
     });
+    this.bigTurnSpan = new BigTurnSpanPipeline({
+      repos: deps.repos,
+      get llm() { return owner.deps.llm; },
+      buildMemory: deps.buildMemory,
+      enqueueJob: deps.enqueueJob,
+      namespaceIdFromMemory: deps.namespaceIdFromMemory,
+      embedAfterCapture: () => owner.deps.config.algorithm.capture.embedAfterCapture
+    });
     this.reward = new RewardPipeline({
       get config() { return owner.deps.config; },
       repos: deps.repos,
@@ -175,6 +185,10 @@ export class EvolutionJobProcessor {
 
   applyReward(job: EvolutionJobRecord): Promise<void> {
     return this.reward.applyReward(job);
+  }
+
+  splitBigTurn(job: EvolutionJobRecord): Promise<void> {
+    return this.bigTurnSpan.splitAndStore(job);
   }
 
   materializeNegativeExperience(job: EvolutionJobRecord): void {

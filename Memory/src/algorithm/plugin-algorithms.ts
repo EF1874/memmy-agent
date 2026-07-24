@@ -57,6 +57,7 @@ export interface TraceMemoryMeta {
   priority: number;
   tags: string[];
   errorSignatures: string[];
+  spanIds: string[];
   vecSummary: number[] | null;
   vecAction: number[] | null;
   signature: string;
@@ -3274,6 +3275,7 @@ export function traceMetaFromMemory(memory: MemoryRow): TraceMemoryMeta | null {
     priority: numberField(trace, "priority") ?? 0,
     tags,
     errorSignatures: stringArrayField(trace, "error_signatures"),
+    spanIds: stringArrayField(trace, "span_ids"),
     vecSummary: memoryVector(memory, "vec_summary"),
     vecAction: memoryVector(memory, "vec_action"),
     signature: stringField(trace, "signature") ?? signatureFromTraceLike(tags, toolCalls, stringField(trace, "reflection") ?? "")
@@ -4895,7 +4897,8 @@ function hasRetrievalEmbedding(
   }
 ): boolean {
   if (memory.memoryLayer === "L1") {
-    return hasVector(meta.trace?.vecSummary) || hasVector(meta.trace?.vecAction);
+    return hasVector(memoryVector(memory, "vec_summary")) ||
+      hasVector(memoryVector(memory, "vec_action"));
   }
   if (memory.memoryLayer === "L2") {
     return hasVector(meta.policy?.vec);
@@ -4994,7 +4997,7 @@ function candidateFromMemory(
   ) {
     return null;
   }
-  const kind = kindFromLayer(memory.memoryLayer);
+  const kind = memory.properties.internal_info.memory_kind ?? kindFromLayer(memory.memoryLayer);
   const tier = memory.memoryLayer === "Skill" ? "tier1" : memory.memoryLayer === "L3" ? "tier3" : "tier2";
   const text = memoryTextForRetrieval(memory);
   const vectorChannels = vectorChannelsForMemory(memory, queryVec, options.config, {
@@ -5522,10 +5525,9 @@ function vectorChannelsForMemory(
   };
 
   if (memory.memoryLayer === "L1") {
-    const trace = traceMetaFromMemory(memory);
     if (!options.suppressTraceVector) {
-      remember(add("vec_summary", trace?.vecSummary, config.minTraceSim));
-      remember(add("vec_action", trace?.vecAction, config.minTraceSim));
+      remember(add("vec_summary", memoryVector(memory, "vec_summary"), config.minTraceSim));
+      remember(add("vec_action", memoryVector(memory, "vec_action"), config.minTraceSim));
     }
   } else if (memory.memoryLayer === "L3") {
     remember(add("vec", worldModelMetaFromMemory(memory)?.vec, Math.min(config.minTraceSim, 0.15)));

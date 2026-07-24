@@ -458,11 +458,13 @@ describe("plugin algorithm parity helpers", () => {
     const trace = memory.properties.internal_info.trace as Record<string, unknown>;
     trace.userText = "我喜欢吃什么水果";
     trace.agentText = "你喜欢吃的水果是草莓";
+    trace.span_ids = ["span_fruit_goal", "span_fruit_answer"];
 
     const meta = traceMetaFromMemory(memory);
     expect(meta).toMatchObject({
       userText: "我喜欢吃什么水果",
-      agentText: "你喜欢吃的水果是草莓"
+      agentText: "你喜欢吃的水果是草莓",
+      spanIds: ["span_fruit_goal", "span_fruit_answer"]
     });
 
     const result = retrievePluginMemories({
@@ -1775,6 +1777,7 @@ function trace(id: string, episodeId: string, value: number, vec: number[]): Tra
     priority: value,
     tags: ["python", "pytest"],
     errorSignatures: [],
+    spanIds: [],
     vecSummary: vec,
     vecAction: vec,
     signature: "python|pytest|_"

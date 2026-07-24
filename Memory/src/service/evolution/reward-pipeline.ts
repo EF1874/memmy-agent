@@ -26,6 +26,10 @@ import type {
   SynthesizeDecisionRepairDraft
 } from "../feedback/feedback-experience.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
+import {
+  SPAN_BIG_TURN_ENABLED,
+  SPAN_BIG_TURN_MIN_TOOL_CALLS
+} from "./big-turn-span-pipeline.js";
 
 type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
 type HumanScoreResult = ReturnType<typeof heuristicHumanScore>;
@@ -253,6 +257,32 @@ export class RewardPipeline {
         createdAt: at
       });
       const savedTrace = this.deps.traceMeta(saved);
+      const rawTurn = savedTrace?.rawTurnId
+        ? this.deps.repos.runtime.getRawTurn(savedTrace.rawTurnId)
+        : undefined;
+      if (
+        SPAN_BIG_TURN_ENABLED &&
+        job.payload.downstreamScheduled !== true &&
+        feedback.rHuman > 0 &&
+        savedTrace &&
+        savedTrace.alpha > 0 &&
+        rawTurn &&
+        rawTurn.toolCalls.length >= SPAN_BIG_TURN_MIN_TOOL_CALLS
+      ) {
+        this.deps.enqueueJob({
+          jobType: "span_big_turn",
+          userId: saved.userId,
+          sessionId: saved.sessionId,
+          episodeId: trace.episodeId,
+          targetMemoryId: saved.id,
+          payload: {
+            rawTurnId: rawTurn.id,
+            rTask: feedback.rHuman,
+            rewardReason: feedback.reason
+          },
+          createdAt: at
+        });
+      }
       if (job.payload.downstreamScheduled !== true && savedTrace && this.deps.isTraceEligibleForL2(savedTrace)) {
         this.deps.recordCandidatePoolTrace(savedTrace, signatureFromTrace(savedTrace), at);
         l2Eligible.push({ memory: saved, trace: savedTrace });
