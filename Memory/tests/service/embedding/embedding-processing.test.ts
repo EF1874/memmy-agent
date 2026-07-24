@@ -3,8 +3,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   DEFAULT_MEMMY_CONFIG,
   MemoryDb,
-  type Embedder
+  type Embedder,
+  type MemoryRow
 } from "../../../src/index.js";
+import { embeddingTextForMemory } from "../../../src/service/embedding/embedding-pipeline.js";
 import { Repositories } from "../../../src/storage/repositories.js";
 import {
   createBatchReflectionLlm,
@@ -23,6 +25,19 @@ const {
 afterEach(cleanup);
 
 describe("MemoryService / embedding / processing", () => {
+  it("falls back to title when negative L2 title and trigger exceed 2048 mixed-language tokens", () => {
+    const title = "Avoid";
+    const triggerAtLimit = [
+      "错".repeat(1_024),
+      Array.from({ length: 1_023 }, () => "word").join(" ")
+    ].join(" ");
+
+    expect(embeddingTextForMemory(negativePolicyMemory(title, triggerAtLimit))).toBe(
+      [title, triggerAtLimit].join("\n")
+    );
+    expect(embeddingTextForMemory(negativePolicyMemory(title, `${triggerAtLimit} 超`))).toBe(title);
+  });
+
   it("retries trace embedding jobs without leaving the processing state stuck", async () => {
     const root = createTestRoot("mindock-memory-embedding-retry-");
     const db = new MemoryDb({
@@ -229,6 +244,41 @@ describe("MemoryService / embedding / processing", () => {
     db.close();
   });
 });
+
+function negativePolicyMemory(title: string, trigger: string): MemoryRow {
+  const now = "2026-07-24T00:00:00.000Z";
+  return {
+    id: "policy_negative_embedding_limit",
+    timeline: now,
+    userId: "negative-embedding-user",
+    memoryType: "LongTermMemory",
+    status: "activated",
+    visibility: "private",
+    memoryKey: "policy:negative-embedding-limit",
+    memoryValue: "Avoid the failed approach.",
+    tags: ["policy", "negative"],
+    info: {},
+    properties: {
+      internal_info: {
+        memory_layer: "L2",
+        memory_kind: "policy",
+        policy: {
+          title,
+          trigger,
+          procedure: "Avoid the failed approach.",
+          verification: "Verify the failure cannot recur.",
+          boundary: "Apply only to the matching task.",
+          experience_type: "failure_avoidance",
+          evidence_polarity: "negative"
+        }
+      }
+    },
+    memoryLayer: "L2",
+    version: 1,
+    createdAt: now,
+    updatedAt: now
+  };
+}
 
 function createFlakyEmbedder(): Embedder {
   let batchCalls = 0;

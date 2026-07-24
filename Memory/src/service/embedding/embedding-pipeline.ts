@@ -16,6 +16,7 @@ import { clip } from "../../utils/text.js";
 
 const EMBEDDING_RETRY_BASE_BACKOFF_MS = 60_000;
 const EMBEDDING_RETRY_MAX_BACKOFF_MS = 60 * 60_000;
+const NEGATIVE_POLICY_EMBEDDING_TOKEN_LIMIT = 2_048;
 
 export interface EmbeddingRetryRunItem {
   id: string;
@@ -36,6 +37,12 @@ export function embeddingTextForMemory(memory: MemoryRow): string {
   }
   const policy = policyMetaFromMemory(memory);
   if (policy) {
+    if (policy.experienceType === "failure_avoidance" || policy.evidencePolarity === "negative") {
+      const text = [policy.title, policy.trigger].filter(Boolean).join("\n");
+      return exceedsMixedLanguageTokenLimit(text, NEGATIVE_POLICY_EMBEDDING_TOKEN_LIMIT)
+        ? policy.title
+        : text;
+    }
     return [policy.title, policy.trigger, policy.procedure, policy.verification, policy.boundary]
       .filter(Boolean)
       .join("\n");
@@ -49,6 +56,15 @@ export function embeddingTextForMemory(memory: MemoryRow): string {
     return [world.title, world.body, world.domainTags.join(" ")].filter(Boolean).join("\n");
   }
   return memory.memoryValue;
+}
+
+function exceedsMixedLanguageTokenLimit(value: string, limit: number): boolean {
+  let count = 0;
+  for (const _match of value.matchAll(/\p{Script=Han}|[A-Za-z]+(?:['’-][A-Za-z]+)*/gu)) {
+    count += 1;
+    if (count > limit) return true;
+  }
+  return false;
 }
 
 export function traceSummaryEmbeddingText(memory: MemoryRow): string | undefined {

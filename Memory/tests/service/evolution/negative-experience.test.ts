@@ -3,7 +3,10 @@ import {
   DEFAULT_MEMMY_CONFIG,
   type LlmClient
 } from "../../../src/index.js";
-import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
+import {
+  createCapturingEmbedder,
+  createMemoryServiceFixture
+} from "../../fixtures/memory-service-fixture.js";
 
 const {
   cleanup,
@@ -59,17 +62,20 @@ function createCountingLlm(
 describe("MemoryService / evolution / negative experience", () => {
   it("materializes explicit negative feedback as an independent avoidance policy without another LLM call", async () => {
     const operations: string[] = [];
+    const embeddedTexts: string[] = [];
+    const embeddingRoles: Array<"query" | "document" | undefined> = [];
     const llm = createCountingLlm(operations);
     const { db, service } = createTestService({
       llm,
       skillLlm: llm,
+      embedder: createCapturingEmbedder(embeddedTexts, embeddingRoles),
       config: {
         ...DEFAULT_MEMMY_CONFIG,
         algorithm: {
           ...DEFAULT_MEMMY_CONFIG.algorithm,
           capture: {
             ...DEFAULT_MEMMY_CONFIG.algorithm.capture,
-            embedAfterCapture: false,
+            embedAfterCapture: true,
             synthReflection: false
           },
           feedback: {
@@ -156,9 +162,21 @@ describe("MemoryService / evolution / negative experience", () => {
     expect(detail.body).toContain("Wrong port");
     expect(detail.body).toContain("443");
     expect(operations).toEqual(["reward.reward.r_human.v7"]);
+    const negativePolicy = (detail.metadata.properties as {
+      internal_info: {
+        policy: {
+          title: string;
+          trigger: string;
+        };
+      };
+    }).internal_info.policy;
 
     const initialVersion = policies[0]!.version;
     await service.runWorkerOnce(50);
+    expect(embeddedTexts).toEqual([
+      [negativePolicy.title, negativePolicy.trigger].join("\n")
+    ]);
+    expect(embeddingRoles).toEqual(["query"]);
     expect(service.panelItems({ namespace, layer: "L2" }).items).toEqual([
       expect.objectContaining({ id: policies[0]!.id, version: initialVersion })
     ]);
