@@ -22,8 +22,6 @@ A span represents one coherent subtask goal pursued through a contiguous
 sequence of tool calls. It is not a single tool call and not merely a change
 of tool name.
 
-Decide first whether the turn should be split.
-
 Split only when the execution contains two or more clearly distinct subtask
 goals or execution phases. Keep diagnosis and repair of the same problem in
 one span unless the repair starts an independently meaningful task.
@@ -36,7 +34,7 @@ Boundary rules:
 - Produce 2 to 6 spans when splitting.
 - Avoid spans containing only one tool call unless it is an independently
   meaningful subtask.
-- If the whole execution serves one coherent goal, return shouldSplit=false.
+- If the whole execution serves one coherent goal, return an empty spans list.
 - Do not invent actions, results, goals, or errors.
 
 spanGoal requirements:
@@ -52,7 +50,6 @@ summary requirements:
 
 Return JSON only:
 {
-  "shouldSplit": true,
   "reason": "...",
   "spans": [
     {
@@ -95,7 +92,6 @@ export class BigTurnSpanPipeline {
     if (!source || !rawTurn || rawTurn.toolCalls.length < SPAN_BIG_TURN_MIN_TOOL_CALLS) return;
 
     const result = await this.deps.llm.completeJson<{
-      shouldSplit?: unknown;
       reason?: unknown;
       spans?: unknown;
     }>([
@@ -285,16 +281,19 @@ function bigTurnPromptPayload(
       rTask: number(job.payload.rTask),
       reason: redactAndClip(text(job.payload.rewardReason) ?? "", 600)
     },
-    toolCalls: rawTurn.toolCalls
-      .filter(isToolCall)
-      .map((call, index) => ({
-        index,
-        name: redactAndClip(call.name, 200),
-        input: redactAndClip(stableStringify(call.input ?? null), 500),
-        output: redactAndClip(stableStringify(call.output ?? null), 800),
-        error: call.error ? redactAndClip(call.error, 400) : null,
-        success: call.success ?? !call.error
-      }))
+    toolCalls: rawTurn.toolCalls.map((call, index) => isToolCall(call)
+      ? {
+          index,
+          name: redactAndClip(call.name, 200),
+          input: redactAndClip(stableStringify(call.input ?? null), 500),
+          output: redactAndClip(stableStringify(call.output ?? null), 800),
+          error: call.error ? redactAndClip(call.error, 400) : null,
+          success: call.success ?? !call.error
+        }
+      : {
+          index,
+          raw: redactAndClip(stableStringify(call), 100)
+        })
   };
 }
 
@@ -303,16 +302,10 @@ function redactAndClip(value: string, maxChars: number): string {
 }
 
 function validateSpanResult(
-  result: { shouldSplit?: unknown; spans?: unknown },
+  result: { spans?: unknown },
   toolCallCount: number
 ): SpanDraft[] | null {
-  if (result.shouldSplit === false) {
-    if (Array.isArray(result.spans) && result.spans.length === 0) return null;
-    throw new Error("span.big_turn returned spans while shouldSplit was false");
-  }
-  if (result.shouldSplit !== true) {
-    throw new Error("span.big_turn returned invalid shouldSplit");
-  }
+  if (Array.isArray(result.spans) && result.spans.length === 0) return null;
   if (!Array.isArray(result.spans) || result.spans.length < 2 || result.spans.length > 6) {
     throw new Error("span.big_turn returned invalid span count");
   }

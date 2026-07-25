@@ -21,8 +21,8 @@ afterEach(cleanup);
 function createSpanBigTurnLlm(
   calls: Array<{ messages: LlmMessage[]; options: LlmCompletionOptions }>,
   spanResult: Record<string, unknown> | Array<Record<string, unknown>> = {
-    shouldSplit: true,
-    reason: "包含定位、修复和验证三个子目标",
+    shouldSplit: false,
+    reason: "即使 shouldSplit 冲突，也以非空 spans 为准",
     spans: [
       {
         start: 0,
@@ -175,6 +175,14 @@ describe("MemoryService / evolution / span big turn", () => {
       toolCalls,
       toolResults
     });
+    const invalidToolCall = `invalid-${"x".repeat(140)}`;
+    const rawToolCalls: unknown[] = [...toolCalls];
+    rawToolCalls[5] = invalidToolCall;
+    db.db.prepare(
+      `UPDATE raw_turns
+       SET tool_calls_json = ?
+       WHERE id = ?`
+    ).run(JSON.stringify(rawToolCalls), completed.rawTurnId);
 
     service.closeSession(session.sessionId);
     await service.feedback({
@@ -207,7 +215,7 @@ describe("MemoryService / evolution / span big turn", () => {
       traceSummary?: string;
       reflection?: string;
       reward?: { rTask?: number; reason?: string };
-      toolCalls?: Array<{ index: number; name: string }>;
+      toolCalls?: Array<{ index: number; name?: string; raw?: string }>;
     };
     expect(spanPayload).toMatchObject({
       userRequest: "修复项目构建失败并完成测试验证",
@@ -223,6 +231,9 @@ describe("MemoryService / evolution / span big turn", () => {
     expect(spanPayload.toolCalls?.map((call) => call.index)).toEqual(
       Array.from({ length: 11 }, (_, index) => index)
     );
+    expect(spanPayload.toolCalls?.[5]?.raw).toHaveLength(100);
+    expect(spanPayload.toolCalls?.[5]?.raw).toMatch(/^"invalid-/);
+    expect(spanPayload.toolCalls?.[5]?.raw).toMatch(/\.\.\.$/);
     const serializedSpanPrompt = spanCall?.messages[1]?.content ?? "";
     expect(serializedSpanPrompt).toContain("[redacted]");
     expect(serializedSpanPrompt).not.toContain("sk-supersecret123456");
