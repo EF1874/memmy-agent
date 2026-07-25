@@ -36,6 +36,7 @@ import {
   providerLogin,
   providerLogout,
   resolveOauthProvider,
+  runInternalCommand,
   serve,
   setCliRuntimeLogs,
   setConfigValue,
@@ -141,11 +142,38 @@ afterEach(() => {
   setCliRuntimeLogs(false);
   (process.stdin as any).isTTY = originalStdinIsTty;
   setConfigPath(null);
+  process.exitCode = 0;
   for (const key of ENV_KEYS) delete process.env[key];
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
 describe("CLI command helpers", () => {
+  it("keeps the browser preparation command hidden and accepts only its exact argv", async () => {
+    const root = tempRoot();
+    setConfigPath(
+      writeConfig(root, { tools: { browser: { enabled: false } } }),
+    );
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    process.exitCode = 0;
+
+    await expect(
+      runInternalCommand(["node", "memmy", "internal", "browser-prepare"]),
+    ).resolves.toBe(true);
+    expect(log).toHaveBeenCalledWith("disabled");
+    expect(process.exitCode).toBe(0);
+    expect(buildHelpText()).not.toContain("browser-prepare");
+
+    await expect(
+      runInternalCommand(["node", "memmy", "internal", "browser-prepare", "--extra"]),
+    ).resolves.toBe(true);
+    expect(error).toHaveBeenCalledWith("unavailable");
+    expect(process.exitCode).toBe(2);
+    await expect(runInternalCommand(["node", "memmy", "status"])).resolves.toBe(
+      false,
+    );
+  });
+
   it("includes core slash commands in the command palette and help", () => {
     const names = builtinCommandPalette().map((item) => item.command);
 

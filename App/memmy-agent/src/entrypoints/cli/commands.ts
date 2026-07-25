@@ -10,6 +10,7 @@ import { InboundMessage, OutboundMessage } from "../../core/runtime-messages/eve
 import { AgentLoop, UNIFIED_SESSION_KEY } from "../../core/agent-runtime/loop.js";
 import { CronTool } from "../../core/agent-runtime/tools/cron.js";
 import { MessageTool } from "../../core/agent-runtime/tools/message.js";
+import { prepareManagedChromium } from "../../core/agent-runtime/tools/browser-setup.js";
 import { WebuiTitleService } from "../../core/session/webui-title.js";
 import { WEBUI_LANGUAGE_METADATA_KEY } from "../../core/session/webui-turns.js";
 import {
@@ -76,6 +77,22 @@ export function setCliRuntimeLogs(enabled: boolean): void {
 
 export function cliRuntimeLogsEnabled(): boolean {
   return cliRuntimeLogs;
+}
+
+async function initializeLoopRuntimeTools(loop: any): Promise<void> {
+  if (typeof loop?.initializeRuntimeTools === "function") {
+    await loop.initializeRuntimeTools();
+    return;
+  }
+  await loop?.connectMcp?.();
+}
+
+async function closeLoopRuntimeTools(loop: any): Promise<void> {
+  if (typeof loop?.closeRuntimeTools === "function") {
+    await loop.closeRuntimeTools();
+    return;
+  }
+  await loop?.closeMcp?.();
 }
 
 export function sanitizeSurrogates(text: string): string {
@@ -204,7 +221,31 @@ export async function runRootInteractiveAgent(): Promise<unknown> {
   return runInkInteractiveAgent(loaded, "cli:direct");
 }
 
+export async function runInternalCommand(argv: string[]): Promise<boolean> {
+  if (argv[2] !== "internal") return false;
+  if (argv.length !== 4 || argv[3] !== "browser-prepare") {
+    console.error("unavailable");
+    process.exitCode = 2;
+    return true;
+  }
+  try {
+    const loaded = loadRuntimeConfig(null, null);
+    const result = await prepareManagedChromium(loaded.tools.browser.enabled);
+    console.log(result.status);
+    if (result.status === "unavailable") {
+      if (result.error) console.error(result.error);
+      process.exitCode = 1;
+    }
+  } catch (error) {
+    console.log("unavailable");
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  }
+  return true;
+}
+
 export async function main(argv: string[] = process.argv): Promise<void> {
+  if (await runInternalCommand(argv)) return;
   if (isRootVersionRequest(argv)) {
     versionCallback(true);
     return;
@@ -478,7 +519,7 @@ export async function serve({
   syncRuntimeWorkspaceTemplates(loaded);
   setCliRuntimeLogs(Boolean(verbose));
   const loop = AgentLoop.fromConfig(loaded);
-  await loop.connectMcp();
+  await initializeLoopRuntimeTools(loop);
   const resolved = loaded.resolvePreset();
   const appServer = createApp(
     loop,
@@ -489,7 +530,7 @@ export async function serve({
   const bindPort = port == null ? loaded.api.port : Number(port);
   let cleanupPromise: Promise<void> | null = null;
   const closeMcpOnce = (): Promise<void> => {
-    cleanupPromise ??= Promise.resolve(loop.closeMcp()).catch(() => undefined);
+    cleanupPromise ??= Promise.resolve(closeLoopRuntimeTools(loop)).catch(() => undefined);
     return cleanupPromise;
   };
   const server = http.createServer(async (req, res) => {
@@ -691,6 +732,7 @@ export async function gateway({
       if (model) publishRuntimeModelUpdate(bus, model, preset);
     },
   });
+  await initializeLoopRuntimeTools(loop);
   const manager = new ChannelManager(loaded, bus, {
     sessionManager: loop.sessions,
     webuiRuntimeModelName: () => {
@@ -698,6 +740,7 @@ export async function gateway({
       return loop.model ?? null;
     },
     cancelActiveTasks: (sessionKey) => loop.cancelActiveTasks(sessionKey),
+    closeBrowserChat: (channel, chatId) => loop.closeBrowserChat(channel, chatId),
   });
   const webuiChannel = manager.getChannel("websocket");
   if (webuiChannel instanceof WebSocketChannel) {
@@ -971,7 +1014,7 @@ export async function gateway({
       await Promise.allSettled([
         inboundTask,
         manager.stopAll(),
-        loop.closeMcp(),
+        closeLoopRuntimeTools(loop),
         (loop.sessions as any)?.flush?.(),
         closeServer(healthServer),
       ]);
@@ -1044,7 +1087,10 @@ export async function agent({
         if (!rendererClosed) await renderer.close();
       } finally {
         loop.stop();
-        await Promise.allSettled([loop.closeMcp(), Promise.resolve(loop.sessions.flushAll())]);
+        await Promise.allSettled([
+          closeLoopRuntimeTools(loop),
+          Promise.resolve(loop.sessions.flushAll()),
+        ]);
       }
     }
   }
@@ -1194,7 +1240,11 @@ export async function runInteractiveAgent(
     active = false;
     loop.stop();
     restoreTerminal();
-    await Promise.allSettled([runTask, outboundTask, loop.closeMcp()]);
+    await Promise.allSettled([
+      runTask,
+      outboundTask,
+      closeLoopRuntimeTools(loop),
+    ]);
   }
   return null;
 }

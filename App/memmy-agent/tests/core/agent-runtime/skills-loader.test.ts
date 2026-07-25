@@ -61,6 +61,20 @@ afterEach(() => {
 });
 
 describe("SkillsLoader listSkills", () => {
+  it("discovers the single-file builtin ui-craft skill with browser visual QA", () => {
+    const loader = new SkillsLoader(tmpDir());
+    const entry = loader.listSkills(false).find((skill) => skill.name === "ui-craft");
+    const content = loader.loadSkill("ui-craft");
+
+    expect(entry).toMatchObject({ name: "ui-craft", source: "builtin" });
+    expect(content).toContain("browser_navigate");
+    expect(content).toContain("browser_snapshot");
+    expect(content).toContain("browser_console_messages");
+    expect(content).toContain("browser_network_requests");
+    expect(content).toContain("browser_take_screenshot");
+    expect(fs.readdirSync(path.dirname(entry!.path))).toEqual(["SKILL.md"]);
+  });
+
   it("keeps the product memory skill removed while preserving user skills named memory", () => {
     const workspace = tmpDir();
     const loader = new SkillsLoader(workspace);

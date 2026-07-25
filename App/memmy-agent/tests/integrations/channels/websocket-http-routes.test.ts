@@ -86,6 +86,8 @@ describe("WebSocket HTTP route helpers", () => {
     runtimeModelName = null,
     workspacePath = null,
     fileMemoryEnabled = false,
+    cancelActiveTasks = undefined,
+    closeBrowserChat = undefined,
     config = {},
   }: {
     sessionManager?: SessionManager | null;
@@ -93,6 +95,8 @@ describe("WebSocket HTTP route helpers", () => {
     runtimeModelName?: (() => string | null | undefined) | null;
     workspacePath?: string | null;
     fileMemoryEnabled?: boolean;
+    cancelActiveTasks?: (sessionKey: string) => Promise<number>;
+    closeBrowserChat?: (channel: string, chatId: string) => Promise<void>;
     config?: Record<string, any>;
   } = {}): WebSocketChannel {
     return new WebSocketChannel(
@@ -112,6 +116,8 @@ describe("WebSocket HTTP route helpers", () => {
         runtimeModelName,
         workspacePath,
         fileMemoryEnabled,
+        cancelActiveTasks,
+        closeBrowserChat,
       },
     );
   }
@@ -649,7 +655,13 @@ describe("WebSocket HTTP route helpers", () => {
     process.env.MEMMY_AGENT_DATA_DIR = root;
     const manager = seedSession(root, "websocket:doomed");
     appendTranscriptObject("websocket:doomed", { event: "user", chat_id: "doomed", text: "x" });
-    const channel = makeChannel({ sessionManager: manager });
+    const cancelActiveTasks = vi.fn(async () => 1);
+    const closeBrowserChat = vi.fn(async () => undefined);
+    const channel = makeChannel({
+      sessionManager: manager,
+      cancelActiveTasks,
+      closeBrowserChat,
+    });
     const port = await startChannel(channel);
     const headers = await authHeaders(port);
 
@@ -660,6 +672,11 @@ describe("WebSocket HTTP route helpers", () => {
     expect(((await deleted.json()) as any).deleted).toBe(true);
     expect(fs.existsSync(manager.pathFor("websocket:doomed"))).toBe(false);
     expect(fs.existsSync(webuiTranscriptPath("websocket:doomed"))).toBe(false);
+    expect(cancelActiveTasks).toHaveBeenCalledWith("websocket:doomed");
+    expect(closeBrowserChat).toHaveBeenCalledWith("websocket", "doomed");
+    expect(cancelActiveTasks.mock.invocationCallOrder[0]).toBeLessThan(
+      closeBrowserChat.mock.invocationCallOrder[0],
+    );
   });
 
   it("renames websocket session titles through the WebUI title route", async () => {

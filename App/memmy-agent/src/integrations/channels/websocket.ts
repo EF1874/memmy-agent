@@ -77,6 +77,7 @@ type WebSocketChannelOptions = {
   workspacePath?: string | null;
   runtimeModelName?: RuntimeModelNameResolver;
   cancelActiveTasks?: (sessionKey: string) => Promise<number>;
+  closeBrowserChat?: (channel: string, chatId: string) => Promise<void>;
   fileMemoryEnabled?: boolean;
 };
 export type WebuiLanguage = "zh-CN" | "en-US";
@@ -506,6 +507,7 @@ export class WebSocketChannel extends BaseChannel {
   workspacePath: string;
   readonly fileMemoryEnabled: boolean;
   cancelActiveTasks: ((sessionKey: string) => Promise<number>) | null = null;
+  closeBrowserChat: ((channel: string, chatId: string) => Promise<void>) | null = null;
   server: any = null;
   channelAdmin: ChannelAdminApi | null = null;
   webuiTitleService: WebuiTitleService | null = null;
@@ -520,6 +522,7 @@ export class WebSocketChannel extends BaseChannel {
     this.runtimeModelName = options.runtimeModelName ?? config?.runtimeModelName ?? null;
     this.fileMemoryEnabled = options.fileMemoryEnabled === true;
     this.cancelActiveTasks = options.cancelActiveTasks ?? config?.cancelActiveTasks ?? null;
+    this.closeBrowserChat = options.closeBrowserChat ?? config?.closeBrowserChat ?? null;
     const workspacePath = options.workspacePath ?? config?.workspacePath ?? getWorkspacePath();
     this.workspacePath = path.resolve(String(workspacePath));
   }
@@ -1101,12 +1104,15 @@ export class WebSocketChannel extends BaseChannel {
     });
   }
 
-  handleSessionDelete(request: any, key: string): HttpLikeResponse {
+  async handleSessionDelete(request: any, key: string): Promise<HttpLikeResponse> {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
     if (!this.sessionManager) return httpError(503, "session manager unavailable");
     const decodedKey = decodeApiKey(key);
     if (decodedKey == null) return httpError(400, "invalid session key");
     if (!this.isWebsocketChannelSessionKey(decodedKey)) return httpError(404, "session not found");
+    const chatId = decodedKey.slice("websocket:".length);
+    await this.cancelActiveTasks?.(decodedKey);
+    await this.closeBrowserChat?.("websocket", chatId);
     const del = this.sessionManager.deleteSession ?? this.sessionManager.delete;
     const deleted = typeof del === "function" ? del.call(this.sessionManager, decodedKey) : false;
     deleteWebuiThread(decodedKey);

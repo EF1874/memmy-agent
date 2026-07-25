@@ -26,6 +26,7 @@ import { ExecSessionManager } from "./tools/exec-session.js";
 import { MessageTool, type MessageSendCallback } from "./tools/message.js";
 import { FileStateStore } from "./tools/file-state.js";
 import { connectMissingServers, runtimeLines as mcpRuntimeLines, sessionExtra as mcpSessionExtra } from "./tools/mcp.js";
+import { BrowserSessionManager, type BrowserScope } from "./tools/browser.js";
 import { ContextBuilder } from "./context.js";
 import { Consolidator, Dream, type TokenCompactionStatus } from "./memory.js";
 import { AgentHook, AgentHookContext, CompositeAgentHook } from "./hook.js";
@@ -344,6 +345,7 @@ export class AgentLoop {
   cronService: CronService;
   execSessionManager: ExecSessionManager;
   fileStateStore: FileStateStore;
+  browserSessionManager: BrowserSessionManager;
   subagents: SubagentManager;
   runner: AgentRunner;
   context: ContextBuilder;
@@ -381,6 +383,7 @@ export class AgentLoop {
   mcpStacks: Record<string, any>;
   mcpConnected: boolean;
   mcpConnecting: boolean;
+  private browserRegistryInitialized = false;
   subagentPendingWaitMs = 300_000;
   static readonly RUNTIME_CHECKPOINT_KEY = "runtimeCheckpoint";
   static readonly PENDING_USER_TURN_KEY = "pendingUserTurn";
@@ -441,6 +444,7 @@ export class AgentLoop {
     this.sessionDagQueue = init.sessionDagQueue ?? this.createSessionDagQueue();
     this.execSessionManager = new ExecSessionManager();
     this.fileStateStore = new FileStateStore();
+    this.browserSessionManager = new BrowserSessionManager(this.config.tools.browser);
     this.subagents = new SubagentManager({
       provider: this.provider,
       workspace: this.workspace,
@@ -556,6 +560,7 @@ export class AgentLoop {
       sessions: this.sessions,
       execSessionManager: this.execSessionManager,
       fileStateStore: this.fileStateStore,
+      browserSessionManager: this.browserSessionManager,
       timezone: this.context.timezone || this.config.agents.defaults.timezone || "UTC",
       runtimeState: this,
       messageSendCallback,
@@ -612,6 +617,35 @@ export class AgentLoop {
 
   async connectMcp(): Promise<void> {
     await connectMissingServers(this as any, this.tools);
+  }
+
+  async initializeRuntimeTools(): Promise<void> {
+    await this.connectMcp();
+    await this.browserSessionManager.initialize();
+    if (!this.browserRegistryInitialized) {
+      this.tools = this.createToolRegistry("runtime-init", {
+        includeConnectedMcp: true,
+      });
+      this.browserRegistryInitialized = true;
+    }
+  }
+
+  async closeRuntimeTools(): Promise<void> {
+    await this.browserSessionManager.close();
+    await this.closeMcp();
+  }
+
+  async closeBrowserSession(
+    sessionKey: string,
+    channel: string,
+    chatId: string,
+  ): Promise<void> {
+    const scope: BrowserScope = { sessionKey, channel, chatId };
+    await this.browserSessionManager.closeSession(scope);
+  }
+
+  async closeBrowserChat(channel: string, chatId: string): Promise<void> {
+    await this.browserSessionManager.closeChat(channel, chatId);
   }
 
   async closeMcp(): Promise<void> {
@@ -1863,7 +1897,7 @@ export class AgentLoop {
 
   async run(): Promise<void> {
     this.running = true;
-    await this.connectMcp();
+    await this.initializeRuntimeTools();
     if (!this.running) return;
     while (this.running) {
       const msg = this.bus.inbound.getNowait();
@@ -1958,7 +1992,7 @@ export class AgentLoop {
       messageSendCallback?: MessageSendCallback | null;
     } = {},
   ): Promise<OutboundMessage | null> {
-    await this.connectMcp();
+    await this.initializeRuntimeTools();
     const key = this.unifiedSession ? UNIFIED_SESSION_KEY : sessionKey;
     const msg = new InboundMessage({
       channel,

@@ -50,6 +50,7 @@ export class ChannelManager {
   sessionManager: any = null;
   webuiRuntimeModelName: (() => string | null) | null = null;
   cancelActiveTasks: ((sessionKey: string) => Promise<number>) | null = null;
+  closeBrowserChat: ((channel: string, chatId: string) => Promise<void>) | null = null;
 
   constructor(
     configOrBus: any = defaultConfig(),
@@ -58,6 +59,7 @@ export class ChannelManager {
       sessionManager?: any;
       webuiRuntimeModelName?: (() => string | null) | null;
       cancelActiveTasks?: ((sessionKey: string) => Promise<number>) | null;
+      closeBrowserChat?: ((channel: string, chatId: string) => Promise<void>) | null;
     } = {},
   ) {
     if (configOrBus instanceof MessageBus) {
@@ -70,6 +72,7 @@ export class ChannelManager {
     this.sessionManager = options.sessionManager ?? null;
     this.webuiRuntimeModelName = options.webuiRuntimeModelName ?? null;
     this.cancelActiveTasks = options.cancelActiveTasks ?? null;
+    this.closeBrowserChat = options.closeBrowserChat ?? null;
     this.initChannels();
   }
 
@@ -126,6 +129,7 @@ export class ChannelManager {
     if (workspacePath) options.workspacePath = workspacePath;
     if (this.webuiRuntimeModelName) options.runtimeModelName = this.webuiRuntimeModelName;
     if (this.cancelActiveTasks) options.cancelActiveTasks = this.cancelActiveTasks;
+    if (this.closeBrowserChat) options.closeBrowserChat = this.closeBrowserChat;
     return options;
   }
 
