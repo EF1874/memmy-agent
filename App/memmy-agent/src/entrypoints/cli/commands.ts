@@ -668,6 +668,15 @@ function sanitizeCronDeliveryMetadata(
   return next;
 }
 
+function cronExecutionMetadata(
+  channel: string,
+  metadata: Record<string, any> = {},
+): Record<string, any> {
+  const next = sanitizeCronDeliveryMetadata(channel, metadata);
+  if (channel === "websocket") delete next.webui;
+  return next;
+}
+
 function usesChineseCronLanguage(metadata: Record<string, any>): boolean {
   return String(metadata?.[WEBUI_LANGUAGE_METADATA_KEY] ?? "")
     .toLowerCase()
@@ -929,7 +938,9 @@ export async function gateway({
           sessionKey: `cron:${job.id}`,
           channel,
           chatId,
-          metadata: channel === "websocket" ? job.payload.channelMeta : {},
+          metadata: channel === "websocket"
+            ? cronExecutionMetadata(channel, job.payload.channelMeta ?? {})
+            : {},
           onProgress: async () => undefined,
           messageSendCallback,
           sessionBindingOverride: targetSessionBinding,

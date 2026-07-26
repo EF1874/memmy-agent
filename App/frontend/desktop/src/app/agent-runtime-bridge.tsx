@@ -185,11 +185,13 @@ export function createAgentTaskStateCoordinator(
     head.reject(error);
     dispatch(agentActions.sidebarMutationFailed(
       sidebarMutationId(head.intent),
+      replaySidebarIntents(confirmedSidebarState, sidebarQueue),
       createAgentOperationError({
         source: "sidebar",
         message: error instanceof Error ? error.message : String(error)
       })
     ));
+    dispatchOptimisticState();
   }
 
   async function readSidebarForReconciliation(): Promise<MemmyAgentSidebarState | null> {
@@ -244,6 +246,7 @@ export function createAgentTaskStateCoordinator(
               sidebarQueuePaused = true;
               dispatch(agentActions.sidebarMutationFailed(
                 sidebarMutationId(head.intent),
+                replaySidebarIntents(confirmedSidebarState, sidebarQueue),
                 createAgentOperationError({
                   source: "sidebar",
                   message: "sidebar_sync_pending"

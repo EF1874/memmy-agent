@@ -96,8 +96,6 @@ const SLASH_COMMAND_RETRY_DELAYS_MS = [300, 1000, 2500];
 const AGENT_CONVERSATION_USER_SCROLL_INTENT_MS = 600;
 /** Definition for stop confirmation grace ms. */
 export const STOP_CONFIRMATION_GRACE_MS = 8000;
-/** Definition for composer error auto dismiss ms. */
-export const COMPOSER_ERROR_AUTO_DISMISS_MS = 5000;
 const TRANSLATABLE_AGENT_ERROR_KEYS = new Set<MessageKey>([
   "home.media.error.sendUnsupported",
   "home.media.error.sendSize",
@@ -683,7 +681,6 @@ export function HomePage() {
   const [isComposerSingleLine, setIsComposerSingleLine] = useState(true);
   const composerDrafts = state.agent.composerDraftsByScope;
   const pendingAttachmentsByScope = state.agent.composerPendingAttachmentsByScope;
-  const composerMediaErrorByScope = state.agent.composerMediaErrorByScope;
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -708,7 +705,6 @@ export function HomePage() {
   const chatScopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
   const input = composerDrafts[chatScopeKey] ?? "";
   const pendingAttachments = pendingAttachmentsByScope[chatScopeKey] ?? [];
-  const composerMediaError = composerMediaErrorByScope[chatScopeKey] ?? null;
   const draftTarget = state.agent.draftTargetsByScope[chatScopeKey] ?? { kind: "standalone" as const };
   const selectedDraftProject = draftTarget.kind === "project"
     ? state.agent.projects.find((project) => project.id === draftTarget.projectId) ?? null
@@ -1202,22 +1198,6 @@ export function HomePage() {
       || state.agent.recoveringGeneration !== null;
   const centerComposerControls = isComposerSingleLine && pendingAttachments.length === 0;
 
-  // Local composer errors are cleared per session so a voice-permission error does not pollute other sessions.
-  useEffect(() => {
-    const currentError = composerMediaError;
-    if (!currentError) {
-      return;
-    }
-
-    const timeoutId = window.setTimeout(() => {
-      if (composerMediaErrorByScope[chatScopeKey] === currentError) {
-        dispatch(agentActions.composerMediaErrorUpdated(chatScopeKey, null));
-      }
-    }, COMPOSER_ERROR_AUTO_DISMISS_MS);
-
-    return () => window.clearTimeout(timeoutId);
-  }, [chatScopeKey, composerMediaError, composerMediaErrorByScope, dispatch]);
-
   useEffect(() => {
     if (selectedCommandIndex >= filteredSlashCommands.length) {
       setSelectedCommandIndex(0);
@@ -1483,7 +1463,14 @@ export function HomePage() {
   }
 
   function setComposerMediaErrorForScope(scopeKey: string, message: string | null) {
-    dispatch(agentActions.composerMediaErrorUpdated(scopeKey, message));
+    if (!message) {
+      return;
+    }
+    dispatch(agentActions.operationFailed("chat", createAgentOperationError({
+      source: "send",
+      message,
+      scopeKey
+    })));
   }
 
   function setCurrentComposerMediaError(message: string | null) {
@@ -1575,7 +1562,6 @@ export function HomePage() {
   }
 
   function resetNewChatLocalUi() {
-    resetComposerDraftUi();
     resetTransientConversationUi();
     setSlashMenuDismissed(false);
     setIsCreatingChat(false);
@@ -2012,7 +1998,7 @@ export function HomePage() {
             <h1 className="text-2xl font-bold text-text-ink">{t("home.subtitle")}</h1>
           </div>
           <div className="w-full max-w-2xl">
-            <AgentOperationErrorSlot message={agentErrorText(composerMediaError, t) ?? agentError} />
+            <AgentOperationErrorSlot message={agentError} />
             <ProjectTargetPicker
               open={projectPickerOpen}
               target={draftTarget}
@@ -2142,7 +2128,12 @@ export function HomePage() {
           ) : null}
           <div className="agent-conversation-composer">
             <div className="max-w-3xl mx-auto">
-              <AgentOperationErrorSlot message={agentErrorText(composerMediaError, t) ?? agentError} />
+              {currentSessionProjectBlocked ? (
+                <p className="mx-auto mb-2 w-fit rounded-tag border border-status-error/20 bg-status-error/5 px-3 py-1 text-xs text-status-error" role="status">
+                  {t("home.project.registryUnavailable")}
+                </p>
+              ) : null}
+              <AgentOperationErrorSlot message={agentError} />
               <div
                 className="relative agent-composer-shell rounded-card-lg"
                 onDragOver={handleComposerDragOver}

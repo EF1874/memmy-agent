@@ -178,7 +178,6 @@ export interface AgentState {
   goalState: AgentGoalState | null;
   composerDraftsByScope: Record<string, string>;
   composerPendingAttachmentsByScope: Record<string, PendingAttachment[]>;
-  composerMediaErrorByScope: Record<string, string | null>;
   draftTargetsByScope: Record<string, WebuiSessionTarget>;
   draftTargetRevisionByScope: Record<string, number>;
   messageSendInFlightByScope: Record<string, string>;
@@ -212,7 +211,7 @@ export type AgentAction =
   | { type: "agent/sidebarStateSaved"; sidebarState: MemmyAgentSidebarState }
   | { type: "agent/sidebarMutationStarted"; mutationId: string; sidebarState: MemmyAgentSidebarState }
   | { type: "agent/sidebarMutationConfirmed"; mutationId: string; sidebarState: MemmyAgentSidebarState }
-  | { type: "agent/sidebarMutationFailed"; mutationId: string; error: AgentOperationError }
+  | { type: "agent/sidebarMutationFailed"; mutationId: string; sidebarState: MemmyAgentSidebarState; error: AgentOperationError }
   | { type: "agent/taskStateLoading"; request: AgentTaskStateRequest }
   | { type: "agent/taskStateSettled"; requestId: string; recoveryGeneration: number | null; snapshot?: MemmyAgentSessionSnapshot; sessions?: MemmyAgentSessionSummary[]; sidebarState?: MemmyAgentSidebarState; error?: AgentOperationError }
   | { type: "agent/historyLoading"; sessionKey: string; chatId: string; requestId: string }
@@ -229,7 +228,6 @@ export type AgentAction =
   | { type: "agent/userMessageQueued"; chatId: string; content: string; media?: AgentChatMediaAttachment[]; focus?: boolean; deliveryUncertain?: boolean }
   | { type: "agent/composerDraftUpdated"; scopeKey: string; value: string }
   | { type: "agent/composerPendingAttachmentsUpdated"; scopeKey: string; attachments: PendingAttachment[] }
-  | { type: "agent/composerMediaErrorUpdated"; scopeKey: string; message: string | null }
   | { type: "agent/draftTargetUpdated"; scopeKey: string; target: WebuiSessionTarget }
   | { type: "agent/messageSendLockUpdated"; scopeKey: string; clientRequestId: string | null }
   | { type: "agent/tasksMarkedRead"; chatIds: string[] }
@@ -310,7 +308,6 @@ export const initialAgentState: AgentState = {
   goalState: null,
   composerDraftsByScope: {},
   composerPendingAttachmentsByScope: {},
-  composerMediaErrorByScope: {},
   draftTargetsByScope: {},
   draftTargetRevisionByScope: {},
   messageSendInFlightByScope: {},
@@ -415,11 +412,12 @@ export function agentReducer(state: AgentState, action: AgentAction): AgentState
         : state;
     case "agent/sidebarMutationFailed":
       return state.currentSidebarMutationId === action.mutationId
-        ? setOperationError({
+        ? setOperationError(deriveTasks({
             ...state,
+            sidebarState: action.sidebarState,
             sidebarStateVersion: state.sidebarStateVersion + 1,
             currentSidebarMutationId: null
-          }, "sidebar", action.error)
+          }), "sidebar", action.error)
         : state;
     case "agent/taskStateLoading":
       return {
@@ -457,8 +455,6 @@ export function agentReducer(state: AgentState, action: AgentAction): AgentState
       return updateComposerDraft(state, action.scopeKey, action.value);
     case "agent/composerPendingAttachmentsUpdated":
       return updateComposerPendingAttachments(state, action.scopeKey, action.attachments);
-    case "agent/composerMediaErrorUpdated":
-      return updateComposerMediaError(state, action.scopeKey, action.message);
     case "agent/draftTargetUpdated":
       return {
         ...state,
@@ -529,6 +525,14 @@ function setOperationError(
   surface: AgentOperationSurface,
   error: AgentOperationError | null
 ): AgentState {
+  if (
+    error
+    && state.operationErrorNotice
+    && isBackgroundOperationError(error)
+    && !isBackgroundOperationError(state.operationErrorNotice)
+  ) {
+    return state;
+  }
   return {
     ...state,
     operationErrorNotice: error,
@@ -537,6 +541,10 @@ function setOperationError(
       [surface]: error
     }
   };
+}
+
+function isBackgroundOperationError(error: AgentOperationError): boolean {
+  return error.source === "sessions" || error.source === "recovery";
 }
 
 function operationErrorFromEvent(event: MemmyAgentWsEvent, source: AgentOperationErrorSource): AgentOperationError {
@@ -860,44 +868,23 @@ function updateComposerPendingAttachments(state: AgentState, scopeKey: string, a
   };
 }
 
-function updateComposerMediaError(state: AgentState, scopeKey: string, message: string | null): AgentState {
-  if (!message) {
-    if (!(scopeKey in state.composerMediaErrorByScope)) {
-      return state;
-    }
-    const composerMediaErrorByScope = { ...state.composerMediaErrorByScope };
-    delete composerMediaErrorByScope[scopeKey];
-    return { ...state, composerMediaErrorByScope };
-  }
-  if (state.composerMediaErrorByScope[scopeKey] === message) {
-    return state;
-  }
-  return {
-    ...state,
-    composerMediaErrorByScope: { ...state.composerMediaErrorByScope, [scopeKey]: message }
-  };
-}
-
 function clearComposerScope(state: AgentState, scopeKey: string): AgentState {
   const hasDraft = scopeKey in state.composerDraftsByScope;
   const hasPendingAttachments = scopeKey in state.composerPendingAttachmentsByScope;
-  const hasMediaError = scopeKey in state.composerMediaErrorByScope;
   const hasTarget = scopeKey in state.draftTargetsByScope;
   const hasTargetRevision = scopeKey in state.draftTargetRevisionByScope;
   const hasSendLock = scopeKey in state.messageSendInFlightByScope;
-  if (!hasDraft && !hasPendingAttachments && !hasMediaError && !hasTarget && !hasTargetRevision && !hasSendLock) {
+  if (!hasDraft && !hasPendingAttachments && !hasTarget && !hasTargetRevision && !hasSendLock) {
     return state;
   }
 
   const composerDraftsByScope = { ...state.composerDraftsByScope };
   const composerPendingAttachmentsByScope = { ...state.composerPendingAttachmentsByScope };
-  const composerMediaErrorByScope = { ...state.composerMediaErrorByScope };
   const draftTargetsByScope = { ...state.draftTargetsByScope };
   const draftTargetRevisionByScope = { ...state.draftTargetRevisionByScope };
   const messageSendInFlightByScope = { ...state.messageSendInFlightByScope };
   delete composerDraftsByScope[scopeKey];
   delete composerPendingAttachmentsByScope[scopeKey];
-  delete composerMediaErrorByScope[scopeKey];
   delete draftTargetsByScope[scopeKey];
   delete draftTargetRevisionByScope[scopeKey];
   delete messageSendInFlightByScope[scopeKey];
@@ -905,7 +892,6 @@ function clearComposerScope(state: AgentState, scopeKey: string): AgentState {
     ...state,
     composerDraftsByScope,
     composerPendingAttachmentsByScope,
-    composerMediaErrorByScope,
     draftTargetsByScope,
     draftTargetRevisionByScope,
     messageSendInFlightByScope

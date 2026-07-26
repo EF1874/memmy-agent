@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { renderToString } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import type { Task, TaskBusValue } from "../../lib/task-bus.js";
 import { mockBootstrap } from "./fixtures/bootstrap.js";
@@ -15,6 +15,7 @@ import {
   hasPetThreadLatestAnswer,
   isPetDoubleClick,
   mapPetThreadMessagesToTaskBus,
+  petAgentSessionExists,
   PET_CANVAS,
   PET_TASK_RECONCILE_INTERVAL_MS,
   PET_TIMING,
@@ -36,6 +37,30 @@ const stylesPath = fileURLToPath(new URL("../../styles.css", import.meta.url));
 const petPageSourcePath = fileURLToPath(new URL("../pet-page.tsx", import.meta.url));
 
 describe("PetPage helpers", () => {
+  it("桌宠缓存未命中时向 Gateway 确认已有 Session，不能误建 standalone", async () => {
+    const cachedList = vi.fn(async () => [{ key: "websocket:project-chat" } as never]);
+
+    await expect(petAgentSessionExists({
+      sessionKey: "websocket:project-chat",
+      cachedSessions: [{ key: "websocket:project-chat" } as never],
+      listSessions: cachedList
+    })).resolves.toBe(true);
+    expect(cachedList).not.toHaveBeenCalled();
+
+    await expect(petAgentSessionExists({
+      sessionKey: "websocket:project-chat",
+      cachedSessions: [],
+      listSessions: cachedList
+    })).resolves.toBe(true);
+    expect(cachedList).toHaveBeenCalledTimes(1);
+
+    await expect(petAgentSessionExists({
+      sessionKey: "websocket:new-chat",
+      cachedSessions: [],
+      listSessions: async () => []
+    })).resolves.toBe(false);
+  });
+
   it("按规范派生 displayState", () => {
     expect(deriveDisplayState({ focusedTask: null, hasUndismissedAnswer: false, isActive: false, isInHotzone: false })).toBe("idle");
     expect(deriveDisplayState({ focusedTask: null, hasUndismissedAnswer: false, isActive: true, isInHotzone: false })).toBe("active");

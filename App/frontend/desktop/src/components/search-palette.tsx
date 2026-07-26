@@ -8,6 +8,7 @@ export interface SearchPaletteProps {
   open: boolean;
   tasks: AgentTaskView[];
   projects?: MemmyAgentProject[];
+  projectRegistryState?: "ready" | "corrupt";
   onClose: () => void;
   onSelectTask: (task: AgentTaskView) => void;
   placeholder?: string;
@@ -15,16 +16,34 @@ export interface SearchPaletteProps {
   untitledLabel?: string;
   ariaLabel?: string;
   standaloneLabel?: string;
+  missingProjectLabel?: string;
+  registryUnavailableLabel?: string;
 }
 
 export function SearchPalette(props: SearchPaletteProps) {
-  const { open, tasks, projects = [], onClose, onSelectTask, placeholder, emptyLabel, untitledLabel, ariaLabel } = props;
+  const {
+    open,
+    tasks,
+    projects = [],
+    projectRegistryState = "ready",
+    onClose,
+    onSelectTask,
+    placeholder,
+    emptyLabel,
+    untitledLabel,
+    ariaLabel
+  } = props;
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
-  const filtered = filterTasks(tasks, query, projects);
+  const filtered = filterTasks(tasks, query, projects, {
+    projectRegistryState,
+    standaloneLabel: props.standaloneLabel,
+    missingProjectLabel: props.missingProjectLabel,
+    registryUnavailableLabel: props.registryUnavailableLabel
+  });
   const displayTasks = query.trim() ? filtered : tasks.slice(0, 12);
 
   useEffect(() => {
@@ -89,15 +108,20 @@ export function SearchPalette(props: SearchPaletteProps) {
             <div className="search-palette-empty">{emptyLabel}</div>
           )}
           {displayTasks.map((task, i) => {
-            const project = task.groupProjectId
-              ? projects.find((candidate) => candidate.id === task.groupProjectId) ?? null
-              : null;
+            const ownership = resolveTaskOwnership(task, projects, {
+              projectRegistryState,
+              standaloneLabel: props.standaloneLabel,
+              missingProjectLabel: props.missingProjectLabel,
+              registryUnavailableLabel: props.registryUnavailableLabel
+            });
             return (
             <button
               key={task.sessionKey}
               type="button"
               role="option"
               aria-selected={i === activeIndex}
+              aria-label={`${task.title || untitledLabel || ""} · ${ownership}`}
+              title={ownership}
               className={`search-palette-item${i === activeIndex ? " search-palette-item--active" : ""}`}
               onMouseEnter={() => setActiveIndex(i)}
               onClick={() => onSelectTask(task)}
@@ -105,7 +129,7 @@ export function SearchPalette(props: SearchPaletteProps) {
               <span className="search-palette-item-title">{task.title || untitledLabel}</span>
               {task.preview && <span className="search-palette-item-preview">{task.preview}</span>}
               <span className="search-palette-item-preview">
-                {project ? `${project.name} · ${project.rootPath}` : props.standaloneLabel}
+                {ownership}
               </span>
             </button>
             );
@@ -119,21 +143,41 @@ export function SearchPalette(props: SearchPaletteProps) {
 export function filterTasks(
   tasks: AgentTaskView[],
   searchQuery: string,
-  projects: MemmyAgentProject[] = []
+  projects: MemmyAgentProject[] = [],
+  labels: TaskOwnershipLabels = {}
 ): AgentTaskView[] {
   const q = searchQuery.trim().toLowerCase();
   if (!q) return tasks;
   return tasks.filter((task) => {
-    const project = task.groupProjectId
-      ? projects.find((candidate) => candidate.id === task.groupProjectId)
-      : null;
     const haystack = [
       task.title,
       task.preview,
       ...task.tags,
-      project?.name ?? "",
-      project?.rootPath ?? ""
+      resolveTaskOwnership(task, projects, labels)
     ].join(" ").toLowerCase();
     return haystack.includes(q);
   });
+}
+
+interface TaskOwnershipLabels {
+  projectRegistryState?: "ready" | "corrupt";
+  standaloneLabel?: string;
+  missingProjectLabel?: string;
+  registryUnavailableLabel?: string;
+}
+
+export function resolveTaskOwnership(
+  task: AgentTaskView,
+  projects: MemmyAgentProject[],
+  labels: TaskOwnershipLabels = {}
+): string {
+  const project = task.groupProjectId
+    ? projects.find((candidate) => candidate.id === task.groupProjectId) ?? null
+    : null;
+  if (project) return `${project.name} · ${task.cwd}`;
+  if (task.projectId == null) return labels.standaloneLabel ?? "";
+  const unavailableLabel = labels.projectRegistryState === "corrupt"
+    ? labels.registryUnavailableLabel
+    : labels.missingProjectLabel;
+  return [unavailableLabel, task.cwd].filter(Boolean).join(" · ");
 }

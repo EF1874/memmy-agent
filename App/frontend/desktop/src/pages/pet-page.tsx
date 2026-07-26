@@ -436,6 +436,18 @@ function normalizePetTaskChatId(sessionId: string, client: Pick<MemmyAgentClient
   return trimmed.startsWith("websocket:") ? client.sessionKeyToChatId(trimmed) : trimmed;
 }
 
+export async function petAgentSessionExists(input: {
+  sessionKey: string;
+  cachedSessions: Array<Pick<MemmyAgentSessionSummary, "key">>;
+  listSessions: () => Promise<MemmyAgentSessionSummary[]>;
+}): Promise<boolean> {
+  if (input.cachedSessions.some((session) => session.key === input.sessionKey)) {
+    return true;
+  }
+  const latestSessions = await input.listSessions();
+  return latestSessions.some((session) => session.key === input.sessionKey);
+}
+
 /** Handles format record seconds. */
 export function formatRecordSeconds(totalSeconds: number): string {
   const minutes = Math.floor(totalSeconds / 60);
@@ -777,7 +789,8 @@ export function PetPage() {
 
   const submitPetAgentTask = useCallback(
     (task: Task, content: string) => {
-      const chatId = clients?.memmyAgent ? normalizePetTaskChatId(task.sessionId, clients.memmyAgent) : task.sessionId;
+      const agentClient = clients?.memmyAgent;
+      const chatId = agentClient ? normalizePetTaskChatId(task.sessionId, agentClient) : task.sessionId;
       cancelledTaskIdsRef.current.delete(task.id);
       taskIdByChatIdRef.current.set(chatId, task.id);
       answerTextByTaskIdRef.current.set(task.id, "");
@@ -800,8 +813,15 @@ export function PetPage() {
           }
           recoveryTracker?.register({ taskId: task.id, chatId, submittedContent: content });
           try {
-            const sessionKey = clients?.memmyAgent?.chatIdToSessionKey(chatId) ?? `websocket:${chatId}`;
-            const created = !state.agent.sessions.some((session) => session.key === sessionKey);
+            if (!agentClient) {
+              throw new Error(t("pet.agentUnavailable"));
+            }
+            const sessionKey = agentClient.chatIdToSessionKey(chatId);
+            const created = !await petAgentSessionExists({
+              sessionKey,
+              cachedSessions: state.agent.sessions,
+              listSessions: () => agentClient.listSessions()
+            });
             await connection.sendMessage({
               chatId,
               content,

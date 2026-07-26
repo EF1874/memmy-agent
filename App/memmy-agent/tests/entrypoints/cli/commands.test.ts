@@ -774,7 +774,9 @@ describe("CLI command helpers", () => {
         sessionKey: "cron:cron-test",
         channel: "websocket",
         chatId: "chat-1",
-        metadata: expect.objectContaining({ turn_id: "stale-turn" }),
+        metadata: {
+          webui_language: "zh-CN",
+        },
         messageSendCallback: expect.any(Function),
       }));
       expect(fakeLoop.waitForCronTargetAvailable).toHaveBeenCalledWith("websocket", "websocket:chat-1");

@@ -289,8 +289,12 @@ export const agentActions = {
     return { type: "agent/sidebarMutationConfirmed", mutationId, sidebarState };
   },
 
-  sidebarMutationFailed(mutationId: string, error: AgentOperationError): AppAction {
-    return { type: "agent/sidebarMutationFailed", mutationId, error };
+  sidebarMutationFailed(
+    mutationId: string,
+    sidebarState: MemmyAgentSidebarState,
+    error: AgentOperationError
+  ): AppAction {
+    return { type: "agent/sidebarMutationFailed", mutationId, sidebarState, error };
   },
 
   taskStateLoading(request: AgentTaskStateRequest): AppAction {
@@ -362,10 +366,6 @@ export const agentActions = {
 
   composerPendingAttachmentsUpdated(scopeKey: string, attachments: PendingAttachment[]): AppAction {
     return { type: "agent/composerPendingAttachmentsUpdated", scopeKey, attachments };
-  },
-
-  composerMediaErrorUpdated(scopeKey: string, message: string | null): AppAction {
-    return { type: "agent/composerMediaErrorUpdated", scopeKey, message };
   },
 
   draftTargetUpdated(scopeKey: string, target: WebuiSessionTarget): AppAction {

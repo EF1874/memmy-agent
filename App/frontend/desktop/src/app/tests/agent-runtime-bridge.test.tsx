@@ -278,6 +278,53 @@ describe("AgentRuntimeBridge", () => {
     coordinator.dispose();
   });
 
+  it("drops a failed sidebar intent after three attempts and continues from the confirmed state", async () => {
+    let agentState: AgentState = initialAgentState;
+    const dispatch = (action: AppAction): void => {
+      if (action.type.startsWith("agent/")) {
+        agentState = agentReducer(agentState, action as AgentAction);
+      }
+    };
+    const writeSidebarState = vi.fn()
+      .mockRejectedValueOnce(new Error("write failed"))
+      .mockRejectedValueOnce(new Error("write failed"))
+      .mockRejectedValueOnce(new Error("write failed"))
+      .mockImplementationOnce(async (_base, state) => ({
+        ...state,
+        updated_at: "2026-07-26T00:00:00.001Z"
+      }));
+    const coordinator = createAgentTaskStateCoordinator(
+      {
+        writeSidebarState,
+        readSidebarState: vi.fn(async () => defaultAgentSidebarState)
+      } as any,
+      dispatch,
+      () => agentState
+    );
+
+    const failed = coordinator.enqueueSidebarIntent({
+      id: "pin",
+      kind: "task-patch",
+      sessionKey: "websocket:chat",
+      patch: { pinned: true }
+    }).catch((error: unknown) => error);
+    const archive = coordinator.enqueueSidebarIntent({
+      id: "archive",
+      kind: "task-patch",
+      sessionKey: "websocket:chat",
+      patch: { archived: true }
+    });
+
+    expect(await failed).toBeInstanceOf(Error);
+    await archive;
+
+    expect(writeSidebarState).toHaveBeenCalledTimes(4);
+    expect(agentState.sidebarState.pinned_keys).toEqual([]);
+    expect(agentState.sidebarState.archived_keys).toEqual(["websocket:chat"]);
+    expect(agentState.currentSidebarMutationId).toBeNull();
+    coordinator.dispose();
+  });
+
   it("waits for sidebar persistence before entering a project removal barrier", async () => {
     let agentState: AgentState = initialAgentState;
     const dispatch = (action: AppAction): void => {

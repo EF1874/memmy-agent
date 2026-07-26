@@ -132,8 +132,13 @@ interface SidebarMenuOverlayStyle extends SidebarMenuPlacement {
   zIndex: number;
 }
 
+interface SidebarContextMenuPlacement {
+  left: number;
+  top: number;
+}
+
 type AgentTaskSort = AppState["agent"]["sidebarState"]["view"]["sort"];
-type NewAgentDraftState = Pick<AppState["agent"], "blankDraftActive" | "newChatRequestId" | "composerDraftsByScope" | "composerPendingAttachmentsByScope" | "composerMediaErrorByScope">;
+type NewAgentDraftState = Pick<AppState["agent"], "blankDraftActive" | "newChatRequestId" | "composerDraftsByScope" | "composerPendingAttachmentsByScope">;
 
 export interface SidebarAccountLabels {
   brandName: string;
@@ -173,6 +178,18 @@ const sidebarMoreMenuSize: SidebarMenuSize = {
   margin: 8,
   gap: 4
 };
+const taskContextMenuSize: SidebarMenuSize = {
+  width: 144,
+  height: 112,
+  margin: 8,
+  gap: 0
+};
+const projectContextMenuSize: SidebarMenuSize = {
+  width: 176,
+  height: 200,
+  margin: 8,
+  gap: 0
+};
 const sidebarMenuOverlayZIndex = 9999;
 const SIDEBAR_PROFILE_NAME_MAX_VISUAL_WIDTH = 10;
 const SIDEBAR_PROFILE_META_MAX_VISUAL_WIDTH = 12;
@@ -199,8 +216,7 @@ export function shouldCreateNewAgentDraft(agent: NewAgentDraftState): boolean {
   }
   const draftScopeKey = agentChatScopeKey(null, agent.newChatRequestId);
   return !agent.composerDraftsByScope[draftScopeKey]
-    && !(agent.composerPendingAttachmentsByScope[draftScopeKey]?.length)
-    && !agent.composerMediaErrorByScope[draftScopeKey];
+    && !(agent.composerPendingAttachmentsByScope[draftScopeKey]?.length);
 }
 
 export function AppFrame(props: AppFrameProps) {
@@ -615,6 +631,18 @@ export function AppFrame(props: AppFrameProps) {
     });
   }
 
+  function expandTaskAncestors(task: AgentTaskView) {
+    for (const key of resolveTaskAncestorGroupKeys(task, state.agent.projects, showingArchived)) {
+      if (!state.agent.sidebarState.collapsed_groups[key]) continue;
+      void enqueueSidebarIntent({
+        id: nextAgentSidebarMutationId(),
+        kind: "set-collapsed",
+        groupKey: key,
+        collapsed: false
+      });
+    }
+  }
+
   async function registerProject(mode: "blank" | "existing") {
     setProjectCreateMenuOpen(false);
     if (!clients?.memmyAgent || !window.memmy || projectMutationId) return;
@@ -643,8 +671,8 @@ export function AppFrame(props: AppFrameProps) {
   async function updateProject(
     projectId: string,
     update: { name: string } | { pinned: boolean }
-  ) {
-    if (!clients?.memmyAgent || projectMutationId) return;
+  ): Promise<boolean> {
+    if (!clients?.memmyAgent || projectMutationId) return false;
     const operationId = `project-update-${crypto.randomUUID()}`;
     setProjectMutationId(operationId);
     try {
@@ -655,10 +683,13 @@ export function AppFrame(props: AppFrameProps) {
       });
       if (result.status !== "committed") {
         showProjectOperationError(result.status === "rejected" ? result.code : "network_unavailable");
+        return false;
       }
+      return true;
     } catch (error) {
       showProjectOperationError(error);
       void refreshAgentTasks();
+      return false;
     } finally {
       setProjectMutationId((current) => current === operationId ? null : current);
     }
@@ -957,12 +988,13 @@ export function AppFrame(props: AppFrameProps) {
             {!showingArchived && (projectTree.pinnedTasks.length > 0 || projectTree.pinnedProjects.length > 0) ? (
               <ProjectTreeSection
                 title={t("common.pin")}
-                groupKey="__pinned__"
+                groupKey="pinned"
                 collapsedGroups={state.agent.sidebarState.collapsed_groups}
                 projects={projectTree.pinnedProjects}
                 tasks={projectTree.pinnedTasks}
                 currentSessionKey={highlightedSessionKey}
                 showPreviews={state.agent.sidebarState.view.show_previews}
+                projectRegistryState={state.agent.projectRegistryState}
                 onToggleGroup={toggleSidebarGroup}
                 onToggleProject={toggleSidebarGroup}
                 onOpenTask={openAgentTask}
@@ -981,12 +1013,13 @@ export function AppFrame(props: AppFrameProps) {
 
             <ProjectTreeSection
               title={t("appFrame.projects")}
-              groupKey="__projects__"
+              groupKey="projects"
               collapsedGroups={state.agent.sidebarState.collapsed_groups}
               projects={showingArchived ? projectTree.archivedProjects : projectTree.projects}
               tasks={[]}
               currentSessionKey={highlightedSessionKey}
               showPreviews={state.agent.sidebarState.view.show_previews}
+              projectRegistryState={state.agent.projectRegistryState}
               emptyText={state.agent.projectRegistryState === "corrupt"
                 ? t("appFrame.project.registryUnavailable")
                 : t("appFrame.project.empty")}
@@ -1030,12 +1063,13 @@ export function AppFrame(props: AppFrameProps) {
 
             <ProjectTreeSection
               title={t("appFrame.tasks")}
-              groupKey="__standalone__"
+              groupKey="standalone"
               collapsedGroups={state.agent.sidebarState.collapsed_groups}
               projects={[]}
               tasks={showingArchived ? projectTree.archivedStandaloneTasks : projectTree.standaloneTasks}
               currentSessionKey={highlightedSessionKey}
               showPreviews={state.agent.sidebarState.view.show_previews}
+              projectRegistryState={state.agent.projectRegistryState}
               emptyText={state.agent.isLoadingSessions
                 ? t("appFrame.taskList.loading")
                 : t(showingArchived ? "appFrame.taskList.emptyArchived" as MessageKey : "appFrame.taskList.empty")}
@@ -1239,8 +1273,13 @@ export function AppFrame(props: AppFrameProps) {
         cancelLabel={t("dialog.cancel")}
         closeLabel={t("common.close")}
         confirmLabel={t("common.remove")}
+        confirmDisabled={projectMutationId != null}
         confirmVariant="danger"
-        onCancel={() => setRemoveProjectId(null)}
+        onCancel={() => {
+          if (projectMutationId == null) {
+            setRemoveProjectId(null);
+          }
+        }}
         onConfirm={() => void confirmRemoveProject()}
       />
       <ConfirmDialog
@@ -1279,8 +1318,11 @@ export function AppFrame(props: AppFrameProps) {
               onClick={() => {
                 if (!renameProject) return;
                 const value = renameProjectValue.trim();
-                setRenameProjectId(null);
-                void updateProject(renameProject.id, { name: value });
+                void updateProject(renameProject.id, { name: value }).then((committed) => {
+                  if (committed) {
+                    setRenameProjectId(null);
+                  }
+                });
               }}
             >
               {t("dialog.ok")}
@@ -1385,7 +1427,10 @@ export function AppFrame(props: AppFrameProps) {
         open={searchPaletteOpen}
         tasks={state.agent.tasks}
         projects={state.agent.projects}
+        projectRegistryState={state.agent.projectRegistryState}
         standaloneLabel={t("appFrame.tasks")}
+        missingProjectLabel={t("appFrame.project.recordUnavailable")}
+        registryUnavailableLabel={t("appFrame.project.taskRegistryUnavailable")}
         placeholder={t("appFrame.search")}
         emptyLabel={t("appFrame.search.empty")}
         untitledLabel={t("appFrame.search.untitled")}
@@ -1393,6 +1438,7 @@ export function AppFrame(props: AppFrameProps) {
         onClose={() => setSearchPaletteOpen(false)}
         onSelectTask={(task) => {
           setSearchPaletteOpen(false);
+          expandTaskAncestors(task);
           void openAgentTask(task);
         }}
       />
@@ -1483,6 +1529,28 @@ export function resolveSidebarMenuOverlayStyle(
 }
 
 /**
+ * Keeps a pointer-anchored context menu entirely inside the viewport.
+ *
+ * @param point The pointer position that opened the menu.
+ * @param viewport The current viewport size.
+ * @param size The menu size and margin configuration.
+ * @returns The menu's fixed left/top coordinates.
+ */
+export function resolveSidebarContextMenuPlacement(
+  point: { x: number; y: number },
+  viewport: SidebarMenuViewport,
+  size: SidebarMenuSize
+): SidebarContextMenuPlacement {
+  const maxLeft = Math.max(size.margin, viewport.width - size.width - size.margin);
+  const maxTop = Math.max(size.margin, viewport.height - size.height - size.margin);
+
+  return {
+    left: clamp(point.x, size.margin, maxLeft),
+    top: clamp(point.y + size.gap, size.margin, maxTop)
+  };
+}
+
+/**
  * Clamps a number to a closed interval.
  *
  * @param value The number to clamp.
@@ -1531,6 +1599,25 @@ export function deriveSidebarPlacement(
 
 export const buildProjectSidebarTree = deriveSidebarPlacement;
 
+export function resolveTaskAncestorGroupKeys(
+  task: AgentTaskView,
+  projects: MemmyAgentProject[],
+  showingArchived: boolean
+): string[] {
+  if (!showingArchived && task.pinned) {
+    return ["pinned"];
+  }
+  if (task.groupProjectId) {
+    const projectKey = `project:${task.groupProjectId}`;
+    if (showingArchived) {
+      return ["projects", projectKey];
+    }
+    const project = projects.find((candidate) => candidate.id === task.groupProjectId);
+    return [project?.pinned ? "pinned" : "projects", projectKey];
+  }
+  return ["standalone"];
+}
+
 export interface TimeGroup {
   labelKey: string;
   tasks: AgentTaskView[];
@@ -1576,6 +1663,7 @@ function ProjectTreeSection(props: {
   tasks: AgentTaskView[];
   currentSessionKey: string | null;
   showPreviews: boolean;
+  projectRegistryState: "ready" | "corrupt";
   headerAction?: ReactNode;
   emptyText?: string;
   onToggleGroup: (key: string) => void;
@@ -1599,6 +1687,7 @@ function ProjectTreeSection(props: {
         task={task}
         isCurrent={props.currentSessionKey === task.sessionKey}
         showPreview={props.showPreviews}
+        projectRegistryState={props.projectRegistryState}
         onOpen={() => void props.onOpenTask(task)}
         onRename={() => props.onRenameTask(task)}
         onContextMenu={(event) => props.onTaskContextMenu(event, task)}
@@ -1754,6 +1843,7 @@ export function TaskRow(props: {
   task: AgentTaskView;
   isCurrent: boolean;
   showPreview: boolean;
+  projectRegistryState?: "ready" | "corrupt";
   onOpen: () => void;
   onRename?: () => void;
   onContextMenu: (event: MouseEvent) => void;
@@ -1775,6 +1865,12 @@ export function TaskRow(props: {
   const titleClass = props.isCurrent ? "text-action-sky-hover" : "text-text-ink/70";
   const previewClass = props.isCurrent ? "text-action-sky-hover/65" : "text-text-ink/45";
   const hasTaskStatus = props.task.runStartedAt != null || props.task.completedUnseen;
+  const projectIssueLabel = props.task.projectId == null || props.task.groupProjectId != null
+    ? null
+    : props.projectRegistryState === "corrupt"
+      ? t("appFrame.project.taskRegistryUnavailable")
+      : t("appFrame.project.recordUnavailable");
+  const projectIssueTitle = projectIssueLabel ? `${projectIssueLabel} · ${props.task.cwd}` : undefined;
   const shouldShowTaskActions = archived ? isTaskRowHovered : props.archiveConfirming || isTaskRowHovered || hasTaskStatus;
 
   return (
@@ -1788,6 +1884,7 @@ export function TaskRow(props: {
       <button
         type="button"
         aria-current={props.isCurrent ? "page" : undefined}
+        title={projectIssueTitle}
         onClick={props.onOpen}
         onDoubleClick={(event) => {
           if (archived || !props.onRename) {
@@ -1805,6 +1902,11 @@ export function TaskRow(props: {
         {props.showPreview && props.task.preview && (
           <span className={`app-frame-task-preview mt-1 block truncate ${previewClass}`}>{props.task.preview}</span>
         )}
+        {projectIssueLabel ? (
+          <span className="app-frame-task-preview mt-1 block truncate text-status-error/70">
+            {projectIssueLabel}
+          </span>
+        ) : null}
       </button>
       {shouldShowTaskActions && (
         <div className="flex self-center shrink-0 items-center justify-center gap-0.5 pr-1.5">
@@ -2016,10 +2118,18 @@ function TaskContextMenu(props: {
     action();
     props.onClose();
   };
-  return (
+  if (typeof document === "undefined" || typeof window === "undefined") {
+    return null;
+  }
+  const placement = resolveSidebarContextMenuPlacement(
+    props.menu,
+    { width: window.innerWidth, height: window.innerHeight },
+    taskContextMenuSize
+  );
+  const menu = (
     <div
       className="fixed z-50 w-36 rounded-menu border border-border-stone/40 bg-background-paper shadow-lg p-1"
-      style={{ left: props.menu.x, top: props.menu.y }}
+      style={placement}
       onClick={(event) => event.stopPropagation()}
     >
       {task.archived ? (
@@ -2036,6 +2146,7 @@ function TaskContextMenu(props: {
       )}
     </div>
   );
+  return createPortal(menu, document.body);
 }
 
 function ProjectContextMenu(props: {
@@ -2056,10 +2167,18 @@ function ProjectContextMenu(props: {
     action();
     props.onClose();
   };
-  return (
+  if (typeof document === "undefined" || typeof window === "undefined") {
+    return null;
+  }
+  const placement = resolveSidebarContextMenuPlacement(
+    props.menu,
+    { width: window.innerWidth, height: window.innerHeight },
+    projectContextMenuSize
+  );
+  const menu = (
     <div
       className="fixed z-50 w-44 rounded-menu border border-border-stone/40 bg-background-paper shadow-lg p-1"
-      style={{ left: props.menu.x, top: props.menu.y }}
+      style={placement}
       onClick={(event) => event.stopPropagation()}
     >
       <MenuButton
@@ -2087,6 +2206,7 @@ function ProjectContextMenu(props: {
       />
     </div>
   );
+  return createPortal(menu, document.body);
 }
 
 function MenuButton(props: { label: string; icon?: ReactNode; active?: boolean; danger?: boolean; onClick: () => void }) {

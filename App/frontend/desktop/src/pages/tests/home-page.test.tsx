@@ -170,14 +170,14 @@ describe("HomePage", () => {
     expect(source).not.toContain('className="absolute left-1/2 bottom-full mb-3 z-30 -translate-x-1/2"');
   });
 
-  it("keeps operation error auto-dismiss centralized in the runtime bridge", () => {
+  it("keeps all temporary operation error auto-dismiss centralized in the runtime bridge", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
     const bridgeSource = readAgentRuntimeBridgeSource();
 
-    expect(source).toContain("COMPOSER_ERROR_AUTO_DISMISS_MS = 5000");
-    expect(source).toContain("window.setTimeout");
-    expect(source).toContain("agentActions.composerMediaErrorUpdated(chatScopeKey, null)");
-    expect(source).toContain("window.clearTimeout");
+    expect(source).not.toContain("COMPOSER_ERROR_AUTO_DISMISS_MS");
+    expect(source).not.toContain("composerMediaErrorUpdated");
+    expect(source).toContain('agentActions.operationFailed("chat", createAgentOperationError({');
+    expect(source).toContain('source: "send"');
     expect(bridgeSource).toContain("AGENT_OPERATION_ERROR_DISMISS_MS = 5_000");
     expect(bridgeSource).toContain('agentActions.operationErrorDismissed("chat", error.id)');
     expect(bridgeSource).toContain("state.agent.operationErrorNotice");
@@ -206,13 +206,12 @@ describe("HomePage", () => {
 
     expect(source).toContain("state.agent.composerDraftsByScope");
     expect(source).toContain("state.agent.composerPendingAttachmentsByScope");
-    expect(source).toContain("state.agent.composerMediaErrorByScope");
     expect(source).toContain("agentActions.composerDraftUpdated(scopeKey, nextValue)");
     expect(source).toContain("const sendScopeKey = chatScopeKey;");
     expect(source).toContain("clearComposer: () => clearComposerAfterSend(sendScopeKey)");
     expect(source).not.toContain("useState<Record<string, string>>({})");
     expect(source).not.toContain("useState<Record<string, PendingAttachment[]>>({})");
-    expect(source).not.toContain("useState<Record<string, string | null>>({})");
+    expect(source).not.toContain("composerMediaErrorByScope");
   });
 
   it("does not revoke all pending attachments when HomePage unmounts", () => {
@@ -227,6 +226,17 @@ describe("HomePage", () => {
 
     expect(source).toContain("const lastNewChatRequestRef = useRef(state.agent.newChatRequestId);");
     expect(source).not.toContain("const lastNewChatRequestRef = useRef(0);");
+  });
+
+  it("preserves the project target selected for a newly opened draft", () => {
+    const source = readFileSync(homePageSourcePath, "utf8");
+    const resetNewChatLocalUi = source.slice(
+      source.indexOf("function resetNewChatLocalUi()"),
+      source.indexOf("/**\n   * Records the most recently used slash command.")
+    );
+
+    expect(resetNewChatLocalUi).toContain("resetTransientConversationUi();");
+    expect(resetNewChatLocalUi).not.toContain("resetComposerDraftUi();");
   });
 
   it("consumes launch chat query params when reading focused agent chat ids", () => {
