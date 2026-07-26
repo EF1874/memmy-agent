@@ -2245,10 +2245,14 @@ export function HomePage() {
   );
 }
 
-function AgentOperationErrorSlot(props: { message: string | null }) {
+export function AgentOperationErrorSlot(props: { message: string | null }) {
   return (
-    <div className="agent-operation-error-slot" aria-live="polite">
-      {props.message ? <p role="alert">{props.message}</p> : null}
+    <div className="agent-operation-error-slot" aria-live="polite" aria-atomic="true">
+      {props.message ? (
+        <p key={props.message} className="agent-operation-error-toast" role="alert">
+          {props.message}
+        </p>
+      ) : null}
     </div>
   );
 }

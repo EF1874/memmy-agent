@@ -249,7 +249,6 @@ body.memmy-window-fullscreen {
   align-items: center;
   justify-content: center;
   margin: 0 auto 6px;
-  color: var(--color-status-error);
   font-size: 12px;
   line-height: 18px;
   text-align: center;
@@ -257,6 +256,44 @@ body.memmy-window-fullscreen {
 
 .agent-operation-error-slot:empty {
   display: none;
+}
+
+.agent-operation-error-toast {
+  max-width: min(100%, 560px);
+  margin: 0;
+  padding: 9px 14px;
+  overflow-wrap: anywhere;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 72%, transparent);
+  border-radius: var(--radius-card);
+  background: color-mix(in srgb, var(--color-background-paper) 96%, var(--color-canvas-oat));
+  box-shadow: 0 8px 24px rgb(17 29 28 / 0.1);
+  color: var(--color-text-ink);
+  font-weight: 500;
+  animation: agent-operation-error-toast-lifecycle 5s ease both;
+}
+
+@keyframes agent-operation-error-toast-lifecycle {
+  0% {
+    opacity: 0;
+    transform: translateY(4px) scale(0.985);
+  }
+
+  4%,
+  92% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translateY(-2px) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-operation-error-toast {
+    animation: none;
+  }
 }
 
 .home-project-picker {

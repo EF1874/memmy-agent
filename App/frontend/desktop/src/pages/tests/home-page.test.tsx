@@ -16,6 +16,7 @@ import {
   ComposerMediaPreviewStrip,
   ComposerSubmitButton,
   HomePage,
+  AgentOperationErrorSlot,
   agentErrorText,
   agentStatusText,
   agentChatScopeKey,
@@ -180,6 +181,24 @@ describe("HomePage", () => {
     expect(bridgeSource).toContain("AGENT_OPERATION_ERROR_DISMISS_MS = 5_000");
     expect(bridgeSource).toContain('agentActions.operationErrorDismissed("chat", error.id)');
     expect(bridgeSource).toContain("state.agent.operationErrorNotice");
+  });
+
+  it("renders operation errors in a neutral rounded toast", () => {
+    const html = renderToString(<AgentOperationErrorSlot message="项目操作未完成，请重试" />);
+    const styles = readFileSync(stylesSourcePath, "utf8");
+    const toastStyles = styles.slice(
+      styles.indexOf(".agent-operation-error-toast {"),
+      styles.indexOf("@keyframes agent-operation-error-toast-lifecycle")
+    );
+
+    expect(html).toContain('class="agent-operation-error-toast"');
+    expect(html).toContain('role="alert"');
+    expect(html).toContain("项目操作未完成，请重试");
+    expect(toastStyles).toContain("border-radius: var(--radius-card);");
+    expect(toastStyles).toContain("background: color-mix(in srgb, var(--color-background-paper) 96%, var(--color-canvas-oat));");
+    expect(toastStyles).toContain("box-shadow: 0 8px 24px rgb(17 29 28 / 0.1);");
+    expect(toastStyles).toContain("color: var(--color-text-ink);");
+    expect(toastStyles).not.toContain("var(--color-status-error)");
   });
 
   it("keeps composer state in the agent reducer instead of HomePage local state", () => {
