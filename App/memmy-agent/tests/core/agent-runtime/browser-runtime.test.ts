@@ -63,6 +63,23 @@ afterEach(() => {
 });
 
 describe("AgentLoop browser runtime registration", () => {
+  it("passes the workspace and existing file restriction state to browser sessions", () => {
+    const workspace = root();
+    const loop = new AgentLoop({
+      config: new Config({
+        tools: {
+          restrictToWorkspace: true,
+          browser: { enabled: true },
+        },
+      }),
+      provider: { generation: {}, getDefaultModel: () => "test-model" },
+      workspace,
+    });
+
+    expect((loop.browserSessionManager as any).workspace).toBe(workspace);
+    expect((loop.browserSessionManager as any).restrictLocalFiles).toBe(true);
+  });
+
   it("probes at runtime initialization and preserves already connected MCP tools", async () => {
     const loop = new AgentLoop({
       config: new Config({ tools: { browser: { enabled: true } } }),

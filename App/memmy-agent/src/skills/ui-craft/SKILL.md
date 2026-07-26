@@ -144,8 +144,10 @@ Do not declare the interface polished while a structural problem remains.
 
 When the `browser_*` tools are available, complete the following workflow before declaring visible frontend work finished:
 
-1. Start the project with its existing development or preview command and wait until it is ready.
-2. Use `browser_navigate` to open the real HTTP or HTTPS route. Do not substitute source inspection for opening the page.
+1. Classify the target by runtime needs, not by file count:
+   - For independent static HTML whose files run as written without a build, backend, or application route, pass the permitted local `.html`/`.htm` path directly to `browser_navigate`.
+   - For framework or service-backed work, start the project's existing development or preview command in the foreground with `yield_time_ms`, wait until it is ready, and use its HTTP or HTTPS route.
+2. Use `browser_navigate` to open the real rendered page. Do not substitute source inspection for opening it.
 3. Use `browser_snapshot` to inspect page structure, visible content, semantics, and important controls.
 4. Exercise the primary interaction and important states with `browser_find`, `browser_click`, `browser_type`, `browser_select_option`, `browser_press_key`, or `browser_wait_for` as relevant.
 5. Use `browser_console_messages` to inspect errors and meaningful warnings.
@@ -155,6 +157,7 @@ When the `browser_*` tools are available, complete the following workflow before
 9. Judge the screenshots, not merely the presence of DOM nodes. Check composition, hierarchy, alignment, spacing rhythm, typography, contrast, content density, clipping, overflow, control prominence, and visual consistency.
 10. Run the anti-template review against the screenshots.
 11. Fix every material issue and repeat the complete relevant sequence until the implementation and the rendered result are sound.
+12. If this task started a development or preview service, terminate its Exec session after validation.
 
 Treat console, network, snapshot, and screenshot checks as different evidence. A clean console does not prove the layout is good, and an attractive screenshot does not prove the interactions work.
 

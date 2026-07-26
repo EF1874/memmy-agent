@@ -3,8 +3,13 @@ import os from "node:os";
 import path from "node:path";
 import type { Browser, BrowserContext } from "playwright";
 import type { BrowserToolsConfig } from "../../../config/schema.js";
-import { validateUrl } from "./web.js";
 import { Tool, type ToolExecutionContext } from "./base.js";
+import {
+  classifyBrowserNavigateTarget,
+  createBrowserPreview,
+  type BrowserNavigateTarget,
+  type BrowserPreviewLease,
+} from "./browser-preview.js";
 import { RequestContext, RequestContextStore } from "./context.js";
 import {
   connectInMemoryMcpServer,
@@ -66,6 +71,7 @@ type BrowserSession = {
   context: BrowserContext;
   connection: InMemoryMcpConnection;
   outputDir: string;
+  preview: BrowserPreviewLease | null;
   lastUsedAt: number;
   pendingCalls: number;
   closed: boolean;
@@ -146,12 +152,24 @@ function narrowBrowserToolDefinition(tool: any): BrowserToolDefinition {
     }),
     "filename",
   );
-  return {
+  const definition: BrowserToolDefinition = {
     name: tool.name,
     description: tool.description || tool.name,
     inputSchema,
     annotations: tool.annotations,
   };
+  if (definition.name === "browser_navigate") {
+    const localPathDescription =
+      "The url may also be an absolute or workspace-relative local .html/.htm path; local files use a restricted temporary preview.";
+    definition.description = `${definition.description} ${localPathDescription}`;
+    const url = definition.inputSchema.properties?.url;
+    if (url && typeof url === "object") {
+      url.description = url.description
+        ? `${url.description} ${localPathDescription}`
+        : localPathDescription;
+    }
+  }
+  return definition;
 }
 
 function normalizeBrowserConfig(config: BrowserToolsConfig | Record<string, any>): {
@@ -170,6 +188,8 @@ export class BrowserSessionManager {
   capability: BrowserCapability = "unknown";
   private readonly config: ReturnType<typeof normalizeBrowserConfig>;
   private readonly runtimeLoader: BrowserRuntimeLoader;
+  private readonly workspace: string;
+  private readonly restrictLocalFiles: boolean;
   private runtime: PlaywrightRuntime | null = null;
   private executablePath: string | null = null;
   private definitions = new Map<BrowserToolName, BrowserToolDefinition>();
@@ -183,10 +203,20 @@ export class BrowserSessionManager {
 
   constructor(
     config: BrowserToolsConfig | Record<string, any>,
-    { runtimeLoader = defaultRuntimeLoader }: { runtimeLoader?: BrowserRuntimeLoader } = {},
+    {
+      runtimeLoader = defaultRuntimeLoader,
+      workspace = process.cwd(),
+      restrictLocalFiles = false,
+    }: {
+      runtimeLoader?: BrowserRuntimeLoader;
+      workspace?: string;
+      restrictLocalFiles?: boolean;
+    } = {},
   ) {
     this.config = normalizeBrowserConfig(config);
     this.runtimeLoader = runtimeLoader;
+    this.workspace = path.resolve(workspace);
+    this.restrictLocalFiles = restrictLocalFiles;
     if (!this.config.enabled) this.capability = "disabled";
   }
 
@@ -361,6 +391,7 @@ export class BrowserSessionManager {
         context,
         connection,
         outputDir,
+        preview: null,
         lastUsedAt: Date.now(),
         pendingCalls: initialPendingCalls,
         closed: false,
@@ -418,9 +449,13 @@ export class BrowserSessionManager {
     abortSignal: AbortSignal | null = null,
   ): Promise<string | Array<Record<string, any>>> {
     if (!this.definitions.has(name)) throw new Error(`browser tool '${name}' is unavailable`);
+    const navigateTarget: BrowserNavigateTarget | null = name === "browser_navigate"
+      ? classifyBrowserNavigateTarget(String(params.url ?? ""))
+      : null;
     const session = await this.acquireSession(scope);
     try {
       return await session.mutex.runExclusive(async () => {
+        let candidatePreview: BrowserPreviewLease | null = null;
         try {
           if (session.closed) throw new Error("browser session closed");
           if (abortSignal?.aborted) {
@@ -429,8 +464,16 @@ export class BrowserSessionManager {
             throw error;
           }
           session.lastUsedAt = Date.now();
+          let callParams = params;
+          if (navigateTarget?.kind === "path") {
+            candidatePreview = await createBrowserPreview(navigateTarget.path, {
+              workspace: this.workspace,
+              restrictLocalFiles: this.restrictLocalFiles,
+            });
+            callParams = { ...params, url: candidatePreview.url };
+          }
           const result = await session.connection.client.callTool(
-            { name, arguments: params },
+            { name, arguments: callParams },
             undefined,
             {
               signal: abortSignal ?? undefined,
@@ -439,8 +482,20 @@ export class BrowserSessionManager {
             },
           );
           session.lastUsedAt = Date.now();
+          if (navigateTarget && result.isError !== true) {
+            const previousPreview = session.preview;
+            session.preview = navigateTarget.kind === "path"
+              ? candidatePreview
+              : null;
+            candidatePreview = null;
+            await previousPreview?.close().catch(() => undefined);
+          } else {
+            await candidatePreview?.close().catch(() => undefined);
+            candidatePreview = null;
+          }
           return convertMcpToolContent(result, "structured");
         } catch (error) {
+          await candidatePreview?.close().catch(() => undefined);
           if (abortSignal?.aborted || (error as Error).name === "AbortError") {
             await this.closeByKey(session.key);
           }
@@ -489,6 +544,8 @@ export class BrowserSessionManager {
     session.closed = true;
     await session.connection.close().catch(() => undefined);
     await session.context.close().catch(() => undefined);
+    await session.preview?.close().catch(() => undefined);
+    session.preview = null;
     fs.rmSync(session.outputDir, { recursive: true, force: true });
   }
 
@@ -575,10 +632,6 @@ abstract class BrowserTool extends Tool {
     const chatId = request?.chatId?.trim();
     if (!sessionKey || !channel || !chatId) {
       throw new Error("browser tool requires a trusted chat context");
-    }
-    if (this.name === "browser_navigate") {
-      const [valid, error] = validateUrl(String(params.url ?? ""));
-      if (!valid) throw new Error(`invalid browser URL: ${error}`);
     }
     return this.manager.callTool(
       { sessionKey, channel, chatId },

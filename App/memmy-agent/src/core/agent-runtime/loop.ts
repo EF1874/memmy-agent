@@ -444,7 +444,16 @@ export class AgentLoop {
     this.sessionDagQueue = init.sessionDagQueue ?? this.createSessionDagQueue();
     this.execSessionManager = new ExecSessionManager();
     this.fileStateStore = new FileStateStore();
-    this.browserSessionManager = new BrowserSessionManager(this.config.tools.browser);
+    this.browserSessionManager = new BrowserSessionManager(
+      this.config.tools.browser,
+      {
+        workspace: this.workspace,
+        restrictLocalFiles: Boolean(
+          this.config.tools.restrictToWorkspace
+          || this.config.tools.exec.sandbox,
+        ),
+      },
+    );
     this.subagents = new SubagentManager({
       provider: this.provider,
       workspace: this.workspace,

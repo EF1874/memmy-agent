@@ -63,6 +63,7 @@ function browserToolDefinitions(): Array<Record<string, any>> {
       properties: {
         url: { type: "string" },
         delay: { type: "integer" },
+        fail: { type: "boolean" },
         filename: { type: "string" },
         nested: {
           type: "object",
@@ -157,6 +158,12 @@ function fakeRuntime(root: string): {
               ],
             };
           }
+          if (args.fail) {
+            return {
+              isError: true,
+              content: [{ type: "text", text: `failed:${context.id}` }],
+            };
+          }
           return {
             content: [
               {
@@ -183,7 +190,11 @@ async function createManager(
   const { runtimeLoader, state } = fakeRuntime(root);
   const manager = new BrowserSessionManager(
     { enabled: true, maxSessions: 4, idleTimeoutS: 900, ...config },
-    { runtimeLoader },
+    {
+      runtimeLoader,
+      workspace: root,
+      restrictLocalFiles: true,
+    },
   );
   managers.push(manager);
   await expect(manager.initialize()).resolves.toBe("ready");
@@ -209,6 +220,10 @@ describe("BrowserSessionManager", () => {
     expect(state.launches).toBe(1);
     expect(BROWSER_TOOL_NAMES.every((name) => manager.definition(name))).toBe(true);
     const schema = manager.definition("browser_navigate")!.inputSchema;
+    expect(manager.definition("browser_navigate")!.description).toContain(
+      "local .html/.htm path",
+    );
+    expect(schema.properties.url.description).toContain("local .html/.htm path");
     expect(schema.properties).not.toHaveProperty("filename");
     expect(schema.properties.nested.properties).not.toHaveProperty("filename");
     expect(schema.properties.nested.required).toEqual(["value"]);
@@ -365,6 +380,65 @@ describe("BrowserSessionManager", () => {
     expect((manager as any).sessions.size).toBe(0);
   });
 
+  it("routes local HTML through a preview and closes it after HTTP navigation", async () => {
+    const root = tmpRoot();
+    fs.writeFileSync(path.join(root, "index.html"), "<h1>Preview</h1>", "utf8");
+    const { manager, state } = await createManager(root);
+    const chat = { sessionKey: "a", channel: "websocket", chatId: "a" };
+
+    await manager.callTool(chat, "browser_navigate", { url: "index.html" });
+    const previewCall = state.calls.at(-1)!;
+    const previewUrl = String(previewCall.arguments.url);
+    const session = [...(manager as any).sessions.values()][0];
+    const preview = session.preview;
+    const close = vi.spyOn(preview, "close");
+
+    expect(previewUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/index\.html$/);
+    expect(previewUrl).not.toContain(root);
+    expect((await fetch(previewUrl)).status).toBe(200);
+
+    await manager.callTool(chat, "browser_navigate", {
+      url: "https://example.com",
+    });
+
+    expect(state.calls.at(-1)!.arguments.url).toBe("https://example.com");
+    expect(session.preview).toBeNull();
+    expect(close).toHaveBeenCalledOnce();
+    await expect(fetch(previewUrl)).rejects.toThrow();
+  });
+
+  it("keeps the active preview when a replacement navigation fails", async () => {
+    const root = tmpRoot();
+    fs.writeFileSync(path.join(root, "first.html"), "<h1>First</h1>", "utf8");
+    fs.writeFileSync(path.join(root, "second.html"), "<h1>Second</h1>", "utf8");
+    const { manager, state } = await createManager(root);
+    const chat = { sessionKey: "a", channel: "websocket", chatId: "a" };
+
+    await manager.callTool(chat, "browser_navigate", { url: "first.html" });
+    const session = [...(manager as any).sessions.values()][0];
+    const first = session.preview;
+    const closeFirst = vi.spyOn(first, "close");
+
+    await manager.callTool(chat, "browser_navigate", {
+      url: "second.html",
+      fail: true,
+    });
+    const failedPreviewUrl = String(state.calls.at(-1)!.arguments.url);
+    expect(session.preview).toBe(first);
+    expect(closeFirst).not.toHaveBeenCalled();
+    await expect(fetch(failedPreviewUrl)).rejects.toThrow();
+
+    await manager.callTool(chat, "browser_navigate", {
+      url: "https://example.com",
+      fail: true,
+    });
+    expect(session.preview).toBe(first);
+    expect(closeFirst).not.toHaveBeenCalled();
+
+    await manager.closeSession(chat);
+    expect(closeFirst).toHaveBeenCalledOnce();
+  });
+
   it("also closes a newly created session for a pre-aborted call", async () => {
     const { manager, state } = await createManager(tmpRoot());
     const controller = new AbortController();
@@ -484,6 +558,7 @@ describe("browser tool wrappers", () => {
     await expect(tool.execute({ url: "file:///tmp/page.html" })).rejects.toThrow(
       "invalid browser URL",
     );
+    expect((manager as any).sessions.size).toBe(0);
     await expect(tool.execute({ url: "https://example.com" })).resolves.toEqual([
       {
         type: "text",

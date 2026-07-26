@@ -73,6 +73,10 @@ describe("SkillsLoader listSkills", () => {
     expect(content).toContain("browser_network_requests");
     expect(content).toContain("browser_take_screenshot");
     expect(content).toContain("browser_resize");
+    expect(content).toContain("independent static HTML");
+    expect(content).toContain("permitted local `.html`/`.htm` path");
+    expect(content).toContain("foreground with `yield_time_ms`");
+    expect(content).toContain("terminate its Exec session after validation");
     expect(content).toContain("one-sentence visual thesis");
     expect(content).toContain("Run the anti-template review");
     expect(content).toContain("Completion gate");
