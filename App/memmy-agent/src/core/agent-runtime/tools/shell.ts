@@ -14,7 +14,9 @@ import {
   MAX_OUTPUT_CHARS,
   MAX_YIELD_MS,
   clampSessionInt,
+  drainExitedProcessStreams,
   formatSessionPoll,
+  terminateManagedProcessTree,
   truncateOutput,
 } from "./exec-session.js";
 import { isPathInside } from "./path-utils.js";
@@ -315,7 +317,12 @@ export class ExecTool extends Tool {
     const args = [];
     if (login && ["bash", "bash.exe", "zsh", "zsh.exe"].includes(shellName(shellProgramResolved))) args.push("-l");
     args.push("-c", command);
-    return spawn(shellProgramResolved, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+    return spawn(shellProgramResolved, args, {
+      cwd,
+      env,
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
   }
 
   static resolveShell(shell?: string | null): [string | null, string | null] {
@@ -539,48 +546,33 @@ export class ExecTool extends Tool {
         const stdoutDecoder = new CommandOutputDecoder(this.outputDecoderOptions());
         const stderrDecoder = new CommandOutputDecoder(this.outputDecoderOptions());
         let settled = false;
+        let streamsClosed = false;
+        let exitObserved = false;
         let timer: NodeJS.Timeout | null = null;
-        let killTimer: NodeJS.Timeout | null = null;
+        let resolveClose!: () => void;
+        const closePromise = new Promise<void>((closeResolve) => {
+          resolveClose = closeResolve;
+        });
+        const processOptions = {
+          platform: (isWindows ? "win32" : process.platform) as NodeJS.Platform,
+        };
         const cleanup = () => {
           if (timer) clearTimeout(timer);
-          if (killTimer) clearTimeout(killTimer);
           signal?.removeEventListener("abort", onAbort);
         };
-        const onAbort = () => {
-          if (settled) return;
-          settled = true;
-          if (timer) clearTimeout(timer);
-          child.kill("SIGTERM");
-          killTimer = setTimeout(() => {
-            if (child.exitCode == null && child.signalCode == null) child.kill("SIGKILL");
-          }, 1000);
-          killTimer.unref?.();
-          reject(createToolAbortError());
+        const forceCloseStreams = () => {
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+          child.stdin?.destroy();
+          if (streamsClosed) return;
+          streamsClosed = true;
+          resolveClose();
         };
-        if (signal?.aborted) {
-          child.kill("SIGTERM");
-          reject(createToolAbortError());
-          return;
-        }
-        signal?.addEventListener("abort", onAbort, { once: true });
-        if (prepared.timeout != null) {
-          timer = setTimeout(() => {
-            if (settled) return;
-            settled = true;
-            cleanup();
-            child.kill("SIGTERM");
-            resolve(`Error: Command timed out after ${prepared.timeout} seconds`);
-          }, prepared.timeout * 1000);
-        }
-        child.stdout?.on("data", (chunk: Buffer) => stdoutDecoder.push(chunk));
-        child.stderr?.on("data", (chunk: Buffer) => stderrDecoder.push(chunk));
-        child.on("error", (error) => {
-          if (settled) return;
-          settled = true;
-          cleanup();
-          resolve(`Error executing command: ${error.message}`);
-        });
-        child.on("close", (code) => {
+        const terminate = async () => {
+          await terminateManagedProcessTree(child, processOptions);
+          if (!streamsClosed) forceCloseStreams();
+        };
+        const complete = (code: number | null, lifecycleError: string | null) => {
           if (settled) return;
           settled = true;
           cleanup();
@@ -592,7 +584,63 @@ export class ExecTool extends Tool {
           parts.push(`\nExit code: ${code}`);
           const body = parts.length ? parts.join("\n") : "(no output)";
           const [truncated] = truncateOutput(body, maxOutputChars);
-          resolve(code === 0 ? truncated : `Error: command exited with ${code}\n${truncated}`);
+          const result = code === 0 ? truncated : `Error: command exited with ${code}\n${truncated}`;
+          resolve(lifecycleError ? `${lifecycleError}\n${result}` : result);
+        };
+        const onAbort = () => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          void terminate().then(
+            () => reject(createToolAbortError()),
+            () => reject(createToolAbortError()),
+          );
+        };
+        if (signal?.aborted) {
+          onAbort();
+          return;
+        }
+        signal?.addEventListener("abort", onAbort, { once: true });
+        if (prepared.timeout != null) {
+          timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            void terminate().finally(() => {
+              resolve(`Error: Command timed out after ${prepared.timeout} seconds`);
+            });
+          }, prepared.timeout * 1000);
+        }
+        child.stdout?.on("data", (chunk: Buffer) => stdoutDecoder.push(chunk));
+        child.stderr?.on("data", (chunk: Buffer) => stderrDecoder.push(chunk));
+        child.once("error", (error) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          resolve(`Error executing command: ${error.message}`);
+        });
+        child.once("close", (code) => {
+          streamsClosed = true;
+          resolveClose();
+          if (!exitObserved) complete(code, null);
+        });
+        child.once("exit", (code) => {
+          exitObserved = true;
+          void (async () => {
+            const lifecycleError = await drainExitedProcessStreams({
+              child,
+              closePromise,
+              streamsClosed: () => streamsClosed,
+              forceCloseStreams,
+              options: processOptions,
+            });
+            complete(code, lifecycleError);
+          })().catch((error) => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            resolve(`Error executing command: ${(error as Error).message}`);
+          });
         });
       });
     } catch (error) {
