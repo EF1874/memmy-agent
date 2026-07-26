@@ -72,6 +72,10 @@ describe("SkillsLoader listSkills", () => {
     expect(content).toContain("browser_console_messages");
     expect(content).toContain("browser_network_requests");
     expect(content).toContain("browser_take_screenshot");
+    expect(content).toContain("browser_resize");
+    expect(content).toContain("one-sentence visual thesis");
+    expect(content).toContain("Run the anti-template review");
+    expect(content).toContain("Completion gate");
     expect(fs.readdirSync(path.dirname(entry!.path))).toEqual(["SKILL.md"]);
   });
 
