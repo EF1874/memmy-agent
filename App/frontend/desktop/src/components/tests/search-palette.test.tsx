@@ -14,6 +14,10 @@ function makeTask(overrides: Partial<AgentTaskView> & Pick<AgentTaskView, "sessi
     pinned: false,
     archived: false,
     tags: [],
+    projectId: null,
+    groupProjectId: null,
+    cwd: "/workspace",
+    missingProject: false,
     ...overrides
   };
 }

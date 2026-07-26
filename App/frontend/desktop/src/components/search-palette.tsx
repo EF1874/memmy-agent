@@ -1,27 +1,30 @@
 /** Search palette module. */
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Search } from "../pages/memory/memory-prototype-icons.js";
+import type { MemmyAgentProject } from "../api/memmy-agent-client.js";
 import type { AgentTaskView } from "../state/agent-chat-slice.js";
 
 export interface SearchPaletteProps {
   open: boolean;
   tasks: AgentTaskView[];
+  projects?: MemmyAgentProject[];
   onClose: () => void;
   onSelectTask: (task: AgentTaskView) => void;
   placeholder?: string;
   emptyLabel?: string;
   untitledLabel?: string;
   ariaLabel?: string;
+  standaloneLabel?: string;
 }
 
 export function SearchPalette(props: SearchPaletteProps) {
-  const { open, tasks, onClose, onSelectTask, placeholder, emptyLabel, untitledLabel, ariaLabel } = props;
+  const { open, tasks, projects = [], onClose, onSelectTask, placeholder, emptyLabel, untitledLabel, ariaLabel } = props;
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
-  const filtered = filterTasks(tasks, query);
+  const filtered = filterTasks(tasks, query, projects);
   const displayTasks = query.trim() ? filtered : tasks.slice(0, 12);
 
   useEffect(() => {
@@ -85,7 +88,11 @@ export function SearchPalette(props: SearchPaletteProps) {
           {displayTasks.length === 0 && (
             <div className="search-palette-empty">{emptyLabel}</div>
           )}
-          {displayTasks.map((task, i) => (
+          {displayTasks.map((task, i) => {
+            const project = task.groupProjectId
+              ? projects.find((candidate) => candidate.id === task.groupProjectId) ?? null
+              : null;
+            return (
             <button
               key={task.sessionKey}
               type="button"
@@ -97,19 +104,36 @@ export function SearchPalette(props: SearchPaletteProps) {
             >
               <span className="search-palette-item-title">{task.title || untitledLabel}</span>
               {task.preview && <span className="search-palette-item-preview">{task.preview}</span>}
+              <span className="search-palette-item-preview">
+                {project ? `${project.name} · ${project.rootPath}` : props.standaloneLabel}
+              </span>
             </button>
-          ))}
+            );
+          })}
         </div>
       </div>
     </div>
   );
 }
 
-export function filterTasks(tasks: AgentTaskView[], searchQuery: string): AgentTaskView[] {
+export function filterTasks(
+  tasks: AgentTaskView[],
+  searchQuery: string,
+  projects: MemmyAgentProject[] = []
+): AgentTaskView[] {
   const q = searchQuery.trim().toLowerCase();
   if (!q) return tasks;
   return tasks.filter((task) => {
-    const haystack = [task.title, task.preview, ...task.tags].join(" ").toLowerCase();
+    const project = task.groupProjectId
+      ? projects.find((candidate) => candidate.id === task.groupProjectId)
+      : null;
+    const haystack = [
+      task.title,
+      task.preview,
+      ...task.tags,
+      project?.name ?? "",
+      project?.rootPath ?? ""
+    ].join(" ").toLowerCase();
     return haystack.includes(q);
   });
 }

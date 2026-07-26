@@ -72,7 +72,8 @@ describe("HomePage", () => {
     expect(html).toContain("发送");
     expect(html).toContain("Agent 正在连接");
     expect(html).not.toContain('aria-haspopup="menu"');
-    expect(html).not.toContain('aria-expanded=');
+    expect(html).toContain('class="home-project-picker__trigger"');
+    expect(html).toContain('aria-expanded="false"');
     expect(html).toContain(`accept="${AGENT_MEDIA_ACCEPT}"`);
     expect(html).toContain("hidden");
     expect(html).toContain('class="hidden"');
@@ -178,7 +179,7 @@ describe("HomePage", () => {
     expect(source).toContain("window.clearTimeout");
     expect(bridgeSource).toContain("AGENT_OPERATION_ERROR_DISMISS_MS = 5_000");
     expect(bridgeSource).toContain('agentActions.operationErrorDismissed("chat", error.id)');
-    expect(bridgeSource).toContain('agentActions.operationErrorDismissed("sidebar", error.id)');
+    expect(bridgeSource).toContain("state.agent.operationErrorNotice");
   });
 
   it("keeps composer state in the agent reducer instead of HomePage local state", () => {
@@ -425,7 +426,7 @@ describe("HomePage", () => {
   it("consumes the shared AgentRuntimeBridge connection instead of owning websocket lifecycle", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
 
-    expect(source).toContain("const { connection, ensureChatSubscription } = useAgentRuntimeBridge();");
+    expect(source).toContain("const { connection, ensureChatSubscription, taskStateCoordinator } = useAgentRuntimeBridge();");
     expect(source).toContain("connection.onStatusResult((chatId, content) => {");
     expect(source).toContain("subscribedChatId: state.agent.currentChatId");
     expect(source).not.toContain("connectWebSocket(");
@@ -507,8 +508,8 @@ describe("HomePage", () => {
 
     expect(refreshEffect).toContain("Object.entries(state.agent.pendingCanonicalHydrateByChatId)");
     expect(refreshEffect).toContain("hydrateAgentThreadInBackground(clients.memmyAgent, dispatch, chatId);");
-    expect(refreshEffect).toContain("void refreshAgentTaskList(clients.memmyAgent, dispatch, { state: state.agent });");
-    expect(refreshTaskList).toContain("client.listSessions()");
+    expect(refreshEffect).toContain("taskStateCoordinator?.refreshTaskState();");
+    expect(refreshTaskList).toContain("client.getSessionSnapshot({ timeoutMs: 10_000 })");
     expect(refreshTaskList).toContain("client.readSidebarState()");
     expect(refreshTaskList).not.toContain("readWebuiThread");
   });
@@ -773,7 +774,7 @@ describe("HomePage", () => {
     expect(agentErrorText("home.media.error.sendUnsupported")).toBe("当前不支持此文件格式。请上传图片、PDF、Office 文档或文本文件。");
     expect(agentErrorText("home.media.error.sendTooManyAttachments")).toBe("最多 4 个附件。");
     expect(agentErrorText("home.media.error.sendFileSize")).toBe("单个文件不能超过 10 MB。");
-    expect(agentErrorText("plain error")).toBe("plain error");
+    expect(agentErrorText("plain error")).toBe("操作未完成，请重试");
     expect(agentErrorText(null)).toBeNull();
   });
 
@@ -821,8 +822,7 @@ describe("HomePage", () => {
         { url: "http://agent.local/api/media/sig/shot", name: "shot.png", kind: "image", path: "/media/websocket/webui/shot.png" },
         { url: "http://agent.local/api/media/sig/report", name: "小短文.pdf", kind: "file", path: "/media/websocket/webui/小短文.pdf" }
       ],
-      focus: true,
-      deliveryUncertain: false
+      focus: true
     });
     expect(uploadAgentMedia).toHaveBeenCalledWith([
       { blob: encodedBlob, name: "shot.png", kind: "image", mime: "image/png" },
@@ -831,6 +831,8 @@ describe("HomePage", () => {
     expect(sendMessage).toHaveBeenCalledWith({
       chatId: "chat-new",
       content: "帮我整理计划",
+      clientRequestId: expect.any(String),
+      target: { kind: "standalone" },
       language: "zh-CN",
       media: [
         { path: "/media/websocket/webui/shot.png", url: "http://agent.local/api/media/sig/shot", name: "shot.png", kind: "image", mime: "image/png", bytes: 3 },
@@ -869,9 +871,14 @@ describe("HomePage", () => {
     })).resolves.toBe(true);
 
     expect(newChat).not.toHaveBeenCalled();
-    expect(dispatch).toHaveBeenCalledWith({ type: "agent/userMessageQueued", chatId: "chat-1", content: "继续", media: [], focus: true, deliveryUncertain: false });
+    expect(dispatch).toHaveBeenCalledWith({ type: "agent/userMessageQueued", chatId: "chat-1", content: "继续", media: [], focus: true });
     expect(ensureChatSubscription).toHaveBeenCalledWith("chat-1");
-    expect(sendMessage).toHaveBeenCalledWith({ chatId: "chat-1", content: "继续", media: [] }, 1);
+    expect(sendMessage).toHaveBeenCalledWith({
+      chatId: "chat-1",
+      content: "继续",
+      clientRequestId: expect.any(String),
+      media: []
+    }, 1);
     expect(mockCallOrder(ensureChatSubscription)).toBeLessThan(mockCallOrder(sendMessage));
     expect(mockCallOrder(sendMessage)).toBeLessThan(mockCallOrder(dispatch));
     expect(onNewChatMessageSent).not.toHaveBeenCalled();
@@ -930,7 +937,7 @@ describe("HomePage", () => {
     expect(clearComposer).not.toHaveBeenCalled();
   });
 
-  it("marks a sent message uncertain when the ready generation changes immediately after send", async () => {
+  it("does not restore the old delivery-uncertain flag after an acknowledged send", async () => {
     const dispatch = vi.fn();
     let generation: number | null = 1;
     const sendMessage = vi.fn(() => {
@@ -953,8 +960,7 @@ describe("HomePage", () => {
       chatId: "chat-1",
       content: "发送后立刻断线",
       media: [],
-      focus: true,
-      deliveryUncertain: true
+      focus: true
     });
   });
 

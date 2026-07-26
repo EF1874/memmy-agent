@@ -24,7 +24,8 @@ describe("AppFrame", () => {
 
     expect(html).toContain("新任务");
     expect(html).toContain("连接与工具");
-    expect(html).toContain("今天");
+    expect(html).toContain("项目");
+    expect(html).toContain("任务");
     expect(html).toContain("暂无任务");
     expect(html).not.toContain("置顶");
     expect(html).not.toContain("归档");
@@ -32,7 +33,7 @@ describe("AppFrame", () => {
     expect(html).toContain('role="separator"');
     expect(html).toContain('aria-label="调整主侧边栏宽度"');
     expect(html).toContain("sidebar-resize-handle");
-    expect(html).toContain("app-frame-task-section-action__dots");
+    expect(html).toContain("app-frame-task-section-action");
     expect(html).not.toContain("刷新列表");
     expect(html).not.toContain("预览任务");
     expect(html).not.toContain("排序方式");
@@ -202,12 +203,13 @@ describe("AppFrame", () => {
     expect(source).not.toContain('state.agent.operationErrorsBySurface.sidebar');
   });
 
-  it("bases rapid sidebar mutations on the latest optimistic state", () => {
+  it("queues rapid sidebar mutations as replayable coordinator intents", () => {
     const source = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
 
-    expect(source).toContain("const sidebarStateRef = useRef(state.agent.sidebarState);");
-    expect(source).toContain("updateSidebarStateForTask(sidebarStateRef.current, task.sessionKey, patch)");
-    expect(source).toContain("sidebarStateRef.current = nextState;");
+    expect(source).toContain("taskStateCoordinator.enqueueSidebarIntent(intent)");
+    expect(source).toContain('kind: "task-patch"');
+    expect(source).toContain('kind: "batch-archive"');
+    expect(source).not.toContain("sidebarStateRef");
   });
 
   it("uses a task-list icon for the preview toggle menu item", () => {
@@ -230,7 +232,7 @@ describe("AppFrame", () => {
     expect(toggleTaskListMenuBlock).toContain("setSortMenuOpen(false);");
     expect(openTaskContextMenuBlock).toContain("setTaskListMenuAnchor(null);");
     expect(openTaskContextMenuBlock).toContain("setSortMenuOpen(false);");
-    expect(source.match(/toggleTaskListMenu\(sidebarMenuAnchorFromRect/g)).toHaveLength(2);
+    expect(source.match(/toggleTaskListMenu\(sidebarMenuAnchorFromRect/g)).toHaveLength(1);
   });
 
   it("New Agent opens a local blank draft without calling the backend", () => {
@@ -240,7 +242,7 @@ describe("AppFrame", () => {
     expect(shouldCreateNewAgentDraft(newAgentDraftState({ blankDraftActive: true }))).toBe(false);
     expect(shouldCreateNewAgentDraft(newAgentDraftState({ composerDraftsByScope: { "draft-3": "未发送" } }))).toBe(false);
     expect(shouldCreateNewAgentDraft(newAgentDraftState({ composerPendingAttachmentsByScope: { "draft-3": [{} as never] } }))).toBe(false);
-    expect(source).toContain("function openNewAgent()");
+    expect(source).toContain("function openNewAgent(target?: WebuiSessionTarget)");
     expect(source).toContain("clearFocusedAgentTarget(");
     expect(source).toContain("if (shouldCreateNewAgentDraft(state.agent))");
     expect(source).toContain("dispatch(agentActions.newChatRequested());");
@@ -788,7 +790,11 @@ function baseTask(chatId: string): AgentTaskView {
     completedUnseen: false,
     pinned: false,
     archived: false,
-    tags: []
+    tags: [],
+    projectId: null,
+    groupProjectId: null,
+    cwd: "/workspace",
+    missingProject: false
   };
 }
 

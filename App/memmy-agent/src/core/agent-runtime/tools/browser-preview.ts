@@ -39,6 +39,7 @@ export type BrowserPreviewLease = {
 type PreviewOptions = {
   workspace: string;
   restrictLocalFiles: boolean;
+  readonlyRoots?: readonly string[];
 };
 
 type ValidatedFile = {
@@ -126,11 +127,12 @@ function safeRealpath(value: string): string {
   }
 }
 
-function allowedRoots(workspace: string): string[] {
+function allowedRoots(workspace: string, readonlyRoots: readonly string[] = []): string[] {
   return [...new Set([
     safeRealpath(workspace),
     safeRealpath(getMediaDir()),
     safeRealpath(BUILTIN_SKILLS_DIR),
+    ...readonlyRoots.map(safeRealpath),
   ])];
 }
 
@@ -518,7 +520,7 @@ export async function createBrowserPreview(
   options: PreviewOptions,
 ): Promise<BrowserPreviewLease> {
   const workspace = path.resolve(options.workspace);
-  const roots = allowedRoots(workspace);
+  const roots = allowedRoots(workspace, options.readonlyRoots);
   const entryCandidate = path.isAbsolute(requestedEntry) || isWindowsAbsolutePath(requestedEntry)
     ? requestedEntry
     : path.resolve(workspace, requestedEntry);

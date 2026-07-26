@@ -174,6 +174,7 @@ export class ExecTool extends Tool {
   pathAppend: string;
   allowedEnvKeys: string[];
   sessionManager: ExecSessionManager;
+  readonlySkillRoots: readonly string[];
   private readonly commandOutputDecoderOptions: CommandOutputDecoderOptions;
 
   constructor({
@@ -189,6 +190,7 @@ export class ExecTool extends Tool {
     allowPatterns,
     denyPatterns,
     sessionManager = DEFAULT_EXEC_SESSION_MANAGER,
+    readonlySkillRoots = [],
     commandOutputDecoderOptions = {},
   }: {
     workspace?: string;
@@ -203,6 +205,7 @@ export class ExecTool extends Tool {
     allowPatterns?: string[];
     denyPatterns?: string[];
     sessionManager?: ExecSessionManager;
+    readonlySkillRoots?: readonly string[];
     commandOutputDecoderOptions?: CommandOutputDecoderOptions;
   } = {}) {
     super();
@@ -225,6 +228,7 @@ export class ExecTool extends Tool {
     this.restrictToWorkspace = restrictToWorkspace ?? this.config.restrictToWorkspace;
     this.config.restrictToWorkspace = this.restrictToWorkspace;
     this.sessionManager = sessionManager;
+    this.readonlySkillRoots = Object.freeze(readonlySkillRoots.map((root) => path.resolve(root)));
     this.commandOutputDecoderOptions = commandOutputDecoderOptions;
   }
 
@@ -245,6 +249,7 @@ export class ExecTool extends Tool {
       config,
       restrictToWorkspace: ctx?.config?.restrictToWorkspace ?? config.restrictToWorkspace,
       sessionManager: ctx?.execSessionManager ?? DEFAULT_EXEC_SESSION_MANAGER,
+      readonlySkillRoots: ctx?.readonlySkillRoots ?? [],
     });
   }
 
@@ -423,6 +428,10 @@ export class ExecTool extends Tool {
         if (ExecTool.isBenignDevicePath(expanded)) continue;
         const absolute = path.resolve(expanded);
         if (ExecTool.isBenignDevicePath(absolute)) continue;
+        if (this.readonlySkillRoots.some((root) => isPathInside(absolute, root))) {
+          if (this.sandbox === "bwrap") continue;
+          return "Error: skill_script_requires_sandbox";
+        }
         if (!isPathInside(absolute, cwdPath) && !isPathInside(absolute, mediaPath)) {
           return "Error: Command blocked by safety guard (path outside working dir)" + WORKSPACE_BOUNDARY_NOTE;
         }
@@ -457,7 +466,7 @@ export class ExecTool extends Tool {
     if (this.sandbox) {
       if (!isWindows) {
         const workspace = this.workingDir || cwd;
-        command = wrapCommand(this.sandbox, command, workspace, cwd);
+        command = wrapCommand(this.sandbox, command, workspace, cwd, this.readonlySkillRoots);
         cwd = path.resolve(workspace);
       }
     }

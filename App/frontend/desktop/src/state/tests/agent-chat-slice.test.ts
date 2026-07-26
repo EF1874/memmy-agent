@@ -18,13 +18,17 @@ const sessions: MemmyAgentSessionSummary[] = [
     key: "websocket:chat-1",
     title: "客户需求分析与软件功能需求拆解",
     preview: "继续确认范围",
-    updatedAt: "2026-06-06T09:00:00.000Z"
+    updatedAt: "2026-06-06T09:00:00.000Z",
+    projectId: null,
+    cwd: "/workspace"
   },
   {
     key: "websocket:chat-2",
     title: "Memmy PRD 整理",
     preview: "补充首期接口",
-    updatedAt: "2026-06-06T10:00:00.000Z"
+    updatedAt: "2026-06-06T10:00:00.000Z",
+    projectId: null,
+    cwd: "/workspace"
   }
 ];
 
@@ -189,7 +193,11 @@ describe("agent chat slice", () => {
         completedUnseen: false,
         pinned: true,
         archived: false,
-        tags: ["需求", "首期"]
+        tags: ["需求", "首期"],
+        projectId: null,
+        groupProjectId: null,
+        cwd: "/workspace",
+        missingProject: false
       },
       {
         sessionKey: "websocket:chat-2",
@@ -201,7 +209,11 @@ describe("agent chat slice", () => {
         completedUnseen: false,
         pinned: false,
         archived: true,
-        tags: []
+        tags: [],
+        projectId: null,
+        groupProjectId: null,
+        cwd: "/workspace",
+        missingProject: false
       }
     ]);
 
@@ -219,7 +231,9 @@ describe("agent chat slice", () => {
         key: "websocket:chat-preview",
         title: "",
         preview: "请帮我总结这个用户问题",
-        updatedAt: "2026-06-06T12:00:00.000Z"
+        updatedAt: "2026-06-06T12:00:00.000Z",
+        projectId: null,
+        cwd: "/workspace"
       }
     ], defaultAgentSidebarState);
 
@@ -2115,7 +2129,7 @@ describe("agent chat slice", () => {
 
     state = agentReducer(state, {
       type: "agent/sessionsLoaded",
-      sessions: [...sessions, { key: "websocket:chat-new", title: "后端标题", preview: "已保存", updatedAt: "2026-06-06T11:00:00.000Z" }]
+      sessions: [...sessions, { key: "websocket:chat-new", title: "后端标题", preview: "已保存", updatedAt: "2026-06-06T11:00:00.000Z", projectId: null, cwd: "/workspace" }]
     });
     expect(state.tasks.find((task) => task.chatId === "chat-new")).toMatchObject({
       title: "后端标题",
@@ -3816,7 +3830,7 @@ describe("agent chat slice", () => {
       type: "agent/taskStateSettled",
       requestId: "parallel-task",
       recoveryGeneration: 2,
-      sessions: [{ key: "websocket:chat-1", title: "任务", preview: "旧 HTTP 快照" }]
+      sessions: [{ key: "websocket:chat-1", title: "任务", preview: "旧 HTTP 快照", projectId: null, cwd: "/workspace" }]
     });
 
     expect(afterChatRecovery.runStatusVersionByChatId["chat-1"]).toBe(runVersionAtStart + 1);

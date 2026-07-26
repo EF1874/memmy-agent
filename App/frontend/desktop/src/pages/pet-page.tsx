@@ -753,7 +753,7 @@ export function PetPage() {
             recoveryTracker?.ready(event.connection_generation);
           }
         })
-        .then((connection) => {
+        .then(async (connection) => {
           if (connectionInstanceEpochRef.current !== instanceEpoch) {
             connection.close();
             throw new Error(t("pet.agentUnavailable"));
@@ -783,7 +783,7 @@ export function PetPage() {
       answerTextByTaskIdRef.current.set(task.id, "");
 
       void ensurePetAgentConnection()
-        .then((connection) => {
+        .then(async (connection) => {
           if (cancelledTaskIdsRef.current.has(task.id)) {
             cleanupPetAgentTaskRun(task);
             return;
@@ -800,7 +800,14 @@ export function PetPage() {
           }
           recoveryTracker?.register({ taskId: task.id, chatId, submittedContent: content });
           try {
-            connection.sendMessage({ chatId, content }, expectedGeneration);
+            const sessionKey = clients?.memmyAgent?.chatIdToSessionKey(chatId) ?? `websocket:${chatId}`;
+            const created = !state.agent.sessions.some((session) => session.key === sessionKey);
+            await connection.sendMessage({
+              chatId,
+              content,
+              clientRequestId: crypto.randomUUID(),
+              ...(created ? { target: { kind: "standalone" as const } } : {})
+            }, expectedGeneration);
           } catch (error) {
             cleanupPetAgentTaskRun(task);
             throw error;
@@ -817,7 +824,7 @@ export function PetPage() {
           busRef.current.errorTask(task.id, resolvePetAgentErrorMessage(error, t("pet.agentUnavailable")));
         });
     },
-    [cleanupPetAgentTaskRun, clients?.memmyAgent, ensurePetAgentConnection, handlePetAgentChatEvent, recoveryTracker, t]
+    [cleanupPetAgentTaskRun, clients?.memmyAgent, ensurePetAgentConnection, handlePetAgentChatEvent, recoveryTracker, state.agent.sessions, t]
   );
 
   const stopPetAgentTask = useCallback(
@@ -935,6 +942,17 @@ export function PetPageView({ bus, mainRoute = "/main", onNavigate, onPetWindowC
   const focusedTaskRef = useRef<Task | null>(null);
 
   const { focusedTask, tasks, lastFinishedTask, pendingNewSession } = bus;
+  const focusedArtifactClient = useMemo(() => {
+    if (!focusedTask || !memmyAgentClient) return null;
+    const chatId = normalizePetTaskChatId(focusedTask.sessionId, memmyAgentClient);
+    if (!chatId) return null;
+    const sessionKey = memmyAgentClient.chatIdToSessionKey(chatId);
+    return {
+      resolveArtifact: (path: string) => memmyAgentClient.resolveArtifact(path, sessionKey),
+      revealArtifact: (path: string) => memmyAgentClient.revealArtifact(path, sessionKey),
+      openArtifact: (path: string) => memmyAgentClient.openArtifact(path, sessionKey)
+    };
+  }, [focusedTask, memmyAgentClient]);
   const hasUndismissedAnswer = !!focusedTask && (focusedTask.status === "answering" || focusedTask.status === "done" || focusedTask.status === "error") && !focusedTask.dismissed;
   const displayState = useMemo(
     () => deriveDisplayState({ focusedTask, hasUndismissedAnswer, isActive, isInHotzone, isActiveSuppressed }),
@@ -1720,7 +1738,7 @@ export function PetPageView({ bus, mainRoute = "/main", onNavigate, onPetWindowC
             registerRef={registerHotzone("topBubble")}
             task={focusedTask}
             streamedText={focusedAgentText}
-            artifactClient={memmyAgentClient}
+            artifactClient={focusedArtifactClient}
             labels={{
               close: t("common.close"),
               expand: t("pet.answer.expand")

@@ -192,7 +192,6 @@ async function createManager(
     { enabled: true, maxSessions: 4, idleTimeoutS: 900, ...config },
     {
       runtimeLoader,
-      workspace: root,
       restrictLocalFiles: true,
     },
   );
@@ -386,7 +385,13 @@ describe("BrowserSessionManager", () => {
     const { manager, state } = await createManager(root);
     const chat = { sessionKey: "a", channel: "websocket", chatId: "a" };
 
-    await manager.callTool(chat, "browser_navigate", { url: "index.html" });
+    await manager.callTool(
+      chat,
+      "browser_navigate",
+      { url: "index.html" },
+      null,
+      { workspace: root, readonlyRoots: [] },
+    );
     const previewCall = state.calls.at(-1)!;
     const previewUrl = String(previewCall.arguments.url);
     const session = [...(manager as any).sessions.values()][0];
@@ -414,15 +419,27 @@ describe("BrowserSessionManager", () => {
     const { manager, state } = await createManager(root);
     const chat = { sessionKey: "a", channel: "websocket", chatId: "a" };
 
-    await manager.callTool(chat, "browser_navigate", { url: "first.html" });
+    await manager.callTool(
+      chat,
+      "browser_navigate",
+      { url: "first.html" },
+      null,
+      { workspace: root, readonlyRoots: [] },
+    );
     const session = [...(manager as any).sessions.values()][0];
     const first = session.preview;
     const closeFirst = vi.spyOn(first, "close");
 
-    await manager.callTool(chat, "browser_navigate", {
-      url: "second.html",
-      fail: true,
-    });
+    await manager.callTool(
+      chat,
+      "browser_navigate",
+      {
+        url: "second.html",
+        fail: true,
+      },
+      null,
+      { workspace: root, readonlyRoots: [] },
+    );
     const failedPreviewUrl = String(state.calls.at(-1)!.arguments.url);
     expect(session.preview).toBe(first);
     expect(closeFirst).not.toHaveBeenCalled();
@@ -553,6 +570,7 @@ describe("browser tool wrappers", () => {
         sessionKey: "session",
         channel: "websocket",
         chatId: "chat",
+        workspace: process.cwd(),
       }),
     );
     await expect(tool.execute({ url: "file:///tmp/page.html" })).rejects.toThrow(
@@ -580,6 +598,7 @@ describe("browser tool wrappers", () => {
         sessionKey: "session",
         channel: "websocket",
         chatId: "chat",
+        workspace: process.cwd(),
       }),
     );
 

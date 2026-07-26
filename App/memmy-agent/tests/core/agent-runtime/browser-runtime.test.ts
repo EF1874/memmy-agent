@@ -63,7 +63,7 @@ afterEach(() => {
 });
 
 describe("AgentLoop browser runtime registration", () => {
-  it("passes the workspace and existing file restriction state to browser sessions", () => {
+  it("keeps the workspace turn-scoped while preserving file restriction state", () => {
     const workspace = root();
     const loop = new AgentLoop({
       config: new Config({
@@ -76,7 +76,7 @@ describe("AgentLoop browser runtime registration", () => {
       workspace,
     });
 
-    expect((loop.browserSessionManager as any).workspace).toBe(workspace);
+    expect((loop.browserSessionManager as any).workspace).toBeUndefined();
     expect((loop.browserSessionManager as any).restrictLocalFiles).toBe(true);
   });
 
