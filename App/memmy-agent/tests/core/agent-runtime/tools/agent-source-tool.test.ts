@@ -1,8 +1,9 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  AgentSourceTool,
   buildCompleteTurns,
   renderFullMemorySkill,
   resolveSyncBoundaryAt,
@@ -115,6 +116,132 @@ describe("AgentSourceTool Skill rendering", () => {
     expect(result.skillPath.startsWith(workspace)).toBe(true);
     expect(rendered).not.toContain("{{SOURCE_ARG}}");
     expect(rendered).toContain("--source 'Agent $HOME'\"'\"'s'");
+  });
+
+  it("requires the exact automatic-sync recipe contract instead of an arbitrary object", () => {
+    const tool = new AgentSourceTool();
+    const parameters = tool.parameters;
+    const recipe = parameters.properties.sync_recipe;
+
+    expect(parameters.properties.action.enum).toContain("get_status");
+    expect(recipe.required).toEqual(["version", "format", "path", "fields", "timestampFormat"]);
+    expect(recipe.properties?.version?.enum).toEqual([1]);
+    expect(recipe.properties?.format?.enum).toEqual(["jsonl", "json", "sqlite"]);
+    expect(recipe.properties?.fields?.required).toEqual(["role", "content", "createdAt"]);
+    expect(recipe.properties?.timestampFormat?.enum).toEqual(["auto", "iso", "unix_seconds", "unix_milliseconds"]);
+
+    expect(
+      tool.validateParams({
+        action: "save_sync_recipe",
+        source_id: "manual-id-1",
+        sync_recipe: {
+          type: "sqlite",
+          id_field: "id",
+          timestamp_format: "epoch_ms"
+        }
+      })
+    ).toEqual([
+      "missing required sync_recipe.version",
+      "missing required sync_recipe.format",
+      "missing required sync_recipe.path",
+      "missing required sync_recipe.fields",
+      "missing required sync_recipe.timestampFormat"
+    ]);
+  });
+
+  it("makes GUI-visible readiness a mandatory connect completion check", () => {
+    const skill = fs.readFileSync(path.resolve("src/skills/agent-memory-onboarding/SKILL.md"), "utf8");
+
+    expect(skill).toContain('action="get_status"');
+    expect(skill).toContain('status == "skill_installed"');
+    expect(skill).toContain("syncBoundaryAt != null");
+    expect(skill).toContain("syncReady == true");
+    expect(skill).toContain("Imported memories are only bootstrap and validation evidence.");
+  });
+
+  it("selects a scannable native projection before falling back to an event ledger", () => {
+    const skill = fs.readFileSync(path.resolve("src/skills/agent-memory-onboarding/SKILL.md"), "utf8");
+    const recipeReference = fs.readFileSync(
+      path.resolve("src/skills/agent-memory-onboarding/references/sync-recipe.md"),
+      "utf8"
+    );
+
+    expect(skill).toMatch(
+      /flattened message projection[\s\S]+snapshot[\s\S]+raw event or ledger stream/u
+    );
+    expect(skill).toContain(
+      "Do not declare the native format unsupported or request a custom adapter until every viable representation"
+    );
+    expect(skill).toContain(
+      "Reject a JSONL event stream when extraction would require event filtering, array expansion"
+    );
+    expect(skill).toContain(
+      "Never use a generic extension when sibling transcripts and ledgers share it."
+    );
+    expect(recipeReference).toContain("One JSONL line is one candidate message record.");
+    expect(recipeReference).toContain("JSONL does not support `recordsPath`.");
+    expect(recipeReference).toContain("prefer `display.jsonl` over `.jsonl`");
+    expect(recipeReference).toContain(
+      "Reject only the failing representation, not the entire Agent framework."
+    );
+  });
+
+  it("reads the final managed source state used by the GUI", async () => {
+    const memmyHome = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-agent-source-status-"));
+    tempRoots.push(memmyHome);
+    fs.writeFileSync(
+      path.join(memmyHome, "runtime.json"),
+      JSON.stringify({
+        baseUrl: "http://127.0.0.1:19001",
+        localToken: "local-token"
+      })
+    );
+    const previousMemmyHome = process.env.MEMMY_HOME;
+    process.env.MEMMY_HOME = memmyHome;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify([
+          {
+            sourceId: "manual-id-1",
+            displayName: "Example Agent",
+            dataPath: "/Users/test/.example/history.db",
+            builtin: false,
+            available: true,
+            status: "skill_installed",
+            messageCount: 4,
+            lastScannedAt: "2026-07-27T12:00:00.000Z",
+            syncBoundaryAt: "2026-07-27T11:00:00.000Z",
+            syncReady: true
+          }
+        ]),
+        { status: 200 }
+      )
+    );
+
+    try {
+      const output = await new AgentSourceTool().execute({
+        action: "get_status",
+        source_id: "manual-id-1"
+      });
+
+      expect(JSON.parse(output)).toEqual({
+        sourceId: "manual-id-1",
+        displayName: "Example Agent",
+        dataPath: "/Users/test/.example/history.db",
+        builtin: false,
+        available: true,
+        status: "skill_installed",
+        skillInstalled: true,
+        messageCount: 4,
+        lastScannedAt: "2026-07-27T12:00:00.000Z",
+        syncBoundaryAt: "2026-07-27T11:00:00.000Z",
+        syncReady: true
+      });
+    } finally {
+      fetchMock.mockRestore();
+      if (previousMemmyHome === undefined) delete process.env.MEMMY_HOME;
+      else process.env.MEMMY_HOME = previousMemmyHome;
+    }
   });
 });
 

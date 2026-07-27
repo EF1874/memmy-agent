@@ -12,6 +12,49 @@ const FULL_MEMORY_SKILL_TEMPLATE = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../../../skills/agent-memory-onboarding/references/full-memory-skill.md"
 );
+const MANAGED_AGENT_SYNC_RECIPE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  description:
+    "Declarative native-history extractor. Use the exact camelCase field names; do not pass scripts or legacy aliases.",
+  properties: {
+    version: { type: "integer", enum: [1] },
+    format: { type: "string", enum: ["jsonl", "json", "sqlite"] },
+    path: { type: "string", description: "Absolute path to the native history file or directory." },
+    fileSuffix: { type: "string" },
+    recordsPath: { type: "string" },
+    query: {
+      type: "string",
+      description: "Required for sqlite: one read-only SELECT with no semicolon or unbound parameters."
+    },
+    fields: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        messageId: { type: "string" },
+        conversationId: { type: "string" },
+        role: { type: "string" },
+        content: { type: "string" },
+        createdAt: { type: "string" },
+        workspacePath: { type: "string" },
+        gitRoot: { type: "string" }
+      },
+      required: ["role", "content", "createdAt"]
+    },
+    roleMap: {
+      type: "object",
+      additionalProperties: {
+        type: "string",
+        enum: ["user", "assistant", "tool", "system"]
+      }
+    },
+    timestampFormat: {
+      type: "string",
+      enum: ["auto", "iso", "unix_seconds", "unix_milliseconds"]
+    }
+  },
+  required: ["version", "format", "path", "fields", "timestampFormat"]
+} as const;
 
 type AgentSourceMessage = {
   messageId: string;
@@ -37,6 +80,12 @@ type RuntimeConfig = {
 type AgentSourceView = {
   sourceId: string;
   displayName: string;
+  dataPath: string;
+  builtin: boolean;
+  available: boolean;
+  status: "not_connected" | "skill_installed" | "plugin_installed";
+  messageCount: number;
+  lastScannedAt: string | null;
   syncBoundaryAt?: string | null;
   syncReady?: boolean;
 };
@@ -69,7 +118,7 @@ export class AgentSourceTool extends Tool {
   }
 
   get description(): string {
-    return "Render an Agent-specific Memmy Skill, import an AI-discovered history manifest, save its reusable sync recipe, or update its installed state. Use only in an explicitly requested agent-memory-onboarding task.";
+    return "Provision a GUI-managed Agent source: inspect its persisted status, render its Memmy Skill, import a normalized bootstrap manifest, save the reusable automatic-sync recipe, or update Skill installation state. Use only in an explicitly requested agent-memory-onboarding task.";
   }
 
   override get readOnly(): boolean {
@@ -82,14 +131,14 @@ export class AgentSourceTool extends Tool {
       properties: {
         action: {
           type: "string",
-          enum: ["render_skill", "import_manifest", "save_sync_recipe", "set_skill_status"]
+          enum: ["get_status", "render_skill", "import_manifest", "save_sync_recipe", "set_skill_status"]
         },
         source_id: { type: "string" },
         manifest_path: { type: "string" },
         mode: { type: "string", enum: ["initial_subset", "incremental"] },
         data_path: { type: "string" },
         skill_installed: { type: "boolean" },
-        sync_recipe: { type: "object", additionalProperties: true }
+        sync_recipe: MANAGED_AGENT_SYNC_RECIPE_SCHEMA
       },
       required: ["action", "source_id"]
     };
@@ -99,6 +148,23 @@ export class AgentSourceTool extends Tool {
     const sourceId = requiredString(params.source_id, "source_id");
     const action = requiredString(params.action, "action");
     const runtime = readRuntimeConfig();
+
+    if (action === "get_status") {
+      const source = await readAgentSource(runtime, sourceId);
+      return JSON.stringify({
+        sourceId: source.sourceId,
+        displayName: source.displayName,
+        dataPath: source.dataPath,
+        builtin: source.builtin,
+        available: source.available,
+        status: source.status,
+        skillInstalled: source.status === "skill_installed",
+        messageCount: source.messageCount,
+        lastScannedAt: source.lastScannedAt,
+        syncBoundaryAt: source.syncBoundaryAt ?? null,
+        syncReady: source.syncReady === true
+      });
+    }
 
     if (action === "render_skill") {
       const source = await readAgentSource(runtime, sourceId);
