@@ -524,7 +524,7 @@ describe("LogsSubPage", () => {
     expect(html).not.toContain("rounded-card text-text-ink");
     expect(html).toContain("hermes");
     expect(html).toContain("memory-log-card__summary-tail");
-    expect(html).toContain("· LLM 筛选后保留 0/0");
+    expect(html).toContain("· 保留 0/0");
     expect(html).not.toContain("候选 0，保留 0");
     expect(html).not.toContain("query &quot;hermes&quot;");
     expect(html).not.toContain("h-2.5 w-2.5 rounded-full");
@@ -588,7 +588,7 @@ describe("LogsSubPage", () => {
     expect(html).toContain("memory-log-card__summary--with-tail");
     expect(html).toContain("memory-log-card__summary-tail");
     expect(html).toContain("bug: 双击 session 修改会话时遮罩太深");
-    expect(html).toContain("· LLM 筛选后保留 6/10");
+    expect(html).toContain("· 保留 6/10");
   });
 
   it("combines search and Agent selection inside one bordered control", () => {
@@ -653,7 +653,7 @@ describe("LogsSubPage", () => {
 
     expect(html).toContain("hermes");
     expect(html).toContain("memory-log-card__summary-tail");
-    expect(html).toContain("· LLM kept 6/7");
+    expect(html).toContain("· kept 6/7");
     expect(html).not.toContain("candidates 7, kept 6");
   });
 
@@ -702,9 +702,9 @@ describe("LogsSubPage", () => {
 
     expect(html).toContain("用户希望参考腾讯团队实践图");
     expect(html).toContain("memory-log-card__summary-tail");
-    expect(html).toContain("· LLM 筛选后保留 2/4");
-    expect(html).not.toContain("· LLM 筛选后保留 2/10");
-    expect(html).not.toContain("· LLM 筛选后保留 0/0");
+    expect(html).toContain("· 保留 2/4");
+    expect(html).not.toContain("· 保留 2/10");
+    expect(html).not.toContain("· 保留 0/0");
   });
 
   it("memory_search candidate rows use memory layer labels", () => {
