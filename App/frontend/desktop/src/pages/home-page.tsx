@@ -634,7 +634,8 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
     chatId,
     content: text,
     media: uploadedAttachments.map((item) => ({ url: item.url, name: item.name, kind: item.kind, path: item.path })),
-    focus
+    focus,
+    ...(capturedTarget ? { target: capturedTarget } : {})
   }));
   input.clearComposer();
   if (createdNewChat) {
