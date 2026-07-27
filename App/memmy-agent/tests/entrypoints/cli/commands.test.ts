@@ -12,9 +12,15 @@ import { OpenAICompatProvider } from "../../../src/providers/openai-compat-provi
 import { stripModelPrefix as stripCodexModelPrefix } from "../../../src/providers/openai-codex-provider.js";
 import { GitHubCopilotProvider, getStorage } from "../../../src/providers/github-copilot-provider.js";
 import { AgentLoop } from "../../../src/core/agent-runtime/loop.js";
+import { SessionManager } from "../../../src/core/session/manager.js";
 import { InboundMessage, OutboundMessage } from "../../../src/core/runtime-messages/events.js";
 import { CronJob, CronJobState, CronPayload, CronSchedule } from "../../../src/cron/types.js";
 import { WebSocketChannel } from "../../../src/integrations/channels/websocket.js";
+import {
+  defaultWebuiSidebarState,
+  readWebuiSidebarState,
+  webuiSidebarStatePath,
+} from "../../../src/entrypoints/frontend-bridge/sidebar-state.js";
 import {
   RESTART_NOTIFY_CHANNEL_ENV,
   RESTART_NOTIFY_CHAT_ID_ENV,
@@ -428,6 +434,13 @@ describe("CLI command helpers", () => {
   it("serve connects MCP on startup and closes it when the API server closes", async () => {
     const root = tempRoot("memmy-serve-mcp-");
     const workspace = path.join(root, "workspace");
+    const migrationStatePath = path.join(
+      workspace,
+      ".memmy-migrations",
+      "agent-workspace.json",
+    );
+    fs.mkdirSync(path.dirname(migrationStatePath), { recursive: true });
+    fs.writeFileSync(migrationStatePath, "invalid migration state", "utf8");
     const configPath = writeConfig(root, {
       agents: { defaults: { workspace, model: "openai/test-model" } },
       api: { host: "127.0.0.1", port: 0, timeout: 1 },
@@ -438,6 +451,7 @@ describe("CLI command helpers", () => {
 
     const server = await serve({ config: configPath });
     expect(loop.connectMcp).toHaveBeenCalledTimes(1);
+    expect(fs.readFileSync(migrationStatePath, "utf8")).toBe("invalid migration state");
     await closeServer(server);
 
     expect(loop.closeMcp).toHaveBeenCalledTimes(1);
@@ -476,6 +490,47 @@ describe("CLI command helpers", () => {
   it("gateway starts a configured health endpoint and can stop cleanly", async () => {
     const root = tempRoot("memmy-gateway-");
     const workspace = path.join(root, "workspace");
+    const sessionsDir = path.join(workspace, "sessions");
+    const legacySessionPath = path.join(sessionsDir, "websocket_legacy.jsonl");
+    const archivedSessionPath = path.join(sessionsDir, "websocket_archived.jsonl");
+    fs.mkdirSync(sessionsDir, { recursive: true });
+    fs.writeFileSync(
+      legacySessionPath,
+      `${JSON.stringify({
+        recordType: "metadata",
+        key: "websocket:legacy",
+        createdAt: "2026-07-01T00:00:00.000Z",
+        updatedAt: "2026-07-01T00:00:00.000Z",
+        metadata: { webui: true, title: "legacy" },
+        lastConsolidated: 0,
+      })}\n${JSON.stringify({
+        role: "user",
+        content: "historical question",
+        timestamp: "2026-07-01T00:01:00.000Z",
+      })}\n`,
+      "utf8",
+    );
+    fs.writeFileSync(
+      archivedSessionPath,
+      `${JSON.stringify({
+        recordType: "metadata",
+        key: "websocket:archived",
+        createdAt: "2026-06-01T00:00:00.000Z",
+        updatedAt: "2026-06-01T00:00:00.000Z",
+        metadata: { webui: true, title: "archived" },
+        lastConsolidated: 0,
+      })}\n`,
+      "utf8",
+    );
+    process.env.MEMMY_AGENT_DATA_DIR = path.join(root, "data");
+    const sidebarState = {
+      ...defaultWebuiSidebarState(),
+      pinned_keys: ["websocket:legacy"],
+      archived_keys: ["websocket:archived"],
+    };
+    const sidebarStatePath = webuiSidebarStatePath();
+    fs.writeFileSync(sidebarStatePath, JSON.stringify(sidebarState), "utf8");
+    const originalSidebarState = fs.readFileSync(sidebarStatePath);
     const configPath = writeConfig(root, {
       agents: { defaults: { workspace, model: "openai/test-model" } },
       fileMemory: { enabled: true },
@@ -488,14 +543,7 @@ describe("CLI command helpers", () => {
         heartbeat: { enabled: false, intervalS: 900, keepRecentMessages: 4 },
       },
     });
-    const fakeSessions = {
-      getOrCreate: vi.fn(() => ({
-        addMessage: vi.fn(),
-        retainRecentLegalSuffix: vi.fn(),
-      })),
-      save: vi.fn(),
-      listSessions: vi.fn(() => []),
-    };
+    let migratedSessionManager: SessionManager | null = null;
     let loopRunning = true;
     const fakeLoop: any = {
       workspace,
@@ -530,14 +578,16 @@ describe("CLI command helpers", () => {
         loopRunning = false;
       }),
       closeMcp: vi.fn(async () => undefined),
-      sessions: {
-        ...fakeSessions,
-        flush: vi.fn(async () => undefined),
-      },
+      sessions: null,
     };
     let cronStorePath = "";
+    let bindingAtLoopCreation: Record<string, unknown> | null = null;
     let publishedModelUpdate: OutboundMessage | undefined;
     vi.spyOn(AgentLoop, "fromConfig").mockImplementation((_loaded: any, bus: any, extra: any = {}) => {
+      const metadataLine = fs.readFileSync(legacySessionPath, "utf8").trim().split("\n")[0]!;
+      bindingAtLoopCreation = JSON.parse(metadataLine).metadata;
+      migratedSessionManager = new SessionManager(sessionsDir);
+      fakeLoop.sessions = migratedSessionManager;
       cronStorePath = extra.cronService?.storePath ?? "";
       if (typeof extra.runtimeModelPublisher === "function") {
         extra.runtimeModelPublisher("gpt-x", "fast");
@@ -546,6 +596,7 @@ describe("CLI command helpers", () => {
       return fakeLoop as any;
     });
     vi.spyOn(console, "log").mockImplementation(() => undefined);
+    vi.spyOn(console, "info").mockImplementation(() => undefined);
 
     const runtime = await gateway({ config: configPath });
     const address = runtime.healthServer.address();
@@ -555,6 +606,23 @@ describe("CLI command helpers", () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ status: "ok" });
+    expect(bindingAtLoopCreation).toMatchObject({
+      webui: true,
+      title: "legacy",
+      webuiProjectId: null,
+      webuiWorkspaceCwd: fs.realpathSync(workspace),
+    });
+    const migrationStatePath = path.join(
+      workspace,
+      ".memmy-migrations",
+      "agent-workspace.json",
+    );
+    expect(JSON.parse(fs.readFileSync(migrationStatePath, "utf8")).applied).toEqual([
+      expect.objectContaining({
+        id: "v1.0.4/0001-add-webui-session-binding",
+        introducedIn: "1.0.4",
+      }),
+    ]);
     expect(missing.status).toBe(404);
     expect(runtime.heartbeat.enabled).toBe(false);
     expect(runtime.heartbeat.intervalS).toBe(900);
@@ -562,6 +630,36 @@ describe("CLI command helpers", () => {
     expect(runtime.manager.webuiRuntimeModelName?.()).toBe("openai/refreshed-model");
     const websocketChannel = runtime.manager.getChannel("websocket");
     expect(websocketChannel).toBeInstanceOf(WebSocketChannel);
+    const snapshot = (websocketChannel as WebSocketChannel).webuiSessionSnapshot();
+    expect(snapshot.sessions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: "websocket:legacy",
+          projectId: null,
+          cwd: fs.realpathSync(workspace),
+        }),
+        expect.objectContaining({
+          key: "websocket:archived",
+          projectId: null,
+          cwd: fs.realpathSync(workspace),
+        }),
+      ]),
+    );
+    const historicalSession = migratedSessionManager!.get("websocket:legacy");
+    expect(historicalSession?.messages).toEqual([
+      expect.objectContaining({ role: "user", content: "historical question" }),
+    ]);
+    historicalSession?.addMessage("assistant", "continued reply");
+    migratedSessionManager!.save(historicalSession!);
+    expect(new SessionManager(sessionsDir).get("websocket:legacy")?.messages).toEqual([
+      expect.objectContaining({ role: "user", content: "historical question" }),
+      expect.objectContaining({ role: "assistant", content: "continued reply" }),
+    ]);
+    expect(readWebuiSidebarState()).toMatchObject({
+      pinned_keys: ["websocket:legacy"],
+      archived_keys: ["websocket:archived"],
+    });
+    expect(fs.readFileSync(sidebarStatePath)).toEqual(originalSidebarState);
     expect((websocketChannel as any).webuiTitleService).toMatchObject({
       sessions: fakeLoop.sessions,
       llmRuntime: expect.any(Function),
@@ -590,6 +688,41 @@ describe("CLI command helpers", () => {
     expect((websocketChannel as WebSocketChannel).fileMemoryEnabled).toBe(true);
     await runtime.stop();
     expect(fakeLoop.stop).toHaveBeenCalledTimes(1);
+
+    const migratedBytes = fs.readFileSync(legacySessionPath);
+    const secondRuntime = await gateway({ config: configPath });
+    expect(fs.readFileSync(legacySessionPath)).toEqual(migratedBytes);
+    expect(JSON.parse(fs.readFileSync(migrationStatePath, "utf8")).applied).toHaveLength(1);
+    await secondRuntime.stop();
+    expect(fakeLoop.stop).toHaveBeenCalledTimes(2);
+  });
+
+  it("gateway stops before creating AgentLoop when migration state is invalid", async () => {
+    const root = tempRoot("memmy-gateway-migration-failure-");
+    const workspace = path.join(root, "workspace");
+    const migrationStatePath = path.join(
+      workspace,
+      ".memmy-migrations",
+      "agent-workspace.json",
+    );
+    fs.mkdirSync(path.dirname(migrationStatePath), { recursive: true });
+    fs.writeFileSync(migrationStatePath, "{invalid-json", "utf8");
+    const configPath = writeConfig(root, {
+      agents: { defaults: { workspace, model: "openai/test-model" } },
+      gateway: {
+        host: "127.0.0.1",
+        port: 0,
+        heartbeat: { enabled: false, intervalS: 900, keepRecentMessages: 4 },
+      },
+    });
+    const fromConfig = vi.spyOn(AgentLoop, "fromConfig");
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await expect(gateway({ config: configPath })).rejects.toMatchObject({
+      code: "migration_state_invalid",
+    });
+    expect(fromConfig).not.toHaveBeenCalled();
+    expect(fs.readFileSync(migrationStatePath, "utf8")).toBe("{invalid-json");
   });
 
   it("gateway health helper serves only the health endpoint", async () => {
