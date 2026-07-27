@@ -3,7 +3,6 @@ import {
   classifyIntent,
   classifyTurnFeedback,
   classifyTurnRelation,
-  classifyTurnRelationWithLlm,
   policyMetaFromMemory,
   retrievalLayersForMode,
   retrievePluginMemories,
@@ -91,7 +90,7 @@ type SessionTurnDependencies = {
 } & Record<string, any>;
 interface CompleteTurnResponse { turnId: string; sessionId: string; episodeId: string; rawTurnId: string; l1MemoryId: string; l1MemoryIds: string[]; closedEpisodeIds: string[]; scheduledEvolution: boolean; jobs: JobRef[]; changeSeq: number; syncCursor: string; etag: string; serverTime: string; duplicate?: boolean; }
 type EndTopicDecision = TurnRelationDecision & { relation: "end_topic" };
-interface EpisodeTurnRoute { episode: EpisodeRecord; pendingEndTopicDecision?: EndTopicDecision; }
+interface EpisodeTurnRoute { episode: EpisodeRecord; endTopicDecision?: EndTopicDecision; }
 
 export interface ToolOutcomeObservation { toolId: string; success?: boolean; reason?: string; }
 
@@ -128,8 +127,30 @@ function isToolCallPayload(value: unknown): value is ToolCallPayload { return is
 
 function uniq<T>(values: readonly T[]): T[] { return [...new Set(values)]; }
 function objectField(value: unknown, key: string): string | undefined { return isRecord(value) && typeof value[key] === "string" ? value[key] as string : undefined; }
-function episodeTurnRoute(episode: EpisodeRecord, pendingEndTopicDecision?: EndTopicDecision): EpisodeTurnRoute {
-  return { episode, pendingEndTopicDecision };
+const EXPLICIT_END_TOPIC_COMMANDS = new Set([
+  "结束会话",
+  "不聊了"
+]);
+
+function episodeTurnRoute(episode: EpisodeRecord, endTopicDecision?: EndTopicDecision): EpisodeTurnRoute {
+  return { episode, endTopicDecision };
+}
+
+function explicitEndTopicDecision(text: string): EndTopicDecision | undefined {
+  const command = text
+    .trim()
+    .toLowerCase()
+    .replace(/[。！？!?.,，、;；:："'“”‘’]+$/gu, "")
+    .replace(/\s+/gu, " ");
+  if (!EXPLICIT_END_TOPIC_COMMANDS.has(command)) {
+    return undefined;
+  }
+  return {
+    relation: "end_topic",
+    confidence: 1,
+    reason: "explicit end-topic command",
+    signals: ["explicit_end_topic_command"]
+  };
 }
 
 function endTopicDecisionFromRawTurn(rawTurn: RawTurnRecord): EndTopicDecision | undefined {
@@ -678,8 +699,6 @@ export class SessionTurnService {
     contextPacketId: string;
     turnId: string;
     sessionId: string;
-    episodeId: string;
-    closedEpisodeIds: string[];
     searchEventId: string;
     hits: RecallHit[];
     injectedContext: InjectedContext;
@@ -701,41 +720,17 @@ export class SessionTurnService {
     const session = this.deps.requireOpenSession(request.sessionId);
     this.deps.assertSessionInScope(session, request.namespace);
     const turnId = request.turnId ?? newId("turn");
-    const existingRawTurn = this.deps.repos.runtime.getRawTurnBySessionTurn(session.id, turnId);
-    if (existingRawTurn) {
-      this.deps.assertRawTurnInScope(existingRawTurn, request.namespace);
-    }
-    const latestEpisodeBefore = existingRawTurn
-      ? undefined
-      : this.deps.repos.runtime.latestEpisodeForSession(session.id);
-    const route = existingRawTurn
-      ? episodeTurnRoute(
-          this.deps.requireEpisode(existingRawTurn.episodeId),
-          endTopicDecisionFromRawTurn(existingRawTurn)
-        )
-      : await this.ensureEpisodeForTurnWithLlm(session, undefined, request.query, "turn.start");
-    const episode = route.episode;
-    const closedEpisodeIds = closedEpisodeIdsFromBoundary(
-      latestEpisodeBefore,
-      episode,
-      latestEpisodeBefore ? this.deps.repos.runtime.getEpisode(latestEpisodeBefore.id) : undefined
-    );
     const intentDecision = classifyIntent(request.query);
-    if (episode.rawTurnIds.length === 0) {
-      this.deps.repos.runtime.updateEpisodeMeta(episode.id, {
-        intentDecision
-      });
-    }
+    const endTopicDecision = explicitEndTopicDecision(request.query);
     const contextHints = turnStartContextHints(request);
     const search = await this.deps.search({
       requestId: request.requestId,
       adapterId: request.adapterId,
       namespace: namespaceForSession(session),
       sessionId: session.id,
-      episodeId: episode.id,
       turnId,
       query: buildSearchQuery({ ...request, contextHints }, this.deps.config.domain),
-      layers: route.pendingEndTopicDecision
+      layers: endTopicDecision
         ? []
         : this.deps.memoryLayersForIntent(intentDecision.kind),
       limit: this.deps.turnStartRetrievalLimit(),
@@ -743,63 +738,15 @@ export class SessionTurnService {
       includeInjectedContext: true,
       retrievalMode: "turn_start",
       contextHints,
-      injectedContextQuery: request.query
+      injectedContextQuery: request.query,
+      recordEvent: false
     });
-    const contextPacketId = `ctx_${stableHash(`${session.id}:${episode.id}:${turnId}:${search.searchEventId}`).slice(0, 20)}`;
-    if (!existingRawTurn) {
-      const at = nowIso();
-      this.deps.repos.runtime.touchSession(session.id, at);
-      const rawTurn = this.deps.repos.runtime.insertRawTurn({
-        id: rawTurnIdForSessionTurn(session.id, turnId),
-        sessionId: session.id,
-        episodeId: episode.id,
-        turnId,
-        userId: session.userId,
-        conversationId: session.conversationId,
-        userText: request.query,
-        toolCalls: [],
-        toolResults: [],
-        sourceMemoryIds: search.sourceMemoryIds,
-        usage: {},
-        messagePayload: {
-          turn_start: {
-            contextPacketId,
-            searchEventId: search.searchEventId,
-            intent_decision: intentDecision,
-            ...(route.pendingEndTopicDecision
-              ? {
-                  episode_close: {
-                    closeAfterComplete: true,
-                    decision: route.pendingEndTopicDecision
-                  }
-                }
-              : {})
-          }
-        },
-        status: "started",
-        createdAt: at
-      });
-      this.deps.repos.runtime.appendEpisodeRawTurn(episode.id, rawTurn.id, at);
-      this.deps.repos.runtime.appendChange({
-        memoryId: rawTurn.id,
-        namespaceId: this.deps.namespaceIdFromSession(session),
-        kind: "raw_turn",
-        op: "created",
-        entityId: rawTurn.id,
-        userId: session.userId,
-        changeType: "raw_turn_created",
-        after: rawTurn,
-        source: "turn.start",
-        createdAt: at
-      });
-    }
+    const contextPacketId = `ctx_${stableHash(`${session.id}:${turnId}:${search.searchEventId}`).slice(0, 20)}`;
 
     return {
       contextPacketId,
       turnId,
       sessionId: session.id,
-      episodeId: episode.id,
-      closedEpisodeIds,
       searchEventId: search.searchEventId,
       hits: search.hits,
       injectedContext: search.injectedContext,
@@ -810,7 +757,7 @@ export class SessionTurnService {
         ...(intentDecision.kind === "chitchat" || intentDecision.kind === "meta"
           ? [`intent:${intentDecision.kind}:retrieval_skipped`]
           : []),
-        ...(route.pendingEndTopicDecision ? ["relation:end_topic"] : [])
+        ...(endTopicDecision ? ["relation:end_topic"] : [])
       ],
       serverTime: nowIso()
     };
@@ -818,6 +765,15 @@ export class SessionTurnService {
 
   completeTurn(turnId: string, request: TurnCompleteRequest & Record<string, unknown>): CompleteTurnResponse {
     request = sanitizeTurnCompleteRequest(request);
+    if (request.status === "cancelled") {
+      throw new MemoryServiceError("invalid_argument", "cancelled turns are not persisted");
+    }
+    if (!request.query.trim() || !request.answer.trim()) {
+      throw new MemoryServiceError(
+        "invalid_argument",
+        "turn.complete requires a non-empty user query and assistant result"
+      );
+    }
     if (!this.deps.memoryAddEnabled()) {
       return this.deps.completeTurnNoWrite(turnId, request);
     }
@@ -850,16 +806,21 @@ export class SessionTurnService {
       if (existingRawTurn) {
         this.deps.assertRawTurnInScope(existingRawTurn, request.namespace);
       }
+      const intentDecision = classifyIntent(request.query);
+      const endTopicDecision =
+        explicitEndTopicDecision(request.query) ??
+        (existingRawTurn ? endTopicDecisionFromRawTurn(existingRawTurn) : undefined);
       const latestEpisodeBefore = existingRawTurn
         ? undefined
         : this.deps.repos.runtime.latestEpisodeForSession(session.id);
       const route = existingRawTurn
         ? episodeTurnRoute(
             this.deps.requireEpisode(existingRawTurn.episodeId),
-            endTopicDecisionFromRawTurn(existingRawTurn)
+            endTopicDecision
           )
         : episodeTurnRoute(
-            this.ensureEpisodeForTurn(session, request.episodeId, request.query, "turn.complete")
+            this.ensureEpisodeForTurn(session, request.episodeId, request.query, "turn.complete"),
+            endTopicDecision
           );
       const episode = route.episode;
       const closedEpisodeIds = closedEpisodeIdsFromBoundary(
@@ -874,6 +835,17 @@ export class SessionTurnService {
       const requestToolCalls = normalizeCompleteTurnToolCalls(request);
       const requestToolResults = normalizeCompleteTurnToolResults(request);
       const requestArtifacts = normalizeCompleteTurnArtifacts(request);
+      const turnStartPayload = {
+        intent_decision: intentDecision,
+        ...(endTopicDecision
+          ? {
+              episode_close: {
+                closeAfterComplete: true,
+                decision: endTopicDecision
+              }
+            }
+          : {})
+      };
 
       const insertedRawTurn: RawTurnRecord =
         existingRawTurn ??
@@ -892,9 +864,7 @@ export class SessionTurnService {
           sourceMemoryIds: normalizeCompleteTurnSourceMemoryIds(request),
           usage: isRecord(request.usage) ? request.usage : {},
           messagePayload: {
-            turn_start: {
-              intent_decision: classifyIntent(request.query)
-            },
+            turn_start: turnStartPayload,
             turn_complete: {
               completed_at: at,
               source_memory_ids: normalizeCompleteTurnSourceMemoryIds(request)
@@ -906,8 +876,17 @@ export class SessionTurnService {
       const rawTurnCreated = !existingRawTurn;
       const rawTurnFirstCompleted = rawTurnCreated
         || !isRecord(existingRawTurn.messagePayload?.turn_complete);
-      const rawTurn = existingRawTurn
-        ? this.deps.repos.runtime.updateRawTurn(completeObservedRawTurn(existingRawTurn, request, at))
+      const completedObservedRawTurn = existingRawTurn
+        ? completeObservedRawTurn(existingRawTurn, request, at)
+        : undefined;
+      const rawTurn = completedObservedRawTurn
+        ? this.deps.repos.runtime.updateRawTurn({
+            ...completedObservedRawTurn,
+            messagePayload: {
+              ...completedObservedRawTurn.messagePayload,
+              turn_start: turnStartPayload
+            }
+          })
         : insertedRawTurn;
       if (rawTurnCreated) {
         this.deps.repos.runtime.appendChange({
@@ -937,6 +916,12 @@ export class SessionTurnService {
           createdAt: at
         });
       }
+      if (episode.rawTurnIds.every((rawTurnId) => rawTurnId === rawTurn.id)) {
+        this.deps.repos.runtime.updateEpisodeMeta(episode.id, {
+          intentDecision
+        });
+      }
+      this.deps.repos.runtime.appendEpisodeRawTurn(episode.id, rawTurn.id, at);
 
       const requestTags = this.deps.normalizeRequestTags(request.tags);
       const capturedSteps = this.captureEpisodeIncrementalSteps(episode, rawTurn, at)
@@ -1098,13 +1083,13 @@ export class SessionTurnService {
           createdAt: at
         });
       }
-      const endTopicDecision = route.pendingEndTopicDecision ?? endTopicDecisionFromRawTurn(rawTurn);
-      if (rawTurnFirstCompleted && endTopicDecision) {
+      const completedEndTopicDecision = route.endTopicDecision ?? endTopicDecisionFromRawTurn(rawTurn);
+      if (rawTurnFirstCompleted && completedEndTopicDecision) {
         const beforeClose = this.deps.repos.runtime.getEpisode(episode.id) ?? episode;
         const closed = this.deps.repos.runtime.closeEpisode(episode.id, {
           closeReason: "end_topic",
           topicState: "ended",
-          relationDecision: endTopicDecision,
+          relationDecision: completedEndTopicDecision,
           endTopicTurnId: turnId,
           closedBy: "turn.complete"
         }, at);
@@ -1128,7 +1113,7 @@ export class SessionTurnService {
       } else if (episodeClosedByEndTopicTurn(episode, turnId)) {
         closedEpisodeIds.push(episode.id);
       }
-      if (rawTurnFirstCompleted && !endTopicDecision) {
+      if (rawTurnFirstCompleted && !completedEndTopicDecision) {
         jobs.push(this.deps.enqueueJob({
           jobType: "episode_idle_close",
           userId: session.userId,
@@ -1909,52 +1894,6 @@ export class SessionTurnService {
     );
   }
 
-  private async ensureEpisodeForTurnWithLlm(
-    session: SessionRecord,
-    episodeId: string | undefined,
-    userText: string | undefined,
-    source: string
-  ): Promise<EpisodeTurnRoute> {
-    if (episodeId || !userText?.trim()) {
-      return episodeTurnRoute(this.ensureEpisode(session, episodeId));
-    }
-    const latest = this.deps.repos.runtime.latestEpisodeForSession(session.id);
-    if (!latest) {
-      return episodeTurnRoute(this.ensureEpisode(session));
-    }
-    const pendingEndTopicRoute = this.routeAfterPendingEndTopic(session, latest);
-    if (pendingEndTopicRoute) {
-      return episodeTurnRoute(pendingEndTopicRoute);
-    }
-    const relationContext = this.episodeRelationContext(latest);
-    if (!relationContext.prevUserText) {
-      return episodeTurnRoute(this.ensureEpisode(session));
-    }
-    const decision = await classifyTurnRelationWithLlm({
-      prevUserText: relationContext.prevUserText,
-      prevAssistantText: relationContext.prevAssistantText,
-      newUserText: userText,
-      gapMs: relationContext.lastTurnAtMs
-        ? Math.max(0, Date.now() - relationContext.lastTurnAtMs)
-        : undefined,
-      prevTags: relationContext.tags
-    }, {
-      llm: this.deps.llm
-    });
-    if (decision.relation === "end_topic") {
-      const next = latest.status === "open" ? undefined : this.ensureEpisode(session);
-      const episode = next
-        ? this.deps.repos.runtime.updateEpisodeMeta(next.id, {
-          previousEpisodeId: latest.id
-        }) ?? next
-        : latest;
-      return episodeTurnRoute(episode, decision as EndTopicDecision);
-    }
-    return episodeTurnRoute(
-      this.applyEpisodeRelationDecision(session, latest, decision, userText, source, relationContext.lastTurnAtMs)
-    );
-  }
-
   private ensureEpisodeForTurn(
     session: SessionRecord,
     episodeId: string | undefined,
@@ -1967,10 +1906,6 @@ export class SessionTurnService {
     const latest = this.deps.repos.runtime.latestEpisodeForSession(session.id);
     if (!latest) {
       return this.ensureEpisode(session);
-    }
-    const pendingEndTopicRoute = this.routeAfterPendingEndTopic(session, latest);
-    if (pendingEndTopicRoute) {
-      return pendingEndTopicRoute;
     }
     const relationContext = this.episodeRelationContext(latest);
     if (!relationContext.prevUserText) {
@@ -2144,27 +2079,6 @@ export class SessionTurnService {
         withinMergeWindow,
         gapMs
       }
-    }) ?? next;
-  }
-
-  private routeAfterPendingEndTopic(
-    session: SessionRecord,
-    episode: EpisodeRecord
-  ): EpisodeRecord | undefined {
-    const hasPendingEndTopic = episode.status === "open" && episode.rawTurnIds.some((rawTurnId) => {
-      const rawTurn = this.deps.repos.runtime.getRawTurn(rawTurnId);
-      return Boolean(
-        rawTurn &&
-        endTopicDecisionFromRawTurn(rawTurn) &&
-        !isRecord(rawTurn.messagePayload?.turn_complete)
-      );
-    });
-    if (!hasPendingEndTopic) {
-      return undefined;
-    }
-    const next = this.ensureEpisode(session, newId("episode"));
-    return this.deps.repos.runtime.updateEpisodeMeta(next.id, {
-      previousEpisodeId: episode.id
     }) ?? next;
   }
 

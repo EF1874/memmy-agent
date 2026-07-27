@@ -79,8 +79,8 @@ describe("ingestion service", () => {
       failedMemories: 0,
       memoryIds: ["memory-1", "memory-2"],
       conversations: 2,
-      completedConversationIds: [],
-      incompleteConversationIds: ["conv-a", "conv-b"],
+      completedConversationIds: ["conv-b"],
+      incompleteConversationIds: ["conv-a"],
       failedConversationIds: [],
       errors: []
     });
@@ -225,8 +225,8 @@ describe("ingestion service", () => {
       deduped: 2,
       failed: 2,
       conversations: 2,
-      completedConversationIds: [],
-      incompleteConversationIds: ["conv-b"],
+      completedConversationIds: ["conv-b"],
+      incompleteConversationIds: [],
       failedConversationIds: ["conv-a"],
       errors: [{ conversationId: "conv-a", reason: "memory unavailable" }]
     });
@@ -450,6 +450,80 @@ describe("ingestion service", () => {
       deduped: 2,
       writtenMemories: 0
     });
+  });
+
+  it("imports only turns that start with user and end with a non-empty assistant response", async () => {
+    const added: string[] = [];
+    const service = createService({
+      async addMemory(input) {
+        added.push(input.content);
+        return {
+          id: `memory-${added.length}`,
+          kind: "trace",
+          memoryLayer: input.layer ?? "L1",
+          status: "activated",
+          title: input.title ?? "Imported conversation",
+          summary: input.content,
+          tags: input.tags ?? [],
+          createdAt: now(),
+          serverTime: now()
+        };
+      }
+    });
+    const message = (
+      conversationId: string,
+      messageId: string,
+      role: ConversationMessage["role"],
+      content = messageId
+    ): ConversationMessage => ({
+      ...createMessage(conversationId, 1),
+      conversationId,
+      messageId,
+      role,
+      content
+    });
+
+    const stats = await service.ingest(
+      toAsyncIterable([
+        message("user-tools", "ut-user", "user"),
+        message("user-tools", "ut-tool", "tool"),
+        message("assistant-only", "ao-assistant", "assistant"),
+        message("tools-assistant", "ta-tool", "tool"),
+        message("tools-assistant", "ta-assistant", "assistant"),
+        message("abandoned-then-complete", "ac-user-abandoned", "user"),
+        message("abandoned-then-complete", "ac-tool-abandoned", "tool"),
+        message("abandoned-then-complete", "ac-user-complete", "user"),
+        message("abandoned-then-complete", "ac-tool-complete", "tool"),
+        message("abandoned-then-complete", "ac-assistant-complete", "assistant"),
+        message("empty-assistant", "ea-user", "user"),
+        message("empty-assistant", "ea-assistant", "assistant", "   "),
+        message("complete", "complete-user", "user"),
+        message("complete", "complete-tool", "tool"),
+        message("complete", "complete-assistant", "assistant")
+      ]),
+      { sourceId: "cursor" }
+    );
+
+    expect(added).toEqual([
+      [
+        "## user\n\nac-user-complete",
+        "## tool\n\nac-tool-complete",
+        "## assistant\n\nac-assistant-complete"
+      ].join("\n\n"),
+      [
+        "## user\n\ncomplete-user",
+        "## tool\n\ncomplete-tool",
+        "## assistant\n\ncomplete-assistant"
+      ].join("\n\n")
+    ]);
+    expect(stats.incompleteConversationIds).toEqual(["user-tools", "empty-assistant"]);
+    expect(stats.completedConversationIds).toEqual([
+      "assistant-only",
+      "tools-assistant",
+      "abandoned-then-complete",
+      "complete"
+    ]);
+    expect(stats.writtenMemories).toBe(2);
   });
 
   it("throws IngestionAssertionError when a conversationId is not contiguous", async () => {

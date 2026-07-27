@@ -300,7 +300,6 @@ export const StartTurnOutputSchema = z.object({
   turnId: NonEmptyStringSchema,
   contextPacketId: NonEmptyStringSchema,
   sessionId: NonEmptyStringSchema,
-  episodeId: NonEmptyStringSchema,
   injectedContext: InjectedContextSchema,
   searchEventId: NonEmptyStringSchema,
   sourceMemoryIds: z.array(NonEmptyStringSchema),
@@ -323,7 +322,7 @@ export const CompleteTurnInputSchema = RuntimeRequestFieldsSchema.extend({
   artifacts: z.array(z.unknown()).optional(),
   sourceMemoryIds: z.array(NonEmptyStringSchema).optional(),
   usage: z.record(z.string(), z.unknown()).optional(),
-  status: z.enum(["succeeded", "failed", "cancelled"]).optional()
+  status: z.enum(["succeeded", "failed"]).optional()
 });
 export type CompleteTurnInput = z.infer<typeof CompleteTurnInputSchema>;
 

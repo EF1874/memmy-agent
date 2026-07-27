@@ -158,14 +158,18 @@ async function processConversation(
   let failed = false;
   const memorySource = ctx.memorySource ?? ctx.sourceId;
 
-  for (const turn of splitConversationIntoTurns(messages)) {
+  const turns = splitConversationIntoTurns(messages);
+  for (let turnIndex = 0; turnIndex < turns.length; turnIndex += 1) {
+    const turn = turns[turnIndex]!;
     processedTurns += 1;
     if (processedTurns % INGESTION_TURN_YIELD_INTERVAL === 0) {
       await yieldToEventLoop();
     }
 
-    if (!isCompleteTurn(turn)) {
-      incomplete = true;
+    if (!isCompleteMemoryTurn(turn.messages)) {
+      if (turnIndex === turns.length - 1 && turn.messages[0]?.role === "user") {
+        incomplete = true;
+      }
       stats.deduped += turn.messages.length;
       emitIngestionProgress(ctx, stats);
       continue;
@@ -306,11 +310,13 @@ function turnCreatedAt(turn: ImportedTurn): string {
   return turn.messages[0]?.createdAt ?? new Date(0).toISOString();
 }
 
-function isCompleteTurn(turn: ImportedTurn): boolean {
-  return (
-    turn.messages.some((message) => message.role === "user") &&
-    turn.messages.some((message) => message.role === "assistant")
-  );
+export function isCompleteMemoryTurn(messages: readonly ConversationMessage[]): boolean {
+  const first = messages[0];
+  const last = messages[messages.length - 1];
+  return first?.role === "user" &&
+    first.content.trim().length > 0 &&
+    last?.role === "assistant" &&
+    last.content.trim().length > 0;
 }
 
 /**
