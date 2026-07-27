@@ -30,6 +30,7 @@ const sidebarState: MemmyAgentSidebarState = {
     show_previews: true,
     show_timestamps: false,
     show_archived: false,
+    show_project_archived: false,
     sort: "updated_desc"
   },
   updated_at: null

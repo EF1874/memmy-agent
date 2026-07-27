@@ -85,6 +85,7 @@ describe("RuntimeApp bootstrap loading", () => {
           show_previews: true,
           show_timestamps: true,
           show_archived: false,
+          show_project_archived: false,
           sort: "updated_desc" as const
         },
         updated_at: null
@@ -129,6 +130,7 @@ describe("RuntimeApp bootstrap loading", () => {
           show_previews: true,
           show_timestamps: true,
           show_archived: false,
+          show_project_archived: false,
           sort: "updated_desc" as const
         },
         updated_at: null

@@ -851,7 +851,8 @@ describe("HomePage", () => {
         { url: "http://agent.local/api/media/sig/shot", name: "shot.png", kind: "image", path: "/media/websocket/webui/shot.png" },
         { url: "http://agent.local/api/media/sig/report", name: "小短文.pdf", kind: "file", path: "/media/websocket/webui/小短文.pdf" }
       ],
-      focus: true
+      focus: true,
+      target: { kind: "standalone" }
     });
     expect(uploadAgentMedia).toHaveBeenCalledWith([
       { blob: encodedBlob, name: "shot.png", kind: "image", mime: "image/png" },
@@ -876,6 +877,41 @@ describe("HomePage", () => {
     expect(clearComposer).toHaveBeenCalledTimes(1);
     expect(onNewChatMessageSent).toHaveBeenCalledWith("chat-new");
     expect(track).toHaveBeenCalledWith({ name: "agent_send_message", params: { page_path: "/main" }, consentTier: "basic" });
+  });
+
+  it("keeps a new project target on the optimistic task action", async () => {
+    const dispatch = vi.fn();
+    const sendMessage = vi.fn();
+    const projectTarget = { kind: "project" as const, projectId: "project-a" };
+
+    await expect(submitAgentComposerMessage({
+      chatId: null,
+      target: projectTarget,
+      connection: {
+        getReadyGeneration: () => 1,
+        newChat: vi.fn(async () => "chat-project"),
+        sendMessage
+      },
+      content: "检查项目",
+      pendingAttachments: [],
+      uploadAgentMedia: vi.fn(async () => []),
+      dispatch,
+      track: vi.fn(),
+      clearComposer: vi.fn()
+    })).resolves.toBe(true);
+
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      chatId: "chat-project",
+      target: projectTarget
+    }), 1);
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "agent/userMessageQueued",
+      chatId: "chat-project",
+      content: "检查项目",
+      media: [],
+      focus: true,
+      target: projectTarget
+    });
   });
 
   it("existing chat send does not create a new chat", async () => {

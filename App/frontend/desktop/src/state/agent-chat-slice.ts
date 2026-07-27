@@ -92,6 +92,7 @@ export interface AgentTaskView {
 interface OptimisticAgentTask {
   content: string;
   createdAt: string;
+  target: WebuiSessionTarget;
 }
 
 export interface AgentChatMessage {
@@ -225,7 +226,7 @@ export type AgentAction =
   | { type: "agent/blankDraftReopened" }
   | { type: "agent/newChatCreated"; chatId: string }
   | { type: "agent/transientSendFailed"; chatId: string }
-  | { type: "agent/userMessageQueued"; chatId: string; content: string; media?: AgentChatMediaAttachment[]; focus?: boolean; deliveryUncertain?: boolean }
+  | { type: "agent/userMessageQueued"; chatId: string; content: string; media?: AgentChatMediaAttachment[]; focus?: boolean; deliveryUncertain?: boolean; target?: WebuiSessionTarget }
   | { type: "agent/composerDraftUpdated"; scopeKey: string; value: string }
   | { type: "agent/composerPendingAttachmentsUpdated"; scopeKey: string; attachments: PendingAttachment[] }
   | { type: "agent/draftTargetUpdated"; scopeKey: string; target: WebuiSessionTarget }
@@ -254,6 +255,7 @@ export const defaultAgentSidebarState: MemmyAgentSidebarState = {
     show_previews: false,
     show_timestamps: false,
     show_archived: false,
+    show_project_archived: false,
     sort: "updated_desc"
   },
   updated_at: null
@@ -590,7 +592,14 @@ function queueOptimisticUserMessage(
     ...nextState,
     messagesByChatId,
     optimisticSendingByChatId: { ...nextState.optimisticSendingByChatId, [action.chatId]: true },
-    optimisticTasksByChatId: maybeAddOptimisticTask(nextState, action.chatId, action.content, action.media, now),
+    optimisticTasksByChatId: maybeAddOptimisticTask(
+      nextState,
+      action.chatId,
+      action.content,
+      action.media,
+      action.target,
+      now
+    ),
     completedUnseenByChatId,
     retryWaitStatusByChatId,
     deliveryUncertainByChatId,
@@ -973,6 +982,13 @@ function buildAgentTasksForState(state: AgentState): AgentTaskView[] {
       continue;
     }
     const sessionKey = chatIdToSessionKey(chatId);
+    const projectId = task.target.kind === "project" ? task.target.projectId : null;
+    const project = projectId
+      ? state.projects.find((candidate) => candidate.id === projectId) ?? null
+      : null;
+    const missingProject = state.projectRegistryState === "ready"
+      && projectId !== null
+      && project === null;
     rows.push(buildTaskView(
       state.sidebarState,
       sessionKey,
@@ -982,10 +998,10 @@ function buildAgentTasksForState(state: AgentState): AgentTaskView[] {
       task.createdAt,
       effectiveRunStartedAtForChat(state, chatId),
       isTaskCompletedUnseen(state, chatId),
-      null,
-      "",
-      false,
-      null
+      projectId,
+      project?.rootPath ?? "",
+      missingProject,
+      state.projectRegistryState === "ready" && !missingProject ? projectId : null
     ));
   }
 
@@ -1037,6 +1053,7 @@ export function updateSidebarStateForTask(
     collapsed?: boolean;
     sort?: MemmyAgentSidebarState["view"]["sort"];
     showArchived?: boolean;
+    showProjectArchived?: boolean;
   }
 ): MemmyAgentSidebarState {
   return {
@@ -1049,7 +1066,8 @@ export function updateSidebarStateForTask(
     view: {
       ...state.view,
       ...(patch.sort ? { sort: patch.sort } : {}),
-      ...(patch.showArchived == null ? {} : { show_archived: patch.showArchived })
+      ...(patch.showArchived == null ? {} : { show_archived: patch.showArchived }),
+      ...(patch.showProjectArchived == null ? {} : { show_project_archived: patch.showProjectArchived })
     }
   };
 }
@@ -1427,6 +1445,7 @@ function maybeAddOptimisticTask(
   chatId: string,
   content: string,
   media: AgentChatMediaAttachment[] | undefined,
+  target: WebuiSessionTarget | undefined,
   now: number
 ): Record<string, OptimisticAgentTask> {
   if (hasCanonicalSession(state, chatId)) {
@@ -1436,7 +1455,8 @@ function maybeAddOptimisticTask(
     ...state.optimisticTasksByChatId,
     [chatId]: {
       content: optimisticTaskText(content, media),
-      createdAt: new Date(now).toISOString()
+      createdAt: new Date(now).toISOString(),
+      target: target ?? { kind: "standalone" }
     }
   };
 }

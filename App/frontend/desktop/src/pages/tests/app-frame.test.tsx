@@ -11,7 +11,7 @@ import { appActions } from "../../state/app-actions.js";
 import { appReducer, createInitialAppState } from "../../state/app-reducer.js";
 import type { AgentTaskView } from "../../state/agent-chat-slice.js";
 import { mockBootstrap } from "./fixtures/bootstrap.js";
-import { AppFrame, TaskArchiveInlineAction, TaskRow, countProjectTasksToArchive, groupAgentTasks, groupTasksByTime, resolveSidebarAccountSummary, resolveSidebarContextMenuPlacement, resolveSidebarMenuOverlayStyle, resolveTaskAncestorGroupKeys, shouldCreateNewAgentDraft, truncateAccountDisplayText } from "../app-frame.js";
+import { AppFrame, TaskArchiveInlineAction, TaskRow, countProjectTasksToArchive, deriveSidebarPlacement, deriveVisibleSidebarPlacement, groupAgentTasks, groupTasksByTime, resolveSidebarAccountSummary, resolveSidebarContextMenuPlacement, resolveSidebarMenuOverlayStyle, resolveTaskAncestorGroupKeys, shouldCreateNewAgentDraft, truncateAccountDisplayText } from "../app-frame.js";
 
 describe("AppFrame", () => {
   it("使用原型 MainLayout 的侧栏图标与导航文案", () => {
@@ -31,6 +31,7 @@ describe("AppFrame", () => {
     expect(html).not.toContain("置顶");
     expect(html).not.toContain("归档");
     expect(html).toContain('aria-label="任务列表操作"');
+    expect(html).toContain('aria-label="项目列表操作"');
     expect(html).toContain('role="separator"');
     expect(html).toContain('aria-label="调整主侧边栏宽度"');
     expect(html).toContain("sidebar-resize-handle");
@@ -113,6 +114,61 @@ describe("AppFrame", () => {
     expect(groups.pinned.map((item) => item.sessionKey)).toEqual(["websocket:pinned"]);
     expect(groups.active.map((item) => item.sessionKey)).toEqual(["websocket:normal"]);
     expect(groups.archived.map((item) => item.sessionKey)).toEqual(["websocket:archived", "websocket:archived-pinned"]);
+  });
+
+  it("switches project and standalone archive views independently", () => {
+    const projectA = project("project-a");
+    const projectB = project("project-b", true);
+    const tree = deriveSidebarPlacement([
+      task("standalone-active"),
+      task("standalone-archived", { archived: true }),
+      task("standalone-pinned", { pinned: true }),
+      task("project-active", { projectId: projectA.id, groupProjectId: projectA.id }),
+      task("project-archived", {
+        archived: true,
+        projectId: projectA.id,
+        groupProjectId: projectA.id
+      }),
+      task("project-pinned-task", {
+        pinned: true,
+        projectId: projectA.id,
+        groupProjectId: projectA.id
+      }),
+      task("pinned-project-active", {
+        projectId: projectB.id,
+        groupProjectId: projectB.id
+      }),
+      task("pinned-project-archived", {
+        archived: true,
+        projectId: projectB.id,
+        groupProjectId: projectB.id
+      })
+    ], [projectA, projectB]);
+
+    const projectArchiveView = deriveVisibleSidebarPlacement(tree, {
+      projectTasks: true,
+      standaloneTasks: false
+    });
+    expect(projectArchiveView.projects.flatMap((node) => node.tasks).map((item) => item.chatId))
+      .toEqual(["project-archived", "pinned-project-archived"]);
+    expect(projectArchiveView.standaloneTasks.map((item) => item.chatId))
+      .toEqual(["standalone-active"]);
+    expect(projectArchiveView.pinnedTasks.map((item) => item.chatId))
+      .toEqual(["standalone-pinned"]);
+    expect(projectArchiveView.pinnedProjects).toEqual([]);
+
+    const standaloneArchiveView = deriveVisibleSidebarPlacement(tree, {
+      projectTasks: false,
+      standaloneTasks: true
+    });
+    expect(standaloneArchiveView.projects.flatMap((node) => node.tasks).map((item) => item.chatId))
+      .toEqual(["project-active"]);
+    expect(standaloneArchiveView.standaloneTasks.map((item) => item.chatId))
+      .toEqual(["standalone-archived"]);
+    expect(standaloneArchiveView.pinnedTasks.map((item) => item.chatId))
+      .toEqual(["project-pinned-task"]);
+    expect(standaloneArchiveView.pinnedProjects.map((node) => node.project.id))
+      .toEqual([projectB.id]);
   });
 
   it("marks the current sidebar session as selected", () => {
@@ -254,20 +310,49 @@ describe("AppFrame", () => {
     expect(source).toContain('icon={<ListChecks size={12} />} label={props.showPreviews ? t("appFrame.task.hidePreview") : t("appFrame.task.preview")}');
   });
 
+  it("gives the project section its own archive-only overflow menu", () => {
+    const source = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
+    const projectHeaderBlock = source.slice(
+      source.indexOf('title={t("appFrame.projects")}'),
+      source.indexOf('title={t("appFrame.tasks")}')
+    );
+    const projectMenuBlock = source.slice(
+      source.indexOf("function ProjectListMoreMenu"),
+      source.indexOf("function SidebarMoreMenu")
+    );
+
+    expect(projectHeaderBlock).toContain('aria-label={t("appFrame.project.listActions")}');
+    expect(projectHeaderBlock).toContain("toggleProjectListMenu(sidebarMenuAnchorFromRect");
+    expect(projectHeaderBlock).toContain("<ProjectListMoreMenu");
+    expect(projectMenuBlock).toContain('t("appFrame.project.showArchived")');
+    expect(projectMenuBlock).toContain('t("appFrame.project.showAll")');
+    expect(projectMenuBlock).not.toContain("onRefresh");
+    expect(projectMenuBlock).not.toContain("onTogglePreviews");
+    expect(projectMenuBlock).not.toContain("onToggleSortMenu");
+  });
+
   it("keeps top-level sidebar task menus mutually exclusive", () => {
     const source = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
     const toggleTaskListMenuStart = source.indexOf("function toggleTaskListMenu(anchor: SidebarMenuAnchor)");
+    const toggleProjectListMenuStart = source.indexOf("function toggleProjectListMenu(anchor: SidebarMenuAnchor)");
     const openTaskContextMenuStart = source.indexOf("function openTaskContextMenu");
-    const toggleTaskListMenuBlock = source.slice(toggleTaskListMenuStart, openTaskContextMenuStart);
+    const toggleTaskListMenuBlock = source.slice(toggleTaskListMenuStart, toggleProjectListMenuStart);
+    const toggleProjectListMenuBlock = source.slice(toggleProjectListMenuStart, openTaskContextMenuStart);
     const openTaskContextMenuBlock = source.slice(openTaskContextMenuStart, source.indexOf("function requestDeleteArchivedTask", openTaskContextMenuStart));
 
     expect(toggleTaskListMenuBlock).toContain("setTaskContextMenu(null);");
     expect(toggleTaskListMenuBlock).toContain("setArchiveConfirmSessionKey(null);");
+    expect(toggleTaskListMenuBlock).toContain("setProjectListMenuAnchor(null);");
     expect(toggleTaskListMenuBlock).toContain("setTaskListMenuAnchor((value) => (value ? null : anchor));");
     expect(toggleTaskListMenuBlock).toContain("setSortMenuOpen(false);");
+    expect(toggleProjectListMenuBlock).toContain("setTaskListMenuAnchor(null);");
+    expect(toggleProjectListMenuBlock).toContain("setProjectCreateMenuOpen(false);");
+    expect(toggleProjectListMenuBlock).toContain("setProjectListMenuAnchor((value) => (value ? null : anchor));");
     expect(openTaskContextMenuBlock).toContain("setTaskListMenuAnchor(null);");
+    expect(openTaskContextMenuBlock).toContain("setProjectListMenuAnchor(null);");
     expect(openTaskContextMenuBlock).toContain("setSortMenuOpen(false);");
     expect(source.match(/toggleTaskListMenu\(sidebarMenuAnchorFromRect/g)).toHaveLength(1);
+    expect(source.match(/toggleProjectListMenu\(sidebarMenuAnchorFromRect/g)).toHaveLength(1);
   });
 
   it("New Agent opens a local blank draft without calling the backend", () => {
@@ -804,7 +889,7 @@ describe("AppFrame", () => {
 
     expect(appFrameSource).toContain("app-frame-task-section-header");
     expect(appFrameSource).toContain('className="space-y-1.5"');
-    expect(appFrameSource).toContain("text-left pl-3 py-2 cursor-pointer");
+    expect(appFrameSource).toContain("text-left pl-1 py-2 cursor-pointer");
     expect(appFrameSource).toContain("app-frame-task-title");
     expect(appFrameSource).toContain("app-frame-task-preview");
     expect(appFrameSource).not.toContain("onToggleCollapsed");
@@ -815,6 +900,59 @@ describe("AppFrame", () => {
     expect(stylesSource).toContain("font-size: 13px;");
     expect(stylesSource).not.toContain(".task-section-header");
     expect(stylesSource).not.toContain(".task-row-actions");
+  });
+
+  it("aligns project and standalone rows while keeping only project tasks indented", () => {
+    const appFrameSource = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
+    const stylesSource = readFileSync(resolve(__dirname, "..", "..", "styles.css"), "utf8");
+    const treeSectionBlock = appFrameSource.slice(
+      appFrameSource.indexOf("function ProjectTreeSection"),
+      appFrameSource.indexOf("function ProjectRow")
+    );
+    const projectRowBlock = appFrameSource.slice(
+      appFrameSource.indexOf("function ProjectRow"),
+      appFrameSource.indexOf("function TaskSection")
+    );
+    const taskRowBlock = appFrameSource.slice(
+      appFrameSource.indexOf("export function TaskRow"),
+      appFrameSource.indexOf("function TaskStatusIndicator")
+    );
+
+    expect(treeSectionBlock).toContain("app-frame-task-section-header__title min-w-0 truncate");
+    expect(treeSectionBlock).toContain("app-frame-task-section-header__toggle-icon shrink-0");
+    expect(treeSectionBlock.indexOf("app-frame-task-section-header__title"))
+      .toBeLessThan(treeSectionBlock.indexOf("app-frame-task-section-header__toggle-icon"));
+    expect(projectRowBlock).toContain("py-1.5 pl-1 text-left");
+    expect(projectRowBlock).toContain("app-frame-project-title");
+    expect(projectRowBlock).not.toContain("<ChevronRight");
+    expect(projectRowBlock).not.toContain("<ChevronDown");
+    expect(taskRowBlock).toContain("text-left pl-1 py-2 cursor-pointer");
+    expect(treeSectionBlock).toContain('className={nested ? "app-frame-project-task" : undefined}');
+    expect(stylesSource).toContain(".app-frame-project-task {");
+    expect(stylesSource).toContain("margin-left: 18px;");
+  });
+
+  it("uses one font size and hover-only top-level disclosure icons", () => {
+    const stylesSource = readFileSync(resolve(__dirname, "..", "..", "styles.css"), "utf8");
+    const typographyBlock = stylesSource.slice(
+      stylesSource.indexOf(".app-frame-task-section-header,"),
+      stylesSource.indexOf(".app-frame-task-section-header__title")
+    );
+    const toggleBlock = stylesSource.slice(
+      stylesSource.indexOf(".app-frame-task-section-header__toggle-icon"),
+      stylesSource.indexOf(".app-frame-task-section-header__actions")
+    );
+
+    expect(typographyBlock).toContain(".app-frame-project-title,");
+    expect(typographyBlock).toContain(".app-frame-task-title {");
+    expect(typographyBlock).toContain("font-size: 13px;");
+    expect(typographyBlock).toContain("line-height: 18px;");
+    expect(toggleBlock).toContain("visibility: hidden;");
+    expect(toggleBlock).toContain("opacity: 0;");
+    expect(toggleBlock).toContain(".app-frame-task-section-header:hover .app-frame-task-section-header__toggle-icon");
+    expect(toggleBlock).not.toContain(".app-frame-task-section-header:focus-within .app-frame-task-section-header__toggle-icon");
+    expect(toggleBlock).toContain("visibility: visible;");
+    expect(toggleBlock).toContain("opacity: 1;");
   });
 
   it("renders task icon tooltips as light fixed overlays", () => {

@@ -285,7 +285,8 @@ describe("agent chat slice", () => {
       tags: ["电商", " AI "],
       collapsed: true,
       sort: "title_asc",
-      showArchived: true
+      showArchived: true,
+      showProjectArchived: true
     });
 
     expect(nextState.title_overrides).toEqual({ "websocket:chat-1": "创建 AI 电商助手" });
@@ -293,7 +294,11 @@ describe("agent chat slice", () => {
     expect(nextState.archived_keys).toEqual(["websocket:chat-1"]);
     expect(nextState.tags_by_key).toEqual({ "websocket:chat-1": ["电商", "AI"] });
     expect(nextState.collapsed_groups).toEqual({ "websocket:chat-1": true });
-    expect(nextState.view).toMatchObject({ sort: "title_asc", show_archived: true });
+    expect(nextState.view).toMatchObject({
+      sort: "title_asc",
+      show_archived: true,
+      show_project_archived: true
+    });
   });
 
   it("reduces websocket events into streaming messages without requesting history refresh on turn end", () => {
@@ -1573,7 +1578,11 @@ describe("agent chat slice", () => {
       ...state,
       optimisticTasksByChatId: {
         ...state.optimisticTasksByChatId,
-        "chat-transient": { content: "未保存消息", createdAt: "2026-06-18T00:00:00.000Z" }
+        "chat-transient": {
+          content: "未保存消息",
+          createdAt: "2026-06-18T00:00:00.000Z",
+          target: { kind: "standalone" }
+        }
       }
     };
 
@@ -2156,7 +2165,9 @@ describe("agent chat slice", () => {
       title: "整理今天的 PPT",
       preview: "整理今天的 PPT",
       runStartedAt: null,
-      completedUnseen: false
+      completedUnseen: false,
+      projectId: null,
+      groupProjectId: null
     });
     expect(state.isSending).toBe(true);
 
@@ -2173,6 +2184,60 @@ describe("agent chat slice", () => {
       preview: "已保存"
     });
     expect(state.optimisticTasksByChatId["chat-new"]).toBeUndefined();
+  });
+
+  it("keeps a project task in its project while replacing the optimistic row with the canonical session", () => {
+    vi.spyOn(Date, "now").mockReturnValue(1781240000000);
+    const project = {
+      id: "project-a",
+      name: "Project A",
+      rootPath: "/workspace/project-a",
+      pinned: false,
+      createdAt: "2026-06-06T08:00:00.000Z"
+    };
+    let state: AgentState = {
+      ...initialAgentState,
+      projects: [project]
+    };
+    state = agentReducer(state, { type: "agent/newChatCreated", chatId: "chat-project" });
+    state = agentReducer(state, {
+      type: "agent/userMessageQueued",
+      chatId: "chat-project",
+      content: "检查项目",
+      target: { kind: "project", projectId: project.id }
+    });
+
+    expect(state.tasks.find((task) => task.chatId === "chat-project")).toMatchObject({
+      projectId: project.id,
+      groupProjectId: project.id,
+      cwd: project.rootPath,
+      missingProject: false
+    });
+
+    state = agentReducer(state, {
+      type: "agent/sessionSnapshotApplied",
+      snapshot: {
+        projectRegistryState: "ready",
+        projects: [project],
+        sessions: [{
+          key: "websocket:chat-project",
+          title: "后端标题",
+          preview: "已保存",
+          updatedAt: "2026-06-06T11:00:00.000Z",
+          projectId: project.id,
+          cwd: project.rootPath
+        }]
+      }
+    });
+
+    expect(state.tasks.find((task) => task.chatId === "chat-project")).toMatchObject({
+      title: "后端标题",
+      projectId: project.id,
+      groupProjectId: project.id,
+      cwd: project.rootPath,
+      missingProject: false
+    });
+    expect(state.optimisticTasksByChatId["chat-project"]).toBeUndefined();
   });
 
   it("marks background completed tasks as unseen and clears the dot when opened", () => {
