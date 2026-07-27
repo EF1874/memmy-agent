@@ -178,6 +178,12 @@ const sidebarMoreMenuSize: SidebarMenuSize = {
   margin: 8,
   gap: 4
 };
+const projectListMoreMenuSize: SidebarMenuSize = {
+  width: 128,
+  height: 40,
+  margin: 8,
+  gap: 4
+};
 const taskContextMenuSize: SidebarMenuSize = {
   width: 144,
   height: 112,
@@ -231,6 +237,7 @@ export function AppFrame(props: AppFrameProps) {
   const [searchPaletteOpen, setSearchPaletteOpen] = useState(false);
   const [showCommunity, setShowCommunity] = useState(false);
   const [taskListMenuAnchor, setTaskListMenuAnchor] = useState<SidebarMenuAnchor | null>(null);
+  const [projectListMenuAnchor, setProjectListMenuAnchor] = useState<SidebarMenuAnchor | null>(null);
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
   const [taskContextMenu, setTaskContextMenu] = useState<TaskContextMenuState | null>(null);
   const [projectContextMenu, setProjectContextMenu] = useState<ProjectContextMenuState | null>(null);
@@ -272,7 +279,15 @@ export function AppFrame(props: AppFrameProps) {
     () => deriveSidebarPlacement(visibleTasks, state.agent.projects),
     [state.agent.projects, visibleTasks]
   );
-  const showingArchived = state.agent.sidebarState.view.show_archived;
+  const showingStandaloneArchived = state.agent.sidebarState.view.show_archived;
+  const showingProjectArchived = state.agent.sidebarState.view.show_project_archived;
+  const visibleProjectTree = useMemo(
+    () => deriveVisibleSidebarPlacement(projectTree, {
+      projectTasks: showingProjectArchived,
+      standaloneTasks: showingStandaloneArchived
+    }),
+    [projectTree, showingProjectArchived, showingStandaloneArchived]
+  );
   const highlightedSessionKey = state.navigation.currentPath === "/main" ? state.agent.currentSessionKey : null;
   const renameProject = state.agent.projects.find((project) => project.id === renameProjectId) ?? null;
   const removeProject = state.agent.projects.find((project) => project.id === removeProjectId) ?? null;
@@ -385,13 +400,14 @@ export function AppFrame(props: AppFrameProps) {
   useEffect(() => {
     if (
       typeof document === "undefined"
-      || (!taskListMenuAnchor && !taskContextMenu && !projectContextMenu && !projectCreateMenuOpen && !archiveConfirmSessionKey)
+      || (!taskListMenuAnchor && !projectListMenuAnchor && !taskContextMenu && !projectContextMenu && !projectCreateMenuOpen && !archiveConfirmSessionKey)
     ) {
       return;
     }
 
     const closeMenus = () => {
       setTaskListMenuAnchor(null);
+      setProjectListMenuAnchor(null);
       setSortMenuOpen(false);
       setTaskContextMenu(null);
       setProjectContextMenu(null);
@@ -410,7 +426,7 @@ export function AppFrame(props: AppFrameProps) {
       document.removeEventListener("click", closeMenus);
       document.removeEventListener("keydown", closeOnEscape);
     };
-  }, [archiveConfirmSessionKey, projectContextMenu, projectCreateMenuOpen, taskContextMenu, taskListMenuAnchor]);
+  }, [archiveConfirmSessionKey, projectContextMenu, projectCreateMenuOpen, projectListMenuAnchor, taskContextMenu, taskListMenuAnchor]);
 
   useEffect(() => {
     if (!showCommunity || typeof document === "undefined") {
@@ -596,6 +612,7 @@ export function AppFrame(props: AppFrameProps) {
   async function saveSidebarView(patch: {
     sort?: typeof state.agent.sidebarState.view.sort;
     showArchived?: boolean;
+    showProjectArchived?: boolean;
     showPreviews?: boolean;
   }) {
     await enqueueSidebarIntent({
@@ -604,6 +621,7 @@ export function AppFrame(props: AppFrameProps) {
       patch: {
         ...(patch.sort ? { sort: patch.sort } : {}),
         ...(patch.showArchived == null ? {} : { show_archived: patch.showArchived }),
+        ...(patch.showProjectArchived == null ? {} : { show_project_archived: patch.showProjectArchived }),
         ...(patch.showPreviews == null ? {} : { show_previews: patch.showPreviews })
       }
     });
@@ -632,7 +650,10 @@ export function AppFrame(props: AppFrameProps) {
   }
 
   function expandTaskAncestors(task: AgentTaskView) {
-    for (const key of resolveTaskAncestorGroupKeys(task, state.agent.projects, showingArchived)) {
+    const showingTaskArchive = task.groupProjectId
+      ? showingProjectArchived
+      : showingStandaloneArchived;
+    for (const key of resolveTaskAncestorGroupKeys(task, state.agent.projects, showingTaskArchive)) {
       if (!state.agent.sidebarState.collapsed_groups[key]) continue;
       void enqueueSidebarIntent({
         id: nextAgentSidebarMutationId(),
@@ -769,6 +790,10 @@ export function AppFrame(props: AppFrameProps) {
 
   function openProjectMenu(event: MouseEvent, projectId: string) {
     event.stopPropagation();
+    setTaskListMenuAnchor(null);
+    setProjectListMenuAnchor(null);
+    setSortMenuOpen(false);
+    setProjectCreateMenuOpen(false);
     setTaskContextMenu(null);
     setProjectContextMenu({ projectId, x: event.clientX, y: event.clientY });
   }
@@ -835,15 +860,28 @@ export function AppFrame(props: AppFrameProps) {
   }
 
   function toggleTaskListMenu(anchor: SidebarMenuAnchor) {
+    setProjectListMenuAnchor(null);
+    setProjectCreateMenuOpen(false);
     setTaskContextMenu(null);
     setArchiveConfirmSessionKey(null);
     setTaskListMenuAnchor((value) => (value ? null : anchor));
     setSortMenuOpen(false);
   }
 
+  function toggleProjectListMenu(anchor: SidebarMenuAnchor) {
+    setTaskListMenuAnchor(null);
+    setSortMenuOpen(false);
+    setProjectCreateMenuOpen(false);
+    setTaskContextMenu(null);
+    setProjectContextMenu(null);
+    setArchiveConfirmSessionKey(null);
+    setProjectListMenuAnchor((value) => (value ? null : anchor));
+  }
+
   function openTaskContextMenu(event: MouseEvent, task: AgentTaskView) {
     event.preventDefault();
     setTaskListMenuAnchor(null);
+    setProjectListMenuAnchor(null);
     setSortMenuOpen(false);
     setArchiveConfirmSessionKey(null);
     setTaskContextMenu({ task, x: event.clientX, y: event.clientY });
@@ -985,13 +1023,13 @@ export function AppFrame(props: AppFrameProps) {
 
         <div ref={taskScrollRef} className={`app-frame-task-scroll mt-5 mx-4 flex-1 overflow-y-auto${taskScrollFade ? " app-frame-task-scroll--faded" : ""}`}>
           <div className="space-y-3">
-            {!showingArchived && (projectTree.pinnedTasks.length > 0 || projectTree.pinnedProjects.length > 0) ? (
+            {visibleProjectTree.pinnedTasks.length > 0 || visibleProjectTree.pinnedProjects.length > 0 ? (
               <ProjectTreeSection
                 title={t("common.pin")}
                 groupKey="pinned"
                 collapsedGroups={state.agent.sidebarState.collapsed_groups}
-                projects={projectTree.pinnedProjects}
-                tasks={projectTree.pinnedTasks}
+                projects={visibleProjectTree.pinnedProjects}
+                tasks={visibleProjectTree.pinnedTasks}
                 currentSessionKey={highlightedSessionKey}
                 showPreviews={state.agent.sidebarState.view.show_previews}
                 projectRegistryState={state.agent.projectRegistryState}
@@ -1015,7 +1053,7 @@ export function AppFrame(props: AppFrameProps) {
               title={t("appFrame.projects")}
               groupKey="projects"
               collapsedGroups={state.agent.sidebarState.collapsed_groups}
-              projects={showingArchived ? projectTree.archivedProjects : projectTree.projects}
+              projects={visibleProjectTree.projects}
               tasks={[]}
               currentSessionKey={highlightedSessionKey}
               showPreviews={state.agent.sidebarState.view.show_previews}
@@ -1037,25 +1075,52 @@ export function AppFrame(props: AppFrameProps) {
               onProjectContextMenu={openProjectMenu}
               onNewProjectTask={(projectId) => openNewAgent({ kind: "project", projectId })}
               headerAction={(
-                <div className="relative">
+                <div className="flex items-center gap-0.5">
+                  <div className="relative">
+                    <button
+                      type="button"
+                      className="app-frame-task-section-action"
+                      aria-label={t("appFrame.project.add")}
+                      title={t("appFrame.project.add")}
+                      disabled={state.agent.projectRegistryState === "corrupt" || projectMutationId != null}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setTaskListMenuAnchor(null);
+                        setProjectListMenuAnchor(null);
+                        setSortMenuOpen(false);
+                        setProjectCreateMenuOpen((open) => !open);
+                      }}
+                    >
+                      <Plus size={14} />
+                    </button>
+                    {projectCreateMenuOpen ? (
+                      <div className="app-frame-project-create-menu">
+                        <MenuButton label={t("appFrame.project.createBlank")} onClick={() => void registerProject("blank")} />
+                        <MenuButton label={t("appFrame.project.useExisting")} onClick={() => void registerProject("existing")} />
+                      </div>
+                    ) : null}
+                  </div>
                   <button
                     type="button"
-                    className="app-frame-task-section-action"
-                    aria-label={t("appFrame.project.add")}
-                    title={t("appFrame.project.add")}
-                    disabled={state.agent.projectRegistryState === "corrupt" || projectMutationId != null}
+                    aria-label={t("appFrame.project.listActions")}
+                    title={t("appFrame.project.listActions")}
                     onClick={(event) => {
                       event.stopPropagation();
-                      setProjectCreateMenuOpen((open) => !open);
+                      toggleProjectListMenu(sidebarMenuAnchorFromRect(event.currentTarget.getBoundingClientRect()));
                     }}
+                    className="app-frame-task-section-action"
                   >
-                    <Plus size={14} />
+                    <MoreHorizontal size={14} />
                   </button>
-                  {projectCreateMenuOpen ? (
-                    <div className="app-frame-project-create-menu">
-                      <MenuButton label={t("appFrame.project.createBlank")} onClick={() => void registerProject("blank")} />
-                      <MenuButton label={t("appFrame.project.useExisting")} onClick={() => void registerProject("existing")} />
-                    </div>
+                  {projectListMenuAnchor ? (
+                    <ProjectListMoreMenu
+                      anchor={projectListMenuAnchor}
+                      showArchived={showingProjectArchived}
+                      onToggleArchived={() => {
+                        setProjectListMenuAnchor(null);
+                        void saveSidebarView({ showProjectArchived: !showingProjectArchived });
+                      }}
+                    />
                   ) : null}
                 </div>
               )}
@@ -1066,13 +1131,13 @@ export function AppFrame(props: AppFrameProps) {
               groupKey="standalone"
               collapsedGroups={state.agent.sidebarState.collapsed_groups}
               projects={[]}
-              tasks={showingArchived ? projectTree.archivedStandaloneTasks : projectTree.standaloneTasks}
+              tasks={visibleProjectTree.standaloneTasks}
               currentSessionKey={highlightedSessionKey}
               showPreviews={state.agent.sidebarState.view.show_previews}
               projectRegistryState={state.agent.projectRegistryState}
               emptyText={state.agent.isLoadingSessions
                 ? t("appFrame.taskList.loading")
-                : t(showingArchived ? "appFrame.taskList.emptyArchived" as MessageKey : "appFrame.taskList.empty")}
+                : t(showingStandaloneArchived ? "appFrame.taskList.emptyArchived" as MessageKey : "appFrame.taskList.empty")}
               onToggleGroup={toggleSidebarGroup}
               onToggleProject={toggleSidebarGroup}
               onOpenTask={openAgentTask}
@@ -1116,7 +1181,7 @@ export function AppFrame(props: AppFrameProps) {
                     <SidebarMoreMenu
                       anchor={taskListMenuAnchor}
                       showPreviews={state.agent.sidebarState.view.show_previews}
-                      showArchived={state.agent.sidebarState.view.show_archived}
+                      showArchived={showingStandaloneArchived}
                       sort={state.agent.sidebarState.view.sort}
                       sortMenuOpen={sortMenuOpen}
                       onRefresh={() => {
@@ -1129,7 +1194,7 @@ export function AppFrame(props: AppFrameProps) {
                       }}
                       onToggleArchived={() => {
                         setTaskListMenuAnchor(null);
-                        void saveSidebarView({ showArchived: !state.agent.sidebarState.view.show_archived });
+                        void saveSidebarView({ showArchived: !showingStandaloneArchived });
                       }}
                       onToggleSortMenu={() => setSortMenuOpen((value) => !value)}
                       onSelectSort={(sort) => {
@@ -1600,6 +1665,24 @@ export function deriveSidebarPlacement(
 
 export const buildProjectSidebarTree = deriveSidebarPlacement;
 
+export function deriveVisibleSidebarPlacement(
+  tree: ProjectSidebarTree,
+  showingArchived: { projectTasks: boolean; standaloneTasks: boolean }
+) {
+  return {
+    pinnedTasks: tree.pinnedTasks.filter((task) => (
+      task.groupProjectId
+        ? !showingArchived.projectTasks
+        : !showingArchived.standaloneTasks
+    )),
+    pinnedProjects: showingArchived.projectTasks ? [] : tree.pinnedProjects,
+    projects: showingArchived.projectTasks ? tree.archivedProjects : tree.projects,
+    standaloneTasks: showingArchived.standaloneTasks
+      ? tree.archivedStandaloneTasks
+      : tree.standaloneTasks
+  };
+}
+
 export function countProjectTasksToArchive(
   tasks: AgentTaskView[],
   projectId: string
@@ -2051,6 +2134,42 @@ function InlineConfirmButton(props: { ariaLabel: string; label: string; onClick:
       {props.label}
     </button>
   );
+}
+
+function ProjectListMoreMenu(props: {
+  anchor: SidebarMenuAnchor;
+  showArchived: boolean;
+  onToggleArchived: () => void;
+}) {
+  const { t } = useTranslation();
+
+  if (typeof document === "undefined" || typeof window === "undefined") {
+    return null;
+  }
+
+  const overlayStyle = resolveSidebarMenuOverlayStyle(
+    props.anchor,
+    { width: window.innerWidth, height: window.innerHeight },
+    projectListMoreMenuSize
+  );
+  const menu = (
+    <div
+      className="fixed w-32 rounded-menu border border-border-stone/40 bg-background-paper shadow-lg p-1"
+      style={overlayStyle}
+      onClick={(event) => event.stopPropagation()}
+    >
+      <MenuButton
+        icon={<Archive size={12} />}
+        label={props.showArchived
+          ? t("appFrame.project.showAll")
+          : t("appFrame.project.showArchived")}
+        active={props.showArchived}
+        onClick={props.onToggleArchived}
+      />
+    </div>
+  );
+
+  return createPortal(menu, document.body);
 }
 
 function SidebarMoreMenu(props: {

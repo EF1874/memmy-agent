@@ -661,7 +661,7 @@ describe("WebSocket HTTP route helpers", () => {
       pinned_keys: ["websocket:sidebar"],
       archived_keys: ["websocket:old"],
       title_overrides: { "websocket:sidebar": "Pinned work" },
-      view: { density: "compact", show_archived: true },
+      view: { density: "compact", show_archived: true, show_project_archived: true },
     };
     const updated = await fetch(`http://127.0.0.1:${port}/api/webui/sidebar-state/update`, {
       method: "POST",
@@ -673,6 +673,8 @@ describe("WebSocket HTTP route helpers", () => {
     expect(body.pinned_keys).toEqual(["websocket:sidebar"]);
     expect(body.title_overrides).toEqual({ "websocket:sidebar": "Pinned work" });
     expect(body.view.density).toBe("compact");
+    expect(body.view.show_archived).toBe(true);
+    expect(body.view.show_project_archived).toBe(true);
     expect(JSON.parse(fs.readFileSync(path.join(root, "webui", "sidebar-state.json"), "utf8")).pinned_keys).toEqual(["websocket:sidebar"]);
   });
 

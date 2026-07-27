@@ -255,6 +255,7 @@ export const defaultAgentSidebarState: MemmyAgentSidebarState = {
     show_previews: false,
     show_timestamps: false,
     show_archived: false,
+    show_project_archived: false,
     sort: "updated_desc"
   },
   updated_at: null
@@ -1052,6 +1053,7 @@ export function updateSidebarStateForTask(
     collapsed?: boolean;
     sort?: MemmyAgentSidebarState["view"]["sort"];
     showArchived?: boolean;
+    showProjectArchived?: boolean;
   }
 ): MemmyAgentSidebarState {
   return {
@@ -1064,7 +1066,8 @@ export function updateSidebarStateForTask(
     view: {
       ...state.view,
       ...(patch.sort ? { sort: patch.sort } : {}),
-      ...(patch.showArchived == null ? {} : { show_archived: patch.showArchived })
+      ...(patch.showArchived == null ? {} : { show_archived: patch.showArchived }),
+      ...(patch.showProjectArchived == null ? {} : { show_project_archived: patch.showProjectArchived })
     }
   };
 }

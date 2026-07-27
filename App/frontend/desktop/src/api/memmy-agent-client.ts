@@ -93,6 +93,7 @@ const SidebarStateSchema = z.object({
     show_previews: z.boolean(),
     show_timestamps: z.boolean(),
     show_archived: z.boolean(),
+    show_project_archived: z.boolean(),
     sort: z.union([z.literal("updated_desc"), z.literal("created_desc"), z.literal("title_asc")])
   }),
   updated_at: z.string().nullable()

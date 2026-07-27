@@ -285,7 +285,8 @@ describe("agent chat slice", () => {
       tags: ["电商", " AI "],
       collapsed: true,
       sort: "title_asc",
-      showArchived: true
+      showArchived: true,
+      showProjectArchived: true
     });
 
     expect(nextState.title_overrides).toEqual({ "websocket:chat-1": "创建 AI 电商助手" });
@@ -293,7 +294,11 @@ describe("agent chat slice", () => {
     expect(nextState.archived_keys).toEqual(["websocket:chat-1"]);
     expect(nextState.tags_by_key).toEqual({ "websocket:chat-1": ["电商", "AI"] });
     expect(nextState.collapsed_groups).toEqual({ "websocket:chat-1": true });
-    expect(nextState.view).toMatchObject({ sort: "title_asc", show_archived: true });
+    expect(nextState.view).toMatchObject({
+      sort: "title_asc",
+      show_archived: true,
+      show_project_archived: true
+    });
   });
 
   it("reduces websocket events into streaming messages without requesting history refresh on turn end", () => {

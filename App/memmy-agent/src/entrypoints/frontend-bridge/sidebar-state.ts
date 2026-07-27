@@ -41,6 +41,7 @@ export function defaultWebuiSidebarState(): Record<string, any> {
       show_previews: false,
       show_timestamps: false,
       show_archived: false,
+      show_project_archived: false,
       sort: "updated_desc",
     },
     updated_at: null,
@@ -107,6 +108,7 @@ function cleanView(value: any): Record<string, any> {
     show_previews: Boolean(value.show_previews ?? defaults.show_previews),
     show_timestamps: Boolean(value.show_timestamps ?? defaults.show_timestamps),
     show_archived: Boolean(value.show_archived ?? defaults.show_archived),
+    show_project_archived: Boolean(value.show_project_archived ?? defaults.show_project_archived),
     sort: ALLOWED_SORTS.has(value.sort) ? value.sort : defaults.sort,
   };
 }
