@@ -49,6 +49,7 @@ export class ChannelManager {
   originReplyFingerprints = new Map<string, string>();
   sessionManager: any = null;
   webuiRuntimeModelName: (() => string | null) | null = null;
+  workspacePath: string | null = null;
   cancelActiveTasks: ((sessionKey: string) => Promise<number>) | null = null;
   closeBrowserChat: ((channel: string, chatId: string) => Promise<void>) | null = null;
 
@@ -58,6 +59,7 @@ export class ChannelManager {
     options: {
       sessionManager?: any;
       webuiRuntimeModelName?: (() => string | null) | null;
+      workspacePath?: string | null;
       cancelActiveTasks?: ((sessionKey: string) => Promise<number>) | null;
       closeBrowserChat?: ((channel: string, chatId: string) => Promise<void>) | null;
     } = {},
@@ -71,6 +73,9 @@ export class ChannelManager {
     }
     this.sessionManager = options.sessionManager ?? null;
     this.webuiRuntimeModelName = options.webuiRuntimeModelName ?? null;
+    this.workspacePath = options.workspacePath
+      ? path.resolve(options.workspacePath)
+      : null;
     this.cancelActiveTasks = options.cancelActiveTasks ?? null;
     this.closeBrowserChat = options.closeBrowserChat ?? null;
     this.initChannels();
@@ -125,7 +130,9 @@ export class ChannelManager {
       const staticDistPath = defaultWebuiDist();
       if (staticDistPath) options.staticDistPath = staticDistPath;
     }
-    const workspacePath = this.config?.workspacePath ?? this.config?.workspace_path;
+    const workspacePath = this.workspacePath
+      ?? this.config?.workspacePath
+      ?? this.config?.workspace_path;
     if (workspacePath) options.workspacePath = workspacePath;
     if (this.webuiRuntimeModelName) options.runtimeModelName = this.webuiRuntimeModelName;
     if (this.cancelActiveTasks) options.cancelActiveTasks = this.cancelActiveTasks;

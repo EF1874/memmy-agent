@@ -12,6 +12,7 @@ import { CronTool } from "../../core/agent-runtime/tools/cron.js";
 import { MessageTool } from "../../core/agent-runtime/tools/message.js";
 import { prepareManagedChromium } from "../../core/agent-runtime/tools/browser-setup.js";
 import { WebuiTitleService } from "../../core/session/webui-title.js";
+import { readWebuiSessionBinding } from "../../core/session/manager.js";
 import { WEBUI_LANGUAGE_METADATA_KEY } from "../../core/session/webui-turns.js";
 import {
   API_MAX_BODY_BYTES,
@@ -54,6 +55,7 @@ import {
   shouldShowCliRestartNotice,
 } from "../../utils/restart.js";
 import { createChannelAdmin } from "../frontend-bridge/channels-api.js";
+import { ProjectStore } from "../frontend-bridge/projects.js";
 import { getQuestionary, runOnboard } from "./onboard.js";
 import { StreamRenderer, ThinkingSpinner } from "./stream.js";
 
@@ -666,6 +668,15 @@ function sanitizeCronDeliveryMetadata(
   return next;
 }
 
+function cronExecutionMetadata(
+  channel: string,
+  metadata: Record<string, any> = {},
+): Record<string, any> {
+  const next = sanitizeCronDeliveryMetadata(channel, metadata);
+  if (channel === "websocket") delete next.webui;
+  return next;
+}
+
 function usesChineseCronLanguage(metadata: Record<string, any>): boolean {
   return String(metadata?.[WEBUI_LANGUAGE_METADATA_KEY] ?? "")
     .toLowerCase()
@@ -726,8 +737,10 @@ export async function gateway({
   installConsoleLevelGate();
   const bus = new MessageBus();
   const cron = new CronService(path.join(workspacePath, "cron", "jobs.json"));
+  const projectStore = new ProjectStore();
   const loop = AgentLoop.fromConfig(loaded, bus, {
     cronService: cron,
+    projectStore,
     runtimeModelPublisher: (model, preset) => {
       if (model) publishRuntimeModelUpdate(bus, model, preset);
     },
@@ -735,6 +748,7 @@ export async function gateway({
   await initializeLoopRuntimeTools(loop);
   const manager = new ChannelManager(loaded, bus, {
     sessionManager: loop.sessions,
+    workspacePath,
     webuiRuntimeModelName: () => {
       loop.refreshProviderSnapshot();
       return loop.model ?? null;
@@ -744,6 +758,11 @@ export async function gateway({
   });
   const webuiChannel = manager.getChannel("websocket");
   if (webuiChannel instanceof WebSocketChannel) {
+    webuiChannel.setProjectStore(projectStore);
+    webuiChannel.setSessionDeletionServices({
+      cronService: cron,
+      sessionDagQueue: loop.sessionDagQueue,
+    });
     webuiChannel.setChannelAdmin(createChannelAdmin(manager));
     webuiChannel.setWebuiTitleService(
       new WebuiTitleService({
@@ -855,6 +874,24 @@ export async function gateway({
     const channel = job.payload.channel ?? "cli";
     const chatId = job.payload.to ?? job.payload.chatId ?? "direct";
     const targetSessionKey = job.payload.sessionKey ?? channelSessionKey(loop, channel, chatId);
+    let targetSessionBinding = null;
+    if (channel === "websocket") {
+      const targetSession = loop.sessions.get(targetSessionKey);
+      if (!targetSession) throw new Error("cron target session not found");
+      targetSessionBinding = loop.resolveSessionWorkspace(
+        new InboundMessage({
+          channel,
+          chatId,
+          senderId: "cron",
+          content: message,
+          metadata: job.payload.channelMeta ?? {},
+          sessionKey: targetSessionKey,
+        }),
+        targetSession,
+        null,
+        readWebuiSessionBinding(targetSession),
+      );
+    }
     const scheduledForMs = job.state.nextRunAtMs ?? Date.now();
     const cronContext: CronDeliveryContext = {
       jobId: job.id,
@@ -901,9 +938,12 @@ export async function gateway({
           sessionKey: `cron:${job.id}`,
           channel,
           chatId,
-          metadata: channel === "websocket" ? job.payload.channelMeta : {},
+          metadata: channel === "websocket"
+            ? cronExecutionMetadata(channel, job.payload.channelMeta ?? {})
+            : {},
           onProgress: async () => undefined,
           messageSendCallback,
+          sessionBindingOverride: targetSessionBinding,
         });
         content = response?.content ?? "";
       } finally {

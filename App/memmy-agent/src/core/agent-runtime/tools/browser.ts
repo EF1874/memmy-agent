@@ -44,6 +44,10 @@ export type BrowserScope = {
   channel: string;
   chatId: string;
 };
+export type BrowserLocalPreviewContext = {
+  workspace: string;
+  readonlyRoots: readonly string[];
+};
 
 type BrowserToolDefinition = {
   name: BrowserToolName;
@@ -188,7 +192,6 @@ export class BrowserSessionManager {
   capability: BrowserCapability = "unknown";
   private readonly config: ReturnType<typeof normalizeBrowserConfig>;
   private readonly runtimeLoader: BrowserRuntimeLoader;
-  private readonly workspace: string;
   private readonly restrictLocalFiles: boolean;
   private runtime: PlaywrightRuntime | null = null;
   private executablePath: string | null = null;
@@ -205,17 +208,14 @@ export class BrowserSessionManager {
     config: BrowserToolsConfig | Record<string, any>,
     {
       runtimeLoader = defaultRuntimeLoader,
-      workspace = process.cwd(),
       restrictLocalFiles = false,
     }: {
       runtimeLoader?: BrowserRuntimeLoader;
-      workspace?: string;
       restrictLocalFiles?: boolean;
     } = {},
   ) {
     this.config = normalizeBrowserConfig(config);
     this.runtimeLoader = runtimeLoader;
-    this.workspace = path.resolve(workspace);
     this.restrictLocalFiles = restrictLocalFiles;
     if (!this.config.enabled) this.capability = "disabled";
   }
@@ -447,6 +447,7 @@ export class BrowserSessionManager {
     name: BrowserToolName,
     params: Record<string, any>,
     abortSignal: AbortSignal | null = null,
+    localPreviewContext: BrowserLocalPreviewContext | null = null,
   ): Promise<string | Array<Record<string, any>>> {
     if (!this.definitions.has(name)) throw new Error(`browser tool '${name}' is unavailable`);
     const navigateTarget: BrowserNavigateTarget | null = name === "browser_navigate"
@@ -466,8 +467,12 @@ export class BrowserSessionManager {
           session.lastUsedAt = Date.now();
           let callParams = params;
           if (navigateTarget?.kind === "path") {
+            if (!localPreviewContext?.workspace) {
+              throw new Error("local browser preview requires a trusted workspace");
+            }
             candidatePreview = await createBrowserPreview(navigateTarget.path, {
-              workspace: this.workspace,
+              workspace: localPreviewContext.workspace,
+              readonlyRoots: localPreviewContext.readonlyRoots,
               restrictLocalFiles: this.restrictLocalFiles,
             });
             callParams = { ...params, url: candidatePreview.url };
@@ -581,14 +586,17 @@ abstract class BrowserTool extends Tool {
   protected readonly manager: BrowserSessionManager;
   private readonly toolDefinition: BrowserToolDefinition;
   private readonly requestContext = new RequestContextStore();
+  private readonly readonlySkillRoots: readonly string[];
 
   constructor(
     manager: BrowserSessionManager,
     definition: BrowserToolDefinition,
+    readonlySkillRoots: readonly string[] = [],
   ) {
     super();
     this.manager = manager;
     this.toolDefinition = definition;
+    this.readonlySkillRoots = Object.freeze([...readonlySkillRoots]);
   }
 
   static enabled(ctx: any): boolean {
@@ -599,7 +607,11 @@ abstract class BrowserTool extends Tool {
     const name = this.browserToolName;
     const definition = ctx.browserSessionManager?.definition(name);
     if (!definition) throw new Error(`browser tool '${name}' is unavailable`);
-    return new (this as any)(ctx.browserSessionManager, definition) as InstanceType<T>;
+    return new (this as any)(
+      ctx.browserSessionManager,
+      definition,
+      ctx.readonlySkillRoots ?? [],
+    ) as InstanceType<T>;
   }
 
   get name(): string {
@@ -630,7 +642,8 @@ abstract class BrowserTool extends Tool {
     const sessionKey = request?.sessionKey?.trim();
     const channel = request?.channel?.trim();
     const chatId = request?.chatId?.trim();
-    if (!sessionKey || !channel || !chatId) {
+    const workspace = request?.workspace?.trim();
+    if (!sessionKey || !channel || !chatId || !workspace) {
       throw new Error("browser tool requires a trusted chat context");
     }
     return this.manager.callTool(
@@ -638,6 +651,10 @@ abstract class BrowserTool extends Tool {
       this.name as BrowserToolName,
       params,
       context?.abortSignal ?? null,
+      {
+        workspace,
+        readonlyRoots: this.readonlySkillRoots,
+      },
     );
   }
 }
