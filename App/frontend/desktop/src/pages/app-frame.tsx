@@ -1803,8 +1803,10 @@ function ProjectTreeSection(props: {
           className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-text-ink/50"
           aria-expanded={!collapsed}
         >
-          {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
-          <span className="app-frame-task-section-header__title truncate">{props.title}</span>
+          <span className="app-frame-task-section-header__title min-w-0 truncate">{props.title}</span>
+          {collapsed
+            ? <ChevronRight size={13} aria-hidden="true" className="app-frame-task-section-header__toggle-icon shrink-0" />
+            : <ChevronDown size={13} aria-hidden="true" className="app-frame-task-section-header__toggle-icon shrink-0" />}
         </button>
         <div
           className="app-frame-task-section-header__actions"
@@ -1856,13 +1858,12 @@ function ProjectRow(props: {
     >
       <button
         type="button"
-        className="flex min-w-0 flex-1 items-center gap-1.5 py-1.5 pl-2 text-left"
+        className="flex min-w-0 flex-1 items-center gap-1.5 py-1.5 pl-1 text-left"
         aria-expanded={!props.collapsed}
         onClick={props.onToggle}
       >
-        {props.collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
         <Folder size={14} className="shrink-0 text-action-sky/70" />
-        <span className="min-w-0 flex-1 truncate text-xs text-text-ink/75">{props.project.name}</span>
+        <span className="app-frame-project-title min-w-0 flex-1 truncate text-text-ink/75">{props.project.name}</span>
       </button>
       <div className="app-frame-project-row__actions flex shrink-0 items-center pr-1">
         <TaskIconButton label={t("appFrame.project.newTask")} onClick={props.onNewTask}>
@@ -1985,7 +1986,7 @@ export function TaskRow(props: {
           event.stopPropagation();
           props.onRename();
         }}
-        className="min-w-0 flex-1 text-left pl-3 py-2 cursor-pointer"
+        className="min-w-0 flex-1 text-left pl-1 py-2 cursor-pointer"
       >
         <span className="flex min-w-0 items-center gap-1.5">
           <span className={`app-frame-task-title min-w-0 flex-1 truncate ${titleClass}`}>{props.task.title}</span>

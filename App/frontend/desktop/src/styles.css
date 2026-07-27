@@ -6980,18 +6980,31 @@ input[type="checkbox"].check-sky:checked::after {
   letter-spacing: 0;
 }
 
-.app-frame-task-section-header {
-  font-size: 12px;
+.app-frame-task-section-header,
+.app-frame-project-title,
+.app-frame-task-title {
+  font-size: 13px;
   font-weight: 400;
-  line-height: 16px;
-  letter-spacing: 0.01em;
+  line-height: 18px;
+  letter-spacing: 0;
 }
 
 .app-frame-task-section-header__title {
   display: flex;
   align-items: center;
-  height: 16px;
-  line-height: 16px;
+  height: 18px;
+  line-height: 18px;
+}
+
+.app-frame-task-section-header__toggle-icon {
+  visibility: hidden;
+  opacity: 0;
+  transition: opacity var(--duration-fast);
+}
+
+.app-frame-task-section-header:hover .app-frame-task-section-header__toggle-icon {
+  visibility: visible;
+  opacity: 1;
 }
 
 .app-frame-task-section-header__actions {
@@ -7104,13 +7117,6 @@ input[type="checkbox"].check-sky:checked::after {
 .app-frame-task-row {
   border-radius: 8px;
   font-family: var(--font-sans);
-}
-
-.app-frame-task-title {
-  font-size: 13px;
-  font-weight: 400;
-  line-height: 18px;
-  letter-spacing: 0;
 }
 
 .app-frame-task-preview,

@@ -889,7 +889,7 @@ describe("AppFrame", () => {
 
     expect(appFrameSource).toContain("app-frame-task-section-header");
     expect(appFrameSource).toContain('className="space-y-1.5"');
-    expect(appFrameSource).toContain("text-left pl-3 py-2 cursor-pointer");
+    expect(appFrameSource).toContain("text-left pl-1 py-2 cursor-pointer");
     expect(appFrameSource).toContain("app-frame-task-title");
     expect(appFrameSource).toContain("app-frame-task-preview");
     expect(appFrameSource).not.toContain("onToggleCollapsed");
@@ -900,6 +900,59 @@ describe("AppFrame", () => {
     expect(stylesSource).toContain("font-size: 13px;");
     expect(stylesSource).not.toContain(".task-section-header");
     expect(stylesSource).not.toContain(".task-row-actions");
+  });
+
+  it("aligns project and standalone rows while keeping only project tasks indented", () => {
+    const appFrameSource = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
+    const stylesSource = readFileSync(resolve(__dirname, "..", "..", "styles.css"), "utf8");
+    const treeSectionBlock = appFrameSource.slice(
+      appFrameSource.indexOf("function ProjectTreeSection"),
+      appFrameSource.indexOf("function ProjectRow")
+    );
+    const projectRowBlock = appFrameSource.slice(
+      appFrameSource.indexOf("function ProjectRow"),
+      appFrameSource.indexOf("function TaskSection")
+    );
+    const taskRowBlock = appFrameSource.slice(
+      appFrameSource.indexOf("export function TaskRow"),
+      appFrameSource.indexOf("function TaskStatusIndicator")
+    );
+
+    expect(treeSectionBlock).toContain("app-frame-task-section-header__title min-w-0 truncate");
+    expect(treeSectionBlock).toContain("app-frame-task-section-header__toggle-icon shrink-0");
+    expect(treeSectionBlock.indexOf("app-frame-task-section-header__title"))
+      .toBeLessThan(treeSectionBlock.indexOf("app-frame-task-section-header__toggle-icon"));
+    expect(projectRowBlock).toContain("py-1.5 pl-1 text-left");
+    expect(projectRowBlock).toContain("app-frame-project-title");
+    expect(projectRowBlock).not.toContain("<ChevronRight");
+    expect(projectRowBlock).not.toContain("<ChevronDown");
+    expect(taskRowBlock).toContain("text-left pl-1 py-2 cursor-pointer");
+    expect(treeSectionBlock).toContain('className={nested ? "app-frame-project-task" : undefined}');
+    expect(stylesSource).toContain(".app-frame-project-task {");
+    expect(stylesSource).toContain("margin-left: 18px;");
+  });
+
+  it("uses one font size and hover-only top-level disclosure icons", () => {
+    const stylesSource = readFileSync(resolve(__dirname, "..", "..", "styles.css"), "utf8");
+    const typographyBlock = stylesSource.slice(
+      stylesSource.indexOf(".app-frame-task-section-header,"),
+      stylesSource.indexOf(".app-frame-task-section-header__title")
+    );
+    const toggleBlock = stylesSource.slice(
+      stylesSource.indexOf(".app-frame-task-section-header__toggle-icon"),
+      stylesSource.indexOf(".app-frame-task-section-header__actions")
+    );
+
+    expect(typographyBlock).toContain(".app-frame-project-title,");
+    expect(typographyBlock).toContain(".app-frame-task-title {");
+    expect(typographyBlock).toContain("font-size: 13px;");
+    expect(typographyBlock).toContain("line-height: 18px;");
+    expect(toggleBlock).toContain("visibility: hidden;");
+    expect(toggleBlock).toContain("opacity: 0;");
+    expect(toggleBlock).toContain(".app-frame-task-section-header:hover .app-frame-task-section-header__toggle-icon");
+    expect(toggleBlock).not.toContain(".app-frame-task-section-header:focus-within .app-frame-task-section-header__toggle-icon");
+    expect(toggleBlock).toContain("visibility: visible;");
+    expect(toggleBlock).toContain("opacity: 1;");
   });
 
   it("renders task icon tooltips as light fixed overlays", () => {
