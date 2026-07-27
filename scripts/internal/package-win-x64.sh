@@ -5,7 +5,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DESKTOP_DIR="$ROOT_DIR/App/shell/desktop"
 AGENT_DIR="$ROOT_DIR/App/memmy-agent"
 MEMORY_DIR="$ROOT_DIR/Memory"
+MIGRATIONS_DIR="$ROOT_DIR/Migrations"
 RUNTIME_DIR="$DESKTOP_DIR/dist/runtime"
+MIGRATIONS_STAGING_DIR="$DESKTOP_DIR/dist/Migrations"
 CLI_BIN_DIR="$RUNTIME_DIR/bin"
 PACKAGE_ARCH="x64"
 WINDOWS_SIGNING_BUILDER_ARGS=()
@@ -447,6 +449,11 @@ verify_packaged_windows_unpacked_artifacts() {
   require_packaged_runtime_file "$unpacked_runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/onnxruntime.dll"
   require_packaged_runtime_glob "$unpacked_runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/*.dll"
   require_packaged_runtime_glob "$unpacked_runtime/memory/node_modules/@img/sharp-win32-x64/lib/libvips*.dll"
+  require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations/dist/index.js"
+  if [ -L "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations" ]; then
+    echo "Packaged migrations package must not be a symbolic link." >&2
+    exit 1
+  fi
   require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/openclaw/node_modules/@lydell/node-pty-win32-x64/prebuilds/win32-x64/conpty/conpty.dll"
   require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/openclaw/node_modules/@lydell/node-pty-win32-x64/prebuilds/win32-x64/conpty/OpenConsole.exe"
 }
@@ -478,6 +485,10 @@ if [ ! -d "$ROOT_DIR/node_modules" ]; then
   log "Installing root workspace dependencies"
   npm_with_configured_script_shell install
 fi
+npm_with_configured_script_shell install --workspace @memmy/migrations --include=dev
+
+log "Building migrations package"
+npm_with_configured_script_shell run build --prefix "$MIGRATIONS_DIR"
 
 log "Installing memmy-agent dependencies"
 PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm_with_configured_script_shell ci --prefix "$AGENT_DIR"
@@ -494,7 +505,11 @@ write_desktop_edition_manifest
 
 log "Preparing Windows x64 packaged runtime"
 rm -rf "$RUNTIME_DIR"
+rm -rf "$MIGRATIONS_STAGING_DIR"
 mkdir -p "$RUNTIME_DIR/memory" "$RUNTIME_DIR/memmy-agent" "$CLI_BIN_DIR"
+mkdir -p "$MIGRATIONS_STAGING_DIR"
+cp "$MIGRATIONS_DIR/package.json" "$MIGRATIONS_STAGING_DIR/package.json"
+cp -R "$MIGRATIONS_DIR/dist" "$MIGRATIONS_STAGING_DIR/dist"
 
 cp -R "$MEMORY_DIR/dist/src" "$RUNTIME_DIR/memory/src"
 create_memory_runtime_manifest
@@ -512,6 +527,24 @@ cp "$AGENT_DIR/package-lock.json" "$RUNTIME_DIR/memmy-agent/package-lock.json"
 
 log "Installing Windows x64 memmy-agent runtime dependencies"
 npm_ci_win_x64 "$RUNTIME_DIR/memmy-agent"
+RUNTIME_MIGRATIONS_DIR="$RUNTIME_DIR/memmy-agent/node_modules/@memmy/migrations"
+rm -rf "$RUNTIME_MIGRATIONS_DIR"
+mkdir -p "$RUNTIME_MIGRATIONS_DIR"
+cp "$MIGRATIONS_STAGING_DIR/package.json" "$RUNTIME_MIGRATIONS_DIR/package.json"
+cp -R "$MIGRATIONS_STAGING_DIR/dist" "$RUNTIME_MIGRATIONS_DIR/dist"
+if [ -L "$RUNTIME_MIGRATIONS_DIR" ]; then
+  echo "Packaged migrations package must not be a symbolic link." >&2
+  exit 1
+fi
+if [ ! -f "$RUNTIME_MIGRATIONS_DIR/dist/index.js" ]; then
+  echo "Packaged migrations entrypoint is missing." >&2
+  exit 1
+fi
+rm -rf "$MIGRATIONS_STAGING_DIR"
+if [ -e "$MIGRATIONS_STAGING_DIR" ]; then
+  echo "Migrations staging directory was not removed." >&2
+  exit 1
+fi
 verify_windows_agent_native_artifacts
 (
   cd "$RUNTIME_DIR/memmy-agent"
@@ -519,6 +552,7 @@ verify_windows_agent_native_artifacts
     import fs from "node:fs";
     import path from "node:path";
     import { createRequire } from "node:module";
+    import { runMigrations } from "@memmy/migrations";
     import { createConnection } from "@playwright/mcp";
     import { chromium } from "playwright";
     const require = createRequire(import.meta.url);
@@ -529,6 +563,7 @@ verify_windows_agent_native_artifacts
     const mcpPackage = require(mcpPath);
     const playwrightPackage = require(playwrightPath);
     const corePackage = require(corePath);
+    if (typeof runMigrations !== "function") throw new Error("Migrations runtime export is unavailable");
     if (typeof createConnection !== "function" || typeof chromium?.executablePath !== "function") throw new Error("Playwright MCP runtime exports are unavailable");
     if (mcpPackage.version !== runtimePackage.dependencies["@playwright/mcp"]) throw new Error("Playwright MCP runtime version mismatch");
     if (playwrightPackage.version !== runtimePackage.dependencies.playwright || corePackage.version !== runtimePackage.dependencies.playwright) throw new Error("Playwright runtime version mismatch");

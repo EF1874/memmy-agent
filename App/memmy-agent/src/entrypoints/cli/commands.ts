@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import { runMigrations } from "@memmy/migrations";
 import fs from "node:fs";
 import http from "node:http";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -735,6 +736,15 @@ export async function gateway({
   setCliRuntimeLogs(Boolean(verbose));
   // Gateway daemon mode: filter console output by the MEMMY_LOG_LEVEL injected by the desktop app.
   installConsoleLevelGate();
+  const canonicalWorkspace = fs.realpathSync(workspacePath);
+  await runMigrations({
+    targets: { agentWorkspace: canonicalWorkspace },
+    logger: {
+      info: (event, fields) => console.info(`[migration] ${event}`, fields ?? {}),
+      warn: (event, fields) => console.warn(`[migration] ${event}`, fields ?? {}),
+      error: (event, fields) => console.error(`[migration] ${event}`, fields ?? {}),
+    },
+  });
   const bus = new MessageBus();
   const cron = new CronService(path.join(workspacePath, "cron", "jobs.json"));
   const projectStore = new ProjectStore();

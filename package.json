@@ -5,6 +5,7 @@
   "type": "module",
   "description": "Local-first agent memory substrate with desktop and CLI surfaces.",
   "workspaces": [
+    "Migrations",
     "Memory",
     "App/backend/local-api-contracts",
     "App/backend",

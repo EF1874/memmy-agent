@@ -30,6 +30,8 @@ const winUnsignedInstallerIncludePath = fileURLToPath(new URL("../build/installe
 const desktopInterfacePath = fileURLToPath(new URL("../interface/src/index.ts", import.meta.url));
 const localApiContractsPath = fileURLToPath(new URL("../../../../App/backend/local-api-contracts/src/index.ts", import.meta.url));
 const rootPackagePath = fileURLToPath(new URL("../../../../package.json", import.meta.url));
+const rootPackageLockPath = fileURLToPath(new URL("../../../../package-lock.json", import.meta.url));
+const migrationsPackagePath = fileURLToPath(new URL("../../../../Migrations/package.json", import.meta.url));
 const memoryPackagePath = fileURLToPath(new URL("../../../../Memory/package.json", import.meta.url));
 const backendPackagePath = fileURLToPath(new URL("../../../../App/backend/package.json", import.meta.url));
 const frontendPackagePath = fileURLToPath(new URL("../../../../App/frontend/desktop/package.json", import.meta.url));
@@ -106,6 +108,112 @@ describe("desktop packaged runtime boundaries", () => {
     );
     expect(agentLock.packages["node_modules/playwright"].version).toBe(
       "1.62.0-alpha-1783623505000",
+    );
+  });
+
+  it("builds migrations as a private root workspace consumed by memmy-agent", () => {
+    const rootPackage = readJson<PackageJson>(rootPackagePath);
+    const rootLock = readJson<any>(rootPackageLockPath);
+    const migrationsPackage = readJson<any>(migrationsPackagePath);
+    const agentPackage = readJson<PackageJson>(agentPackagePath);
+    const agentLock = readJson<any>(agentPackageLockPath);
+
+    expect(rootPackage.workspaces).toContain("Migrations");
+    expect(rootLock.packages.Migrations).toMatchObject({
+      name: "@memmy/migrations",
+      version: "0.0.0",
+      dependencies: { "proper-lockfile": "^4.1.2" },
+    });
+    expect(rootLock.packages["node_modules/@memmy/migrations"]).toEqual({
+      resolved: "Migrations",
+      link: true,
+    });
+    expect(migrationsPackage).toMatchObject({
+      name: "@memmy/migrations",
+      version: "0.0.0",
+      private: true,
+      type: "module",
+      files: ["dist/**/*"],
+      main: "./dist/index.js",
+      types: "./dist/index.d.ts",
+      exports: {
+        ".": {
+          types: "./dist/index.d.ts",
+          import: "./dist/index.js",
+        },
+      },
+    });
+    expect(agentPackage.dependencies).toHaveProperty(
+      "@memmy/migrations",
+      "file:../../Migrations",
+    );
+    expect(agentLock.packages[""]?.dependencies).toHaveProperty(
+      "@memmy/migrations",
+      "file:../../Migrations",
+    );
+    expect(agentLock.packages["node_modules/@memmy/migrations"]).toEqual({
+      resolved: "../../Migrations",
+      link: true,
+    });
+    for (const scriptName of ["prebuild", "pretypecheck", "pretest"]) {
+      expect(agentPackage.scripts?.[scriptName]).toBe(
+        "npm run version:sync && npm --prefix ../../Migrations run build",
+      );
+    }
+  });
+
+  it("materializes the compiled migrations package in macOS and Windows runtimes", () => {
+    const macSource = readFileSync(packageMacDmgPath, "utf8");
+    const winSource = readFileSync(packageWinX64Path, "utf8");
+
+    for (const source of [macSource, winSource]) {
+      expect(source).toContain('MIGRATIONS_DIR="$ROOT_DIR/Migrations"');
+      expect(source).toContain('MIGRATIONS_STAGING_DIR="$DESKTOP_DIR/dist/Migrations"');
+      expect(source).toContain("install --workspace @memmy/migrations --include=dev");
+      expect(source).toContain('cp "$MIGRATIONS_DIR/package.json" "$MIGRATIONS_STAGING_DIR/package.json"');
+      expect(source).toContain('cp -R "$MIGRATIONS_DIR/dist" "$MIGRATIONS_STAGING_DIR/dist"');
+      expect(source).toContain('RUNTIME_MIGRATIONS_DIR="$RUNTIME_DIR/memmy-agent/node_modules/@memmy/migrations"');
+      expect(source).toContain('rm -rf "$RUNTIME_MIGRATIONS_DIR"');
+      expect(source).toContain('mkdir -p "$RUNTIME_MIGRATIONS_DIR"');
+      expect(source).toContain('cp "$MIGRATIONS_STAGING_DIR/package.json" "$RUNTIME_MIGRATIONS_DIR/package.json"');
+      expect(source).toContain('cp -R "$MIGRATIONS_STAGING_DIR/dist" "$RUNTIME_MIGRATIONS_DIR/dist"');
+      expect(source).toContain('if [ -L "$RUNTIME_MIGRATIONS_DIR" ]; then');
+      expect(source).toContain('if [ ! -f "$RUNTIME_MIGRATIONS_DIR/dist/index.js" ]; then');
+      expect(source).toContain('if [ -e "$MIGRATIONS_STAGING_DIR" ]; then');
+      expect(source).toContain('import { runMigrations } from "@memmy/migrations";');
+      expect(source).toContain(
+        'if (typeof runMigrations !== "function") throw new Error("Migrations runtime export is unavailable")',
+      );
+      expect(source).toContain(
+        '$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations/dist/index.js',
+      );
+      expect(source).toContain(
+        '[ -L "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations" ]',
+      );
+
+      const stageIndex = source.indexOf(
+        'cp "$MIGRATIONS_DIR/package.json" "$MIGRATIONS_STAGING_DIR/package.json"',
+      );
+      const runtimeInstallIndex = source.indexOf(
+        source === macSource
+          ? 'npm ci --prefix "$RUNTIME_DIR/memmy-agent"'
+          : 'npm_ci_win_x64 "$RUNTIME_DIR/memmy-agent"',
+      );
+      const materializeIndex = source.indexOf('rm -rf "$RUNTIME_MIGRATIONS_DIR"');
+      const cleanupIndex = source.indexOf('rm -rf "$MIGRATIONS_STAGING_DIR"', stageIndex + 1);
+      const builderIndex = source.indexOf("npx electron-builder");
+      expect(stageIndex).toBeGreaterThanOrEqual(0);
+      expect(runtimeInstallIndex).toBeGreaterThan(stageIndex);
+      expect(materializeIndex).toBeGreaterThan(runtimeInstallIndex);
+      expect(cleanupIndex).toBeGreaterThan(materializeIndex);
+      expect(builderIndex).toBeGreaterThan(cleanupIndex);
+    }
+
+    expect(macSource.indexOf('npm --prefix "$MIGRATIONS_DIR" run build')).toBeLessThan(
+      macSource.indexOf('npm ci --prefix "$AGENT_DIR"'),
+    );
+    expect(winSource.indexOf('run build --prefix "$MIGRATIONS_DIR"')).toBeLessThan(
+      winSource.indexOf('ci --prefix "$AGENT_DIR"'),
     );
   });
 
