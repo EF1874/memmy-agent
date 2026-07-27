@@ -19,7 +19,7 @@ async function selectDirectory(
 export function selectProjectDirectory(
   owner: BrowserWindow | null,
 ): Promise<DesktopProjectDirectorySelection> {
-  return selectDirectory(owner, ["openDirectory"]);
+  return selectDirectory(owner, ["openDirectory", "createDirectory"]);
 }
 
 export function selectEmptyProjectDirectory(
