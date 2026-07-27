@@ -290,9 +290,17 @@ export function buildCompleteTurns(messages: readonly AgentSourceMessage[]): Age
 }
 
 function appendCompleteTurn(messages: readonly AgentSourceMessage[], turns: AgentSourceTurn[]): void {
-  const user = messages.find((message) => message.role === "user");
-  if (!user || !messages.some((message) => message.role === "assistant")) return;
-  turns.push({ createdAt: user.createdAt, messages: [...messages] });
+  const first = messages[0];
+  const last = messages[messages.length - 1];
+  if (
+    first?.role !== "user" ||
+    !first.content.trim() ||
+    last?.role !== "assistant" ||
+    !last.content.trim()
+  ) {
+    return;
+  }
+  turns.push({ createdAt: first.createdAt, messages: [...messages] });
 }
 
 function sortMessages(messages: readonly AgentSourceMessage[]): AgentSourceMessage[] {

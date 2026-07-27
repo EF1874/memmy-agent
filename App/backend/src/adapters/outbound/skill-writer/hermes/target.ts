@@ -1144,8 +1144,10 @@ class MemmyMemoryProvider(MemoryProvider):
         return memory_session_id
 
     def _sync_turn(self, active_session: str, user_content: str, assistant_content: str) -> None:
-        query = _sanitize_memmy_protocol_text(_clean_text(user_content)) or "Hermes turn"
-        answer = _sanitize_memmy_protocol_text(_clean_text(assistant_content)) or "Turn ended without assistant text."
+        query = _sanitize_memmy_protocol_text(_clean_text(user_content))
+        answer = _sanitize_memmy_protocol_text(_clean_text(assistant_content))
+        if not query or not answer:
+            return
         try:
             memory_session_id = self._ensure_session(active_session)
             with self._lock:
