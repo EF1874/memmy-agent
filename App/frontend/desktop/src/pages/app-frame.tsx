@@ -55,7 +55,7 @@ import {
   Trash2,
   User
 } from "./memory/memory-prototype-icons.js";
-import { ChevronDown, ChevronRight, Folder, FolderPlus, MoreHorizontal, Plus } from "lucide-react";
+import { CheckCheck, ChevronDown, ChevronRight, Folder, FolderPlus, MoreHorizontal, Pencil, Plus } from "lucide-react";
 
 export interface AppFrameProps {
   title: string;
@@ -281,7 +281,7 @@ export function AppFrame(props: AppFrameProps) {
     ? state.agent.sessions.filter((session) => session.projectId === removeProject.id).length
     : 0;
   const archiveProjectTaskCount = archiveProject
-    ? state.agent.tasks.filter((task) => task.projectId === archiveProject.id && !task.archived).length
+    ? countProjectTasksToArchive(state.agent.tasks, archiveProject.id)
     : 0;
 
   useEffect(() => {
@@ -1158,6 +1158,7 @@ export function AppFrame(props: AppFrameProps) {
             <ProjectContextMenu
               menu={projectContextMenu}
               project={state.agent.projects.find((project) => project.id === projectContextMenu.projectId) ?? null}
+              archiveTaskCount={countProjectTasksToArchive(state.agent.tasks, projectContextMenu.projectId)}
               onClose={() => setProjectContextMenu(null)}
               onPin={(project) => {
                 setProjectContextMenu(null);
@@ -1598,6 +1599,13 @@ export function deriveSidebarPlacement(
 }
 
 export const buildProjectSidebarTree = deriveSidebarPlacement;
+
+export function countProjectTasksToArchive(
+  tasks: AgentTaskView[],
+  projectId: string
+): number {
+  return tasks.filter((task) => task.projectId === projectId && !task.archived).length;
+}
 
 export function resolveTaskAncestorGroupKeys(
   task: AgentTaskView,
@@ -2152,6 +2160,7 @@ function TaskContextMenu(props: {
 function ProjectContextMenu(props: {
   menu: ProjectContextMenuState;
   project: MemmyAgentProject | null;
+  archiveTaskCount: number;
   onPin: (project: MemmyAgentProject) => void;
   onReveal: (project: MemmyAgentProject) => void;
   onRename: (project: MemmyAgentProject) => void;
@@ -2191,11 +2200,20 @@ function ProjectContextMenu(props: {
         label={t("appFrame.project.reveal")}
         onClick={() => run(() => props.onReveal(project))}
       />
-      <MenuButton label={t("appFrame.project.rename")} onClick={() => run(() => props.onRename(project))} />
-      <MenuButton label={t("appFrame.project.markRead")} onClick={() => run(() => props.onMarkRead(project))} />
+      <MenuButton
+        icon={<Pencil size={12} />}
+        label={t("appFrame.project.rename")}
+        onClick={() => run(() => props.onRename(project))}
+      />
+      <MenuButton
+        icon={<CheckCheck size={12} />}
+        label={t("appFrame.project.markRead")}
+        onClick={() => run(() => props.onMarkRead(project))}
+      />
       <MenuButton
         icon={<Archive size={12} />}
         label={t("appFrame.project.archiveTasks")}
+        disabled={props.archiveTaskCount === 0}
         onClick={() => run(() => props.onArchive(project))}
       />
       <MenuButton
@@ -2209,17 +2227,27 @@ function ProjectContextMenu(props: {
   return createPortal(menu, document.body);
 }
 
-function MenuButton(props: { label: string; icon?: ReactNode; active?: boolean; danger?: boolean; onClick: () => void }) {
-  const colorClass = props.danger
-    ? "text-status-error hover:bg-status-error/10"
-    : props.active
-      ? "text-action-sky bg-action-sky/10"
-      : "text-text-ink/65 hover:bg-canvas-oat/60";
+function MenuButton(props: {
+  label: string;
+  icon?: ReactNode;
+  active?: boolean;
+  danger?: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  const colorClass = props.disabled
+    ? "cursor-not-allowed text-text-ink/30"
+    : props.danger
+      ? "cursor-pointer text-status-error hover:bg-status-error/10"
+      : props.active
+        ? "cursor-pointer text-action-sky bg-action-sky/10"
+        : "cursor-pointer text-text-ink/65 hover:bg-canvas-oat/60";
   return (
     <button
       type="button"
+      disabled={props.disabled}
       onClick={props.onClick}
-      className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-input text-left text-xs cursor-pointer ${colorClass}`}
+      className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-input text-left text-xs ${colorClass}`}
     >
       {props.icon}
       <span className="truncate">{props.label}</span>

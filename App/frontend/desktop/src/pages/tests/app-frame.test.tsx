@@ -11,7 +11,7 @@ import { appActions } from "../../state/app-actions.js";
 import { appReducer, createInitialAppState } from "../../state/app-reducer.js";
 import type { AgentTaskView } from "../../state/agent-chat-slice.js";
 import { mockBootstrap } from "./fixtures/bootstrap.js";
-import { AppFrame, TaskArchiveInlineAction, TaskRow, groupAgentTasks, groupTasksByTime, resolveSidebarAccountSummary, resolveSidebarContextMenuPlacement, resolveSidebarMenuOverlayStyle, resolveTaskAncestorGroupKeys, shouldCreateNewAgentDraft, truncateAccountDisplayText } from "../app-frame.js";
+import { AppFrame, TaskArchiveInlineAction, TaskRow, countProjectTasksToArchive, groupAgentTasks, groupTasksByTime, resolveSidebarAccountSummary, resolveSidebarContextMenuPlacement, resolveSidebarMenuOverlayStyle, resolveTaskAncestorGroupKeys, shouldCreateNewAgentDraft, truncateAccountDisplayText } from "../app-frame.js";
 
 describe("AppFrame", () => {
   it("使用原型 MainLayout 的侧栏图标与导航文案", () => {
@@ -465,6 +465,38 @@ describe("AppFrame", () => {
 
     expect(taskMenuBlock).toContain("return createPortal(menu, document.body);");
     expect(projectMenuBlock).toContain("return createPortal(menu, document.body);");
+  });
+
+  it("disables empty project archive actions and gives every project action an icon", () => {
+    const source = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
+    const projectMenuBlock = source.slice(
+      source.indexOf("function ProjectContextMenu"),
+      source.indexOf("function MenuButton")
+    );
+    const menuButtonBlock = source.slice(
+      source.indexOf("function MenuButton"),
+      source.indexOf("function SidebarProfileTextLine")
+    );
+
+    expect(projectMenuBlock).toContain("archiveTaskCount: number;");
+    expect(projectMenuBlock).toContain("icon={<Pencil size={12} />}");
+    expect(projectMenuBlock).toContain("icon={<CheckCheck size={12} />}");
+    expect(projectMenuBlock).toContain("disabled={props.archiveTaskCount === 0}");
+    expect(menuButtonBlock).toContain("disabled?: boolean;");
+    expect(menuButtonBlock).toContain("disabled={props.disabled}");
+  });
+
+  it("counts only active tasks belonging to the selected project", () => {
+    expect(countProjectTasksToArchive([
+      task("active-a", { projectId: "project-a" }),
+      task("archived-a", { projectId: "project-a", archived: true }),
+      task("active-b", { projectId: "project-b" }),
+      task("standalone")
+    ], "project-a")).toBe(1);
+    expect(countProjectTasksToArchive([
+      task("archived-a", { projectId: "project-a", archived: true }),
+      task("active-b", { projectId: "project-b" })
+    ], "project-a")).toBe(0);
   });
 
   it("keeps pointer-anchored context menus inside every viewport edge", () => {
