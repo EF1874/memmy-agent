@@ -23,7 +23,11 @@ import type {
 import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
 import type { SourceRegistry } from "../adapters/outbound/agent-source/source-registry.js";
 import type { AgentSourceRepository, AgentSourceRecord } from "../infrastructure/agent-source-store/index.js";
-import type { IngestionService, IngestionStats } from "./ingestion-service.js";
+import {
+  isCompleteMemoryTurn,
+  type IngestionService,
+  type IngestionStats
+} from "./ingestion-service.js";
 import { AgentSourceUnavailableError } from "./runtime-errors.js";
 import type { SkillDistributionService } from "./skill-distribution-service.js";
 import {
@@ -746,14 +750,10 @@ function pushCompleteMemoryUnit(
   messages: readonly ConversationMessage[],
   units: SourceMemoryUnit[]
 ): void {
-  if (messages.length === 0 || !messages.some((message) => message.role === "assistant")) {
+  if (!isCompleteMemoryTurn(messages)) {
     return;
   }
-
-  const userMessage = messages.find((message) => message.role === "user");
-  if (!userMessage) {
-    return;
-  }
+  const userMessage = messages[0]!;
 
   units.push({
     sourceId,

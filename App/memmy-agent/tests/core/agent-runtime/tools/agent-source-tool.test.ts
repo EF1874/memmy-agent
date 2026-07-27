@@ -63,6 +63,23 @@ describe("AgentSourceTool history selection", () => {
     expect(selected[0]?.messages.map((item) => item.messageId)).toEqual(["new-user", "new-assistant"]);
   });
 
+  it("requires exact user-to-assistant turn boundaries", () => {
+    const messages = [
+      message("assistant-only", "assistant-only", "assistant", "2026-07-01T08:00:00.000Z"),
+      message("user-tool-user", "mixed", "user", "2026-07-01T09:00:00.000Z"),
+      { ...message("tool-tail", "mixed", "assistant", "2026-07-01T09:00:01.000Z"), role: "tool" as const },
+      message("next-user", "mixed", "user", "2026-07-01T10:00:00.000Z"),
+      message("next-assistant", "mixed", "assistant", "2026-07-01T10:00:01.000Z"),
+      { ...message("empty-user", "empty", "user", "2026-07-01T11:00:00.000Z"), content: "query" },
+      { ...message("empty-assistant", "empty", "assistant", "2026-07-01T11:00:01.000Z"), content: "" }
+    ];
+
+    const turns = buildCompleteTurns(messages);
+
+    expect(turns).toHaveLength(1);
+    expect(turns[0]?.messages.map((item) => item.messageId)).toEqual(["next-user", "next-assistant"]);
+  });
+
   it("requires an initial boundary before incremental sync", () => {
     expect(() => selectTurns([], "incremental", null)).toThrow("recorded initial sync boundary");
   });

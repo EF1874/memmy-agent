@@ -359,6 +359,66 @@ describe("agent source service", () => {
     expect(collected.messages.some((message) => message.messageId.includes("incomplete"))).toBe(false);
   });
 
+  it("excludes units whose first or last message violates the complete-turn boundary", async () => {
+    const valid = createCompleteMemoryMessages("cursor", 1, "2026-05-01T00:00:00.000Z", {
+      includeTool: true
+    });
+    const invalid = [
+      {
+        ...createMessage("cursor", 20),
+        messageId: "invalid-user",
+        conversationId: "invalid-user-tool",
+        role: "user" as const,
+        content: "query"
+      },
+      {
+        ...createMessage("cursor", 21),
+        messageId: "invalid-tool",
+        conversationId: "invalid-user-tool",
+        role: "tool" as const,
+        content: "tool output"
+      },
+      {
+        ...createMessage("cursor", 22),
+        messageId: "orphan-assistant",
+        conversationId: "orphan-assistant",
+        role: "assistant" as const,
+        content: "answer without query"
+      },
+      {
+        ...createMessage("cursor", 23),
+        messageId: "trailing-user",
+        conversationId: "assistant-then-user",
+        role: "user" as const,
+        content: "query"
+      },
+      {
+        ...createMessage("cursor", 24),
+        messageId: "middle-assistant",
+        conversationId: "assistant-then-user",
+        role: "assistant" as const,
+        content: "answer"
+      },
+      {
+        ...createMessage("cursor", 25),
+        messageId: "trailing-tool",
+        conversationId: "assistant-then-user",
+        role: "tool" as const,
+        content: "late tool"
+      }
+    ];
+    const service = createService({
+      adapters: [createFakeAdapter("cursor", [...invalid, ...valid])]
+    });
+
+    const collected = await service.collectOne("cursor", { mode: "initial_subset" });
+
+    expectMemoryCount(collected.messages, 1);
+    expect(collected.messages.map((message) => message.messageId)).toEqual(
+      valid.map((message) => message.messageId)
+    );
+  });
+
   it("collects all source messages before ingesting any raw memories", async () => {
     const events: string[] = [];
     const createAdapter = (sourceId: string): SourceAdapter =>

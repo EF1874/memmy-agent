@@ -201,6 +201,7 @@ type InternalMemorySearchRequest = MemorySearchRequest & {
   targetSkillId?: string;
   contextHints?: Record<string, unknown>;
   injectedContextQuery?: string;
+  recordEvent?: boolean;
 };
 
 function requireMemoryDb(options: MemoryServiceOptions): MemoryDb {
@@ -769,8 +770,6 @@ export class MemoryService {
     contextPacketId: string;
     turnId: string;
     sessionId: string;
-    episodeId: string;
-    closedEpisodeIds: string[];
     searchEventId: string;
     hits: RecallHit[];
     injectedContext: InjectedContext;
@@ -1840,15 +1839,13 @@ export class MemoryService {
       includeInjectedContext: true,
       retrievalMode: "turn_start",
       contextHints,
-      injectedContextQuery: request.query
+      injectedContextQuery: request.query,
+      recordEvent: false
     });
-    const episodeId = `episode_${stableHash(`readonly:${request.sessionId}:${turnId}`).slice(0, 20)}`;
     return {
-      contextPacketId: `ctx_${stableHash(`${request.sessionId}:${episodeId}:${turnId}:${search.searchEventId}`).slice(0, 20)}`,
+      contextPacketId: `ctx_${stableHash(`${request.sessionId}:${turnId}:${search.searchEventId}`).slice(0, 20)}`,
       turnId,
       sessionId: request.sessionId,
-      episodeId,
-      closedEpisodeIds: [],
       searchEventId: search.searchEventId,
       hits: search.hits,
       injectedContext: search.injectedContext,
