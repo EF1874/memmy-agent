@@ -17,6 +17,7 @@ import {
 
 export type WebuiTitleTrackInput = {
   chatId: string;
+  sessionKey?: string;
   content: string;
   metadata: Record<string, any>;
   mediaPaths?: string[];
@@ -71,7 +72,7 @@ export class WebuiTitleService {
     }
 
     if (!runtime?.provider) return;
-    const sessionKey = `websocket:${input.chatId}`;
+    const sessionKey = input.sessionKey ?? `websocket:${input.chatId}`;
     this.pendingByChatId.set(input.chatId, {
       chatId: input.chatId,
       sessionKey,
@@ -100,10 +101,9 @@ export class WebuiTitleService {
   }
 
   discard(sessionKey: string): void {
-    if (!sessionKey.startsWith("websocket:")) return;
-    const chatId = sessionKey.slice("websocket:".length);
-    const pending = this.pendingByChatId.get(chatId);
-    if (pending?.sessionKey === sessionKey) this.pendingByChatId.delete(chatId);
+    for (const [chatId, pending] of this.pendingByChatId) {
+      if (pending.sessionKey === sessionKey) this.pendingByChatId.delete(chatId);
+    }
   }
 
   private async generateTitle(pending: PendingTitleRequest): Promise<boolean> {

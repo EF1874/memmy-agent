@@ -93,6 +93,38 @@ describe("AgentLoop direct processing", () => {
     });
   });
 
+  it("treats a GUI cancellation of an independent cli turn as a normal stopped result", async () => {
+    const p = {
+      generation: { maxTokens: 100 },
+      getDefaultModel: () => "test-model",
+      chatWithRetry: vi.fn(async (args: Record<string, any>) => (
+        new Promise<never>((_resolve, reject) => {
+          const onAbort = () => {
+            const error = new Error("task cancelled");
+            error.name = "AbortError";
+            reject(error);
+          };
+          args.signal?.addEventListener("abort", onAbort, { once: true });
+        })
+      )),
+    };
+    const agent = loop(p);
+    const turn = agent.processDirect("keep working", { sessionKey: "cli:stoppable" });
+    while (!agent.terminalRunControl.read("cli:stoppable")) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    await agent.terminalRunControl.requestCancel("cli:stoppable");
+
+    await expect(turn).resolves.toBeNull();
+    expect(agent.terminalRunControl.read("cli:stoppable")).toBeNull();
+    const session = agent.sessions.reload("cli:stoppable");
+    expect(session?.messages.map((message) => message.role)).toEqual(["user"]);
+    expect(session?.metadata).not.toHaveProperty(AgentLoop.PENDING_USER_TURN_KEY);
+    expect(session?.metadata).not.toHaveProperty(AgentLoop.RUNTIME_CHECKPOINT_KEY);
+    expect(agent.restorePendingUserTurn(session!)).toBe(false);
+  });
+
   it("publishes a thread session update after early-persisting WebUI user messages", async () => {
     const p = provider(["web answer"]);
     const agent = loop(p);
@@ -136,14 +168,15 @@ describe("AgentLoop direct processing", () => {
     expect(agent.sessions.getOrCreate("cli:test").messages.map((message) => message.content)).toEqual(["first", "one", "second", "two"]);
   });
 
-  it("uses the unified session key when unified sessions are enabled", async () => {
+  it("keeps explicit cli sessions separate when unified sessions are enabled", async () => {
     const p = provider(["ok"]);
     const agent = loop(p, { unifiedSession: true });
 
     await agent.processDirect("hello", { sessionKey: "cli:a", chatId: "a" });
 
     expect(agent.sessionKey({ sessionKey: "cli:a" } as any)).toBe(UNIFIED_SESSION_KEY);
-    expect(agent.sessions.getOrCreate(UNIFIED_SESSION_KEY).messages[0].content).toBe("hello");
+    expect(agent.sessions.getOrCreate("cli:a").messages[0].content).toBe("hello");
+    expect(agent.sessions.get(UNIFIED_SESSION_KEY)).toBeNull();
   });
 
   it("handles slash command shortcuts without calling the model and persists command turns outside LLM history", async () => {

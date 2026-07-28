@@ -145,6 +145,63 @@ describe("AgentLoop turn persistence", () => {
     expect(bus.outboundSize).toBe(0);
   });
 
+  it("mirrors compaction and retry-wait events for projected IM turns", async () => {
+    const bus = new MessageBus();
+    const loop = makeLoop({ bus });
+    const session = new Session({ key: "telegram:chat" });
+    const msg = new InboundMessage({
+      channel: "telegram",
+      chatId: "chat",
+      senderId: "u",
+      content: "continue",
+    });
+    const ctx = new TurnContext({
+      msg,
+      sessionKey: session.key,
+      session,
+      turnId: "turn-projected",
+    });
+    ctx.sessionWorkspace = loop.workspace;
+    ctx.mirrorTurn = {
+      sessionKey: session.key,
+      chatId: "ext_dGVsZWdyYW06Y2hhdA",
+      turnId: "turn-projected",
+    };
+    const contextCompaction = vi.fn();
+    const retryWait = vi.fn();
+    loop.guiTranscriptMirror = {
+      contextCompaction,
+      retryWait,
+      user: vi.fn(),
+      progress: vi.fn(),
+      delta: vi.fn(),
+      streamEnd: vi.fn(),
+    } as any;
+    (loop.consolidator as any).maybeConsolidateByTokens = vi.fn(
+      async (_session: Session, opts: Record<string, any>) => {
+        await opts.onCompactionEvent?.({
+          kind: "token",
+          status: "running",
+          replayMaxMessages: loop.maxMessages,
+        });
+        return false;
+      },
+    );
+
+    await loop.stateBuild(ctx);
+    await ctx.onRetryWait("Retrying in 1 second");
+
+    expect(contextCompaction).toHaveBeenCalledWith(
+      ctx.mirrorTurn,
+      "Summarizing chat context",
+      "running",
+    );
+    expect(retryWait).toHaveBeenCalledWith(
+      ctx.mirrorTurn,
+      "Retrying in 1 second",
+    );
+  });
+
   it("keeps post-save background compaction silent", async () => {
     const bus = new MessageBus();
     const loop = makeLoop({ bus });

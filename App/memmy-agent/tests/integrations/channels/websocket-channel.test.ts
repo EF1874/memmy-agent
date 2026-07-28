@@ -248,6 +248,7 @@ describe("WebSocket channel", () => {
     expect(inbound.metadata.image_generation).toEqual({ enabled: true, aspect_ratio: "16:9" });
     expect(titleService.trackUserMessage).toHaveBeenCalledWith({
       chatId: "chat-1",
+      sessionKey: "websocket:chat-1",
       content: "see this",
       metadata: expect.objectContaining({
         webui: true,
@@ -990,7 +991,13 @@ describe("WebSocket channel", () => {
         started_at: 1780732800,
         turn_id: "turn-1",
       },
-      { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800 },
+      {
+        event: "goal_status",
+        chat_id: "chat-1",
+        status: "running",
+        started_at: 1780732800,
+        turn_id: "turn-1",
+      },
     ]);
   });
 

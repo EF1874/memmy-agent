@@ -422,6 +422,11 @@ export class SessionManager {
     this.sessions.delete(key);
   }
 
+  reload(key: string): Session | null {
+    this.invalidate(key);
+    return this.get(key);
+  }
+
   private parseDate(value: any): string | undefined {
     if (typeof value !== "string" || !value) return undefined;
     const time = Date.parse(value);
@@ -570,9 +575,10 @@ export class SessionManager {
     this.sessions.set(session.key, session);
   }
 
-  flushAll(): number {
+  flushAll(options: { exclude?: (session: Session) => boolean } = {}): number {
     let flushed = 0;
     for (const session of this.sessions.values()) {
+      if (options.exclude?.(session)) continue;
       try {
         this.save(session, { fsync: true });
         flushed += 1;
@@ -619,7 +625,7 @@ export class SessionManager {
   }
 
   renameSession(key: string, title: string): Record<string, any> | null {
-    const session = this.loadSession(key);
+    const session = this.sessions.get(key) ?? this.loadSession(key);
     if (!session) {
       return null;
     }
@@ -655,6 +661,7 @@ export class SessionManager {
 
   listSessions(): Record<string, any>[] {
     const rows: Record<string, any>[] = [];
+    if (!fs.existsSync(this.root)) return rows;
     for (const file of fs.readdirSync(this.root).filter((name) => name.endsWith(".jsonl"))) {
       const fullPath = path.join(this.root, file);
       const fallbackKey = path.basename(file, ".jsonl").replace("_", ":");
@@ -678,6 +685,7 @@ export class SessionManager {
 
   listWebuiSessionRecords(): Session[] {
     const records = new Map<string, Session>();
+    if (!fs.existsSync(this.root)) return [];
     for (const file of fs.readdirSync(this.root).filter((name) => name.endsWith(".jsonl"))) {
       const fallbackKey = path.basename(file, ".jsonl").replace("_", ":");
       const session = this.loadSession(fallbackKey);
@@ -685,7 +693,9 @@ export class SessionManager {
       records.set(session.key, session);
     }
     for (const [key, session] of this.sessions) {
-      if (isWebuiSession(session)) records.set(key, session);
+      if (!isWebuiSession(session)) continue;
+      const disk = records.get(key);
+      if (!disk || session.updatedAt > disk.updatedAt) records.set(key, session);
     }
     return [...records.values()]
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
@@ -705,6 +715,5 @@ function normalizeWebuiSessionBinding(binding: WebuiSessionBinding): WebuiSessio
 }
 
 function isWebuiSession(session: Session): boolean {
-  return session.key.startsWith("websocket:")
-    && session.metadata?.[WEBUI_SESSION_METADATA_KEY] === true;
+  return session.metadata?.[WEBUI_SESSION_METADATA_KEY] === true;
 }

@@ -6,6 +6,8 @@ import { Config } from "../../config/schema.js";
 import { getConfigPath, getWorkspacePath } from "../../config/paths.js";
 import { withProgressCapabilities, type ProgressOptions } from "../../utils/progress-events.js";
 import { VERSION } from "../../version.js";
+import { GuiTranscriptMirror } from "../frontend-bridge/gui-transcript-sync.js";
+import type { TerminalTarget } from "./commands.js";
 import { resolveComposerCursorPosition, type ComposerLayout } from "./tui-cursor.js";
 
 type TuiMessageRole = "assistant" | "progress" | "system" | "user";
@@ -22,6 +24,7 @@ type TuiProps = {
   config: Config;
   registerCleanup: (cleanup: TuiCleanup) => void;
   sessionId: string;
+  target: TerminalTarget | null;
   toolsets: ToolsetSummary[];
   version: string;
 };
@@ -690,11 +693,13 @@ function formatCompactToolsets(toolsets: ToolsetSummary[]): string {
 function Banner({
   columns,
   config,
+  target,
   toolsets,
   version,
 }: {
   columns: number;
   config: Config;
+  target: TerminalTarget | null;
   toolsets: ToolsetSummary[];
   version: string;
 }) {
@@ -722,6 +727,24 @@ function Banner({
             <TitledFrameRow width={panelWidth}>
               <MetaLine label="workspace" value={workspace} />
             </TitledFrameRow>
+            {target ? (
+              <TitledFrameRow width={panelWidth}>
+                <MetaLine label="session" value={target.sessionId} />
+              </TitledFrameRow>
+            ) : null}
+            {target ? (
+              <TitledFrameRow width={panelWidth}>
+                <MetaLine
+                  label={target.target === "project" ? "project" : "task"}
+                  value={target.projectName ?? target.target}
+                />
+              </TitledFrameRow>
+            ) : null}
+            {target ? (
+              <TitledFrameRow width={panelWidth}>
+                <MetaLine label="root" value={target.cwd} />
+              </TitledFrameRow>
+            ) : null}
             <TitledFrameRow width={panelWidth}>
               <MetaLine label="config" value={getConfigPath()} />
             </TitledFrameRow>
@@ -868,7 +891,7 @@ function StatusRule({
   );
 }
 
-function MemmyTui({ config, registerCleanup, sessionId, toolsets, version }: TuiProps) {
+function MemmyTui({ config, registerCleanup, sessionId, target, toolsets, version }: TuiProps) {
   const { exit } = useApp();
   const { columns, rows } = useTerminalSize();
   const activeLoopRef = useRef<AgentLoop | null>(null);
@@ -985,6 +1008,9 @@ function MemmyTui({ config, registerCleanup, sessionId, toolsets, version }: Tui
       setTurnStartedAt(Date.now());
       activeAssistantIdRef.current = null;
       const loop = activeLoopRef.current ?? AgentLoop.fromConfig(config);
+      if (!loop.guiTranscriptMirror) {
+        loop.guiTranscriptMirror = new GuiTranscriptMirror(loop.sessions, loop.workspace);
+      }
       activeLoopRef.current = loop;
       void (async () => {
         try {
@@ -1120,7 +1146,7 @@ function MemmyTui({ config, registerCleanup, sessionId, toolsets, version }: Tui
 
   return (
     <Box flexDirection="column" paddingX={1}>
-      <Banner columns={columns} config={config} toolsets={toolsets} version={version} />
+      <Banner columns={columns} config={config} target={target} toolsets={toolsets} version={version} />
 
       {messages.length ? (
         <Box flexDirection="column">
@@ -1154,7 +1180,11 @@ function MemmyTui({ config, registerCleanup, sessionId, toolsets, version }: Tui
   );
 }
 
-export async function runInkInteractiveAgent(config: Config, sessionId = "cli:direct"): Promise<null> {
+export async function runInkInteractiveAgent(
+  config: Config,
+  sessionId = "cli:direct",
+  target: TerminalTarget | null = null,
+): Promise<null> {
   if (!process.stdin.isTTY) return null;
   const toolsets = readToolsets(config);
   let cleanup: TuiCleanup = async () => undefined;
@@ -1164,7 +1194,14 @@ export async function runInkInteractiveAgent(config: Config, sessionId = "cli:di
 
   process.stdout.write("\x1b[2J\x1b[H\x1b[3J");
   const instance = render(
-    <MemmyTui config={config} registerCleanup={registerCleanup} sessionId={sessionId} toolsets={toolsets} version={VERSION} />,
+    <MemmyTui
+      config={config}
+      registerCleanup={registerCleanup}
+      sessionId={sessionId}
+      target={target}
+      toolsets={toolsets}
+      version={VERSION}
+    />,
     { exitOnCtrlC: false, maxFps: 60 },
   );
 

@@ -17,8 +17,12 @@ import {
   WEBUI_PROJECT_ID_METADATA_KEY,
   WEBUI_WORKSPACE_CWD_METADATA_KEY,
 } from "../session/manager.js";
+import {
+  TerminalRunControl,
+  TerminalSessionTurnLock,
+} from "../session/terminal-session-control.js";
 import { goalStateRuntimeLines, runnerWallLlmTimeoutS, sustainedGoalActive } from "../session/goal-state.js";
-import { finishWebuiTurn, markWebuiSession, publishTurnRunStatus, publishWebuiThreadSessionUpdated, shouldPublishWebuiRunStatus, WEBUI_LANGUAGE_METADATA_KEY } from "../session/webui-turns.js";
+import { finishWebuiTurn, markWebuiSession, maybeGenerateWebuiTitle, publishTurnRunStatus, publishWebuiThreadSessionUpdated, shouldPublishWebuiRunStatus, WEBUI_LANGUAGE_METADATA_KEY } from "../session/webui-turns.js";
 import { extractDocuments } from "../../utils/document.js";
 import { imageGenerationPrompt } from "../../utils/image-generation-intent.js";
 import { LLMRuntime } from "../../utils/llm-runtime.js";
@@ -53,6 +57,35 @@ import {
 
 export const UNIFIED_SESSION_KEY = "unified:default";
 type ToolRegistryInstance = ReturnType<ToolLoader["loadRegistry"]>;
+type GuiMirrorTurn = { sessionKey: string; chatId: string; turnId: string };
+type GuiTranscriptMirrorLike = {
+  sessionKeyForMessage: (message: InboundMessage) => string | null;
+  prepareSession: (
+    message: InboundMessage,
+    session: Session,
+    sessionKey: string,
+  ) => WebuiSessionBinding | null;
+  sessionUpdated: (sessionKey: string) => void;
+  turn: (sessionKey: string, turnId: string) => GuiMirrorTurn | null;
+  running: (turn: GuiMirrorTurn, startedAt: number) => void;
+  user: (turn: GuiMirrorTurn, text: string, mediaPaths?: string[]) => void;
+  progress: (turn: GuiMirrorTurn, content: string, options?: Record<string, any>) => void;
+  delta: (turn: GuiMirrorTurn, text: string, streamId: string) => void;
+  streamEnd: (turn: GuiMirrorTurn, streamId: string, resuming?: boolean) => void;
+  contextCompaction: (
+    turn: GuiMirrorTurn,
+    text: string,
+    status: TokenCompactionStatus,
+  ) => void;
+  retryWait: (turn: GuiMirrorTurn, text: string) => void;
+  final: (
+    turn: GuiMirrorTurn,
+    text: string,
+    latencyMs?: number | null,
+    agentUi?: unknown,
+  ) => void;
+  ended: (turn: GuiMirrorTurn, latencyMs?: number | null) => void;
+};
 
 export enum TurnState {
   RESTORE = "restore",
@@ -114,6 +147,7 @@ export class TurnContext {
   sessionWorkspace: string | null = null;
   sessionProjectId: string | null = null;
   trustedSessionBinding: WebuiSessionBinding | null = null;
+  mirrorTurn: GuiMirrorTurn | null = null;
 
   constructor(init: { msg: InboundMessage; sessionKey?: string; state?: TurnState; turnId?: string; session?: Session | null }) {
     this.msg = init.msg;
@@ -156,6 +190,7 @@ type AgentLoopInit = {
   hooks?: AgentHook[];
   sessionDagQueue?: SessionDagQueueManager | null;
   projectStore?: ProjectStore | null;
+  guiTranscriptMirror?: GuiTranscriptMirrorLike | null;
 };
 
 function truncateText(text: string, maxChars: number): string {
@@ -314,6 +349,11 @@ type CancelActiveTasksOptions = {
   excludeSignal?: AbortSignal | null;
 };
 
+type TurnSlot = {
+  route: string;
+  pending: AsyncQueue<InboundMessage>;
+};
+
 function makeCancelableDispatchTask(run: (isCancelled: () => boolean, signal: AbortSignal) => Promise<void>): CancelableDispatchTask {
   const controller = new AbortController();
   const state = { cancelled: false, settled: false };
@@ -382,6 +422,9 @@ export class AgentLoop {
   consolidator: Consolidator;
   sessionDagQueue: SessionDagQueueManager | null;
   projectStore: ProjectStore | null;
+  guiTranscriptMirror: GuiTranscriptMirrorLike | null;
+  terminalTurnLock: TerminalSessionTurnLock;
+  terminalRunControl: TerminalRunControl;
   autoCompact: AutoCompact;
   dream: Dream | null;
   maxIterations: number;
@@ -398,6 +441,8 @@ export class AgentLoop {
   lastUsage: Record<string, number>;
   activeTasks: Map<string, any[]>;
   pendingQueues: Map<string, AsyncQueue<InboundMessage>>;
+  turnSlots: Map<string, TurnSlot[]>;
+  sessionDeletionQueues: Map<string, InboundMessage[]>;
   sessionLocks: Map<string, AsyncMutex>;
   running: boolean;
   currentIterationValue = 0;
@@ -422,6 +467,8 @@ export class AgentLoop {
     this.lastUsage = {};
     this.activeTasks = new Map();
     this.pendingQueues = new Map();
+    this.turnSlots = new Map();
+    this.sessionDeletionQueues = new Map();
     this.sessionLocks = new Map();
     this.running = false;
     this.providerSnapshotLoader = init.providerSnapshotLoader ?? null;
@@ -470,6 +517,12 @@ export class AgentLoop {
     this.unifiedSession = init.unifiedSession ?? defaults.unifiedSession;
     this.sessions = init.sessionManager ?? new SessionManager(init.sessionDir ?? path.join(this.workspace, "sessions"));
     this.projectStore = init.projectStore ?? null;
+    this.guiTranscriptMirror = init.guiTranscriptMirror ?? null;
+    const terminalControlRoot = this.sessions.root
+      ?? init.sessionDir
+      ?? path.join(this.workspace, "sessions");
+    this.terminalTurnLock = new TerminalSessionTurnLock(terminalControlRoot);
+    this.terminalRunControl = new TerminalRunControl(terminalControlRoot);
     this.cronService = init.cronService ?? new CronService(path.join(this.workspace, "cron", "jobs.json"));
     this.sessionDagQueue = init.sessionDagQueue ?? this.createSessionDagQueue();
     this.execSessionManager = new ExecSessionManager();
@@ -664,12 +717,21 @@ export class AgentLoop {
     tools: ToolRegistryInstance = this.tools,
   ): void {
     const effectiveKey = sessionKey ?? (this.unifiedSession ? UNIFIED_SESSION_KEY : `${channel}:${chatId}`);
+    const projectedBrowserScope = metadata?.webui === true
+      && !effectiveKey.startsWith("websocket:")
+      ? {
+          sessionKey: effectiveKey,
+          channel: "projected-session",
+          chatId: effectiveKey,
+        }
+      : null;
     const ctx = new RequestContext({
       channel,
       chatId,
       messageId,
       sessionKey: effectiveKey,
       workspace: capturedSessionWorkspace,
+      browserScope: projectedBrowserScope,
       metadata,
     });
     for (const name of tools.toolNames) {
@@ -732,6 +794,8 @@ export class AgentLoop {
 
   effectiveSessionKey(message: InboundMessage): string {
     const override = message.sessionKeyOverride;
+    const projected = this.guiTranscriptMirror?.sessionKeyForMessage(message) ?? null;
+    if (projected) return projected;
     if (this.unifiedSession && !override) return UNIFIED_SESSION_KEY;
     return override ?? message.sessionKey;
   }
@@ -940,7 +1004,9 @@ export class AgentLoop {
       if (typeof task?.done === "function") return !task.done();
       return true;
     });
-    return hasActiveTask || this.pendingQueues.has(sessionKey);
+    return hasActiveTask
+      || this.pendingQueues.has(sessionKey)
+      || (this.turnSlots.get(sessionKey)?.length ?? 0) > 0;
   }
 
   isSessionGoalActive(sessionKey: string): boolean {
@@ -1690,11 +1756,36 @@ export class AgentLoop {
       || msg.metadata?.webui !== true
       ? null
       : this.sessions.peekWebuiSessionBindingReservation(ctx.sessionKey);
+    if (!ctx.session) {
+      ctx.session = existingSession ?? await this.getOrCreateSession(
+        ctx.sessionKey,
+        "created",
+        reservation !== null,
+      );
+    }
+    const projectedBinding = this.guiTranscriptMirror?.prepareSession(
+      msg,
+      ctx.session,
+      ctx.sessionKey,
+    ) ?? null;
+    if (projectedBinding && msg.metadata?.webui !== true) {
+      msg = ctx.msg = new InboundMessage({
+        channel: msg.channel,
+        chatId: msg.chatId,
+        senderId: msg.senderId,
+        content: msg.content,
+        media: msg.media,
+        metadata: { ...(msg.metadata ?? {}), webui: true },
+        sessionKey: ctx.sessionKey,
+        sessionKeyOverride: msg.sessionKeyOverride,
+        timestamp: msg.timestamp,
+      });
+    }
     const binding = this.resolveSessionWorkspace(
       msg,
-      existingSession,
+      ctx.session,
       reservation,
-      ctx.trustedSessionBinding,
+      ctx.trustedSessionBinding ?? projectedBinding,
     );
     ctx.sessionWorkspace = binding.cwd;
     ctx.sessionProjectId = binding.projectId;
@@ -1711,13 +1802,6 @@ export class AgentLoop {
         sessionKeyOverride: msg.sessionKeyOverride,
         timestamp: msg.timestamp,
       });
-    }
-    if (!ctx.session) {
-      ctx.session = existingSession ?? await this.getOrCreateSession(
-        ctx.sessionKey,
-        "created",
-        reservation !== null,
-      );
     }
     markWebuiSession(ctx.session, msg.metadata);
     let changed = this.restoreRuntimeCheckpoint(ctx.session);
@@ -1747,6 +1831,13 @@ export class AgentLoop {
     if (!sessionWorkspace) throw new SessionWorkspaceError("workspace_missing");
     ctx.userPersistedEarly = this.persistUserMessageEarly(ctx.msg, ctx.session!);
     if (ctx.userPersistedEarly) {
+      if (ctx.mirrorTurn) {
+        this.guiTranscriptMirror?.user(
+          ctx.mirrorTurn,
+          ctx.msg.content,
+          ctx.msg.media,
+        );
+      }
       await this.publishWebuiMessageAccepted(ctx.msg);
       await publishWebuiThreadSessionUpdated(this.bus, ctx.msg);
     }
@@ -1766,10 +1857,21 @@ export class AgentLoop {
     } = {
       replayMaxMessages: this.maxMessages,
     };
-    if (ctx.msg.channel === "websocket") {
+    if (ctx.msg.channel === "websocket" || ctx.mirrorTurn) {
       compactionOptions.notifyOnLockWait = true;
       compactionOptions.onCompactionEvent = async (event) => {
-        await this.publishWebuiContextCompaction(ctx, event.status);
+        const text = this.contextCompactionLabel(ctx, event.status);
+        if (ctx.mirrorTurn) {
+          if (ctx.boundary?.shouldEmitLive() !== false) {
+            this.guiTranscriptMirror?.contextCompaction(
+              ctx.mirrorTurn,
+              text,
+              event.status,
+            );
+          }
+        } else {
+          await this.publishWebuiContextCompaction(ctx, event.status);
+        }
       };
     }
     await this.consolidator.maybeConsolidateByTokens(ctx.session!, compactionOptions);
@@ -1810,7 +1912,39 @@ export class AgentLoop {
       sessionWorkspace,
     );
     ctx.onProgress ??= await this.buildBusProgressCallback(ctx);
+    if (ctx.mirrorTurn && this.guiTranscriptMirror) {
+      const mirror = this.guiTranscriptMirror;
+      const turn = ctx.mirrorTurn;
+      const downstream = ctx.onProgress;
+      ctx.onProgress = withProgressCapabilities(
+        async (content: string, options: Record<string, any> = {}) => {
+          mirror.progress(turn, content, options);
+          await downstream?.(content, options);
+        },
+        { toolEvents: true, fileEditEvents: true, reasoning: true },
+      );
+      const downstreamStream = ctx.onStream;
+      const streamId = `${ctx.sessionKey}:${ctx.turnId}`;
+      ctx.onStream = async (delta: string) => {
+        mirror.delta(turn, delta, streamId);
+        await downstreamStream?.(delta);
+      };
+      const downstreamStreamEnd = ctx.onStreamEnd;
+      ctx.onStreamEnd = async (options: { resuming?: boolean } = {}) => {
+        mirror.streamEnd(turn, streamId, Boolean(options.resuming));
+        await downstreamStreamEnd?.(options);
+      };
+    }
     ctx.onRetryWait ??= await this.buildRetryWaitCallback(ctx.msg);
+    if (ctx.mirrorTurn && this.guiTranscriptMirror) {
+      const mirror = this.guiTranscriptMirror;
+      const turn = ctx.mirrorTurn;
+      const downstreamRetryWait = ctx.onRetryWait;
+      ctx.onRetryWait = async (content: string) => {
+        mirror.retryWait(turn, content);
+        await downstreamRetryWait?.(content);
+      };
+    }
     return "ok";
   }
 
@@ -1859,12 +1993,30 @@ export class AgentLoop {
       this.context.memory.rawArchive(messages, { sessionKey: ctx.sessionKey }),
     );
     this.sessions.save(ctx.session!);
+    if (ctx.mirrorTurn && ctx.finalContent) {
+      this.guiTranscriptMirror?.final(
+        ctx.mirrorTurn,
+        ctx.finalContent,
+        ctx.turnLatencyMs,
+      );
+    }
+    if (
+      ctx.msg.metadata?.webui === true
+      && !ctx.sessionKey.startsWith("websocket:")
+    ) {
+      await maybeGenerateWebuiTitle({
+        sessions: this.sessions,
+        sessionKey: ctx.sessionKey,
+        provider: this.provider,
+        model: this.model ?? this.provider?.getDefaultModel?.() ?? "",
+      });
+    }
     this.enqueueSessionDagTurn(ctx.session!, ctx.turnId, dagMessageStart, ctx.session!.messages.length);
-    this.scheduleBackground(
-      this.consolidator.maybeConsolidateByTokens(ctx.session!, {
-        replayMaxMessages: this.maxMessages,
-      }),
-    );
+    const followupCompaction = this.consolidator.maybeConsolidateByTokens(ctx.session!, {
+      replayMaxMessages: this.maxMessages,
+    });
+    if (ctx.sessionKey.startsWith("cli:")) await followupCompaction;
+    else this.scheduleBackground(followupCompaction);
     return "ok";
   }
 
@@ -2068,22 +2220,127 @@ export class AgentLoop {
     ctx.trustedSessionBinding = sessionBindingOverride ?? null;
 
     await this.stateRestore(ctx);
-    this.autoCompact.checkExpired((promise) => this.scheduleBackground(promise), this.activeTasks.keys());
-    await this.stateCompact(ctx);
-    const commandState = await this.stateCommand(ctx);
-    if (commandState === "shortcut") return ctx.outbound;
-    await this.stateBuild(ctx);
-    await this.stateRun(ctx);
-    await this.stateSave(ctx);
-    await this.stateRespond(ctx);
-    return ctx.outbound;
+    if (message.channel !== "websocket") {
+      ctx.mirrorTurn = this.guiTranscriptMirror?.turn(key, ctx.turnId) ?? null;
+      if (ctx.mirrorTurn) {
+        this.guiTranscriptMirror?.running(ctx.mirrorTurn, ctx.turnWallStartedAt);
+      }
+    }
+    try {
+      this.autoCompact.checkExpired((promise) => this.scheduleBackground(promise), this.activeTasks.keys());
+      await this.stateCompact(ctx);
+      const commandState = await this.stateCommand(ctx);
+      if (commandState === "shortcut") {
+        if (ctx.mirrorTurn && ctx.outbound?.content) {
+          this.guiTranscriptMirror?.final(
+            ctx.mirrorTurn,
+            ctx.outbound.content,
+            null,
+            ctx.outbound.metadata?.agentUi,
+          );
+        }
+        return ctx.outbound;
+      }
+      await this.stateBuild(ctx);
+      await this.stateRun(ctx);
+      await this.stateSave(ctx);
+      await this.stateRespond(ctx);
+      return ctx.outbound;
+    } finally {
+      if (ctx.mirrorTurn) {
+        this.guiTranscriptMirror?.ended(ctx.mirrorTurn, ctx.turnLatencyMs);
+      }
+    }
   }
 
   async processMessage(message: InboundMessage, sessionKey?: string, opts: Parameters<AgentLoop["processMessageInternal"]>[2] = {}): Promise<OutboundMessage | null> {
     return this.processMessageInternal(message, sessionKey, opts);
   }
 
-  async dispatchMessage(msg: InboundMessage, isCancelled: () => boolean = () => false, abortSignal: AbortSignal | null = null): Promise<void> {
+  private async withTerminalTurn<T>(
+    sessionKey: string,
+    channel: string,
+    turnId: string,
+    signal: AbortSignal | null,
+    operation: (signal: AbortSignal | null) => Promise<T>,
+  ): Promise<T> {
+    const runOperation = async (turnSignal: AbortSignal | null): Promise<T> => {
+      try {
+        return await operation(turnSignal);
+      } catch (error) {
+        if (isTaskCancelledError(error)) {
+          const getSession = this.sessions.get;
+          const session = typeof getSession === "function"
+            ? getSession.call(this.sessions, sessionKey)
+            : null;
+          if (session) {
+            if (!this.restoreRuntimeCheckpoint(session)) {
+              this.clearPendingUserTurn(session);
+              this.clearRuntimeCheckpoint(session);
+            }
+            this.sessions.save(session, { fsync: sessionKey.startsWith("cli:") });
+          }
+        }
+        throw error;
+      }
+    };
+    if (!sessionKey.startsWith("cli:")) return runOperation(signal);
+    return this.terminalTurnLock.runExclusive(sessionKey, async () => {
+      this.sessions.invalidate(sessionKey);
+      if (signal?.aborted) throw createTaskCancelledError();
+      if (channel !== "cli") return runOperation(signal);
+      const controller = new AbortController();
+      const relayAbort = () => controller.abort(signal?.reason);
+      signal?.addEventListener("abort", relayAbort, { once: true });
+      await this.terminalRunControl.create(sessionKey, turnId);
+      const stopOwner = this.terminalRunControl.startOwner(sessionKey, turnId, controller);
+      try {
+        return await runOperation(controller.signal);
+      } finally {
+        signal?.removeEventListener("abort", relayAbort);
+        await stopOwner();
+      }
+    }, signal);
+  }
+
+  async withSessionTurnBarrier<T>(
+    sessionKey: string,
+    operation: () => Promise<T>,
+    signal: AbortSignal | null = null,
+  ): Promise<T> {
+    return this.lockFor(sessionKey).runExclusive(() => (
+      this.terminalTurnLock.runExclusive(sessionKey, async () => {
+        this.sessions.invalidate(sessionKey);
+        return operation();
+      }, signal)
+    ));
+  }
+
+  async withSessionDeletionBarrier<T>(
+    sessionKey: string,
+    prepare: () => Promise<void>,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    if (this.sessionDeletionQueues.has(sessionKey)) {
+      throw new Error("session_deletion_in_progress");
+    }
+    const deferred: InboundMessage[] = [];
+    this.sessionDeletionQueues.set(sessionKey, deferred);
+    try {
+      await prepare();
+      return await this.withSessionTurnBarrier(sessionKey, operation);
+    } finally {
+      this.sessionDeletionQueues.delete(sessionKey);
+      for (const message of deferred) await this.bus.publishInbound(message);
+    }
+  }
+
+  async dispatchMessage(
+    msg: InboundMessage,
+    isCancelled: () => boolean = () => false,
+    abortSignal: AbortSignal | null = null,
+    slotPending: AsyncQueue<InboundMessage> | null = null,
+  ): Promise<void> {
     const sessionKey = this.effectiveSessionKey(msg);
     const turnId = firstString(msg.metadata?.turn_id, msg.metadata?.turnId) ?? cryptoRandomId();
     const effectiveMsg = new InboundMessage({
@@ -2100,92 +2357,101 @@ export class AgentLoop {
       sessionKey: msg.sessionKey,
       sessionKeyOverride: sessionKey !== msg.sessionKey ? sessionKey : msg.sessionKeyOverride,
     });
-    const boundary = createTurnCancellationBoundary({ turnId, signal: abortSignal });
-    const pending = new AsyncQueue<InboundMessage>();
-    this.pendingQueues.set(sessionKey, pending);
+    let effectiveAbortSignal = abortSignal;
+    let boundary = createTurnCancellationBoundary({ turnId, signal: effectiveAbortSignal });
+    const pending = slotPending ?? new AsyncQueue<InboundMessage>();
+    if (!slotPending) this.pendingQueues.set(sessionKey, pending);
     const lock = this.lockFor(sessionKey);
     const publishRunStatus = shouldPublishWebuiRunStatus(effectiveMsg);
     let didPublishRunning = false;
     try {
-      await lock.runExclusive(async () => {
-        if (isCancelled()) return;
-        if (effectiveMsg.channel === "websocket" && effectiveMsg.metadata?.webui === true) {
-          const getSession = this.sessions.get;
-          const existing = typeof getSession === "function"
-            ? getSession.call(this.sessions, sessionKey)
-            : null;
-          if (!existing) {
-            const peekReservation = this.sessions.peekWebuiSessionBindingReservation;
-            if (typeof peekReservation === "function") {
-              peekReservation.call(this.sessions, sessionKey);
+      await lock.runExclusive(() => this.withTerminalTurn(
+        sessionKey,
+        effectiveMsg.channel,
+        turnId,
+        abortSignal,
+        async (turnSignal) => {
+          effectiveAbortSignal = turnSignal;
+          boundary = createTurnCancellationBoundary({ turnId, signal: turnSignal });
+          if (isCancelled()) return;
+          if (effectiveMsg.channel === "websocket" && effectiveMsg.metadata?.webui === true) {
+            const getSession = this.sessions.get;
+            const existing = typeof getSession === "function"
+              ? getSession.call(this.sessions, sessionKey)
+              : null;
+            if (!existing) {
+              const peekReservation = this.sessions.peekWebuiSessionBindingReservation;
+              if (typeof peekReservation === "function") {
+                peekReservation.call(this.sessions, sessionKey);
+              }
             }
           }
-        }
-        if (publishRunStatus) {
-          await publishTurnRunStatus(this.bus, effectiveMsg, "running");
-          didPublishRunning = true;
-        }
-        let onStream: ((delta: string) => Promise<void>) | undefined;
-        let onStreamEnd: ((opts?: { resuming?: boolean }) => Promise<void>) | undefined;
-        if (effectiveMsg.metadata?.wantsStream) {
-          const streamBaseId = `${effectiveMsg.sessionKey}:${Date.now()}`;
-          let streamSegment = 0;
-          const currentStreamId = () => `${streamBaseId}:${streamSegment}`;
-          onStream = async (delta: string) => {
-            if (isCancelled() || boundary.shouldEmitLive() === false) return;
-            await this.bus.publishOutbound(
-              new OutboundMessage({
-                channel: effectiveMsg.channel,
-                chatId: effectiveMsg.chatId,
-                content: delta,
-                metadata: {
-                  ...(effectiveMsg.metadata ?? {}),
-                  ...boundary.metadata(),
-                  streamDelta: true,
-                  streamId: currentStreamId(),
-                },
-              }),
-            );
-          };
-          onStreamEnd = async ({ resuming = false }: { resuming?: boolean } = {}) => {
-            if (isCancelled() || boundary.shouldEmitLive() === false) return;
+          if (publishRunStatus) {
+            await publishTurnRunStatus(this.bus, effectiveMsg, "running");
+            didPublishRunning = true;
+          }
+          let onStream: ((delta: string) => Promise<void>) | undefined;
+          let onStreamEnd: ((opts?: { resuming?: boolean }) => Promise<void>) | undefined;
+          if (effectiveMsg.metadata?.wantsStream) {
+            const streamBaseId = `${effectiveMsg.sessionKey}:${Date.now()}`;
+            let streamSegment = 0;
+            const currentStreamId = () => `${streamBaseId}:${streamSegment}`;
+            onStream = async (delta: string) => {
+              if (isCancelled() || boundary.shouldEmitLive() === false) return;
+              await this.bus.publishOutbound(
+                new OutboundMessage({
+                  channel: effectiveMsg.channel,
+                  chatId: effectiveMsg.chatId,
+                  content: delta,
+                  metadata: {
+                    ...(effectiveMsg.metadata ?? {}),
+                    ...boundary.metadata(),
+                    streamDelta: true,
+                    streamId: currentStreamId(),
+                  },
+                }),
+              );
+            };
+            onStreamEnd = async ({ resuming = false }: { resuming?: boolean } = {}) => {
+              if (isCancelled() || boundary.shouldEmitLive() === false) return;
+              await this.bus.publishOutbound(
+                new OutboundMessage({
+                  channel: effectiveMsg.channel,
+                  chatId: effectiveMsg.chatId,
+                  content: "",
+                  metadata: {
+                    ...(effectiveMsg.metadata ?? {}),
+                    ...boundary.metadata(),
+                    streamEnd: true,
+                    resuming,
+                    streamId: currentStreamId(),
+                  },
+                }),
+              );
+              streamSegment += 1;
+            };
+          }
+          const response = await this.processMessageInternal(effectiveMsg, sessionKey, {
+            onStream,
+            onStreamEnd,
+            pendingQueue: pending,
+            abortSignal: turnSignal,
+            turnId,
+            boundary,
+          });
+          if (!isCancelled() && response) await this.bus.publishOutbound(response);
+          if (!isCancelled() && effectiveMsg.channel === "cli") {
             await this.bus.publishOutbound(
               new OutboundMessage({
                 channel: effectiveMsg.channel,
                 chatId: effectiveMsg.chatId,
                 content: "",
-                metadata: {
-                  ...(effectiveMsg.metadata ?? {}),
-                  ...boundary.metadata(),
-                  streamEnd: true,
-                  resuming: resuming,
-                  streamId: currentStreamId(),
-                },
+                metadata: effectiveMsg.metadata ?? {},
               }),
             );
-            streamSegment += 1;
-          };
-        }
-        const response = await this.processMessageInternal(effectiveMsg, sessionKey, {
-          onStream,
-          onStreamEnd,
-          pendingQueue: pending,
-          abortSignal,
-          turnId,
-          boundary,
-        });
-        if (!isCancelled() && response) await this.bus.publishOutbound(response);
-        if (!isCancelled() && effectiveMsg.channel === "cli") {
-          await this.bus.publishOutbound(
-            new OutboundMessage({
-              channel: effectiveMsg.channel,
-              chatId: effectiveMsg.chatId,
-              content: "",
-              metadata: effectiveMsg.metadata ?? {},
-            }),
-          );
-        }
-      });
+          }
+        },
+      ));
     } catch (error) {
       if (
         error instanceof SessionWorkspaceError
@@ -2217,6 +2483,10 @@ export class AgentLoop {
         );
         return;
       }
+      if (isTaskCancelledError(error)) {
+        boundary.close("aborted");
+        return;
+      }
       try {
         const getSession = this.sessions.get;
         const session = typeof getSession === "function"
@@ -2228,10 +2498,6 @@ export class AgentLoop {
       } catch {
         // Preserve the original dispatch failure; checkpoint restore is best-effort.
       }
-      if (isTaskCancelledError(error)) {
-        boundary.close("aborted");
-        return;
-      }
       throw error;
     } finally {
       if (didPublishRunning) {
@@ -2242,10 +2508,12 @@ export class AgentLoop {
           sessions: this.sessions,
         });
       }
-      boundary.close(abortSignal?.aborted ? "aborted" : "ended");
-      const queue = this.pendingQueues.get(sessionKey);
-      this.pendingQueues.delete(sessionKey);
-      while (queue) {
+      boundary.close(effectiveAbortSignal?.aborted ? "aborted" : "ended");
+      const queue = pending;
+      if (!slotPending && this.pendingQueues.get(sessionKey) === pending) {
+        this.pendingQueues.delete(sessionKey);
+      }
+      while (!isCancelled()) {
         const item = queue.getNowait();
         if (!item) break;
         await this.bus.publishInbound(item);
@@ -2265,54 +2533,92 @@ export class AgentLoop {
         continue;
       }
       const raw = msg.content.trim();
+      const effectiveKey = this.effectiveSessionKey(msg);
+      const deletionQueue = this.sessionDeletionQueues.get(effectiveKey);
+      if (deletionQueue) {
+        deletionQueue.push(msg);
+        continue;
+      }
       if (this.commands.isPriority(raw)) {
         await this.dispatchCommandInline(msg, msg.sessionKey, raw, (ctx) => this.commands.dispatchPriority(ctx));
         continue;
       }
-      const effectiveKey = this.effectiveSessionKey(msg);
-      const pending = this.pendingQueues.get(effectiveKey);
-      if (pending) {
+      const route = `${msg.channel}\0${String(msg.chatId)}`;
+      const slots = this.turnSlots.get(effectiveKey) ?? [];
+      const lastSlot = slots.at(-1);
+      const legacyPending = slots.length === 0
+        ? this.pendingQueues.get(effectiveKey)
+        : null;
+      if (legacyPending) {
         if (this.commands.isDispatchableCommand(raw)) {
           await this.dispatchCommandInline(msg, effectiveKey, raw, (ctx) => this.commands.dispatch(ctx));
           continue;
         }
-        const queued =
-          effectiveKey === msg.sessionKey
-            ? msg
-            : new InboundMessage({
-                channel: msg.channel,
-                chatId: msg.chatId,
-                senderId: msg.senderId,
-                content: msg.content,
-                media: msg.media,
-                metadata: msg.metadata,
-                timestamp: msg.timestamp,
-                sessionKeyOverride: effectiveKey,
-              });
+        const queued = effectiveKey === msg.sessionKey
+          ? msg
+          : new InboundMessage({
+              channel: msg.channel,
+              chatId: msg.chatId,
+              senderId: msg.senderId,
+              content: msg.content,
+              media: msg.media,
+              metadata: msg.metadata,
+              timestamp: msg.timestamp,
+              sessionKeyOverride: effectiveKey,
+            });
         try {
-          pending.put(queued);
+          legacyPending.put(queued);
+          continue;
         } catch {
-          const task = makeCancelableDispatchTask((isCancelled, signal) => this.dispatchMessage(msg, isCancelled, signal));
-          const list = this.activeTasks.get(effectiveKey) ?? [];
-          list.push(task);
-          this.activeTasks.set(effectiveKey, list);
-          task
-            .finally(() => {
-              const current = this.activeTasks.get(effectiveKey) ?? [];
-              const next = current.filter((item) => item !== task);
-              if (next.length) this.activeTasks.set(effectiveKey, next);
-              else this.activeTasks.delete(effectiveKey);
-            })
-            .catch(() => undefined);
+          // A closing legacy queue falls through to a new turn slot.
         }
-        continue;
       }
-      const task = makeCancelableDispatchTask((isCancelled, signal) => this.dispatchMessage(msg, isCancelled, signal));
+      const dispatchableCommand = this.commands.isDispatchableCommand(raw);
+      if (lastSlot?.route === route) {
+        if (dispatchableCommand) {
+          await this.dispatchCommandInline(msg, effectiveKey, raw, (ctx) => this.commands.dispatch(ctx));
+          continue;
+        }
+        const queued = effectiveKey === msg.sessionKey
+          ? msg
+          : new InboundMessage({
+              channel: msg.channel,
+              chatId: msg.chatId,
+              senderId: msg.senderId,
+              content: msg.content,
+              media: msg.media,
+              metadata: msg.metadata,
+              timestamp: msg.timestamp,
+              sessionKeyOverride: effectiveKey,
+            });
+        try {
+          lastSlot.pending.put(queued);
+          continue;
+        } catch {
+          // A closing slot falls through and creates a new ordered turn.
+        }
+      }
+      const slot: TurnSlot = { route, pending: new AsyncQueue<InboundMessage>() };
+      slots.push(slot);
+      this.turnSlots.set(effectiveKey, slots);
+      this.pendingQueues.set(effectiveKey, slot.pending);
+      const task = makeCancelableDispatchTask(
+        (isCancelled, signal) => this.dispatchMessage(msg, isCancelled, signal, slot.pending),
+      );
       const list = this.activeTasks.get(effectiveKey) ?? [];
       list.push(task);
       this.activeTasks.set(effectiveKey, list);
       task
         .finally(() => {
+          const currentSlots = this.turnSlots.get(effectiveKey) ?? [];
+          const nextSlots = currentSlots.filter((item) => item !== slot);
+          if (nextSlots.length) {
+            this.turnSlots.set(effectiveKey, nextSlots);
+            this.pendingQueues.set(effectiveKey, nextSlots.at(-1)!.pending);
+          } else {
+            this.turnSlots.delete(effectiveKey);
+            this.pendingQueues.delete(effectiveKey);
+          }
           const current = this.activeTasks.get(effectiveKey) ?? [];
           const next = current.filter((item) => item !== task);
           if (next.length) this.activeTasks.set(effectiveKey, next);
@@ -2339,6 +2645,7 @@ export class AgentLoop {
       onStreamEnd,
       messageSendCallback,
       sessionBindingOverride,
+      abortSignal = null,
     }: {
       sessionKey?: string;
       channel?: string;
@@ -2350,10 +2657,15 @@ export class AgentLoop {
       onStreamEnd?: (...args: any[]) => Promise<void> | void;
       messageSendCallback?: MessageSendCallback | null;
       sessionBindingOverride?: WebuiSessionBinding | null;
+      abortSignal?: AbortSignal | null;
     } = {},
   ): Promise<OutboundMessage | null> {
     await this.initializeRuntimeTools();
-    const key = this.unifiedSession ? UNIFIED_SESSION_KEY : sessionKey;
+    const key = sessionKey.startsWith("cli:")
+      ? sessionKey
+      : this.unifiedSession
+        ? UNIFIED_SESSION_KEY
+        : sessionKey;
     const msg = new InboundMessage({
       channel,
       chatId,
@@ -2363,12 +2675,26 @@ export class AgentLoop {
       metadata,
       sessionKey: key,
     });
-    return this.processMessageInternal(msg, key, {
-      onProgress,
-      onStream,
-      onStreamEnd,
-      messageSendCallback,
-      sessionBindingOverride,
-    });
+    const turnId = cryptoRandomId();
+    try {
+      return await this.lockFor(key).runExclusive(() => this.withTerminalTurn(
+        key,
+        channel,
+        turnId,
+        abortSignal,
+        (turnSignal) => this.processMessageInternal(msg, key, {
+          onProgress,
+          onStream,
+          onStreamEnd,
+          messageSendCallback,
+          sessionBindingOverride,
+          abortSignal: turnSignal,
+          turnId,
+        }),
+      ));
+    } catch (error) {
+      if (isTaskCancelledError(error)) return null;
+      throw error;
+    }
   }
 }

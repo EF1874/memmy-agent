@@ -442,7 +442,7 @@ describe("task cancellation", () => {
     }
   });
 
-  it("aborts the active websocket turn and restores pending context on /stop", async () => {
+  it("aborts the active websocket turn without synthesizing a final answer on /stop", async () => {
     let entered!: () => void;
     let seenSignal: AbortSignal | null = null;
     const providerEntered = new Promise<void>((resolve) => {
@@ -498,8 +498,9 @@ describe("task cancellation", () => {
       expect(fourth.metadata).toMatchObject({ goalStatusEvent: true, goalStatus: "idle" });
       expect(fifth.content.toLowerCase()).toContain("stopped");
       const session = loop.sessions.getOrCreate("websocket:c1");
-      expect(session.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
-      expect(session.messages.at(-1)?.content).toBe("Error: Task interrupted before a response was generated.");
+      expect(session.messages.map((message) => message.role)).toEqual(["user"]);
+      expect(session.metadata.pendingUserTurn).toBeUndefined();
+      expect(session.metadata.runtimeCheckpoint).toBeUndefined();
       expect(session.messages.some((message) => message.content === "Error: task cancelled")).toBe(false);
     } finally {
       loop.stop();

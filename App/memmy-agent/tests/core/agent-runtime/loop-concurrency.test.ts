@@ -54,6 +54,92 @@ afterEach(() => {
 });
 
 describe("AgentLoop concurrent chat turns", () => {
+  it("keeps A/B/C delivery routes as ordered independent turns", async () => {
+    const loop = makeLoop();
+    const started: string[] = [];
+    let releaseA!: () => void;
+    const aGate = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+    loop.initializeRuntimeTools = vi.fn(async () => undefined);
+    loop.processMessageInternal = vi.fn(async (message: InboundMessage, _key, options) => {
+      started.push(`${message.channel}:${message.chatId}`);
+      if (started.length === 1) await aGate;
+      expect(options.pendingQueue?.size).toBe(0);
+      return null;
+    });
+    const running = loop.run();
+    const canonicalKey = "telegram:123";
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "telegram",
+      chatId: "123",
+      senderId: "user",
+      content: "A",
+    }));
+    while (started.length < 1) await new Promise((resolve) => setTimeout(resolve, 5));
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "websocket",
+      chatId: "ext_projection",
+      senderId: "user",
+      content: "B",
+      sessionKeyOverride: canonicalKey,
+    }));
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "telegram",
+      chatId: "123",
+      senderId: "user",
+      content: "C",
+    }));
+    while ((loop.turnSlots.get(canonicalKey)?.length ?? 0) < 3) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    releaseA();
+    while (started.length < 3) await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(started).toEqual([
+      "telegram:123",
+      "websocket:ext_projection",
+      "telegram:123",
+    ]);
+    loop.stop();
+    await running;
+  });
+
+  it("defers new IM input only for the active deletion window", async () => {
+    const loop = makeLoop();
+    const canonicalKey = "telegram:delete-race";
+    const processed: string[] = [];
+    let releaseDeletion!: () => void;
+    const deletionGate = new Promise<void>((resolve) => {
+      releaseDeletion = resolve;
+    });
+    loop.initializeRuntimeTools = vi.fn(async () => undefined);
+    loop.processMessageInternal = vi.fn(async (message: InboundMessage) => {
+      processed.push(message.content);
+      return null;
+    });
+    const running = loop.run();
+    const deletion = loop.withSessionDeletionBarrier(
+      canonicalKey,
+      () => deletionGate,
+      async () => undefined,
+    );
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "telegram",
+      chatId: "delete-race",
+      senderId: "user",
+      content: "arrived during delete",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(processed).toEqual([]);
+
+    releaseDeletion();
+    await deletion;
+    while (!processed.length) await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(processed).toEqual(["arrived during delete"]);
+    loop.stop();
+    await running;
+  });
+
   it("exposes WebUI-only cron target busy and goal-active checks", () => {
     const loop = makeLoop();
     const key = "websocket:chat-1";

@@ -20,6 +20,7 @@ import {
 } from "../../core/session/manager.js";
 import { websocketTurnWallStartedAt, websocketTurnWallStartTimes } from "../../core/session/webui-turns.js";
 import type { WebuiTitleService } from "../../core/session/webui-title.js";
+import { TerminalRunControl } from "../../core/session/terminal-session-control.js";
 import { scrubSubagentMessagesForChannel } from "../../utils/subagent-channel-display.js";
 import {
   mcpPresetsSettingsAction,
@@ -38,6 +39,16 @@ import {
   type WebuiProject,
   type WebuiSessionTarget,
 } from "../../entrypoints/frontend-bridge/projects.js";
+import {
+  GuiSessionProjection,
+  GuiSessionProjectionError,
+  isExternalGuiChatId,
+  isNativeGuiChatId,
+  stripGuiDisplayTitleSuffix,
+  toGuiChatId,
+  type ResolvedGuiSession,
+} from "../../entrypoints/frontend-bridge/gui-session-projection.js";
+import type { GatewayTranscriptMonitor } from "../../entrypoints/frontend-bridge/gui-transcript-sync.js";
 import {
   createModelConfiguration,
   settingsPayload,
@@ -248,6 +259,11 @@ export function isValidChatId(value: any): boolean {
   return typeof value === "string" && CHAT_ID_RE.test(value);
 }
 
+export function isValidGuiChatId(value: any): boolean {
+  return typeof value === "string"
+    && (isNativeGuiChatId(value) || isExternalGuiChatId(value));
+}
+
 export function normalizeWebuiLanguage(value: any): WebuiLanguage | null {
   return typeof value === "string" && WEBUI_LANGUAGE_VALUES.has(value as WebuiLanguage)
     ? value as WebuiLanguage
@@ -332,6 +348,24 @@ export function decodeApiKey(rawKey: string): string | null {
     return null;
   }
   return API_KEY_RE.test(decoded) ? decoded : null;
+}
+
+export function decodeGuiSessionApiKey(rawKey: string): string | null {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(rawKey);
+  } catch {
+    return null;
+  }
+  if (!decoded.startsWith("websocket:")) return null;
+  const chatId = decoded.slice("websocket:".length);
+  return isNativeGuiChatId(chatId) || isExternalGuiChatId(chatId) ? decoded : null;
+}
+
+function invalidGuiSessionKeyResponse(rawKey: string): HttpLikeResponse {
+  return decodeApiKey(rawKey) == null
+    ? httpError(400, "invalid session key")
+    : httpError(404, "session not found");
 }
 
 export function isLocalhost(connection: any): boolean {
@@ -534,11 +568,20 @@ export class WebSocketChannel extends BaseChannel {
   mediaSecret = crypto.randomBytes(32);
   settingsRestartSections = new Set<string>();
   sessionManager: any = null;
+  guiSessionProjection: GuiSessionProjection | null = null;
+  transcriptMonitor: GatewayTranscriptMonitor | null = null;
+  terminalRunControl: TerminalRunControl | null = null;
   staticDistPath: string | null = null;
   runtimeModelName: RuntimeModelNameResolver = null;
   workspacePath: string;
   readonly fileMemoryEnabled: boolean;
   cancelActiveTasks: ((sessionKey: string) => Promise<number>) | null = null;
+  sessionTurnBarrier: (<T>(sessionKey: string, operation: () => Promise<T>) => Promise<T>) | null = null;
+  sessionDeletionBarrier: (<T>(
+    sessionKey: string,
+    cancelRunning: boolean,
+    operation: () => Promise<T>,
+  ) => Promise<T>) | null = null;
   closeBrowserChat: ((channel: string, chatId: string) => Promise<void>) | null = null;
   server: any = null;
   channelAdmin: ChannelAdminApi | null = null;
@@ -548,6 +591,8 @@ export class WebSocketChannel extends BaseChannel {
   sessionDeletionServices: SessionDeletionServices | null = null;
   projectDeletionCoordinators = new Map<string, Promise<string[]>>();
   projectDeletionRetryTimers = new Map<string, NodeJS.Timeout>();
+  sessionUpdateTimers = new Map<string, NodeJS.Timeout>();
+  sessionUpdateScopes = new Map<string, string>();
   pendingProjectDeleteContinuation: Promise<void> | null = null;
 
   constructor(config: any = {}, bus?: any, options: WebSocketChannelOptions = {}) {
@@ -555,6 +600,12 @@ export class WebSocketChannel extends BaseChannel {
     super("websocket", normalized, bus);
     this.config = normalized;
     this.sessionManager = options.sessionManager ?? config?.sessionManager ?? null;
+    this.guiSessionProjection = this.sessionManager
+      ? new GuiSessionProjection(this.sessionManager)
+      : null;
+    this.terminalRunControl = this.sessionManager?.root
+      ? new TerminalRunControl(this.sessionManager.root)
+      : null;
     this.projectStore = options.projectStore ?? config?.projectStore ?? null;
     const staticDistPath = options.staticDistPath ?? config?.staticDistPath ?? null;
     this.staticDistPath = staticDistPath ? path.resolve(String(staticDistPath)) : null;
@@ -576,6 +627,26 @@ export class WebSocketChannel extends BaseChannel {
 
   setProjectStore(projectStore: ProjectStore): void {
     this.projectStore = projectStore;
+  }
+
+  setTranscriptMonitor(monitor: GatewayTranscriptMonitor | null): void {
+    this.transcriptMonitor = monitor;
+  }
+
+  setSessionTurnBarrier(
+    barrier: <T>(sessionKey: string, operation: () => Promise<T>) => Promise<T>,
+  ): void {
+    this.sessionTurnBarrier = barrier;
+  }
+
+  setSessionDeletionBarrier(
+    barrier: <T>(
+      sessionKey: string,
+      cancelRunning: boolean,
+      operation: () => Promise<T>,
+    ) => Promise<T>,
+  ): void {
+    this.sessionDeletionBarrier = barrier;
   }
 
   setSessionDeletionServices(services: SessionDeletionServices): void {
@@ -690,9 +761,12 @@ export class WebSocketChannel extends BaseChannel {
   private ensureAcceptedTranscript(
     chatId: string,
     clientRequestId: string,
+    canonicalSessionKey: string | null = null,
   ): void {
-    const sessionKey = `websocket:${chatId}`;
-    if (readTranscriptLines(sessionKey).some(
+    const guiSessionKey = `websocket:${chatId}`;
+    const sessionKey = canonicalSessionKey ?? this.canonicalSessionKeyForChatId(chatId);
+    if (!sessionKey) return;
+    if (readTranscriptLines(guiSessionKey).some(
       (line) => line?.event === "user" && line?.client_request_id === clientRequestId,
     )) {
       return;
@@ -808,7 +882,9 @@ export class WebSocketChannel extends BaseChannel {
 
   async maybePushActiveGoalState(chatId: string): Promise<void> {
     if (!this.sessionManager) return;
-    const row = this.readSessionFile(`websocket:${chatId}`);
+    const sessionKey = this.canonicalSessionKeyForChatId(chatId);
+    if (!sessionKey) return;
+    const row = this.readSessionFile(sessionKey);
     const metadata = row && typeof row.metadata === "object" ? row.metadata : {};
     const blob = goalStateWsBlob(metadata);
     if (!blob.active) return;
@@ -816,14 +892,21 @@ export class WebSocketChannel extends BaseChannel {
   }
 
   async maybePushTurnRunWallClock(chatId: string): Promise<void> {
-    const startedAt = websocketTurnWallStartedAt(chatId);
+    const terminalRun = this.terminalRunStateForChatId(chatId);
+    const startedAt = websocketTurnWallStartedAt(chatId)
+      ?? (terminalRun ? terminalRun.startedAt / 1000 : null);
     if (startedAt == null) return;
-    await this.sendGoalStatus(chatId, "running", { startedAt });
+    await this.sendGoalStatus(chatId, "running", {
+      startedAt,
+      turnId: this.activeTurnIdByChatId.get(chatId) ?? terminalRun?.turnId ?? null,
+    });
   }
 
   async sendRunStatusSnapshot(connection: any, chatId: string): Promise<void> {
-    const startedAt = websocketTurnWallStartedAt(chatId);
-    const turnId = this.activeTurnIdByChatId.get(chatId) ?? null;
+    const terminalRun = this.terminalRunStateForChatId(chatId);
+    const startedAt = websocketTurnWallStartedAt(chatId)
+      ?? (terminalRun ? terminalRun.startedAt / 1000 : null);
+    const turnId = this.activeTurnIdByChatId.get(chatId) ?? terminalRun?.turnId ?? null;
     const payload = startedAt == null
       ? {
           event: "run_status_snapshot",
@@ -963,27 +1046,11 @@ export class WebSocketChannel extends BaseChannel {
   webuiSessionSnapshot(): Record<string, any> {
     this.schedulePendingProjectDeletionContinuation();
     const registry = this.projectStore?.snapshot() ?? { state: "ready" as const, projects: [] };
-    const records = typeof this.sessionManager?.listWebuiSessionRecords === "function"
-      ? this.sessionManager.listWebuiSessionRecords() as Session[]
-      : null;
-    const rawSessions = records
-      ? records.map((session) => {
-          if (typeof this.sessionManager?.webuiSessionSummary === "function") {
-            return this.sessionManager.webuiSessionSummary(session);
-          }
-          return {
-            key: session.key,
-            title: session.metadata?.title,
-            preview: "",
-            updatedAt: session.updatedAt,
-            ...readWebuiSessionBinding(session),
-          };
-        })
-      : (this.sessionManager?.listSessions?.() ?? []);
+    const rawSessions = this.guiSessionProjection?.snapshot() ?? [];
     const sessions = Array.isArray(rawSessions)
       ? rawSessions.flatMap((session: any) => {
           const key = session?.key;
-          if (typeof key !== "string" || !this.isWebsocketChannelSessionKey(key)) return [];
+          if (typeof key !== "string" || decodeGuiSessionApiKey(key) == null) return [];
           if (
             registry.state === "ready"
             && typeof session.projectId === "string"
@@ -996,6 +1063,17 @@ export class WebSocketChannel extends BaseChannel {
           const chatId = key.slice("websocket:".length);
           const startedAt = websocketTurnWallStartedAt(chatId);
           if (startedAt != null) row.run_started_at = startedAt;
+          else {
+            try {
+              const canonical = this.resolveGuiSession(key).canonicalSessionKey;
+              const terminalRun = canonical.startsWith("cli:")
+                ? this.terminalRunControl?.read(canonical)
+                : null;
+              if (terminalRun) row.run_started_at = terminalRun.startedAt / 1000;
+            } catch {
+              // Invalid records are already filtered by the projection.
+            }
+          }
           return [row];
         })
       : [];
@@ -1298,6 +1376,42 @@ export class WebSocketChannel extends BaseChannel {
     return key.startsWith("websocket:");
   }
 
+  private resolveGuiSession(input: string): ResolvedGuiSession {
+    if (!this.guiSessionProjection) {
+      throw new GuiSessionProjectionError("session_manager_unavailable", 503);
+    }
+    return this.guiSessionProjection.resolve(input);
+  }
+
+  private resolveGuiSessionResponse(input: string): ResolvedGuiSession | HttpLikeResponse {
+    try {
+      return this.resolveGuiSession(input);
+    } catch (error) {
+      if (error instanceof GuiSessionProjectionError) {
+        return httpError(error.status, error.code);
+      }
+      return httpError(404, "session not found");
+    }
+  }
+
+  private canonicalSessionKeyForChatId(chatId: string): string | null {
+    if (isExternalGuiChatId(chatId)) {
+      try {
+        return this.resolveGuiSession(chatId).canonicalSessionKey;
+      } catch {
+        return null;
+      }
+    }
+    return isNativeGuiChatId(chatId) ? `websocket:${chatId}` : null;
+  }
+
+  private terminalRunStateForChatId(chatId: string) {
+    const canonicalSessionKey = this.canonicalSessionKeyForChatId(chatId);
+    return canonicalSessionKey?.startsWith("cli:")
+      ? this.terminalRunControl?.read(canonicalSessionKey) ?? null
+      : null;
+  }
+
   readSessionFile(key: string): Record<string, any> | null {
     const read = this.sessionManager?.readSessionFile;
     if (typeof read === "function") return read.call(this.sessionManager, key);
@@ -1314,27 +1428,30 @@ export class WebSocketChannel extends BaseChannel {
   handleSessionMessages(request: any, key: string): HttpLikeResponse {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
     if (!this.sessionManager) return httpError(503, "session manager unavailable");
-    const decodedKey = decodeApiKey(key);
-    if (decodedKey == null) return httpError(400, "invalid session key");
-    if (!this.isWebsocketChannelSessionKey(decodedKey)) return httpError(404, "session not found");
-    const data = this.readSessionFile(decodedKey);
+    const decodedKey = decodeGuiSessionApiKey(key);
+    if (decodedKey == null) return invalidGuiSessionKeyResponse(key);
+    const resolved = this.resolveGuiSessionResponse(decodedKey);
+    if ("status" in resolved) return resolved;
+    const data = this.readSessionFile(resolved.canonicalSessionKey);
     if (!data) return httpError(404, "session not found");
+    data.key = resolved.guiSessionKey;
     if (Array.isArray(data.messages)) scrubSubagentMessagesForChannel(data.messages);
-    this.augmentMediaUrls(data, decodedKey);
+    this.augmentMediaUrls(data, resolved.canonicalSessionKey);
     return httpJsonResponse(data);
   }
 
   handleWebuiThreadGet(request: any, key: string): HttpLikeResponse {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
-    const decodedKey = decodeApiKey(key);
-    if (decodedKey == null) return httpError(400, "invalid session key");
-    if (!this.isWebsocketChannelSessionKey(decodedKey)) return httpError(404, "session not found");
-    const sessionMessages = this.readSessionFile(decodedKey)?.messages;
-    const data = buildWebuiThreadResponse(decodedKey, {
+    const decodedKey = decodeGuiSessionApiKey(key);
+    if (decodedKey == null) return invalidGuiSessionKeyResponse(key);
+    const resolved = this.resolveGuiSessionResponse(decodedKey);
+    if ("status" in resolved) return resolved;
+    const sessionMessages = this.readSessionFile(resolved.canonicalSessionKey)?.messages;
+    const data = buildWebuiThreadResponse(resolved.guiSessionKey, {
       sessionMessages: Array.isArray(sessionMessages) ? sessionMessages : null,
-      augmentUserMedia: (paths: string[]) => this.augmentTranscriptUserMedia(paths, decodedKey),
-      augmentAssistantMedia: (paths: string[]) => paths.flatMap((p) => this.webuiMediaAttachmentForPath(p, decodedKey) ?? []),
-      augmentAssistantText: (text: string) => this.rewriteLocalMarkdownImages(text, decodedKey),
+      augmentUserMedia: (paths: string[]) => this.augmentTranscriptUserMedia(paths, resolved.canonicalSessionKey),
+      augmentAssistantMedia: (paths: string[]) => paths.flatMap((p) => this.webuiMediaAttachmentForPath(p, resolved.canonicalSessionKey) ?? []),
+      augmentAssistantText: (text: string) => this.rewriteLocalMarkdownImages(text, resolved.canonicalSessionKey),
     });
     if (!data) return httpError(404, "webui thread not found");
     return httpJsonResponse(data);
@@ -1378,12 +1495,13 @@ export class WebSocketChannel extends BaseChannel {
 
   handleLastCompactionGet(request: any, key: string): HttpLikeResponse {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
-    const decodedKey = decodeApiKey(key);
-    if (decodedKey == null) return httpError(400, "invalid session key");
-    if (!this.isWebsocketChannelSessionKey(decodedKey)) return httpError(404, "session not found");
-    const data = this.readSessionFile(decodedKey);
+    const decodedKey = decodeGuiSessionApiKey(key);
+    if (decodedKey == null) return invalidGuiSessionKeyResponse(key);
+    const resolved = this.resolveGuiSessionResponse(decodedKey);
+    if ("status" in resolved) return resolved;
+    const data = this.readSessionFile(resolved.canonicalSessionKey);
     if (!data) return httpError(404, "session not found");
-    return httpJsonResponse(this.lastCompactionPayload(decodedKey, data.metadata?.lastSummary));
+    return httpJsonResponse(this.lastCompactionPayload(resolved.guiSessionKey, data.metadata?.lastSummary));
   }
 
   handleArtifactResolve(request: HttpRequestLike): HttpLikeResponse {
@@ -1534,7 +1652,13 @@ export class WebSocketChannel extends BaseChannel {
       const clientRequestId = separator >= 0 ? key.slice(separator + 1) : "";
       const chatId = sessionKey.startsWith("websocket:")
         ? sessionKey.slice("websocket:".length)
-        : "";
+        : (() => {
+            try {
+              return toGuiChatId(sessionKey);
+            } catch {
+              return "";
+            }
+          })();
       this.inflightWebuiMessageRequests.delete(key);
       for (const connection of inflight.connections) {
         void this.sendWebuiRequestError(connection, {
@@ -1557,29 +1681,49 @@ export class WebSocketChannel extends BaseChannel {
     { cancelRunning }: { cancelRunning: boolean },
   ): Promise<string[]> {
     const keys = [...new Set(sessionKeys)]
-      .filter((key) => this.isWebsocketChannelSessionKey(key))
+      .filter((key) => {
+        const session = this.sessionManager?.get?.(key) as Session | null;
+        if (session?.metadata?.webui !== true) return false;
+        try {
+          toGuiChatId(key);
+          return true;
+        } catch {
+          return false;
+        }
+      })
       .sort();
     if (!keys.length) return [];
-    if (cancelRunning) {
-      for (const key of keys) await this.cancelActiveTasks?.(key);
-    }
+    const projectedKeys = keys.map((key) => `websocket:${toGuiChatId(key)}`);
     for (const key of keys) {
-      const chatId = key.slice("websocket:".length);
-      await this.closeBrowserChat?.("websocket", chatId).catch(() => undefined);
+      const deleteOne = async () => {
+        if (key.startsWith("websocket:")) {
+          await this.closeBrowserChat?.("websocket", key.slice("websocket:".length)).catch(() => undefined);
+        } else {
+          await this.closeBrowserChat?.("projected-session", key).catch(() => undefined);
+        }
+        await this.deleteSessionDag(key);
+        this.webuiTitleService?.discard(key);
+        deleteWebuiThread(`websocket:${toGuiChatId(key)}`);
+        const del = this.sessionManager?.deleteSession
+          ?? this.sessionManager?.delete;
+        if (typeof del === "function") del.call(this.sessionManager, key);
+      };
+      if (this.sessionDeletionBarrier) {
+        await this.sessionDeletionBarrier(key, cancelRunning, deleteOne);
+      } else {
+        if (cancelRunning) await this.cancelActiveTasks?.(key);
+        if (this.sessionTurnBarrier) await this.sessionTurnBarrier(key, deleteOne);
+        else await deleteOne();
+      }
     }
-    for (const key of keys) await this.deleteSessionDag(key);
-    for (const key of keys) {
-      this.webuiTitleService?.discard(key);
-      deleteWebuiThread(key);
+    removeWebuiSidebarSessionKeys(projectedKeys);
+    for (const projectedKey of projectedKeys) {
+      const chatId = projectedKey.slice("websocket:".length);
+      if (isExternalGuiChatId(chatId)) {
+        this.queueGlobalSessionUpdated(chatId, "metadata");
+      }
     }
-    removeWebuiSidebarSessionKeys(keys);
-    for (const key of keys) {
-      const del = this.sessionManager?.hardDeleteSession
-        ?? this.sessionManager?.deleteSession
-        ?? this.sessionManager?.delete;
-      if (typeof del === "function") del.call(this.sessionManager, key);
-    }
-    return keys;
+    return projectedKeys;
   }
 
   private projectSessionKeys(projectId: string): string[] {
@@ -1718,21 +1862,23 @@ export class WebSocketChannel extends BaseChannel {
   async handleSessionDelete(request: any, key: string): Promise<HttpLikeResponse> {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
     if (!this.sessionManager) return httpError(503, "session manager unavailable");
-    const decodedKey = decodeApiKey(key);
-    if (decodedKey == null) return httpError(400, "invalid session key");
-    if (!this.isWebsocketChannelSessionKey(decodedKey)) return httpError(404, "session not found");
-    const existed = Boolean(this.sessionManager?.has?.(decodedKey));
-    await this.hardDeleteWebuiSessions([decodedKey], { cancelRunning: true });
-    return httpJsonResponse({ deleted: existed });
+    const decodedKey = decodeGuiSessionApiKey(key);
+    if (decodedKey == null) return invalidGuiSessionKeyResponse(key);
+    const resolved = this.resolveGuiSessionResponse(decodedKey);
+    if ("status" in resolved) return resolved;
+    const existed = Boolean(this.sessionManager?.has?.(resolved.canonicalSessionKey));
+    await this.hardDeleteWebuiSessions([resolved.canonicalSessionKey], { cancelRunning: true });
+    return httpJsonResponse({ deleted: existed, key: resolved.guiSessionKey });
   }
 
-  handleSessionTitleUpdate(request: any, key: string): HttpLikeResponse {
+  async handleSessionTitleUpdate(request: any, key: string): Promise<HttpLikeResponse> {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
     if ((request.method ?? "GET").toUpperCase() !== "POST") return httpError(405, "method not allowed");
     if (!this.sessionManager) return httpError(503, "session manager unavailable");
-    const decodedKey = decodeApiKey(key);
-    if (decodedKey == null) return httpError(400, "invalid session key");
-    if (!this.isWebsocketChannelSessionKey(decodedKey)) return httpError(404, "session not found");
+    const decodedKey = decodeGuiSessionApiKey(key);
+    if (decodedKey == null) return invalidGuiSessionKeyResponse(key);
+    const resolved = this.resolveGuiSessionResponse(decodedKey);
+    if ("status" in resolved) return resolved;
     let decoded: any;
     try {
       decoded = JSON.parse(requestBodyText(request));
@@ -1742,10 +1888,26 @@ export class WebSocketChannel extends BaseChannel {
     if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) return httpError(400, "body must be an object");
     const title = typeof decoded.title === "string" ? decoded.title : null;
     if (title == null) return httpError(400, "missing title");
-    const rename = this.sessionManager.renameSession;
-    const session = typeof rename === "function" ? rename.call(this.sessionManager, decodedKey, title) : null;
-    if (!session) return httpError(404, "session not found");
-    return httpJsonResponse({ session });
+    const baseTitle = stripGuiDisplayTitleSuffix(title, resolved.source);
+    const rename = async (): Promise<HttpLikeResponse> => {
+      this.sessionManager.invalidate?.(resolved.canonicalSessionKey);
+      const renameSession = this.sessionManager.renameSession;
+      const canonicalSummary = typeof renameSession === "function"
+        ? renameSession.call(this.sessionManager, resolved.canonicalSessionKey, baseTitle)
+        : null;
+      if (!canonicalSummary) return httpError(404, "session not found");
+      const current = this.sessionManager.get(resolved.canonicalSessionKey) as Session | null;
+      const session = current ? this.guiSessionProjection?.projectSession(current) : null;
+      if (!session) return httpError(404, "session not found");
+      if (isExternalGuiChatId(resolved.guiChatId)) {
+        this.queueGlobalSessionUpdated(resolved.guiChatId, "metadata");
+      }
+      return httpJsonResponse({ session });
+    };
+    if (this.sessionTurnBarrier) {
+      return this.sessionTurnBarrier(resolved.canonicalSessionKey, rename);
+    }
+    return rename();
   }
 
   augmentMediaUrls(payload: Record<string, any>, sessionKey?: string | null): void {
@@ -1765,11 +1927,14 @@ export class WebSocketChannel extends BaseChannel {
   }
 
   artifactSessionWorkspace(sessionKey: string): string | null {
-    if (!this.isWebsocketChannelSessionKey(sessionKey)) return null;
-    const session = this.sessionManager?.get?.(sessionKey) as Session | null;
-    if (!session) return null;
     try {
-      return readWebuiSessionBinding(session).cwd;
+      if (!sessionKey.startsWith("websocket:")) {
+        const canonical = this.sessionManager?.get?.(sessionKey) as Session | null;
+        return canonical?.metadata?.webui === true
+          ? readWebuiSessionBinding(canonical).cwd
+          : null;
+      }
+      return this.resolveGuiSession(sessionKey).binding.cwd;
     } catch {
       return null;
     }
@@ -1873,7 +2038,9 @@ export class WebSocketChannel extends BaseChannel {
 
   tryAppendWebuiTranscript(chatId: string, wire: Record<string, any>): void {
     try {
-      appendTranscriptObject(`websocket:${chatId}`, structuredClone(wire));
+      const key = `websocket:${chatId}`;
+      const offset = appendTranscriptObject(key, structuredClone(wire));
+      this.transcriptMonitor?.noteConsumed(key, offset);
     } catch {
       // Transcript persistence is best-effort for live WebSocket delivery.
     }
@@ -2093,6 +2260,9 @@ export class WebSocketChannel extends BaseChannel {
     this.sessionManager?.clearWebuiSessionBindingReservations?.();
     for (const timer of this.projectDeletionRetryTimers.values()) clearTimeout(timer);
     this.projectDeletionRetryTimers.clear();
+    for (const timer of this.sessionUpdateTimers.values()) clearTimeout(timer);
+    this.sessionUpdateTimers.clear();
+    this.sessionUpdateScopes.clear();
   }
 
   async connectionLoop(connection: any): Promise<void> {
@@ -2254,8 +2424,39 @@ export class WebSocketChannel extends BaseChannel {
     content: string,
     mediaPaths: string[],
   ): Promise<void> {
-    const sessionKey = `websocket:${chatId}`;
+    const externalProjection = isExternalGuiChatId(chatId);
+    let sessionKey = `websocket:${chatId}`;
+    if (externalProjection) {
+      try {
+        sessionKey = this.resolveGuiSession(chatId).canonicalSessionKey;
+      } catch (error) {
+        await this.sendWebuiRequestError(connection, {
+          chatId,
+          detail: "message_request_rejected",
+          reason: error instanceof GuiSessionProjectionError
+            ? error.code
+            : "session_not_found",
+        });
+        return;
+      }
+      if (envelope.target != null) {
+        await this.sendWebuiRequestError(connection, {
+          chatId,
+          detail: "session_binding_rejected",
+          reason: "session_target_invalid",
+        });
+        return;
+      }
+    }
     if (envelope.webui !== true) {
+      if (externalProjection) {
+        await this.sendWebuiRequestError(connection, {
+          chatId,
+          detail: "message_request_rejected",
+          reason: "webui_required",
+        });
+        return;
+      }
       const legacyMetadata: Record<string, any> = {
         remote: connection?.remoteAddress ?? null,
       };
@@ -2321,7 +2522,7 @@ export class WebSocketChannel extends BaseChannel {
           });
           return;
         }
-        this.ensureAcceptedTranscript(chatId, clientRequestId);
+        this.ensureAcceptedTranscript(chatId, clientRequestId, sessionKey);
         await this.sendEvent(connection, "message_accepted", {
           chat_id: chatId,
           client_request_id: clientRequestId,
@@ -2400,13 +2601,22 @@ export class WebSocketChannel extends BaseChannel {
       };
     }
     try {
-      this.webuiTitleService?.trackUserMessage({ chatId, content, metadata, mediaPaths });
+      if (!externalProjection) {
+        this.webuiTitleService?.trackUserMessage({
+          chatId,
+          sessionKey,
+          content,
+          metadata,
+          mediaPaths,
+        });
+      }
       await this.handleMessage({
         senderId: clientId,
         chatId,
         content,
         media: mediaPaths.length ? mediaPaths : undefined,
         metadata,
+        sessionKey,
         isDm: false,
       });
     } catch (error) {
@@ -2435,7 +2645,10 @@ export class WebSocketChannel extends BaseChannel {
     }
     if (type === "attach") {
       const chatId = envelope.chat_id;
-      if (!isValidChatId(chatId)) return this.sendEvent(connection, "error", { detail: "invalid chat_id" });
+      if (!isValidGuiChatId(chatId)) return this.sendEvent(connection, "error", { detail: "invalid chat_id" });
+      if (isExternalGuiChatId(chatId) && !this.canonicalSessionKeyForChatId(chatId)) {
+        return this.sendEvent(connection, "error", { chat_id: chatId, detail: "session_not_found" });
+      }
       this.attachConnection(connection, chatId);
       await this.sendEvent(connection, "attached", { chat_id: chatId });
       await this.sendRunStatusSnapshot(connection, chatId);
@@ -2444,7 +2657,9 @@ export class WebSocketChannel extends BaseChannel {
     }
     if (type === "status") {
       const chatId = envelope.chat_id;
-      if (!isValidChatId(chatId)) return this.sendEvent(connection, "error", { detail: "invalid chat_id" });
+      if (!isValidGuiChatId(chatId)) return this.sendEvent(connection, "error", { detail: "invalid chat_id" });
+      const sessionKey = this.canonicalSessionKeyForChatId(chatId);
+      if (!sessionKey) return this.sendEvent(connection, "error", { chat_id: chatId, detail: "session_not_found" });
       this.attachConnection(connection, chatId);
       await this.hydrateAfterSubscribe(chatId);
       await this.handleMessage({
@@ -2455,13 +2670,16 @@ export class WebSocketChannel extends BaseChannel {
           remote: connection?.remoteAddress ?? null,
           webui_ephemeral_command: "status",
         },
+        sessionKey,
         isDm: false,
       });
       return;
     }
     if (type === "history_dag") {
       const chatId = envelope.chat_id;
-      if (!isValidChatId(chatId)) return this.sendEvent(connection, "error", { detail: "invalid chat_id" });
+      if (!isValidGuiChatId(chatId)) return this.sendEvent(connection, "error", { detail: "invalid chat_id" });
+      const sessionKey = this.canonicalSessionKeyForChatId(chatId);
+      if (!sessionKey) return this.sendEvent(connection, "error", { chat_id: chatId, detail: "session_not_found" });
       this.attachConnection(connection, chatId);
       await this.hydrateAfterSubscribe(chatId);
       await this.handleMessage({
@@ -2472,22 +2690,26 @@ export class WebSocketChannel extends BaseChannel {
           remote: connection?.remoteAddress ?? null,
           webui_ephemeral_command: "historyDag",
         },
+        sessionKey,
         isDm: false,
       });
       return;
     }
     if (type === "stop") {
       const chatId = envelope.chat_id;
-      if (!isValidChatId(chatId)) return this.sendEvent(connection, "error", { detail: "invalid chat_id" });
+      if (!isValidGuiChatId(chatId)) return this.sendEvent(connection, "error", { detail: "invalid chat_id" });
+      const sessionKey = this.canonicalSessionKeyForChatId(chatId);
+      if (!sessionKey) return this.sendEvent(connection, "error", { chat_id: chatId, detail: "session_not_found" });
       this.attachConnection(connection, chatId);
       const turnId = this.activeTurnIdByChatId.get(chatId) ?? null;
       let stopped = 0;
       try {
-        stopped = await (this.cancelActiveTasks?.(`websocket:${chatId}`) ?? Promise.resolve(0));
+        stopped = await (this.cancelActiveTasks?.(sessionKey) ?? Promise.resolve(0));
       } catch {
         await this.sendEvent(connection, "error", { chat_id: chatId, detail: "stop_failed" });
         return;
       }
+      await this.transcriptMonitor?.drain();
       this.activeTurnIdByChatId.delete(chatId);
       await this.sendTurnPayload(chatId, {
         event: "stop_result",
@@ -2495,12 +2717,15 @@ export class WebSocketChannel extends BaseChannel {
         stopped,
         ...(turnId ? { turn_id: turnId } : {}),
       });
+      if (isExternalGuiChatId(chatId)) {
+        this.queueGlobalSessionUpdated(chatId, "metadata");
+      }
       return;
     }
     if (type === "message") {
       const chatId = envelope.chat_id;
       const content = envelope.content;
-      if (!isValidChatId(chatId)) return this.sendEvent(connection, "error", { detail: "invalid chat_id" });
+      if (!isValidGuiChatId(chatId)) return this.sendEvent(connection, "error", { detail: "invalid chat_id" });
       if (typeof content !== "string") return this.sendEvent(connection, "error", { chat_id: chatId, detail: "missing content" });
       let mediaPaths: string[] = [];
       if (envelope.media != null) {
@@ -2644,8 +2869,10 @@ export class WebSocketChannel extends BaseChannel {
     if (message.metadata?.webuiMessageAccepted) {
       const clientRequestId = String(message.metadata.clientRequestId ?? "");
       if (!clientRequestId) return;
-      this.ensureAcceptedTranscript(message.chatId, clientRequestId);
-      const key = this.webuiRequestKey(`websocket:${message.chatId}`, clientRequestId);
+      const canonicalSessionKey = this.canonicalSessionKeyForChatId(message.chatId);
+      if (!canonicalSessionKey) return;
+      this.ensureAcceptedTranscript(message.chatId, clientRequestId, canonicalSessionKey);
+      const key = this.webuiRequestKey(canonicalSessionKey, clientRequestId);
       const inflight = this.inflightWebuiMessageRequests.get(key);
       this.inflightWebuiMessageRequests.delete(key);
       const payload = {
@@ -2836,6 +3063,9 @@ export class WebSocketChannel extends BaseChannel {
     };
     await this.sendTurnPayload(chatId, payload);
     if (turnId && this.activeTurnIdByChatId.get(chatId) === turnId) this.activeTurnIdByChatId.delete(chatId);
+    if (isExternalGuiChatId(chatId)) {
+      this.queueGlobalSessionUpdated(chatId, "metadata");
+    }
   }
 
   async sendGoalState(chatId: string, blob: Record<string, any>): Promise<void> {
@@ -2860,7 +3090,82 @@ export class WebSocketChannel extends BaseChannel {
   }
 
   async sendSessionUpdated(chatId: string, scope: string | null = null): Promise<void> {
+    if (isExternalGuiChatId(chatId)) {
+      this.queueGlobalSessionUpdated(chatId, scope ?? "metadata");
+      return;
+    }
     await this.broadcast(chatId, { event: "session_updated", chat_id: chatId, ...(scope ? { scope } : {}) });
+  }
+
+  async consumeTranscriptRecord(
+    record: Record<string, any>,
+    canonicalSessionKey: string | null = null,
+  ): Promise<void> {
+    const chatId = String(record.chat_id ?? "");
+    if (!isValidGuiChatId(chatId)) return;
+    if (record.event === "session_updated") {
+      this.queueGlobalSessionUpdated(chatId, String(record.scope ?? "metadata"));
+      return;
+    }
+    if (record.event === "goal_status") {
+      await this.sendGoalStatus(chatId, String(record.status ?? ""), {
+        startedAt: numberOrNull(record.started_at),
+        turnId: firstNonemptyString(record.turn_id, record.turnId),
+      });
+      return;
+    }
+    const turnId = firstNonemptyString(record.turn_id, record.turnId);
+    if (record.event === "turn_end" && turnId && this.activeTurnIdByChatId.get(chatId) === turnId) {
+      this.activeTurnIdByChatId.delete(chatId);
+    }
+    const payload = { ...record };
+    if (canonicalSessionKey) {
+      const originalText = typeof payload.text === "string" ? payload.text : null;
+      const rewrittenText = originalText == null
+        ? null
+        : this.rewriteLocalMarkdownImages(originalText, canonicalSessionKey);
+      if (rewrittenText != null) payload.text = rewrittenText;
+      if (typeof payload.content === "string") {
+        payload.content = payload.content === originalText && rewrittenText != null
+          ? rewrittenText
+          : this.rewriteLocalMarkdownImages(payload.content, canonicalSessionKey);
+      }
+      const mediaPaths = Array.isArray(payload.media_paths)
+        ? payload.media_paths.filter(
+          (entry: unknown): entry is string => typeof entry === "string" && Boolean(entry.trim()),
+        )
+        : [];
+      if (mediaPaths.length && !Array.isArray(payload.media_urls)) {
+        const mediaUrls = this.augmentTranscriptUserMedia(mediaPaths, canonicalSessionKey);
+        if (mediaUrls.length) payload.media_urls = mediaUrls;
+      }
+    }
+    await this.sendTurnPayload(chatId, payload, { appendTranscript: false });
+  }
+
+  private queueGlobalSessionUpdated(chatId: string, scope: string): void {
+    const currentScope = this.sessionUpdateScopes.get(chatId);
+    this.sessionUpdateScopes.set(
+      chatId,
+      currentScope === "thread" || scope === "thread" ? "thread" : scope,
+    );
+    if (this.sessionUpdateTimers.has(chatId)) return;
+    const timer = setTimeout(() => {
+      this.sessionUpdateTimers.delete(chatId);
+      const pendingScope = this.sessionUpdateScopes.get(chatId) ?? "metadata";
+      this.sessionUpdateScopes.delete(chatId);
+      const payload = {
+        event: "session_updated",
+        chat_id: chatId,
+        scope: pendingScope,
+      };
+      void Promise.all(
+        [...this.connectionChats.keys()].map((connection) => (
+          this.safeSendTo(connection, payload)
+        )),
+      ).catch(() => undefined);
+    }, 100);
+    this.sessionUpdateTimers.set(chatId, timer);
   }
 
   async sendRuntimeModelUpdated({ modelName, modelPreset }: { modelName?: any; modelPreset?: any }): Promise<void> {
@@ -2922,7 +3227,7 @@ function artifactRequestFromRequest(
     typeof rawPath !== "string"
     || !rawPath.trim()
     || typeof sessionKey !== "string"
-    || !API_KEY_RE.test(sessionKey)
+    || decodeGuiSessionApiKey(sessionKey) == null
   ) {
     return null;
   }

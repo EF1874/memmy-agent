@@ -647,7 +647,7 @@ abstract class BrowserTool extends Tool {
       throw new Error("browser tool requires a trusted chat context");
     }
     return this.manager.callTool(
-      { sessionKey, channel, chatId },
+      request?.browserScope ?? { sessionKey, channel, chatId },
       this.name as BrowserToolName,
       params,
       context?.abortSignal ?? null,

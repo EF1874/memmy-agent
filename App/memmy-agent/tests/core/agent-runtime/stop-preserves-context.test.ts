@@ -126,6 +126,7 @@ describe("stop preserves context", () => {
         estimatePromptTokens: () => [10_000, "test"],
       } as any,
       sessionManager: {
+        get: () => session,
         getOrCreate: () => session,
         save: () => {
           saved = true;
@@ -158,6 +159,7 @@ describe("stop preserves context", () => {
         estimatePromptTokens: () => [10_000, "test"],
       } as any,
       sessionManager: {
+        get: () => session,
         getOrCreate: () => session,
         save: () => {
           saved = true;

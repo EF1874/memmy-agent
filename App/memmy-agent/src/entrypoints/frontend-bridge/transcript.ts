@@ -188,9 +188,9 @@ export function readTranscriptLines(sessionKey: string): Dict[] {
   return out;
 }
 
-export function appendTranscriptObject(sessionKey: string, obj: Dict): void;
-export function appendTranscriptObject(root: string, id: string, obj: Dict): void;
-export function appendTranscriptObject(sessionKeyOrRoot: string, objOrId: Dict | string, maybeObj?: Dict): void {
+export function appendTranscriptObject(sessionKey: string, obj: Dict): number;
+export function appendTranscriptObject(root: string, id: string, obj: Dict): number;
+export function appendTranscriptObject(sessionKeyOrRoot: string, objOrId: Dict | string, maybeObj?: Dict): number {
   const file = typeof objOrId === "string"
     ? webuiTranscriptPath(sessionKeyOrRoot, objOrId)
     : webuiTranscriptPath(sessionKeyOrRoot);
@@ -206,9 +206,49 @@ export function appendTranscriptObject(sessionKeyOrRoot: string, objOrId: Dict |
   try {
     fs.writeSync(fd, `${raw}\n`, undefined, "utf8");
     fs.fsyncSync(fd);
+    return fs.fstatSync(fd).size;
   } finally {
     fs.closeSync(fd);
   }
+}
+
+export function readTranscriptChunk(
+  sessionKey: string,
+  offset: number,
+): {
+  inode: number;
+  nextOffset: number;
+  completeLines: string[];
+  remainder: string;
+  size: number;
+} | null {
+  const file = webuiTranscriptPath(sessionKey);
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(file);
+  } catch {
+    return null;
+  }
+  if (!stat.isFile() || stat.size > MAX_TRANSCRIPT_FILE_BYTES) return null;
+  const start = Math.max(0, Math.min(Math.trunc(offset), stat.size));
+  const length = stat.size - start;
+  const buffer = Buffer.alloc(length);
+  const fd = fs.openSync(file, "r");
+  try {
+    if (length) fs.readSync(fd, buffer, 0, length, start);
+  } finally {
+    fs.closeSync(fd);
+  }
+  const text = buffer.toString("utf8");
+  const parts = text.split("\n");
+  const remainder = parts.pop() ?? "";
+  return {
+    inode: Number(stat.ino),
+    nextOffset: stat.size - Buffer.byteLength(remainder, "utf8"),
+    completeLines: parts.map((line) => line.replace(/\r$/, "")),
+    remainder,
+    size: stat.size,
+  };
 }
 
 export function deleteWebuiTranscript(sessionKey: string): boolean;

@@ -61,6 +61,12 @@ describe("WebSocket HTTP route helpers", () => {
     return ["xdg-open", [path.dirname(filePath)]];
   }
 
+  function bindWebuiSession(session: Session, workspace: string): void {
+    session.metadata.webui = true;
+    session.metadata.webuiProjectId = null;
+    session.metadata.webuiWorkspaceCwd = fs.realpathSync(workspace);
+  }
+
   function seedSession(
     root: string,
     key = "websocket:test",
@@ -523,6 +529,7 @@ describe("WebSocket HTTP route helpers", () => {
     process.env.MEMMY_AGENT_DATA_DIR = root;
     const manager = new SessionManager(root);
     const session = new Session({ key: "websocket:timed" });
+    bindWebuiSession(session, root);
     session.addMessage("user", "你好", { timestamp: "2026-06-19T08:07:00.000Z" });
     session.addMessage("assistant", "你好！", { timestamp: "2026-06-19T08:07:03.000Z" });
     manager.save(session);
@@ -545,6 +552,7 @@ describe("WebSocket HTTP route helpers", () => {
     process.env.MEMMY_AGENT_DATA_DIR = root;
     const manager = new SessionManager(root);
     const session = new Session({ key: "websocket:compact" });
+    bindWebuiSession(session, root);
     session.addMessage("user", "继续");
     manager.save(session);
     appendTranscriptObject("websocket:compact", { event: "user", chat_id: "compact", text: "继续" });
@@ -588,9 +596,11 @@ describe("WebSocket HTTP route helpers", () => {
     const root = tmpRoot();
     const manager = new SessionManager(root);
     const legacy = new Session({ key: "websocket:legacy-summary" });
+    bindWebuiSession(legacy, root);
     legacy.metadata.lastSummary = "legacy text summary";
     manager.save(legacy);
     const dag = new Session({ key: "websocket:dag-summary" });
+    bindWebuiSession(dag, root);
     dag.metadata.lastSummary = {
       text: "DAG snapshot summary",
       mode: "dag",
@@ -599,6 +609,7 @@ describe("WebSocket HTTP route helpers", () => {
     };
     manager.save(dag);
     const empty = new Session({ key: "websocket:no-summary" });
+    bindWebuiSession(empty, root);
     empty.metadata.lastSummary = { text: "" };
     manager.save(empty);
     const cli = new Session({ key: "cli:direct" });

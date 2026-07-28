@@ -7,6 +7,7 @@ export class RequestContext {
   workspace?: string | null;
   messageId?: string | null;
   sessionKey?: string | null;
+  browserScope?: { sessionKey: string; channel: string; chatId: string } | null;
   metadata: Record<string, any>;
 
   constructor(init: Partial<RequestContext> = {}) {
@@ -15,6 +16,7 @@ export class RequestContext {
     this.senderId = init.senderId ?? null;
     this.messageId = init.messageId ?? null;
     this.sessionKey = init.sessionKey ?? null;
+    this.browserScope = init.browserScope ?? null;
     this.metadata = init.metadata ?? {};
   }
 }

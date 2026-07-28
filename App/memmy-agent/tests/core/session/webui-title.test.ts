@@ -118,6 +118,35 @@ describe("WebuiTitleService", () => {
     });
   });
 
+  it("uses an explicitly resolved canonical Session key for GUI projections", async () => {
+    const sessions = new SessionManager(sessionRoot());
+    const sessionKey = "telegram:chat-1";
+    const session = sessions.getOrCreate(sessionKey);
+    session.metadata.webui = true;
+    session.metadata.webuiProjectId = null;
+    session.metadata.webuiWorkspaceCwd = fs.realpathSync(sessions.root);
+    session.addMessage("user", "请总结这段 Telegram 对话");
+    sessions.save(session);
+    const provider = titleProvider("Telegram 对话总结");
+    const { service, scheduled, recorder } = createService({ sessions, provider });
+
+    service.trackUserMessage({
+      chatId: "ext_projection",
+      sessionKey,
+      content: "请总结这段 Telegram 对话",
+      metadata: { webui: true },
+    });
+    service.onUserMessagePersisted("ext_projection");
+    await scheduled[0];
+
+    expect(sessions.loadSession(sessionKey)?.metadata[WEBUI_TITLE_METADATA_KEY]).toBe("Telegram 对话总结");
+    expect(sessions.loadSession("websocket:ext_projection")).toBeNull();
+    expect(recorder.recordAgentChatUsage).toHaveBeenCalledWith(expect.objectContaining({
+      chatId: "ext_projection",
+      sessionKey,
+    }));
+  });
+
   it("does not create a missing session or generate titles for non-WebUI sessions", async () => {
     const sessions = new SessionManager(sessionRoot());
     const provider = titleProvider("不应该生成");
