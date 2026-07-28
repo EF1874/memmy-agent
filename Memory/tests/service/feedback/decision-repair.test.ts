@@ -56,15 +56,9 @@ function createDecisionRepairLlm(
           }))
         } as unknown as T;
       }
-      if (options.operation === "capture.reflected_trace_summary.v1") {
-        const payload = JSON.parse(messages.find((message) => message.role === "user")?.content ?? "{}") as {
-          traces?: Array<{ index: number; userText?: string }>;
-        };
+      if (options.operation === "capture.summarize") {
         return {
-          summaries: (payload.traces ?? []).map((trace) => ({
-            index: trace.index,
-            summary: trace.userText || "sqlite migration workflow"
-          }))
+          summary: "sqlite migration workflow"
         } as unknown as T;
       }
       if (options.operation === "decision.repair.v1") {
