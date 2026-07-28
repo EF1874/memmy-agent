@@ -142,6 +142,14 @@ export interface AlgorithmConfig {
     traceCharCap: number;
     evidenceLimit: number;
   };
+  negativeExperience: {
+    enabled: boolean;
+    failureRTaskThreshold: number;
+    maxAntiPatterns: number;
+    maxPreferences: number;
+    maxSourceIds: number;
+    implicitConfidenceCap: number;
+  };
   l2Induction: {
     useLlm: boolean;
     minEpisodesForInduction: number;
@@ -344,6 +352,14 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
       cooldownMs: 60_000,
       traceCharCap: 500,
       evidenceLimit: 4
+    },
+    negativeExperience: {
+      enabled: true,
+      failureRTaskThreshold: -0.15,
+      maxAntiPatterns: 3,
+      maxPreferences: 3,
+      maxSourceIds: 20,
+      implicitConfidenceCap: 0.65
     },
     l2Induction: {
       useLlm: true,
@@ -650,6 +666,7 @@ function normalizeAlgorithm(input: Record<string, unknown>): AlgorithmConfig {
   const capture = asRecord(input.capture);
   const reward = asRecord(input.reward);
   const feedback = asRecord(input.feedback);
+  const negativeExperience = asRecord(input.negativeExperience);
   const l2 = asRecord(input.l2Induction);
   const l3 = asRecord(input.l3Abstraction);
   const skill = asRecord(input.skill);
@@ -724,6 +741,32 @@ function normalizeAlgorithm(input: Record<string, unknown>): AlgorithmConfig {
       cooldownMs: numberValue(feedback.cooldownMs, DEFAULT_MEMMY_CONFIG.algorithm.feedback.cooldownMs),
       traceCharCap: numberValue(feedback.traceCharCap, DEFAULT_MEMMY_CONFIG.algorithm.feedback.traceCharCap),
       evidenceLimit: numberValue(feedback.evidenceLimit, DEFAULT_MEMMY_CONFIG.algorithm.feedback.evidenceLimit)
+    },
+    negativeExperience: {
+      enabled: booleanValue(
+        negativeExperience.enabled,
+        DEFAULT_MEMMY_CONFIG.algorithm.negativeExperience.enabled
+      ),
+      failureRTaskThreshold: numberValue(
+        negativeExperience.failureRTaskThreshold,
+        DEFAULT_MEMMY_CONFIG.algorithm.negativeExperience.failureRTaskThreshold
+      ),
+      maxAntiPatterns: numberValue(
+        negativeExperience.maxAntiPatterns,
+        DEFAULT_MEMMY_CONFIG.algorithm.negativeExperience.maxAntiPatterns
+      ),
+      maxPreferences: numberValue(
+        negativeExperience.maxPreferences,
+        DEFAULT_MEMMY_CONFIG.algorithm.negativeExperience.maxPreferences
+      ),
+      maxSourceIds: numberValue(
+        negativeExperience.maxSourceIds,
+        DEFAULT_MEMMY_CONFIG.algorithm.negativeExperience.maxSourceIds
+      ),
+      implicitConfidenceCap: numberValue(
+        negativeExperience.implicitConfidenceCap,
+        DEFAULT_MEMMY_CONFIG.algorithm.negativeExperience.implicitConfidenceCap
+      )
     },
     l2Induction: {
       useLlm: booleanValue(l2.useLlm, DEFAULT_MEMMY_CONFIG.algorithm.l2Induction.useLlm),

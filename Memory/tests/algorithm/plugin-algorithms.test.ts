@@ -458,11 +458,13 @@ describe("plugin algorithm parity helpers", () => {
     const trace = memory.properties.internal_info.trace as Record<string, unknown>;
     trace.userText = "我喜欢吃什么水果";
     trace.agentText = "你喜欢吃的水果是草莓";
+    trace.span_ids = ["span_fruit_goal", "span_fruit_answer"];
 
     const meta = traceMetaFromMemory(memory);
     expect(meta).toMatchObject({
       userText: "我喜欢吃什么水果",
-      agentText: "你喜欢吃的水果是草莓"
+      agentText: "你喜欢吃的水果是草莓",
+      spanIds: ["span_fruit_goal", "span_fruit_answer"]
     });
 
     const result = retrievePluginMemories({
@@ -736,6 +738,39 @@ describe("plugin algorithm parity helpers", () => {
     expect(decision.signals).toContain("llm_skipped");
   });
 
+  it("accepts an explicit end-topic decision from the relation LLM", async () => {
+    const decision = await classifyTurnRelationWithLlm({
+      prevUserText: "Configure nginx TLS for the service",
+      prevAssistantText: "Use port 443 and verify the certificate chain.",
+      newUserText: "结束话题"
+    }, {
+      llm: relationLlm([], undefined, {
+        "relation.classify.v1": {
+          relation: "end_topic",
+          confidence: 0.98,
+          reason: "user explicitly ends the current topic"
+        }
+      })
+    });
+
+    expect(decision).toMatchObject({
+      relation: "end_topic",
+      confidence: 0.98
+    });
+  });
+
+  it("does not synthesize end-topic decisions without the relation LLM", async () => {
+    const decision = await classifyTurnRelationWithLlm({
+      prevUserText: "Configure nginx TLS for the service",
+      prevAssistantText: "Use port 443 and verify the certificate chain.",
+      newUserText: "结束话题"
+    }, {
+      disableLlm: true
+    });
+
+    expect(decision.relation).toBe("follow_up");
+  });
+
   it("uses the plugin relation LLM prompt and arbitration framing", async () => {
     const calls: string[] = [];
     const messages = new Map<string, Array<{ role: "system" | "user" | "assistant"; content: string }>>();
@@ -751,6 +786,11 @@ describe("plugin algorithm parity helpers", () => {
 
     const primary = messages.get("relation.classify.v1");
     expect(primary?.[0]?.content).toContain("DEFAULT to follow_up");
+    expect(primary?.[0]?.content).toContain('"end_topic"');
+    expect(primary?.[0]?.content).toContain("sole intent");
+    expect(primary?.[0]?.content).toContain("结束这个话题，我们聊旅游");
+    expect(primary?.[0]?.content).toContain("如何结束进程");
+    expect(primary?.[0]?.content).toContain("except an explicit end_topic");
     expect(primary?.[0]?.content).toContain("Nginx SSL");
     expect(primary?.[0]?.content).toContain("tools, systems, or methods");
     expect(primary?.[1]?.content).toContain("PREVIOUS_USER_MESSAGE");
@@ -1259,6 +1299,14 @@ describe("plugin algorithm parity helpers", () => {
     expect(buildWorldModelDraft({
       policies: [policy("p-enough-gain", "Parse SEC 13F infotable holdings with sec-api", [1, 0], 0.03)]
     })).toHaveLength(1);
+    expect(buildWorldModelDraft({
+      policies: [{
+        ...policy("p-negative-caveat", "Avoid repeating a failed SEC 13F parser path", [1, 0], 0.8),
+        experienceType: "failure_avoidance",
+        evidencePolarity: "negative",
+        skillEligible: false
+      }]
+    })).toHaveLength(0);
 
     expect(buildSkillDraft({
       policy: policy("p-skill-low-gain", "Parse SEC 13F infotable holdings with sec-api", [1, 0], 0.01),
@@ -1729,6 +1777,7 @@ function trace(id: string, episodeId: string, value: number, vec: number[]): Tra
     priority: value,
     tags: ["python", "pytest"],
     errorSignatures: [],
+    spanIds: [],
     vecSummary: vec,
     vecAction: vec,
     signature: "python|pytest|_"

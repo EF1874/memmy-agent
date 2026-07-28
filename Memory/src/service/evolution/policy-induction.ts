@@ -27,6 +27,7 @@ export type PolicyEnhancementResult =
   | { ok: false; reason: string };
 type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
 type PolicyMeta = NonNullable<ReturnType<typeof policyMetaFromMemory>>;
+const L2_INDUCTION_DRAFT_MAX_ATTEMPTS = 3;
 
 type JobChangeKind = "created" | "updated" | "skipped";
 type PolicyLifecycleStatus = "candidate" | "active" | "archived";
@@ -476,70 +477,79 @@ export class PolicyInductionEngine {
     }
 
     try {
-      const result = await this.deps.skillLlm.completeJson<{
-        title?: unknown;
-        trigger?: unknown;
-        action?: unknown;
-        procedure?: unknown;
-        verification?: unknown;
-        boundary?: unknown;
-        rationale?: unknown;
-        caveats?: unknown;
-        confidence?: unknown;
-        support_trace_ids?: unknown;
-        tags?: unknown;
-      }>([
-        {
-          role: "system",
-          content: L2_INDUCTION_PROMPT.system
-        },
-        {
-          role: "system",
-          content: languageSteeringLine(detectDominantLanguage(evidenceTraces.flatMap((trace) => [
-            trace.userText,
-            trace.agentText,
-            trace.reflection
-          ])))
-        },
-        {
-          role: "user",
-          content: packL2InductionTraces(
-            evidenceTraces,
-            this.deps.config.algorithm.l2Induction.traceCharCap,
-            signature
-          )
-        }
-      ], {
-        operation: `${L2_INDUCTION_PROMPT.id}.v${L2_INDUCTION_PROMPT.version}`,
-        thinkingMode: "enabled",
-        temperature: 0.1,
-        maxTokens: 1200
-      });
+      let lastInvalidReason: string | null = null;
+      for (let attempt = 0; attempt < L2_INDUCTION_DRAFT_MAX_ATTEMPTS; attempt += 1) {
+        const result = await this.deps.skillLlm.completeJson<{
+          title?: unknown;
+          trigger?: unknown;
+          action?: unknown;
+          procedure?: unknown;
+          verification?: unknown;
+          boundary?: unknown;
+          rationale?: unknown;
+          caveats?: unknown;
+          confidence?: unknown;
+          support_trace_ids?: unknown;
+          tags?: unknown;
+        }>([
+          {
+            role: "system",
+            content: L2_INDUCTION_PROMPT.system
+          },
+          {
+            role: "system",
+            content: languageSteeringLine(detectDominantLanguage(evidenceTraces.flatMap((trace) => [
+              trace.userText,
+              trace.agentText,
+              trace.reflection
+            ])))
+          },
+          {
+            role: "user",
+            content: packL2InductionTraces(
+              evidenceTraces,
+              this.deps.config.algorithm.l2Induction.traceCharCap,
+              signature
+            )
+          }
+        ], {
+          operation: `${L2_INDUCTION_PROMPT.id}.v${L2_INDUCTION_PROMPT.version}`,
+          thinkingMode: "enabled",
+          temperature: 0.1,
+          maxTokens: 1200
+        });
 
-      const invalidReason = l2InductionInvalidReason(result);
-      if (invalidReason) {
-        return { ok: false, reason: invalidReason };
+        const invalidReason = l2InductionInvalidReason(result);
+        if (invalidReason) {
+          lastInvalidReason = invalidReason;
+          continue;
+        }
+
+        const boundary = typeof result.boundary === "string" ? skillMarkdown(result.boundary) : "";
+        const procedure = skillMarkdown(firstString(result.procedure, result.action));
+        const verification = typeof result.verification === "string" ? skillMarkdown(result.verification) : "";
+        const next = {
+          ...fallback,
+          title: skillText(result.title),
+          trigger: skillMarkdown(result.trigger),
+          procedure,
+          verification,
+          boundary,
+          confidence: clampNumber(numberOr(result.confidence, fallback.confidence), 0, 1)
+        };
+
+        return {
+          ok: true,
+          draft: {
+            ...next,
+            body: renderPolicyBody(next)
+          }
+        };
       }
 
-      const boundary = typeof result.boundary === "string" ? skillMarkdown(result.boundary) : "";
-      const procedure = skillMarkdown(firstString(result.procedure, result.action));
-      const verification = typeof result.verification === "string" ? skillMarkdown(result.verification) : "";
-      const next = {
-        ...fallback,
-        title: skillText(result.title),
-        trigger: skillMarkdown(result.trigger),
-        procedure,
-        verification,
-        boundary,
-        confidence: clampNumber(numberOr(result.confidence, fallback.confidence), 0, 1)
-      };
-
       return {
-        ok: true,
-        draft: {
-          ...next,
-          body: renderPolicyBody(next)
-        }
+        ok: false,
+        reason: lastInvalidReason ?? "llm-failed: l2.induction.invalid: unknown"
       };
     } catch (error) {
       return {

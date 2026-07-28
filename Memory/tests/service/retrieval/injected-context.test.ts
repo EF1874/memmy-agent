@@ -206,6 +206,8 @@ describe("MemoryService / retrieval / injected context", () => {
       query: "rerun the focused sqlite migration pytest after the fix",
       answer: "reran the focused pytest and verified the migration state"
     });
+    service.closeSession(session.sessionId);
+    await service.runWorkerOnce(20);
     await service.runWorkerOnce(20);
 
     const recall = await service.search({

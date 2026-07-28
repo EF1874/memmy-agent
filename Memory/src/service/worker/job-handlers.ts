@@ -30,7 +30,7 @@ export type ProcessingStage = "summary" | "embedding";
 export const EPISODE_IDLE_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 export type JobChangeOperation = "queued" | "leased" | "succeeded" | "failed" | "dead_letter";
 export type EmbeddingRetryChangeOperation = "queued" | "retry" | "succeeded" | "failed";
-export type ClosedEpisodeTrigger = "topic_boundary" | "session_closed" | "episode_rewarded" | "idle_timeout";
+export type ClosedEpisodeTrigger = "topic_boundary" | "session_closed" | "episode_rewarded" | "idle_timeout" | "end_topic";
 
 export interface EnqueueJobInput {
   jobType: JobType;
@@ -58,9 +58,11 @@ export interface WorkerJobProcessors {
   };
   evolution: {
     induceL2(job: EvolutionJobRecord): MaybePromise<void>;
+    materializeNegativeExperience(job: EvolutionJobRecord): MaybePromise<void>;
     abstractL3(job: EvolutionJobRecord): MaybePromise<void>;
     crystallizeSkill(job: EvolutionJobRecord): MaybePromise<void>;
     associateL2(job: EvolutionJobRecord): MaybePromise<void>;
+    splitBigTurn(job: EvolutionJobRecord): MaybePromise<void>;
   };
   feedback: {
     applyReward(job: EvolutionJobRecord): MaybePromise<void>;
@@ -221,6 +223,9 @@ export async function processJob(
     case "l2_induction":
       await deps.processors.evolution.induceL2(job);
       return;
+    case "negative_experience":
+      await deps.processors.evolution.materializeNegativeExperience(job);
+      return;
     case "l3_abstraction":
       await deps.processors.evolution.abstractL3(job);
       return;
@@ -229,6 +234,9 @@ export async function processJob(
       return;
     case "reward":
       await deps.processors.feedback.applyReward(job);
+      return;
+    case "span_big_turn":
+      await deps.processors.evolution.splitBigTurn(job);
       return;
     case "embedding":
       await deps.processors.embedding.embedMemory(job);
@@ -350,7 +358,6 @@ export function enqueueEpisodeReflection(
   trigger: string
 ): EvolutionJobRecord[] {
   if (
-    !deps.capture.synthReflection ||
     episode.status !== "closed" ||
     deps.repos.runtime.hasEpisodeJob(episode.id, "reflection", ["queued", "leased", "failed"])
   ) return [];
@@ -477,6 +484,17 @@ export function evolutionJobDedupeKey(input: Pick<EnqueueJobInput, "jobType" | "
       return input.episodeId ? `reflection:${input.episodeId}` : target ? `reflection:${target}` : undefined;
     case "reward":
       return input.episodeId ? `reward:${input.episodeId}` : target ? `reward:${target}` : undefined;
+    case "span_big_turn":
+      return target ? `span_big_turn:${target}` : undefined;
+    case "negative_experience": {
+      const source = payloadString("source");
+      const sourceEventId = payloadString("sourceEventId");
+      return source && sourceEventId
+        ? `negative_experience:${source}:${sourceEventId}`
+        : input.episodeId
+          ? `negative_experience:${input.episodeId}`
+          : undefined;
+    }
     case "l2_association":
       return target ? `l2_association:${target}` : undefined;
     case "l2_induction": {

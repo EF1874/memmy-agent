@@ -30,6 +30,11 @@ describe("memmy memory config", () => {
     expect(loadMemmyConfig(configPath).config.algorithm.enableMemoryAdd).toBe(true);
     expect(loadMemmyConfig(configPath).config.algorithm.enableMemorySearch).toBe(true);
     expect(loadMemmyConfig(configPath).config.algorithm.enableQueryRewrite).toBe(false);
+    expect(loadMemmyConfig(configPath).config.algorithm.negativeExperience).toMatchObject({
+      enabled: true,
+      failureRTaskThreshold: -0.15,
+      implicitConfidenceCap: 0.65
+    });
     expect(loadMemmyConfig(configPath).config.algorithm.retrieval.llmFilterEnabled).toBe(true);
     expect(loadMemmyConfig(configPath).config.domain).toBe("");
     expect(loadMemmyConfig(configPath).config.algorithm.retrieval.readOnlyInjectionProfile).toBe("all");

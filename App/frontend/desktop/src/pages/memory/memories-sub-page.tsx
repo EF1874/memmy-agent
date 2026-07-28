@@ -561,6 +561,34 @@ function MemoryDetailBody(props: {
   const traceDetail = readTraceDetail(detail);
   const summaryText = displayMemorySummaryText(item.summary, t);
 
+  if (item.kind === "span") {
+    const span = recordValue(recordValue(recordValue(item.metadata.properties).internal_info).span);
+    const relatedSteps = readSpanRelatedSteps(detail);
+    return (
+      <>
+        <section className="memory-detail-card">
+          <h5 className="memory-detail-card__label">{t("memory.memories.spanGoal")}</h5>
+          <div className="memory-detail-text">{stringValue(span.span_goal)}</div>
+        </section>
+        <section className="memory-detail-card">
+          <h5 className="memory-detail-card__label">{t("memory.memories.summary")}</h5>
+          <div className="memory-detail-text">{summaryText}</div>
+        </section>
+        <section className="memory-detail-card">
+          <h5 className="memory-detail-card__label">{t("memory.memories.relatedSteps")}</h5>
+          <div className="memory-turn">
+            {relatedSteps.toolCalls.map((call, index) => (
+              <TraceTurnEventBlock
+                key={call.id ?? `${call.name}:${index}`}
+                event={{ kind: "tool", key: `tool:${call.id ?? call.name}:${index}`, call, index: relatedSteps.toolCallStart + index + 1 }}
+              />
+            ))}
+          </div>
+        </section>
+      </>
+    );
+  }
+
   if (traceDetail) {
     return (
       <TraceMemoryDetail
@@ -744,6 +772,11 @@ interface TraceStep {
   alpha?: number;
   priority?: number;
   reflection?: string;
+  toolCalls: TraceToolCall[];
+}
+
+interface SpanRelatedSteps {
+  toolCallStart: number;
   toolCalls: TraceToolCall[];
 }
 
@@ -1061,6 +1094,14 @@ function readTraceDetail(detail: MemoryDetailOutput): TraceDetail | null {
     finalResponse: stringValue(rawTurn.assistantText) ?? stringValue(trace.agent_text) ?? stringValue(trace.agentText),
     toolCalls,
     steps: arrayValue(trace.steps).map(readTraceStep).filter((step): step is TraceStep => Boolean(step))
+  };
+}
+
+function readSpanRelatedSteps(detail: MemoryDetailOutput): SpanRelatedSteps {
+  const spanDetail = recordValue(detail.item.metadata.spanDetail);
+  return {
+    toolCallStart: numberValue(spanDetail.toolCallStart) as number,
+    toolCalls: arrayValue(spanDetail.toolCalls).map(readTraceToolCall).filter((call): call is TraceToolCall => Boolean(call))
   };
 }
 

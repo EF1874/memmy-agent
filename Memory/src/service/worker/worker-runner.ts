@@ -15,6 +15,7 @@ import {
   type Repositories
 } from "../../storage/repositories.js";
 import type { JobRef,MemoryRow,RequestEnvelope } from "../../types.js";
+import { isRecord } from "../../utils/json.js";
 import type {
   EmbeddingJobProcessor,
   PreparedEmbeddingJob
@@ -193,6 +194,10 @@ export class WorkerRunner {
       }
 
       if (processing.state === "summary_pending" || processing.state === "summarizing") {
+        const trace = memory.properties.internal_info.trace;
+        if (isRecord(trace) && trace.summary_deferred_until_reflection === true) {
+          continue;
+        }
         const jobType = memoryHasImportPipeline(memory) ? "import_summary" : "trace_summary";
         let job = this.deps.repos.runtime.getPendingJob(memory.id, jobType, memory.contentHash ?? undefined);
         if (!job) {
