@@ -675,11 +675,13 @@ describe("MemoryService / feedback / decision repair", () => {
     const { db, service } = createTestService({
       skillLlm: createDecisionRepairLlm(calls)
     });
+    const positiveUserId = "user-value-distribution-positive";
+    const negativeUserId = "user-value-distribution-negative";
     const session = service.openSession({
       namespace: {
         source: "codex",
         profileId: "jiang",
-        userId: "user-value-distribution-repair"
+        userId: positiveUserId
       }
     });
     const positive = service.completeTurn("turn-value-distribution-positive", {
@@ -706,7 +708,7 @@ describe("MemoryService / feedback / decision repair", () => {
       namespace: {
         source: "codex",
         profileId: "jiang",
-        userId: "user-value-distribution-repair"
+        userId: negativeUserId
       }
     });
     const negative = service.completeTurn("turn-value-distribution-negative", {
@@ -777,14 +779,14 @@ describe("MemoryService / feedback / decision repair", () => {
       op: "created"
     });
     expect(service.panelJobs({
-      userId: "user-value-distribution-repair",
+      userId: negativeUserId,
       status: "queued"
     }).items).toEqual(expect.arrayContaining([
       expect.objectContaining({ jobType: "negative_experience" })
     ]));
     await service.runWorkerOnce(100);
     const policies = service.panelItems({
-      userId: "user-value-distribution-repair",
+      userId: negativeUserId,
       layer: "L2"
     }).items;
     const avoidance = policies
