@@ -5,7 +5,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DESKTOP_DIR="$ROOT_DIR/App/shell/desktop"
 AGENT_DIR="$ROOT_DIR/App/memmy-agent"
 MEMORY_DIR="$ROOT_DIR/Memory"
+MIGRATIONS_DIR="$ROOT_DIR/Migrations"
 RUNTIME_DIR="$DESKTOP_DIR/dist/runtime"
+MIGRATIONS_STAGING_DIR="$DESKTOP_DIR/dist/Migrations"
 CLI_BIN_DIR="$RUNTIME_DIR/bin"
 DMG_HELPER_DIR="$DESKTOP_DIR/dist/dmg"
 
@@ -487,6 +489,11 @@ verify_packaged_mac_unpacked_artifacts() {
   require_packaged_runtime_file "$app_path/Contents/Resources/app.asar"
   require_packaged_runtime_glob "$unpacked_runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/darwin/$target_cpu/libonnxruntime*.dylib"
   require_packaged_runtime_glob "$unpacked_runtime/memory/node_modules/@img/sharp-libvips-darwin-$target_cpu/lib/libvips*.dylib"
+  require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations/dist/index.js"
+  if [ -L "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations" ]; then
+    echo "Packaged migrations package must not be a symbolic link." >&2
+    exit 1
+  fi
   require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/openclaw/node_modules/@lydell/node-pty-darwin-$target_cpu/prebuilds/darwin-$target_cpu/spawn-helper"
 }
 
@@ -520,11 +527,15 @@ echo "Preparing macOS $TARGET_CPU package."
 if [ ! -x "$ROOT_DIR/node_modules/.bin/tsc" ] || [ ! -x "$ROOT_DIR/node_modules/.bin/electron-builder" ]; then
   npm install
 fi
+npm install --workspace @memmy/migrations --include=dev
 if npm ls --workspace @memmy/frontend-desktop --depth=0 >/dev/null 2>&1; then
   echo "Frontend desktop workspace dependencies already installed."
 else
   npm install --workspace @memmy/frontend-desktop --no-package-lock
 fi
+
+echo "Building migrations package."
+npm --prefix "$MIGRATIONS_DIR" run build
 
 echo "Installing memmy-agent dependencies."
 PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --prefix "$AGENT_DIR"
@@ -536,7 +547,11 @@ write_desktop_edition_manifest
 
 rm -rf "$RUNTIME_DIR"
 rm -rf "$DMG_HELPER_DIR"
+rm -rf "$MIGRATIONS_STAGING_DIR"
 mkdir -p "$RUNTIME_DIR/memory" "$RUNTIME_DIR/memmy-agent" "$CLI_BIN_DIR" "$DMG_HELPER_DIR"
+mkdir -p "$MIGRATIONS_STAGING_DIR"
+cp "$MIGRATIONS_DIR/package.json" "$MIGRATIONS_STAGING_DIR/package.json"
+cp -R "$MIGRATIONS_DIR/dist" "$MIGRATIONS_STAGING_DIR/dist"
 cp -R "$MEMORY_DIR/dist/src" "$RUNTIME_DIR/memory/src"
 cp -R "$AGENT_DIR/dist" "$RUNTIME_DIR/memmy-agent/dist"
 create_memory_runtime_manifest "$RUNTIME_DIR/memory"
@@ -551,12 +566,31 @@ node_modules/.bin/electron-rebuild \
 cp "$AGENT_DIR/package.json" "$RUNTIME_DIR/memmy-agent/package.json"
 cp "$AGENT_DIR/package-lock.json" "$RUNTIME_DIR/memmy-agent/package-lock.json"
 PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --prefix "$RUNTIME_DIR/memmy-agent" --omit=dev --os=darwin --cpu="$TARGET_CPU"
+RUNTIME_MIGRATIONS_DIR="$RUNTIME_DIR/memmy-agent/node_modules/@memmy/migrations"
+rm -rf "$RUNTIME_MIGRATIONS_DIR"
+mkdir -p "$RUNTIME_MIGRATIONS_DIR"
+cp "$MIGRATIONS_STAGING_DIR/package.json" "$RUNTIME_MIGRATIONS_DIR/package.json"
+cp -R "$MIGRATIONS_STAGING_DIR/dist" "$RUNTIME_MIGRATIONS_DIR/dist"
+if [ -L "$RUNTIME_MIGRATIONS_DIR" ]; then
+  echo "Packaged migrations package must not be a symbolic link." >&2
+  exit 1
+fi
+if [ ! -f "$RUNTIME_MIGRATIONS_DIR/dist/index.js" ]; then
+  echo "Packaged migrations entrypoint is missing." >&2
+  exit 1
+fi
+rm -rf "$MIGRATIONS_STAGING_DIR"
+if [ -e "$MIGRATIONS_STAGING_DIR" ]; then
+  echo "Migrations staging directory was not removed." >&2
+  exit 1
+fi
 (
   cd "$RUNTIME_DIR/memmy-agent"
   node --input-type=module --eval '
     import fs from "node:fs";
     import path from "node:path";
     import { createRequire } from "node:module";
+    import { runMigrations } from "@memmy/migrations";
     import { createConnection } from "@playwright/mcp";
     import { chromium } from "playwright";
     const require = createRequire(import.meta.url);
@@ -567,6 +601,7 @@ PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --prefix "$RUNTIME_DIR/memmy-agent" --
     const mcpPackage = require(mcpPath);
     const playwrightPackage = require(playwrightPath);
     const corePackage = require(corePath);
+    if (typeof runMigrations !== "function") throw new Error("Migrations runtime export is unavailable");
     if (typeof createConnection !== "function" || typeof chromium?.executablePath !== "function") throw new Error("Playwright MCP runtime exports are unavailable");
     if (mcpPackage.version !== runtimePackage.dependencies["@playwright/mcp"]) throw new Error("Playwright MCP runtime version mismatch");
     if (playwrightPackage.version !== runtimePackage.dependencies.playwright || corePackage.version !== runtimePackage.dependencies.playwright) throw new Error("Playwright runtime version mismatch");

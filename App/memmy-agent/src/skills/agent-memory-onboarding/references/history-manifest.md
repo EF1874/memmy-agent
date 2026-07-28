@@ -8,7 +8,7 @@ Create UTF-8 JSONL with one object per source message:
 
 Required fields:
 
-- `messageId`: stable across repeat scans. Prefer the source record id. Otherwise hash immutable source coordinates such as canonical file path plus record offset or database primary key. Never use a random id.
+- `messageId`: stable across repeat scans. Prefer the source record id. Otherwise hash immutable source coordinates such as canonical file path plus record offset or database primary key. Never use a random id. The permanent sync recipe must emit this exact same string, including any prefix or transformation.
 - `conversationId`: stable source conversation or session id.
 - `role`: exactly `user`, `assistant`, `tool`, or `system`.
 - `content`: non-empty plain text or Markdown.
@@ -31,3 +31,5 @@ Rules:
 7. Keep extraction code temporary in the Memmy workspace. Do not modify the source Agent's history database.
 8. For an initial scan, never emit an empty manifest or invent an epoch boundary. Leave the scan pending until at least one complete turn is verified.
 9. Provenance must identify the active product surface as well as the container. An empty database from a background daemon does not prove that a desktop app's remote web-chat surface has no history.
+10. Build the manifest and automatic-sync recipe from one canonical mapping. Compare representative outputs field-for-field before importing.
+11. Run the extraction twice and verify unique, identical message ids. A manifest-only prefix or random id breaks later deduplication even when the initial import succeeds.
