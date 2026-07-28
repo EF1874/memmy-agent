@@ -589,15 +589,33 @@ function buildSummary(log: MemoryApiLog, input: unknown, output: unknown, t: Tra
   const addInput = asRecord(input) as AddInput;
   const addOutput = asRecord(output) as AddOutput;
   const firstDetail = addOutput.details?.[0];
+  const summary = usableAddSummary(firstDetail?.summary);
   return {
     text: firstLogText(
-      usableAddSummary(firstDetail?.summary),
+      firstDetail?.role === "trace" && summary ? truncateTraceLogSummary(summary) : summary,
       firstDetail?.query,
       addInput.query,
       firstDetail?.content,
       firstDetail?.traceId
     ) ?? "memory item"
   };
+}
+
+function truncateTraceLogSummary(value: string): string {
+  const characters = Array.from(value);
+  const chineseCharacterCount = characters.filter((character) => /[\u3400-\u9fff]/u.test(character)).length;
+  if (chineseCharacterCount > 0) {
+    if (chineseCharacterCount <= 20) return value;
+    let count = 0;
+    const end = characters.findIndex((character) => {
+      if (/[\u3400-\u9fff]/u.test(character)) count += 1;
+      return count === 20;
+    });
+    return `${characters.slice(0, end + 1).join("")}...`;
+  }
+
+  const words = value.match(/\S+/g) ?? [];
+  return words.length > 20 ? `${words.slice(0, 20).join(" ")}...` : value;
 }
 
 function usableAddSummary(value: string | null | undefined): string | undefined {
