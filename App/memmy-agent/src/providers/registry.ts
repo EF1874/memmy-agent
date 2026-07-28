@@ -1,4 +1,7 @@
+import { resolveMemmyAccountHeaders } from "./memmy-account.js";
+
 type Dict<T = any> = Record<string, T>;
+type ProviderHeaders = Record<string, string>;
 
 // Memmy Account gateway API base: the gateway domain comes only from MEMMY_CLOUD_SERVICE in the repository root .env.
 // Entrypoints load ../load-env.js before all module evaluation, so the code keeps no URL default.
@@ -41,6 +44,7 @@ export class ProviderSpec {
   reasoningAsContent: boolean;
   aliases: string[];
   baseUrl?: string;
+  resolveHeaders?: () => ProviderHeaders;
 
   constructor(init: {
     name: string;
@@ -65,6 +69,7 @@ export class ProviderSpec {
     reasoningAsContent?: boolean;
     aliases?: string[];
     baseUrl?: string;
+    resolveHeaders?: () => ProviderHeaders;
   }) {
     this.name = init.name;
     this.keywords = init.keywords ?? init.aliases ?? [];
@@ -88,6 +93,7 @@ export class ProviderSpec {
     this.reasoningAsContent = init.reasoningAsContent ?? false;
     this.aliases = init.aliases ?? this.keywords;
     this.baseUrl = this.defaultApiBase || undefined;
+    this.resolveHeaders = init.resolveHeaders;
   }
 
   get label(): string {
@@ -264,6 +270,7 @@ export const PROVIDERS: ProviderSpec[] = [
     keywords: ["memmy-account", "memmy_account"],
     displayName: "Memmy Account",
     defaultApiBase: MEMMY_ACCOUNT_API_BASE,
+    resolveHeaders: resolveMemmyAccountHeaders,
   }),
   new ProviderSpec({
     name: "openai_codex",
