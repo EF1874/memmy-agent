@@ -217,6 +217,43 @@ describe("LogsSubPage", () => {
     expect(html).not.toContain("摘要排队中");
   });
 
+  it("trace 日志标题按前 20 个中文字符截断摘要", () => {
+    const summary = "甲".repeat(21);
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <LogsSubPageView
+          state={{
+            status: "ready",
+            data: {
+              logs: [{
+                id: 1,
+                toolName: "memory_add",
+                inputJson: "{}",
+                outputJson: JSON.stringify({ details: [{ role: "trace", summary }] }),
+                durationMs: 12,
+                success: true,
+                calledAt: "2026-06-03T10:00:00.000Z"
+              }],
+              total: 1,
+              limit: 20,
+              offset: 0,
+              serverTime: "2026-06-03T10:00:00.000Z"
+            }
+          }}
+          tool=""
+          sourceAgent=""
+          onToolChange={vi.fn()}
+          onSourceAgentChange={vi.fn()}
+          onPageChange={vi.fn()}
+          onRefresh={vi.fn()}
+        />
+      </I18nProvider>
+    );
+
+    expect(html).toContain(`${"甲".repeat(20)}...`);
+    expect(html).not.toContain(summary);
+  });
+
   it("通过顶部下拉框筛选来源 Agent，不再在日志行内展示标签", () => {
     const html = renderToString(
       <I18nProvider language="zh-CN">
