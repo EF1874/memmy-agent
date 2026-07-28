@@ -549,9 +549,12 @@ describe("MemoryService / evolution / reflection", () => {
     );
     expect(reflectionCall?.options.thinkingMode).toBe("disabled");
     expect(summaryCalls.some((call) => call.options.operation === "capture.reflection.batch.v13")).toBe(false);
-    expect(summaryCalls.some((call) =>
+    const summaryCall = summaryCalls.find((call) =>
       call.options.operation === "capture.reflected_trace_summary.v1"
-    )).toBe(true);
+    );
+    expect(summaryCall).toBeTruthy();
+    expect(summaryCall!.messages[0]?.content).not.toContain("Write in English");
+    expect(summaryCall!.messages[1]?.content).toContain("Simplified Chinese");
     const payload = JSON.parse(
       reflectionCall?.messages.find((message) => message.role === "user")?.content ?? "{}"
     ) as { host_context?: { reflectionModel?: string } };

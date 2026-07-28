@@ -113,14 +113,26 @@ describe("MemoriesSubPage", () => {
     expect(html).not.toContain("memory-pill--source");
   });
 
-  it("摘要未完成时用导入 trace 的用户 query 作为记忆标题", () => {
-    expect(displayMemoryTitle({
+  it("摘要完成前或失败时展示 user-text，完成后展示真实摘要", () => {
+    const trace = {
       id: "memory-trace-import",
-      title: "codex turn 2026-06-10 #10",
-      summary: "## user",
+      title: "修复自动扫描卡顿和标题占位",
       memoryLayer: "L1",
       body: "## user\n\n修复自动扫描卡顿和标题占位\n\n## assistant\n\n已开始排查。"
+    } as const;
+
+    expect(displayMemoryTitle({
+      ...trace,
+      summary: ""
     })).toBe("修复自动扫描卡顿和标题占位");
+    expect(displayMemoryTitle({
+      ...trace,
+      summary: "摘要整理中"
+    })).toBe("修复自动扫描卡顿和标题占位");
+    expect(displayMemoryTitle({
+      ...trace,
+      summary: "已修复自动扫描卡顿，并替换临时标题"
+    })).toBe("已修复自动扫描卡顿，并替换临时标题");
   });
 
   it("span 列表展示标题，详情只展示子目标和摘要", () => {

@@ -1385,7 +1385,7 @@ Rules:
 - When tool use is present, summarize the overall attempt and outcome instead
   of listing intermediate calls or results.
 - Keep each summary normally within 200 characters.
-- Write in English, the language of this template.
+- Follow the separate language instruction provided for the current batch.
 - Do not invent facts, merge traces, or omit an input index.`
 } as const;
 

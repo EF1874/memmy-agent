@@ -3529,6 +3529,9 @@ function listTitleForMemory(memory: MemoryRow): string {
   const importedUserTitle = isPlaceholderMemorySummary(placeholderSummary)
     ? firstUserMemoryValueLine(memory.memoryValue)
     : undefined;
+  const pendingTraceUserTitle = memory.memoryLayer === "L1" && !placeholderSummary
+    ? firstUserMemoryValueLine(memory.memoryValue)
+    : undefined;
   const skillTitleCandidates = memory.memoryLayer === "Skill"
     ? [
         stringLike(internal.title),
@@ -3542,6 +3545,7 @@ function listTitleForMemory(memory: MemoryRow): string {
     importedUserTitle,
     stringLike(memory.info.title),
     stringLike(internal.title),
+    pendingTraceUserTitle,
     stringLike(policy.title),
     stringLike(world.title),
     ...skillTitleCandidates,

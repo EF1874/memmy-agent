@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { type MemoryRow } from "../../../src/index.js";
+import { updateTraceSummary } from "../../../src/service/embedding/embedding-job-processor.js";
 import { changeLogToPanelChange } from "../../../src/service/read-model/panel-read.js";
 import { Repositories } from "../../../src/storage/repositories.js";
 import {
@@ -141,6 +142,49 @@ describe("MemoryService / read model / panel", () => {
       alpha: 0.5,
       reflectionDone: true
     });
+    db.close();
+  });
+
+  it("uses trace user text until a generated summary is available", () => {
+    const { db, service } = createTestService();
+    const repos = new Repositories(db.db);
+    const namespace = {
+      source: "codex",
+      profileId: "default",
+      userId: "user-panel-trace-title"
+    };
+    const session = service.openSession({ namespace });
+    const completed = service.completeTurn("turn-panel-trace-title", {
+      sessionId: session.sessionId,
+      query: "修复项目级会话的启动兼容问题",
+      answer: "已定位并修复旧会话缺少工作区绑定的问题。"
+    });
+
+    const pendingItem = service.panelItems({ namespace, layer: "L1" }).items[0];
+    expect(pendingItem?.processing?.state).toBe("summary_pending");
+    expect(pendingItem?.title).toBe("修复项目级会话的启动兼容问题");
+
+    repos.processing.update(completed.l1MemoryId, {
+      state: "failed",
+      stage: "summary",
+      errorCode: "summary_failed",
+      errorMessage: "summary model unavailable",
+      failedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    }, ["summary_pending"]);
+    const failedItem = service.panelItems({ namespace, layer: "L1" }).items[0];
+    expect(failedItem?.processing?.state).toBe("failed");
+    expect(failedItem?.title).toBe("修复项目级会话的启动兼容问题");
+
+    const current = repos.memories.get(completed.l1MemoryId);
+    expect(current).toBeDefined();
+    repos.memories.update(updateTraceSummary(current!, {
+      summary: "旧会话缺少工作区绑定会导致 Gateway 启动失败",
+      updatedAt: new Date().toISOString()
+    }));
+    const summarizedItem = service.panelItems({ namespace, layer: "L1" }).items[0];
+    expect(summarizedItem?.summary).toBe("旧会话缺少工作区绑定会导致 Gateway 启动失败");
+
     db.close();
   });
 
