@@ -14,6 +14,7 @@ function fakeClient() {
       turnId,
       sessionId: body.sessionId,
       episodeId: "ep-1",
+      sourceMemoryIds: ["trace-source"],
       injectedContext: { markdown: "Relevant prior memory." },
     })),
     completeTurn: vi.fn(async () => ({ rawTurnId: "raw-1", l1MemoryId: "l1-1" })),
@@ -114,8 +115,10 @@ describe("MemmyMemoryHook", () => {
     const completeBody = (client.completeTurn as any).mock.calls[0][1];
     expect(completeBody).toMatchObject({
       sessionId: "session-generated-1",
+      episodeId: "ep-1",
       query: "Please continue",
       answer: "Done",
+      sourceMemoryIds: ["trace-source"],
       status: "succeeded"
     });
     expect(completeBody.requestId).toMatch(/^memmy-agent-complete:/u);

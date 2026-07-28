@@ -150,6 +150,7 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
           query: userText || "(conversation continued)",
         }));
         turn.episodeId = stringOrUndefined(response?.episodeId);
+        turn.sourceMemoryIds = arrayOfStrings(response?.sourceMemoryIds);
         turn.hasInjectedContext = hasInjectedContextValue(response?.injectedContext);
         turn.sourceMemoryCount = sourceMemoryCountFromResponse(response);
         this.injectMemoryContext(messages, response?.injectedContext);
@@ -227,18 +228,20 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
           ...this.requestEnvelope(sessionKey, ctx),
           requestId: completeRequestId(turn.turnId, status, turn.userText, answer),
           sessionId: turn.sessionId,
+          episodeId: turn.episodeId,
           query: turn.userText,
           answer,
           reasoningSummary,
           toolCalls,
           toolResults,
+          sourceMemoryIds: turn.sourceMemoryIds,
           usage: result?.usage ?? ctx.usage,
           status,
         }));
         turn.rawTurnId = stringOrUndefined(response?.rawTurnId) ?? turn.rawTurnId;
         turn.l1MemoryId = stringOrUndefined(response?.l1MemoryId) ?? turn.l1MemoryId;
         const l1MemoryIds = arrayOfStrings(response?.l1MemoryIds);
-        if (!turn.l1MemoryId && l1MemoryIds.length) turn.l1MemoryId = l1MemoryIds[0];
+        if (!turn.l1MemoryId && l1MemoryIds?.length) turn.l1MemoryId = l1MemoryIds[0];
         this.analytics.track(events.addSucceeded, {
           ...addBase,
           duration_ms: elapsedMs(addStartedAt),
@@ -309,6 +312,11 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
   currentSessionId(sessionKey?: string | null): string | null {
     if (!sessionKey) return null;
     return this.sessionIdBySessionKey.get(sessionKey) ?? null;
+  }
+
+  currentEpisodeId(sessionKey?: string | null): string | null {
+    if (!sessionKey) return null;
+    return this.turnBySessionKey.get(sessionKey)?.episodeId ?? null;
   }
 
   currentTurnId(sessionKey?: string | null): string | null {
@@ -488,6 +496,12 @@ function compact<T extends JsonRecord>(value: T): T {
 
 function stringOrUndefined(value: any): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function arrayOfStrings(value: any): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const items = value.filter((item): item is string => typeof item === "string" && Boolean(item.trim()));
+  return items.length ? items : undefined;
 }
 
 function messageContentText(content: any): string {

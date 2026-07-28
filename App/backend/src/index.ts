@@ -15,8 +15,7 @@ import {
 import { resolveDefaultRuntimeConfigPath, writeRuntimeConfigFile } from "./infrastructure/cli-binary/index.js";
 import {
   createMemmyConfigWriter,
-  readAgentGatewayBootstrapSecret,
-  resolveDefaultMemmyConfigPath
+  readAgentGatewayBootstrapSecret
 } from "./infrastructure/memmy-config/index.js";
 import { createPermissionManager } from "./permission/index.js";
 import { createLocalApiServer } from "./adapters/inbound/local-api/server.js";
@@ -49,7 +48,7 @@ export interface CreateLocalBackendOptions {
   agentAdapterRegistry?: AgentAdapterRegistry;
   agentAdapterPluginDirectories?: string[];
   runtimeConfigPath?: string;
-  /** Memmy config path. */
+  /** Memmy config path. Required unless MEMMY_CONFIG is set. */
   memmyConfigPath?: string;
   /** Memory service address exposed to desktop and browser-debug clients. */
   memoryBaseUrl?: string;
@@ -77,7 +76,10 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
   let autoScan: AgentSourceAutoScanService | null = null;
 
   try {
-    const memmyConfigPath = options.memmyConfigPath ?? process.env.MEMMY_CONFIG ?? resolveDefaultMemmyConfigPath();
+    const memmyConfigPath = options.memmyConfigPath ?? process.env.MEMMY_CONFIG;
+    if (!memmyConfigPath) {
+      throw new Error("memmyConfigPath or MEMMY_CONFIG is required");
+    }
     if (options.desktopInstallFingerprint) {
       await resetAccountRuntimeForDesktopInstallChange({
         appStateStore,
