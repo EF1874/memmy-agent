@@ -453,16 +453,18 @@ describe("desktop packaged runtime boundaries", () => {
     expect(updatePromptSource).not.toContain("CornerRadius");
   });
 
-  it("exports memory.sqlite through the desktop save dialog", () => {
+  it("exports a consistent memory.sqlite snapshot through the desktop save dialog", () => {
     const source = readFileSync(mainSourcePath, "utf8");
     const exportSource = extractFunctionSource(source, "async function exportMemoryDatabase");
 
     expect(source).toContain('ipcMain.handle("memmy:export-memory-database"');
     expect(exportSource).toContain("dialog.showSaveDialog");
-    expect(exportSource).toContain("await copyFile(sourcePath, selected.filePath)");
+    expect(exportSource).toContain("await backupSqliteDatabase(sourcePath, selected.filePath)");
+    expect(exportSource).not.toContain("await copyFile(sourcePath, selected.filePath)");
     expect(exportSource).toContain("memory-${formatExportTimestamp(new Date())}.sqlite");
     expect(exportSource).not.toContain("filters:");
     expect(exportSource).not.toContain("All Files");
+    expect(source).toContain('import { backupSqliteDatabase } from "./sqlite-backup.js"');
     expect(source).toContain('join(homedir(), ".memmy", "memory-service", "memory.sqlite")');
   });
 

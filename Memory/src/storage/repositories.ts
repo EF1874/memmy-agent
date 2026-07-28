@@ -452,7 +452,7 @@ export class MemoryRepository {
     previous?: MemoryRow;
   } {
     const previous = memory.memoryKey
-      ? this.getByKey(memory.userId, memory.memoryLayer, memory.memoryKey)
+      ? this.getByKey(memory.memoryLayer, memory.memoryKey)
       : undefined;
     if (!previous) {
       return { memory: this.insert(memory), created: true };
@@ -503,19 +503,18 @@ export class MemoryRepository {
     return row ? this.hydrate(memoryFromSql(row)) : undefined;
   }
 
-  getByKey(userId: string, memoryLayer: MemoryLayer, key: string): MemoryRow | undefined {
+  getByKey(memoryLayer: MemoryLayer, key: string): MemoryRow | undefined {
     const row = this.db
       .prepare(
         `SELECT *
          FROM memories
          WHERE memory_layer = ?
            AND memory_key = ?
-           AND user_id = ?
            AND deleted_at IS NULL
          ORDER BY updated_at DESC
          LIMIT 1`
       )
-      .get(memoryLayer, key, userId) as MemorySqlRow | undefined;
+      .get(memoryLayer, key) as MemorySqlRow | undefined;
     return row ? this.hydrate(memoryFromSql(row)) : undefined;
   }
 
@@ -1854,6 +1853,21 @@ export class RuntimeRepository {
     const row = this.db
       .prepare(`SELECT * FROM recall_events WHERE id = ?`)
       .get(id) as SqlRecallEventRow | undefined;
+    return row ? recallEventFromSql(row) : undefined;
+  }
+
+  getTurnStartRecallEvent(sessionId: string, turnId: string): RecallEventRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT *
+         FROM recall_events
+         WHERE session_id = ?
+           AND turn_id = ?
+           AND json_extract(request_json, '$.retrievalMode') = 'turn_start'
+         ORDER BY created_at DESC
+         LIMIT 1`
+      )
+      .get(sessionId, turnId) as SqlRecallEventRow | undefined;
     return row ? recallEventFromSql(row) : undefined;
   }
 
@@ -3827,7 +3841,6 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
   const clauses = ["deleted_at IS NULL"];
   const params: SqlValue[] = [];
 
-  addValueClause("user_id", filter.userId);
   addValueClause("session_id", filter.sessionId);
   addValueClause("conversation_id", filter.conversationId);
   addAgentIdClause(filter.agentId, filter.excludedAgentIds);
@@ -3836,7 +3849,6 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
   addArrayClause("status", filter.status);
   addArrayClause("id", filter.ids);
   addTagClauses(filter.tags);
-  addNegativeExperienceScope(filter.negativeExperienceUserId);
 
   return {
     where: clauses.join(" AND "),
@@ -3865,19 +3877,6 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
       )`);
       params.push(...excluded);
     }
-  }
-
-  function addNegativeExperienceScope(userId: string | undefined): void {
-    if (!userId) return;
-    clauses.push(`(
-      user_id = ?
-      OR memory_layer <> 'L2'
-      OR (
-        COALESCE(json_extract(properties_json, '$.internal_info.policy.experience_type'), '') <> 'failure_avoidance'
-        AND COALESCE(json_extract(properties_json, '$.internal_info.policy.evidence_polarity'), '') <> 'negative'
-      )
-    )`);
-    params.push(userId);
   }
 
   function addArrayClause(column: string, value: string | string[] | undefined): void {

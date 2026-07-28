@@ -51,11 +51,14 @@ export type MemmyMemoryTurnState = {
   turnId: string;
   userText: string;
   messageStartIndex: number;
+  episodeId?: string;
+  sourceMemoryIds?: string[];
 };
 
 export type MemmyMemoryToolRuntime = {
   requestEnvelope(sessionKey?: string | null): MemmyMemoryRequestEnvelope;
   currentSessionId(sessionKey?: string | null): string | null;
+  currentEpisodeId(sessionKey?: string | null): string | null;
   currentTurnId(sessionKey?: string | null): string | null;
   currentUserText(sessionKey?: string | null): string | null;
 };

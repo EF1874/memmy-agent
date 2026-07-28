@@ -95,6 +95,7 @@ describe("memmy memory tools", () => {
         },
       }),
       currentSessionId: () => "memmy-agent::cli:direct",
+      currentEpisodeId: () => "ep-1",
       currentTurnId: () => "turn-1",
       currentUserText: () => "Summarize the current README",
     };
@@ -121,10 +122,10 @@ describe("memmy memory tools", () => {
       query: "previous task",
       source: "memmy-agent",
       sessionId: "memmy-agent::cli:direct",
+      episodeId: "ep-1",
+      turnId: "turn-1",
       layers: ["L1"]
     });
-    expect(body).not.toHaveProperty("episodeId");
-    expect(body).not.toHaveProperty("turnId");
     expect(body).not.toHaveProperty("requestId");
     expect(body).not.toHaveProperty("adapterId");
     expect(calls[1].url).toBe("http://memory.test/api/v1/memory/trace_123");
@@ -182,6 +183,7 @@ describe("memmy memory tools", () => {
     const runtime: MemmyMemoryToolRuntime = {
       requestEnvelope: () => ({}),
       currentSessionId: () => "session-1",
+      currentEpisodeId: () => "episode-1",
       currentTurnId: () => "turn-1",
       currentUserText: () => "current task",
     };
@@ -218,6 +220,7 @@ describe("memmy memory tools", () => {
     const runtime: MemmyMemoryToolRuntime = {
       requestEnvelope: () => ({}),
       currentSessionId: () => "memmy-agent::cli:direct",
+      currentEpisodeId: () => "ep-1",
       currentTurnId: () => "turn-1",
       currentUserText: () => "current task",
     };
@@ -254,6 +257,7 @@ describe("memmy memory tools", () => {
         },
       }),
       currentSessionId: (sessionKey) => sessionKey ? `memmy-agent::${sessionKey}` : null,
+      currentEpisodeId: () => null,
       currentTurnId: () => null,
       currentUserText: () => "current task",
     };

@@ -528,7 +528,7 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
   }
 
   /**
-   * Lets the user pick a path via the desktop bridge and copies the current memory.sqlite main database.
+   * Lets the user pick a path via the desktop bridge and creates a consistent memory.sqlite snapshot.
    */
   function exportLocalData() {
     if (localDataBusy) {

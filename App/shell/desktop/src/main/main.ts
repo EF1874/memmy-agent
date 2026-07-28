@@ -86,6 +86,7 @@ import {
   setLogLevel as applyAndPersistLogLevel,
   type LogLevel
 } from "./logger.js";
+import { backupSqliteDatabase } from "./sqlite-backup.js";
 
 let mainWindow: BrowserWindow | null = null;
 let petWindow: BrowserWindow | null = null;
@@ -5002,7 +5003,7 @@ function desktopImageSaveFilters(name: string, mime: string | null): FileFilter[
 }
 
 /**
- * Prompts for a save path and copies the current Memory SQLite primary database.
+ * Prompts for a save path and creates a consistent Memory SQLite snapshot.
  *
  * @param owner The window that triggered the export.
  * @returns The user cancellation or the export result.
@@ -5023,12 +5024,11 @@ async function exportMemoryDatabase(owner: BrowserWindow | null): Promise<Memory
     return { canceled: true };
   }
 
-  await copyFile(sourcePath, selected.filePath);
-  const copied = await stat(selected.filePath);
+  const bytes = await backupSqliteDatabase(sourcePath, selected.filePath);
   return {
     canceled: false,
     exportPath: selected.filePath,
-    bytes: copied.size
+    bytes
   };
 }
 
