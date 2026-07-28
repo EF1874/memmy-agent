@@ -137,6 +137,7 @@ import {
 } from "./turn/turn-normalization.js";
 import {
   createWorkerJobHandlers,
+  type ClosedEpisodeTrigger,
   type EnqueueJobInput
 } from "./worker/job-handlers.js";
 import { WorkerRunner } from "./worker/worker-runner.js";
@@ -272,9 +273,11 @@ export class MemoryService {
         },
         evolution: {
           induceL2: (job) => this.evolutionJobs.induceL2(job),
+          materializeNegativeExperience: (job) => this.evolutionJobs.materializeNegativeExperience(job),
           abstractL3: (job) => this.evolutionJobs.abstractL3(job),
           crystallizeSkill: (job) => this.evolutionJobs.crystallizeSkill(job),
-          associateL2: (job) => this.evolutionJobs.associateL2(job)
+          associateL2: (job) => this.evolutionJobs.associateL2(job),
+          splitBigTurn: (job) => this.evolutionJobs.splitBigTurn(job)
         },
         feedback: {
           applyReward: (job) => this.evolutionJobs.applyReward(job),
@@ -305,7 +308,6 @@ export class MemoryService {
         llm: this.skillLlm
       }),
       scheduleEmbeddingAfterTextUpdate: (input) => this.embeddingJobs.scheduleEmbeddingAfterTextUpdate(input),
-      attachRepairToPolicies: (...args) => this.feedbackExperience.attachRepairToPolicies(...args),
       repairEvidenceValueDiff: sessionRepairEvidenceValueDiff
     });
     const trialOwner = this;
@@ -498,7 +500,6 @@ export class MemoryService {
       assertMemoryAddEnabled: this.assertMemoryAddEnabled.bind(this),
       assertRawTurnInScope: this.assertRawTurnInScope.bind(this),
       assertSessionInScope: this.assertSessionInScope.bind(this),
-      attachRepairToPolicies: this.feedbackExperience.attachRepairToPolicies.bind(this.feedbackExperience),
       buildMemory: this.buildMemory.bind(this),
       closeSessionNoWrite: this.closeSessionNoWrite.bind(this),
       completeTurnNoWrite: this.completeTurnNoWrite.bind(this),
@@ -1671,7 +1672,7 @@ export class MemoryService {
   private finalizeClosedEpisode(
     episode: EpisodeRecord,
     at: string,
-    trigger: "topic_boundary" | "session_closed" | "episode_rewarded" | "idle_timeout"
+    trigger: ClosedEpisodeTrigger
   ): EvolutionJobRecord[] {
     return this.workerHandlers.finalizeClosedEpisode(episode, at, trigger);
   }
@@ -2094,6 +2095,7 @@ function stringFromMeta(meta: Record<string, unknown> | undefined, key: string):
 }
 
 function memoryIdPrefix(layer: MemoryLayer, kind: MemoryKind): string {
+  if (kind === "span") return "span";
   if (layer === "L1" || kind === "trace") return "trace";
   if (layer === "L2" || kind === "policy") return "policy";
   if (layer === "L3" || kind === "world_model") return "world";

@@ -268,7 +268,9 @@ async feedback(request: FeedbackRequest): Promise<FeedbackResponse> {
       this.applyRecallOutcome(updatedRecallEvent, feedback, feedback.createdAt);
     }
     const jobs: EvolutionJobRecord[] = [];
-    jobs.push(...await this.maybeCreateFeedbackExperience(attributedRequest, feedback, context));
+    if (feedback.polarity !== "negative") {
+      jobs.push(...await this.maybeCreateFeedbackExperience(attributedRequest, feedback, context));
+    }
     if (attributedRequest.l1MemoryId || attributedRequest.episodeId) {
       jobs.push(
         this.deps.enqueueJob({
@@ -283,6 +285,7 @@ async feedback(request: FeedbackRequest): Promise<FeedbackResponse> {
             polarity: feedback.polarity,
             magnitude: feedback.magnitude,
             rationale: feedback.rationale,
+            ...(repair?.repairId ? { repairId: repair.repairId } : {}),
             trigger: feedback.channel === "implicit" ? "implicit_feedback" : "explicit_feedback"
           }
         })
@@ -379,7 +382,8 @@ async maybeSynthesizeFeedbackDecisionRepair(
       if (recent.length > 0) return undefined;
     }
 
-    const attachedPolicyIds = this.deps.config.algorithm.feedback.attachToPolicy
+    const attachedPolicyIds = feedback.polarity !== "negative"
+      && this.deps.config.algorithm.feedback.attachToPolicy
       ? this.feedbackCandidatePolicyIds(request, feedback)
       : [];
     const evidence = this.feedbackRepairEvidence(request, feedback, attachedPolicyIds);

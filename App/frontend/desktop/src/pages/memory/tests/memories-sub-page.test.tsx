@@ -113,14 +113,76 @@ describe("MemoriesSubPage", () => {
     expect(html).not.toContain("memory-pill--source");
   });
 
-  it("摘要未完成时用导入 trace 的用户 query 作为记忆标题", () => {
-    expect(displayMemoryTitle({
+  it("摘要完成前或失败时展示 user-text，完成后展示真实摘要", () => {
+    const trace = {
       id: "memory-trace-import",
-      title: "codex turn 2026-06-10 #10",
-      summary: "## user",
+      title: "修复自动扫描卡顿和标题占位",
       memoryLayer: "L1",
       body: "## user\n\n修复自动扫描卡顿和标题占位\n\n## assistant\n\n已开始排查。"
+    } as const;
+
+    expect(displayMemoryTitle({
+      ...trace,
+      summary: ""
     })).toBe("修复自动扫描卡顿和标题占位");
+    expect(displayMemoryTitle({
+      ...trace,
+      summary: "摘要整理中"
+    })).toBe("修复自动扫描卡顿和标题占位");
+    expect(displayMemoryTitle({
+      ...trace,
+      summary: "已修复自动扫描卡顿，并替换临时标题"
+    })).toBe("已修复自动扫描卡顿，并替换临时标题");
+  });
+
+  it("span 列表展示标题，详情只展示子目标和摘要", () => {
+    const spanItem = {
+      ...memoryListItemFixture,
+      id: "span_38dff97911bbdf533513",
+      kind: "span" as const,
+      title: "读取并分析源码，分类金融策略",
+      summary: "阅读策略、指标和组合模型相关文件。"
+    };
+    const spanDetail = {
+      item: {
+        ...spanItem,
+        body: "Goal: 读取并分析源码，分类金融策略\nSummary: 阅读策略、指标和组合模型相关文件。",
+        sourceMemoryIds: [],
+        metadata: {
+          spanDetail: {
+            toolCallStart: 1,
+            toolCalls: [
+              { id: "tool-1", name: "rg", input: { pattern: "span" }, output: "match" },
+              { id: "tool-2", name: "npm_test", output: "passed" }
+            ]
+          },
+          properties: {
+            internal_info: {
+              span: { span_goal: "读取并分析源码，分类金融策略" }
+            }
+          }
+        }
+      },
+      version: 1,
+      etag: "span-detail"
+    };
+
+    const html = renderMemories({
+      status: "ready",
+      data: panelItemsOutput([spanItem]),
+      detail: { status: "ready", data: spanDetail }
+    });
+
+    expect(html).toContain("读取并分析源码，分类金融策略");
+    expect(html).toContain("子目标");
+    expect(html).toContain("摘要");
+    expect(html).toContain("阅读策略、指标和组合模型相关文件。");
+    expect(html).toContain("相关步骤");
+    expect(html).toContain("工具调用 · rg");
+    expect(html).toContain("工具调用 · npm_test");
+    expect(html).not.toContain("正文");
+    expect(html).not.toContain("Goal:");
+    expect(html).not.toContain("Summary:");
   });
 
   it("搜索列表和点击详情都调用 memoryRuntime client", async () => {

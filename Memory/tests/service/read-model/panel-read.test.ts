@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { type MemoryRow } from "../../../src/index.js";
+import { updateTraceSummary } from "../../../src/service/embedding/embedding-job-processor.js";
+import { changeLogToPanelChange } from "../../../src/service/read-model/panel-read.js";
 import { Repositories } from "../../../src/storage/repositories.js";
 import {
   createCapturingEmbedder,
@@ -14,6 +16,25 @@ const {
 afterEach(cleanup);
 
 describe("MemoryService / read model / panel", () => {
+  it("preserves Span kinds in panel change records", () => {
+    expect(changeLogToPanelChange({
+      seq: 1,
+      memoryId: "span_panel_change",
+      kind: "span",
+      op: "created",
+      entityId: "span_panel_change",
+      userId: "user-panel-span-change",
+      changeType: "span_created",
+      source: "worker.span_big_turn.v1",
+      createdAt: "2026-07-24T06:38:21.017Z"
+    })).toMatchObject({
+      kind: "span",
+      id: "span_panel_change",
+      op: "created",
+      source: "worker"
+    });
+  });
+
   it("stores source Agent directly on memory_add and memory_search logs", async () => {
     const { db, service } = createTestService();
     service.addMemory({
@@ -121,6 +142,49 @@ describe("MemoryService / read model / panel", () => {
       alpha: 0.5,
       reflectionDone: true
     });
+    db.close();
+  });
+
+  it("uses trace user text until a generated summary is available", () => {
+    const { db, service } = createTestService();
+    const repos = new Repositories(db.db);
+    const namespace = {
+      source: "codex",
+      profileId: "default",
+      userId: "user-panel-trace-title"
+    };
+    const session = service.openSession({ namespace });
+    const completed = service.completeTurn("turn-panel-trace-title", {
+      sessionId: session.sessionId,
+      query: "修复项目级会话的启动兼容问题",
+      answer: "已定位并修复旧会话缺少工作区绑定的问题。"
+    });
+
+    const pendingItem = service.panelItems({ namespace, layer: "L1" }).items[0];
+    expect(pendingItem?.processing?.state).toBe("summary_pending");
+    expect(pendingItem?.title).toBe("修复项目级会话的启动兼容问题");
+
+    repos.processing.update(completed.l1MemoryId, {
+      state: "failed",
+      stage: "summary",
+      errorCode: "summary_failed",
+      errorMessage: "summary model unavailable",
+      failedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    }, ["summary_pending"]);
+    const failedItem = service.panelItems({ namespace, layer: "L1" }).items[0];
+    expect(failedItem?.processing?.state).toBe("failed");
+    expect(failedItem?.title).toBe("修复项目级会话的启动兼容问题");
+
+    const current = repos.memories.get(completed.l1MemoryId);
+    expect(current).toBeDefined();
+    repos.memories.update(updateTraceSummary(current!, {
+      summary: "旧会话缺少工作区绑定会导致 Gateway 启动失败",
+      updatedAt: new Date().toISOString()
+    }));
+    const summarizedItem = service.panelItems({ namespace, layer: "L1" }).items[0];
+    expect(summarizedItem?.summary).toBe("旧会话缺少工作区绑定会导致 Gateway 启动失败");
+
     db.close();
   });
 
@@ -396,12 +460,12 @@ describe("MemoryService / read model / panel", () => {
 
     const list = service.panelItems({ namespace, layer: "L1" });
     const itemBeforeEmbedding = list.items.find((item) => item.id === complete.l1MemoryId);
-    expect(itemBeforeEmbedding?.tags).toContain("索引建立中");
+    expect(itemBeforeEmbedding?.tags).toContain("摘要总结中");
     expect(itemBeforeEmbedding?.tags).not.toContain("openclaw");
     expect(itemBeforeEmbedding?.metadata?.source).toBe("openclaw");
 
     const detail = service.getMemory(complete.l1MemoryId, { namespace });
-    expect(detail.item.tags).toContain("索引建立中");
+    expect(detail.item.tags).toContain("摘要总结中");
     expect(detail.item.tags).not.toContain("openclaw");
     expect(detail.item.metadata.source).toBe("openclaw");
     expect(detail.refs.episode).toMatchObject({
@@ -410,6 +474,8 @@ describe("MemoryService / read model / panel", () => {
       status: "open"
     });
 
+    service.closeSession(session.sessionId);
+    await service.runWorkerOnce(20);
     await service.runWorkerOnce(20);
     expect(embeddingTexts.length).toBeGreaterThan(0);
     const listAfterEmbedding = service.panelItems({ namespace, layer: "L1" });

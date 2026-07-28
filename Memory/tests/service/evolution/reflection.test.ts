@@ -62,9 +62,15 @@ function createUnusableReflectionLlm(): LlmClient {
           }))
         } as unknown as T;
       }
-      if (options.operation === "capture.summarize") {
+      if (options.operation === "capture.reflected_trace_summary.v1") {
+        const payload = JSON.parse(messages.find((message) => message.role === "user")?.content ?? "{}") as {
+          traces?: Array<{ index: number }>;
+        };
         return {
-          summary: "unusable reflection summary"
+          summaries: (payload.traces ?? []).map((trace) => ({
+            index: trace.index,
+            summary: "unusable reflection summary"
+          }))
         } as unknown as T;
       }
       return {
@@ -428,6 +434,14 @@ describe("MemoryService / evolution / reflection", () => {
       call.options.operation === "capture.reflection.batch.v13"
     );
     expect(reflectionCalls).toHaveLength(1);
+    const summaryCalls = calls.filter((call) =>
+      call.options.operation === "capture.reflected_trace_summary.v1"
+    );
+    expect(summaryCalls).toHaveLength(1);
+    const summaryPayload = JSON.parse(
+      summaryCalls[0]!.messages.find((message) => message.role === "user")?.content ?? "{}"
+    ) as { traces: Array<{ index: number }> };
+    expect(summaryPayload.traces.map((trace) => trace.index)).toEqual([0, 1]);
     const payload = JSON.parse(
       reflectionCalls[0]!.messages.find((message) => message.role === "user")?.content ?? "{}"
     ) as { steps: Array<{ idx: number; state: string }> };
@@ -535,7 +549,12 @@ describe("MemoryService / evolution / reflection", () => {
     );
     expect(reflectionCall?.options.thinkingMode).toBe("disabled");
     expect(summaryCalls.some((call) => call.options.operation === "capture.reflection.batch.v13")).toBe(false);
-    expect(summaryCalls.some((call) => call.options.operation === "capture.summarize")).toBe(true);
+    const summaryCall = summaryCalls.find((call) =>
+      call.options.operation === "capture.reflected_trace_summary.v1"
+    );
+    expect(summaryCall).toBeTruthy();
+    expect(summaryCall!.messages[0]?.content).not.toContain("Write in English");
+    expect(summaryCall!.messages[1]?.content).toContain("Simplified Chinese");
     const payload = JSON.parse(
       reflectionCall?.messages.find((message) => message.role === "user")?.content ?? "{}"
     ) as { host_context?: { reflectionModel?: string } };
@@ -824,9 +843,20 @@ describe("MemoryService / evolution / reflection", () => {
     expect(payload.steps[0]?.tool_calls).toHaveLength(2);
     expect(payload.steps.every((step) => step.synth_allowed)).toBe(true);
     expect(payload.task_context).toContain("sqlite migration");
-    const summaryCall = calls.find((call) => call.options.operation === "capture.summarize");
+    const summaryCall = calls.find((call) =>
+      call.options.operation === "capture.reflected_trace_summary.v1"
+    );
     expect(summaryCall).toBeTruthy();
-    expect(summaryCall!.messages[0]?.content).toContain("single user/agent exchange");
+    expect(summaryCall!.messages[0]?.content).toContain("each reflected AI-agent trace");
+    const summaryPayload = JSON.parse(
+      summaryCall!.messages.find((message) => message.role === "user")?.content ?? "{}"
+    ) as { traces: Array<{ index: number; reflection: string; toolCalls: unknown[] }> };
+    expect(summaryPayload.traces).toHaveLength(1);
+    expect(summaryPayload.traces[0]).toMatchObject({
+      index: 0,
+      reflection: "PIVOTAL"
+    });
+    expect(summaryPayload.traces[0]?.toolCalls).toHaveLength(2);
 
     const rows = complete.l1MemoryIds.map((id) => db.db.prepare(
       `SELECT properties_json
@@ -843,12 +873,14 @@ describe("MemoryService / evolution / reflection", () => {
             reflection_source: string;
             reflection_scored_at?: string;
             summary: string;
+            summary_deferred_until_reflection?: boolean;
           };
         };
       };
       expect(properties.internal_info.trace.reflection).toBe("PIVOTAL");
       expect(properties.internal_info.trace.alpha).toBeCloseTo(1);
       expect(properties.internal_info.trace.summary).toBe("LLM batch summary");
+      expect(properties.internal_info.trace.summary_deferred_until_reflection).toBeUndefined();
       expect(properties.internal_info.trace.usable).toBe(true);
       expect(properties.internal_info.trace.reflection_source).toBe("synth");
       expect(properties.internal_info.trace.reflection_scored_at).toBeTruthy();

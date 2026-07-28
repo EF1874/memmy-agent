@@ -25,6 +25,8 @@ describe("MemoryService / lifecycle / governance", () => {
       query: "secret raw user text should not be exported by default",
       answer: "secret raw assistant text should stay in raw turn only"
     });
+    first.service.closeSession(session.sessionId);
+    await first.service.runWorkerOnce(20);
     await first.service.runWorkerOnce(20);
 
     const redactedBundle = first.service.exportBundle({

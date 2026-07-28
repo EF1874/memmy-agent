@@ -5,9 +5,10 @@ export function createCapturingL2Llm(calls: Array<{
   options: { operation: string };
 }>,
   skillCrystallizeResponse?: Record<string, unknown>,
-  l2InductionResponse?: Record<string, unknown>,
+  l2InductionResponse?: Record<string, unknown> | Array<Record<string, unknown>>,
   l3AbstractionResponse?: Record<string, unknown>
 ): LlmClient {
+  let l2InductionCallIndex = 0;
   return {
     config: {
       ...DEFAULT_MEMMY_CONFIG.evolution,
@@ -26,8 +27,37 @@ export function createCapturingL2Llm(calls: Array<{
       options: { operation: string }
     ): Promise<T> {
       calls.push({ messages, options });
+      if (options.operation === "capture.reflection.batch.v13") {
+        const payload = JSON.parse(messages.find((message) => message.role === "user")?.content ?? "{}") as {
+          steps?: Array<{ idx: number }>;
+        };
+        return {
+          scores: (payload.steps ?? []).map((step) => ({
+            idx: step.idx,
+            relevance: "RELATED",
+            reason: "batch scored"
+          }))
+        } as unknown as T;
+      }
+      if (options.operation === "capture.reflected_trace_summary.v1") {
+        const payload = JSON.parse(messages.find((message) => message.role === "user")?.content ?? "{}") as {
+          traces?: Array<{ index: number; userText?: string }>;
+        };
+        return {
+          summaries: (payload.traces ?? []).map((trace) => ({
+            index: trace.index,
+            summary: trace.userText || "reflected trace summary"
+          }))
+        } as unknown as T;
+      }
       if (options.operation === "l2.induction.v3") {
-        return (l2InductionResponse ?? {
+        const configuredResponse = Array.isArray(l2InductionResponse)
+          ? l2InductionResponse[
+              Math.min(l2InductionCallIndex, Math.max(0, l2InductionResponse.length - 1))
+            ]
+          : l2InductionResponse;
+        l2InductionCallIndex += 1;
+        return (configuredResponse ?? {
           title: "Use focused pytest migration checks",
           trigger: "pytest workflow fails around sqlite migration output",
           action: "Run the focused pytest workflow, inspect migration output, then retry the exact failing test.",
@@ -161,7 +191,7 @@ export function createNoToolSkillLlm(calls: Array<{
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string }
     ): Promise<T> {
-      if (options.operation === "reward.reward.r_human.v6") {
+      if (options.operation === "reward.reward.r_human.v7") {
         calls.push({ messages, options });
         return {
           goal_achievement: 1,
