@@ -292,6 +292,12 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).not.toContain("startDesktopRuntimeServices");
   });
 
+  it("persists gtag client_id into the shared ~/.memmy analytics-client-id file", () => {
+    const mainSource = readFileSync(mainSourcePath, "utf8");
+    expect(mainSource).toContain('import { persistSharedAnalyticsClientId } from "./analytics-client-id-store.js"');
+    expect(mainSource).toContain("persistSharedAnalyticsClientId(clientId)");
+  });
+
   it("omits empty agent gateway bootstrap secrets in development runtime config", () => {
     const mainSource = readFileSync(mainSourcePath, "utf8");
     const contractsSource = readFileSync(localApiContractsPath, "utf8");
@@ -470,16 +476,18 @@ describe("desktop packaged runtime boundaries", () => {
     expect(updatePromptSource).not.toContain("CornerRadius");
   });
 
-  it("exports memory.sqlite through the desktop save dialog", () => {
+  it("exports a consistent memory.sqlite snapshot through the desktop save dialog", () => {
     const source = readFileSync(mainSourcePath, "utf8");
     const exportSource = extractFunctionSource(source, "async function exportMemoryDatabase");
 
     expect(source).toContain('ipcMain.handle("memmy:export-memory-database"');
     expect(exportSource).toContain("dialog.showSaveDialog");
-    expect(exportSource).toContain("await copyFile(sourcePath, selected.filePath)");
+    expect(exportSource).toContain("await backupSqliteDatabase(sourcePath, selected.filePath)");
+    expect(exportSource).not.toContain("await copyFile(sourcePath, selected.filePath)");
     expect(exportSource).toContain("memory-${formatExportTimestamp(new Date())}.sqlite");
     expect(exportSource).not.toContain("filters:");
     expect(exportSource).not.toContain("All Files");
+    expect(source).toContain('import { backupSqliteDatabase } from "./sqlite-backup.js"');
     expect(source).toContain('join(homedir(), ".memmy", "memory-service", "memory.sqlite")');
   });
 
@@ -839,11 +847,18 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).toContain('join(dirname(options.agentEntry), "skills")');
     expect(source).toContain('join(options.agentWorkspace, "skills")');
     expect(source).toContain("copyDirectoryContents");
-    expect(source).toContain("await preparePackagedBrowser(entries, runtimeConfig, options)");
+    expect(source).toContain(
+      "browserPreparation = startPackagedBrowserPreparation(",
+    );
+    expect(source).not.toContain("await preparePackagedBrowser(entries, runtimeConfig, options)");
     expect(source).toContain('[entries.agentEntry, "internal", "browser-prepare"]');
-    expect(source.indexOf("await preparePackagedBrowser")).toBeLessThan(
+    expect(source.indexOf("browserPreparation = startPackagedBrowserPreparation")).toBeLessThan(
       source.indexOf("await ensureMemoryService"),
     );
+    expect(source).toContain("browserPreparation?.stop()");
+    expect(source).toContain("terminateProcessTreeSync(child)");
+    expect(source).toContain('detached: process.platform !== "win32"');
+    expect(source).toContain('process.kill(-pid, "SIGKILL")');
     expect(source).toContain('join(options.logDirectory, "browser-prepare.log")');
     expect(source).toContain('ELECTRON_RUN_AS_NODE: "1"');
     expect(source).toContain("await readdir(sourceDirectory, { withFileTypes: true })");
