@@ -16,6 +16,7 @@ import { openExternalUrl } from "../utils/open-url.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { appActions } from "../state/app-actions.js";
 import { useAppState } from "../state/app-state.js";
+import { formatTokenGiftAmount } from "./token-gift.js";
 
 /** Handles welcome page. */
 export function WelcomePage() {
@@ -30,7 +31,9 @@ export function WelcomePage() {
   const [modePersistenceFeedback, setModePersistenceFeedback] = useState<{ text: string; tone: "error" | "success" } | null>(null);
   const channel = resolveDesktopAccountChannel();
   const canContinue = Boolean(identifier.trim() && code.trim());
-  const showLoginBanner = state.bootstrap?.promotions?.loginBanner ?? true;
+  const agentChatTokenTotal = state.bootstrap?.promotions?.agentChatTokenTotal;
+  const showLoginBanner =
+    (state.bootstrap?.promotions?.loginBanner ?? true) && (agentChatTokenTotal ?? 0) > 0;
 
   // Handles use effect.
   useEffect(() => {
@@ -61,7 +64,7 @@ export function WelcomePage() {
       return;
     }
 
-    track({ name: "signup_completed", params: { method: channel === "phone" ? "phone" : "email", is_new_user: session.isNewUser }, consentTier: "basic" });
+    track({ name: "signup_completed", params: { method: channel === "phone" ? "phone" : "email", is_new_user: session.isNewUser, user_mode: "account" }, consentTier: "basic" });
 
     dispatch(appActions.accountUpdated({
       email: session.profile.email ?? "",
@@ -122,7 +125,7 @@ export function WelcomePage() {
     // Definition for byok entry.
     const byokEntry = resolveByokEntry({ onboarding: state.bootstrap?.onboarding });
 
-    track({ name: "byok_started", consentTier: "basic" });
+    track({ name: "byok_started", params: { user_mode: "byok" }, consentTier: "basic" });
     setModePersistenceFeedback(null);
 
     try {
@@ -173,7 +176,9 @@ export function WelcomePage() {
                 <span className="w-6 h-6 rounded-full bg-action-sky/15 flex items-center justify-center text-action-sky shrink-0">
                   <Gift size={14} strokeWidth={2.2} />
                 </span>
-                <span className="text-sm text-text-ink/70">{t("welcome.gift")}</span>
+                <span className="text-sm text-text-ink/70">
+                  {t("welcome.gift", { count: formatTokenGiftAmount(agentChatTokenTotal) })}
+                </span>
               </button>
             )}
 

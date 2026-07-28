@@ -41,6 +41,26 @@ afterEach(async () => {
 });
 
 describe("local api", () => {
+  it("requires an explicit Memmy config path instead of using the user's home directory", async () => {
+    const previousMemmyConfig = process.env.MEMMY_CONFIG;
+    delete process.env.MEMMY_CONFIG;
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-backend-config-path-"));
+
+    try {
+      await expect(
+        createLocalBackend({
+          databasePath: join(tempDir, "app.sqlite"),
+          runtimeConfigPath: join(tempDir, "runtime.json"),
+          localToken: "test-token",
+          memoryClient: createMockMemoryClient(),
+          cloudClient: createMockCloudClient()
+        })
+      ).rejects.toThrow("memmyConfigPath or MEMMY_CONFIG is required");
+    } finally {
+      restoreOptionalEnv("MEMMY_CONFIG", previousMemmyConfig);
+    }
+  });
+
   it("reloads Memory config when the desktop backend starts", async () => {
     tempDir = mkdtempSync(join(tmpdir(), "memmy-backend-startup-reload-"));
     const baseClient = createMockMemoryClient();
@@ -59,7 +79,8 @@ describe("local api", () => {
       localToken: "test-token",
       memoryBaseUrl: "http://127.0.0.1:18960",
       memoryClient,
-      cloudClient: createMockCloudClient()
+      cloudClient: createMockCloudClient(),
+      memmyConfigPath: join(tempDir, "config.yaml")
     });
 
     expect(reloadReasons).toEqual([{ reason: "desktop_startup" }]);
@@ -76,10 +97,69 @@ describe("local api", () => {
         databasePath: join(tempDir, "app.sqlite"),
         runtimeConfigPath: join(tempDir, "runtime.json"),
         localToken: "test-token",
-        memoryClient: createMockMemoryClient()
+        memoryClient: createMockMemoryClient(),
+        memmyConfigPath: join(tempDir, "config.yaml")
       });
 
       expect(backend.runtimeConfig.baseUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+    } finally {
+      restoreOptionalEnv("MEMMY_CLOUD_URL", previousCloudUrl);
+    }
+  });
+
+  it("keeps send-code available when the installation id cannot be read", async () => {
+    const previousCloudUrl = process.env.MEMMY_CLOUD_URL;
+    let deviceId: string | undefined;
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-backend-device-id-unavailable-"));
+    const databasePath = join(tempDir, "app.sqlite");
+    const preparedStore = createAppStateStore({ databasePath });
+    preparedStore.db.exec("ALTER TABLE app_settings DROP COLUMN installation_id");
+    preparedStore.close();
+
+    integrationServer = createServer(async (request, response) => {
+      if (
+        request.method === "POST" &&
+        request.url === "/api/agentUser/sendEmailVerification"
+      ) {
+        deviceId = request.headers["x-memmy-device-id"] as string | undefined;
+        sendJson(response, { code: 0, message: "ok", data: true });
+        return;
+      }
+
+      sendJson(response, { code: 40000, message: "not found", data: null }, 404);
+    });
+    await listen(integrationServer);
+    const address = integrationServer.address();
+    if (!address || typeof address === "string") {
+      throw new Error("Mock Cloud server did not bind to a port");
+    }
+    process.env.MEMMY_CLOUD_URL = `http://127.0.0.1:${address.port}`;
+
+    try {
+      backend = await createLocalBackend({
+        databasePath,
+        runtimeConfigPath: join(tempDir, "runtime.json"),
+        localToken: "test-token",
+        memoryClient: createMockMemoryClient(),
+        memmyConfigPath: join(tempDir, "config.yaml")
+      });
+
+      const response = await fetch(`${backend.runtimeConfig.baseUrl}/api/account/send-code`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-memmy-local-token": "test-token"
+        },
+        body: JSON.stringify({
+          channel: "email",
+          email: "hello@example.com",
+          locale: "zh"
+        })
+      });
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({ ok: true, resendAfterSec: 60 });
+      expect(deviceId).toBeUndefined();
     } finally {
       restoreOptionalEnv("MEMMY_CLOUD_URL", previousCloudUrl);
     }
@@ -102,7 +182,8 @@ describe("local api", () => {
           databasePath: join(tempDir, "app.sqlite"),
           runtimeConfigPath: join(tempDir, "runtime.json"),
           localToken: "test-token",
-          cloudClient: createMockCloudClient()
+          cloudClient: createMockCloudClient(),
+          memmyConfigPath: join(tempDir, "config.yaml")
         })
       ).rejects.toThrow("MEMMY_MEMORY_LAYER_URL or a local Memmy memory SQLite source is required");
     } finally {
@@ -697,6 +778,7 @@ describe("local api", () => {
 
   it("default integrations routes proxy capabilities/authorize/list/delete to Cloud Service with machine token", async () => {
     const previousCloudUrl = process.env.MEMMY_CLOUD_URL;
+    let loginDeviceId: string | undefined;
     const requests: Array<{
       method?: string;
       url?: string;
@@ -717,6 +799,7 @@ describe("local api", () => {
       });
 
       if (request.method === "POST" && request.url === "/api/agentUser/login") {
+        loginDeviceId = request.headers["x-memmy-device-id"] as string | undefined;
         sendJson(response, {
           code: 0,
           message: "ok",
@@ -811,13 +894,15 @@ describe("local api", () => {
       throw new Error("Mock integrations server did not bind to a port");
     }
     process.env.MEMMY_CLOUD_URL = `http://127.0.0.1:${address.port}`;
+    const memmyConfigPath = join(tempDir, "config.yaml");
 
     try {
       backend = await createLocalBackend({
         databasePath: join(tempDir, "app.sqlite"),
         runtimeConfigPath: join(tempDir, "runtime.json"),
         localToken: "test-token",
-        memoryClient: createMockMemoryClient()
+        memoryClient: createMockMemoryClient(),
+        memmyConfigPath
       });
 
       const loginResponse = await fetch(`${backend.runtimeConfig.baseUrl}/api/account/verify-code`, {
@@ -859,6 +944,12 @@ describe("local api", () => {
       });
 
       expect(loginResponse.status).toBe(200);
+      expect(readFileSync(memmyConfigPath, "utf8")).toContain(
+        "https://cloud.test.invalid/api/agentExternal/v1"
+      );
+      expect(loginDeviceId).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+      );
       expect(capabilitiesResponse.status).toBe(200);
       await expect(capabilitiesResponse.json()).resolves.toEqual({ toolkits: ["airtable"] });
       expect(response.status).toBe(200);

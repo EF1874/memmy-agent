@@ -1,4 +1,4 @@
-import { createLocalBackend, loadCloudServiceEnv, sendGa4Events, resolveGa4Config, type BootstrapScenario, type LocalBackend } from "@memmy/backend";
+import { createLocalBackend, loadCloudServiceEnv, trackAnalyticsEvent, type BootstrapScenario, type LocalBackend } from "@memmy/backend";
 import { resolveCloudServiceBaseUrl } from "@memmy/local-api-contracts";
 import type {
   DesktopAppInfo,
@@ -86,6 +86,7 @@ import {
   setLogLevel as applyAndPersistLogLevel,
   type LogLevel
 } from "./logger.js";
+import { persistSharedAnalyticsClientId } from "./analytics-client-id-store.js";
 import { backupSqliteDatabase } from "./sqlite-backup.js";
 
 let mainWindow: BrowserWindow | null = null;
@@ -118,6 +119,7 @@ let areIpcHandlersRegistered = false;
 let isBootReady = false;
 let analyticsClientId: string | null = null;
 let analyticsAppEnv: "dev" | "prod" | null = null;
+let analyticsAppEdition: "cn" | "intl" | null = null;
 let requiredUpdateBackgroundFirstCheckTimer: ReturnType<typeof setTimeout> | null = null;
 let requiredUpdateBackgroundCheckTimer: ReturnType<typeof setTimeout> | null = null;
 let isRequiredUpdateBackgroundCheckRunning = false;
@@ -283,6 +285,7 @@ async function stopPackagedRendererServer(): Promise<void> {
  */
 async function boot(): Promise<void> {
   try {
+    process.env.MEMMY_APP_EDITION = resolveCurrentDesktopEdition();
     initLogger();
     forceLightWindowChrome();
     await writePackagedStartupLog("boot:start");
@@ -4392,24 +4395,37 @@ function handleAnalyticsClientId(_event: IpcMainEvent, payload: unknown): void {
     return;
   }
 
-  const { clientId, appEnv } = payload as { clientId?: unknown; appEnv?: unknown };
+  const { clientId, appEnv, appEdition } = payload as {
+    clientId?: unknown;
+    appEnv?: unknown;
+    appEdition?: unknown;
+  };
   if (typeof clientId === "string" && clientId) {
     analyticsClientId = clientId;
+    // gtag is the source of truth: always overwrite so CLI picks up reinstall/new IDs.
+    try {
+      const path = persistSharedAnalyticsClientId(clientId);
+      console.log("[analytics] shared client_id persisted:", path);
+    } catch (error) {
+      console.warn("[analytics] failed to persist shared client_id:", error);
+    }
   }
   if (appEnv === "dev" || appEnv === "prod") {
     analyticsAppEnv = appEnv;
   }
+  if (appEdition === "cn" || appEdition === "intl") {
+    analyticsAppEdition = appEdition;
+  }
 }
 
 async function sendAppExitEvent(): Promise<void> {
-  const config = resolveGa4Config();
-  if (!config || !analyticsClientId) return;
+  if (!analyticsClientId) return;
   try {
-    await sendGa4Events({
-      config,
+    await trackAnalyticsEvent({
+      eventName: "app_exit",
       clientId: analyticsClientId,
       appEnv: analyticsAppEnv ?? undefined,
-      events: [{ name: "app_exit" }]
+      appEdition: analyticsAppEdition ?? resolveCurrentDesktopEdition(),
     });
     console.log("[analytics] app_exit sent");
   } catch (error) {

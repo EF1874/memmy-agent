@@ -102,13 +102,25 @@ export const PrivacySettingsDtoSchema = z.object({
 });
 export type PrivacySettingsDto = z.infer<typeof PrivacySettingsDtoSchema>;
 
+export const TokenUsageSceneSchema = z.enum(["agent_chat", "memory_summary", "memory_evolution"]);
+export type TokenUsageScene = z.infer<typeof TokenUsageSceneSchema>;
+
+export const TokenSceneUsageDtoSchema = z.object({
+    scene: TokenUsageSceneSchema,
+    totalTokens: z.number().int().nonnegative(),
+    usedTokens: z.number().int().nonnegative(),
+    remainingTokens: z.number().int()
+});
+export type TokenSceneUsageDto = z.infer<typeof TokenSceneUsageDtoSchema>;
+
 export const TokenUsageDtoSchema = z.object({
     planName: z.string(),
     totalTokens: z.number().int().nonnegative(),
     usedTokens: z.number().int().nonnegative(),
-    remainingTokens: z.number().int().nonnegative(),
+    remainingTokens: z.number().int(),
     expiresAt: z.string().datetime().nullable(),
-    lastSyncedAt: z.string().datetime().nullable()
+    lastSyncedAt: z.string().datetime().nullable(),
+    sceneUsages: z.array(TokenSceneUsageDtoSchema).default([])
 });
 export type TokenUsageDto = z.infer<typeof TokenUsageDtoSchema>;
 
@@ -312,6 +324,21 @@ export const AgentSourceIdParamsSchema = z.object({
 });
 export type AgentSourceIdParams = z.infer<typeof AgentSourceIdParamsSchema>;
 
+/** Schema for agent source plugin install trigger. */
+export const AgentSourcePluginInstallTypeSchema = z.enum([
+    "manual",
+    "onboarding",
+    "auto_inject",
+    "conflict_replace"
+]);
+export type AgentSourcePluginInstallType = z.infer<typeof AgentSourcePluginInstallTypeSchema>;
+
+/** Schema for agent source plugin action input. */
+export const AgentSourcePluginActionInputSchema = z.object({
+    installType: AgentSourcePluginInstallTypeSchema.optional()
+});
+export type AgentSourcePluginActionInput = z.infer<typeof AgentSourcePluginActionInputSchema>;
+
 /** Schema for agent source scan mode. */
 export const AgentSourceScanModeSchema = z.enum(["initial_subset", "incremental", "full"]);
 export type AgentSourceScanMode = z.infer<typeof AgentSourceScanModeSchema>;
@@ -487,7 +514,8 @@ export type LegalAgreementUrls = z.infer<typeof LegalAgreementUrlsSchema>;
 export const PromotionFlagsSchema = z.object({
     loginBanner: z.boolean(),
     improvementGift: z.boolean(),
-    applyMore: z.boolean()
+    applyMore: z.boolean(),
+    agentChatTokenTotal: z.number().int().nonnegative()
 });
 export type PromotionFlags = z.infer<typeof PromotionFlagsSchema>;
 

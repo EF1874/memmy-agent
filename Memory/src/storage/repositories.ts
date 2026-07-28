@@ -2225,13 +2225,7 @@ export class RuntimeRepository {
                    )
                    AND (
                      memory_processing_state.state IN ('embedding_pending', 'embedding')
-                     OR (
-                       memory_processing_state.state IN ('summary_pending', 'summarizing')
-                       AND json_extract(
-                         memories.properties_json,
-                         '$.internal_info.trace.summary_deferred_until_reflection'
-                       ) = 1
-                     )
+                   OR memory_processing_state.state IN ('summary_pending', 'summarizing')
                    )
                )
              )

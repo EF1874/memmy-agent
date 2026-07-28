@@ -16,13 +16,13 @@ Available as a desktop app, CLI, and API. You can use the same long
 
 ## 🚀 Get Started with Memmy
 
-Get Memmy from [Official Website](https://memmy.bot/) and [GitHub](https://github.com/MemTensor/memmy-agent/releases).
+Get Memmy from [Official Website](https://memmy.bot/) or [GitHub Release](https://github.com/MemTensor/memmy-agent/releases).
 
 Sign up to get free tokens. Model routing is automatic — start exploring the full Memory + Agent Runtime with zero config.
 
 > **Trial credits:**
 
-- **Registration grants 30,000,000 tokens; you can check your remaining balance and usage inside the app.**
+- **Registration grants Agent task trial tokens; the current amount and usage are shown in the app.**
 
 Once the trial credits run out, you can switch to BYOK and use your own model API.
 
@@ -74,7 +74,7 @@ After installing Memmy, it can automatically scan the history of your�
 
 Now supported: Cursor, Claude Code, Codex, OpenCode, OpenClaw, Hermes Agent.
 
-See the full support list → link to docs/import-agent-memory.md
+[See the full support list](https://memmy.bot/docs/memory/sources)
 
 ## One Agent Runtime, Multiple Entry Points
 
@@ -87,12 +87,9 @@ Memmy is not just a chat interface — it is an AI Agent Runtime t
 | 🔌 Integration Layer | Connect external ecosystems        | Messaging channels, third-party tools, OpenAI-compatible API                      |
 | 🖥️ User Interface  | Provide entry points               | Desktop App, CLI/TUI, Web API                                                     |
 
-### Repository Structure
-
-Memmy uses an npm workspaces monorepo architecture:
+### Repository Architecture
 
 ![Memmy System Architecture](docs/assets/memmy-architecture-en.png)
-
 
 ## Memmy vs. Personal AI Agents
 
@@ -123,7 +120,7 @@ Compared with "personal AI Agents" like Hermes and OpenClaw, what sets
 3. Enter the main workbench and send your first task.
 4. Open "Tools" to connect messaging channels or third-party tools; open "Memory" to scan Agent history sources.
 
-> **Account mode free credits**: signing in grants **30,000,000 (30 million) trial tokens**, so you can get running without your own API Key. You can check used / total / remaining amounts and the expiry date anytime in the app. Once used up or expired, switch to API Key (BYOK) mode and continue with your own quota.
+> **Account mode free credits**: signing in grants Agent task trial tokens, so you can get running without your own API Key. The current amount and usage are shown in the app. Once used up or expired, switch to API Key (BYOK) mode and continue with your own quota.
 
 ### Option 2: `memmy` CLI (Agent Runtime)
 
@@ -165,14 +162,14 @@ memmy-memory add "a piece of knowledge worth saving"
 memmy-memory get <id>
 ```
 
-Connects to `http://127.0.0.1:18960\` by default; use `--url`, `--token`, `--config`, `--source`, and `--user-id` to specify the target service, authentication, source, and user namespace.
+Connects to `http://127.0.0.1:18960` by default; use `--url`, `--token`, `--config`, `--source`, and `--user-id` to specify the target service, authentication, source, and user namespace.
 
 ## Core Concepts
 
 - **Workspace** — the Agent's working directory, default `~/.memmy/workspace`; syncs templates, built-in skills, and memory files.
 - **Config** — the main configuration, default `~/.memmy/config.yaml` (overridable via `MEMMY_CONFIG` / `--config`), covering models, providers, tools, MCP, gateway, Memory, and workspace settings.
 - **Agent Runtime** — the core of task execution: model calls, message loop, tool registration, MCP, sessions, long tasks, skill loading, auto-compaction, and memory hooks.
-- **Memory Service** — the local-first memory foundation, default `http://127.0.0.1:18960\`, providing session, turn, search, write, panel, and analytics APIs; every entry point reads and writes the same memory, so tasks and context carry over across Agents.
+- **Memory Service** — the local-first memory foundation, default `http://127.0.0.1:18960`, providing session, turn, search, write, panel, and analytics APIs; every entry point reads and writes the same memory, so tasks and context carry over across Agents.
 - **Local Backend** — the backend for the desktop local API (Fastify + SQLite app state), handling accounts, configuration, integrations, source scanning, and Skill writing.
 - **Agent Source** — an adapter that collects historical context from external Agents; each source has history-reading logic and an optional Skill install target.
 

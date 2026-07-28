@@ -1101,7 +1101,6 @@ export class SessionTurnService {
               usable: step.reflection.usable,
               reflection_source: step.reflection.source,
               summary: "",
-              summary_deferred_until_reflection: true,
               tags: step.tags,
               value: step.value,
               priority: step.priority,
@@ -1144,6 +1143,19 @@ export class SessionTurnService {
             failedAt: null,
             updatedAt: at
           });
+          jobs.push(this.deps.enqueueJob({
+            jobType: "trace_summary",
+            userId: session.userId,
+            sessionId: session.id,
+            episodeId: episode.id,
+            targetMemoryId: upsert.memory.id,
+            payload: {
+              source: "turn.complete.capture",
+              contentHash: upsert.memory.contentHash
+            },
+            maxAttempts: 3,
+            createdAt: at
+          }));
         }
       }
       for (const artifact of requestArtifacts) {
