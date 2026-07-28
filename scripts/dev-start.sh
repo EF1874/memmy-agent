@@ -65,6 +65,7 @@ ensure_npm_dependencies() {
   local -a required_packages=(
     "concurrently"
     "wait-on"
+    "@types/proper-lockfile/index.d.ts"
     "electron-log/main"
     "electron-log/renderer"
     "@xyflow/react"
