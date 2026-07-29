@@ -640,7 +640,6 @@ function showPackagedStartupError(error: unknown): void {
 async function startLocalApi(services: PackagedRuntimeServices | null): Promise<DesktopRuntimeConfig> {
   const databasePath = join(app.getPath("userData"), "app.sqlite");
   let memoryControl: { baseUrl: string; token: string };
-  let agentWorkspace: string;
   if (services) {
     process.env.MEMMY_CONFIG ??= services.memory.configPath;
     process.env.MEMMY_MEMORY_LAYER_URL = services.memory.baseUrl;
@@ -650,7 +649,6 @@ async function startLocalApi(services: PackagedRuntimeServices | null): Promise<
       baseUrl: services.memory.baseUrl,
       token: services.memory.token
     };
-    agentWorkspace = services.agentGateway.workspace;
   } else {
     const memoryRuntime = await preparePackagedRuntimeConfig({
       ensureDirectories: false,
@@ -666,7 +664,6 @@ async function startLocalApi(services: PackagedRuntimeServices | null): Promise<
       baseUrl: memoryRuntime.memoryBaseUrl,
       token: memoryRuntime.memoryToken
     };
-    agentWorkspace = memoryRuntime.agentWorkspace;
   }
   memoryServiceControl = memoryControl;
   const desktopInstallFingerprint = app.isPackaged ? await resolveDesktopInstallFingerprint() : undefined;
@@ -677,7 +674,6 @@ async function startLocalApi(services: PackagedRuntimeServices | null): Promise<
     bootstrapScenario: getBootstrapScenario(),
     desktopInstallFingerprint,
     memmyConfigPath: process.env.MEMMY_CONFIG,
-    agentWorkspace,
     memoryBaseUrl: memoryControl.baseUrl,
     runtimeConfigPath: process.env.MEMMY_HOME ? join(process.env.MEMMY_HOME, "runtime.json") : undefined
   });

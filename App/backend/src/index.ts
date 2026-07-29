@@ -1,6 +1,5 @@
 /** Src module. */
 import { RuntimeConfigSchema, type AppSettingsDto, type LastLaunchMode, type RuntimeConfig } from "@memmy/local-api-contracts";
-import { runMigrations } from "@memmy/migrations";
 import { randomBytes } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { createDefaultAgentAdapterRegistry, type AgentAdapterRegistry } from "./adapters/outbound/agent-adapter/index.js";
@@ -51,8 +50,6 @@ export interface CreateLocalBackendOptions {
   runtimeConfigPath?: string;
   /** Memmy config path. Required unless MEMMY_CONFIG is set. */
   memmyConfigPath?: string;
-  /** Resolved Agent workspace paired with memmyConfigPath. */
-  agentWorkspace: string;
   /** Memory service address exposed to desktop and browser-debug clients. */
   memoryBaseUrl?: string;
   /** Desktop install fingerprint. */
@@ -78,18 +75,6 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
   if (!memmyConfigPath) {
     throw new Error("memmyConfigPath or MEMMY_CONFIG is required");
   }
-  await runMigrations({
-    targets: {
-      agentWorkspace: options.agentWorkspace,
-      runtimeConfigFile: memmyConfigPath
-    },
-    logger: {
-      info: (event, fields) => console.info(`[migration] ${event}`, fields ?? {}),
-      warn: (event, fields) => console.warn(`[migration] ${event}`, fields ?? {}),
-      error: (event, fields) => console.error(`[migration] ${event}`, fields ?? {})
-    }
-  });
-
   const appStateStore = createAppStateStore({ databasePath: options.databasePath });
   let server: Awaited<ReturnType<typeof createLocalApiServer>> | null = null;
   let autoScan: AgentSourceAutoScanService | null = null;

@@ -4,12 +4,14 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import YAML from "yaml";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AgentGatewaySupervisor,
   preparePackagedBrowser,
   preparePackagedRuntimeConfig,
+  runPackagedMigrationCommand,
   restartExternalMemoryService,
   spawnNodeService,
   startPackagedBrowserPreparation,
@@ -47,11 +49,108 @@ describe("packaged desktop runtime config", () => {
   afterEach(async () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+    delete process.env.MEMMY_MIGRATIONS_READY_CONFIG;
+    delete process.env.MEMMY_MIGRATIONS_READY_WORKSPACE;
     await Promise.all(testServers.splice(0).map((server) => new Promise<void>((resolveClose) => {
       server.close(() => resolveClose());
       server.closeAllConnections();
     })));
     await Promise.all(tempRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  });
+
+  it("runs packaged migrations through the Agent CLI with exact targets", async () => {
+    const root = await makeTempRoot();
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const child = Object.assign(new EventEmitter(), {
+      stdout,
+      stderr,
+      exitCode: null,
+      signalCode: null,
+      kill: vi.fn()
+    }) as unknown as ChildProcess;
+    const spawnProcess = vi.fn(() => {
+      queueMicrotask(() => child.emit("close", 0, null));
+      return child;
+    });
+    process.env.MEMMY_MIGRATIONS_READY_CONFIG = "/stale/config.yaml";
+    process.env.MEMMY_MIGRATIONS_READY_WORKSPACE = "/stale/workspace";
+
+    await runPackagedMigrationCommand({
+      agentEntry: "/runtime/memmy-agent/dist/main.js",
+      configPath: join(root, "config.yaml"),
+      agentWorkspace: join(root, "workspace"),
+      logDirectory: root,
+      logLevel: "info",
+      spawnProcess: spawnProcess as typeof import("node:child_process").spawn
+    });
+    expect(spawnProcess).toHaveBeenCalledWith(
+      process.execPath,
+      [
+        "/runtime/memmy-agent/dist/main.js",
+        "migrate",
+        "--config",
+        join(root, "config.yaml"),
+        "--workspace",
+        join(root, "workspace")
+      ],
+      expect.objectContaining({
+        env: expect.objectContaining({
+          ELECTRON_RUN_AS_NODE: "1",
+          MEMMY_LOG_LEVEL: "info"
+        }),
+        stdio: ["ignore", "pipe", "pipe"],
+        shell: false
+      })
+    );
+    const spawnedEnv = spawnProcess.mock.calls[0]?.[2]?.env;
+    expect(spawnedEnv).not.toHaveProperty("MEMMY_MIGRATIONS_READY_CONFIG");
+    expect(spawnedEnv).not.toHaveProperty("MEMMY_MIGRATIONS_READY_WORKSPACE");
+  });
+
+  it("rejects when the packaged migration command exits unsuccessfully", async () => {
+    const root = await makeTempRoot();
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      exitCode: null,
+      signalCode: null,
+      kill: vi.fn()
+    }) as unknown as ChildProcess;
+
+    const promise = runPackagedMigrationCommand({
+      agentEntry: "/runtime/memmy-agent/dist/main.js",
+      configPath: join(root, "config.yaml"),
+      agentWorkspace: join(root, "workspace"),
+      logDirectory: root,
+      logLevel: "info",
+      spawnProcess: (() => child) as typeof import("node:child_process").spawn
+    });
+    queueMicrotask(() => child.emit("close", 1, null));
+
+    await expect(promise).rejects.toThrow("Migration command exited with code 1");
+  });
+
+  it("terminates a packaged migration command that exceeds startup timeout", async () => {
+    const root = await makeTempRoot();
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      exitCode: null,
+      signalCode: null,
+      kill: vi.fn()
+    }) as unknown as ChildProcess;
+
+    await expect(runPackagedMigrationCommand({
+      agentEntry: "/runtime/memmy-agent/dist/main.js",
+      configPath: join(root, "config.yaml"),
+      agentWorkspace: join(root, "workspace"),
+      logDirectory: root,
+      logLevel: "info",
+      timeoutMs: 5,
+      spawnProcess: (() => child) as typeof import("node:child_process").spawn
+    })).rejects.toThrow("Migration command timed out after 5ms");
+    expect(child.kill).toHaveBeenCalledWith("SIGKILL");
   });
 
   it("requests a supervised Memory shutdown and waits for the replacement service", async () => {
@@ -706,6 +805,8 @@ describe("AgentGatewaySupervisor", () => {
     expect(harness.spawn).toHaveBeenCalledTimes(2);
     expect(harness.spawn.mock.calls[1]?.[3]).toMatchObject({
       MEMMY_DESKTOP_MANAGED_GATEWAY: "1",
+      MEMMY_MIGRATIONS_READY_CONFIG: "/memmy/config.yaml",
+      MEMMY_MIGRATIONS_READY_WORKSPACE: "/memmy/workspace",
       MEMMY_BROWSER_PREPARATION_ATTEMPT_ID: "test-browser-attempt",
       MEMMY_AGENT_RESTART_NOTIFY_CHANNEL: "websocket",
       MEMMY_AGENT_RESTART_NOTIFY_CHAT_ID: "chat-1",

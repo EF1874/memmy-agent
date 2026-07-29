@@ -51,7 +51,6 @@ describe("local api", () => {
         createLocalBackend({
           databasePath: join(tempDir, "app.sqlite"),
           runtimeConfigPath: join(tempDir, "runtime.json"),
-          agentWorkspace: tempDir,
           localToken: "test-token",
           memoryClient: createMockMemoryClient(),
           cloudClient: createMockCloudClient()
@@ -77,7 +76,6 @@ describe("local api", () => {
     backend = await createLocalBackend({
       databasePath: join(tempDir, "app.sqlite"),
       runtimeConfigPath: join(tempDir, "runtime.json"),
-      agentWorkspace: tempDir,
       localToken: "test-token",
       memoryBaseUrl: "http://127.0.0.1:18960",
       memoryClient,
@@ -98,7 +96,6 @@ describe("local api", () => {
       backend = await createLocalBackend({
         databasePath: join(tempDir, "app.sqlite"),
         runtimeConfigPath: join(tempDir, "runtime.json"),
-        agentWorkspace: tempDir,
         localToken: "test-token",
         memoryClient: createMockMemoryClient(),
         memmyConfigPath: join(tempDir, "config.yaml")
@@ -142,7 +139,6 @@ describe("local api", () => {
       backend = await createLocalBackend({
         databasePath,
         runtimeConfigPath: join(tempDir, "runtime.json"),
-        agentWorkspace: tempDir,
         localToken: "test-token",
         memoryClient: createMockMemoryClient(),
         memmyConfigPath: join(tempDir, "config.yaml")
@@ -185,7 +181,6 @@ describe("local api", () => {
         createLocalBackend({
           databasePath: join(tempDir, "app.sqlite"),
           runtimeConfigPath: join(tempDir, "runtime.json"),
-          agentWorkspace: tempDir,
           localToken: "test-token",
           cloudClient: createMockCloudClient(),
           memmyConfigPath: join(tempDir, "config.yaml")
@@ -318,7 +313,6 @@ describe("local api", () => {
     backend = await createLocalBackend({
       databasePath,
       runtimeConfigPath: join(tempDir, "runtime.json"),
-      agentWorkspace: tempDir,
       localToken: "test-token",
       memoryClient: createMockMemoryClient(),
       cloudClient: createMockCloudClient(),
@@ -365,7 +359,6 @@ describe("local api", () => {
       backend = await createLocalBackend({
         databasePath: join(tempDir, "app.sqlite"),
         runtimeConfigPath: join(tempDir, "runtime.json"),
-        agentWorkspace: tempDir,
         localToken: "test-token",
         memoryClient: createMockMemoryClient(),
         cloudClient: createMockCloudClient()
@@ -781,7 +774,6 @@ describe("local api", () => {
     backend = await createLocalBackend({
       databasePath,
       runtimeConfigPath: join(tempDir, "runtime.json"),
-      agentWorkspace: tempDir,
       localToken: "test-token",
       memoryClient: createMockMemoryClient(),
       cloudClient,
@@ -945,7 +937,6 @@ describe("local api", () => {
       backend = await createLocalBackend({
         databasePath: join(tempDir, "app.sqlite"),
         runtimeConfigPath: join(tempDir, "runtime.json"),
-        agentWorkspace: tempDir,
         localToken: "test-token",
         memoryClient: createMockMemoryClient(),
         memmyConfigPath
@@ -1087,7 +1078,6 @@ async function createTempBackend(
   return createLocalBackend({
     databasePath: join(tempDir, "app.sqlite"),
     runtimeConfigPath: join(tempDir, "runtime.json"),
-    agentWorkspace: tempDir,
     localToken: "test-token",
     heartbeatIntervalMs: options.heartbeatIntervalMs,
     memoryClient: options.memoryClient ?? createMockMemoryClient(),

@@ -1,8 +1,7 @@
-import { runMigrations } from "@memmy/migrations";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import YAML from "yaml";
@@ -101,6 +100,8 @@ const AGENT_GATEWAY_STABLE_MS = 30_000;
 const DESKTOP_MANAGED_GATEWAY_ENV = "MEMMY_DESKTOP_MANAGED_GATEWAY";
 const BROWSER_PREPARATION_ATTEMPT_ID_ENV = "MEMMY_BROWSER_PREPARATION_ATTEMPT_ID";
 const MANAGED_RESTART_IPC_TYPE = "memmy-agent:restart";
+const MIGRATIONS_READY_CONFIG_ENV = "MEMMY_MIGRATIONS_READY_CONFIG";
+const MIGRATIONS_READY_WORKSPACE_ENV = "MEMMY_MIGRATIONS_READY_WORKSPACE";
 
 interface DesktopManagedRestartNotice {
   type: typeof MANAGED_RESTART_IPC_TYPE;
@@ -117,18 +118,16 @@ export async function startPackagedRuntimeServices(
 ): Promise<PackagedRuntimeServices> {
   const entries = resolveRuntimeEntryPaths(options);
   const migrationTargets = await resolvePackagedRuntimeMigrationTargets();
-  await runMigrations({
-    targets: {
-      agentWorkspace: migrationTargets.agentWorkspace,
-      runtimeConfigFile: migrationTargets.configPath
-    },
-    logger: {
-      info: (event, fields) => console.info(`[migration] ${event}`, fields ?? {}),
-      warn: (event, fields) => console.warn(`[migration] ${event}`, fields ?? {}),
-      error: (event, fields) => console.error(`[migration] ${event}`, fields ?? {})
-    }
+  await runPackagedMigrationCommand({
+    agentEntry: entries.agentEntry,
+    configPath: migrationTargets.configPath,
+    agentWorkspace: migrationTargets.agentWorkspace,
+    logDirectory: options.logDirectory,
+    logLevel: options.logLevel
   });
   const runtimeConfig = await preparePackagedRuntimeConfig();
+  runtimeConfig.configPath = migrationTargets.configPath;
+  runtimeConfig.agentWorkspace = migrationTargets.agentWorkspace;
   const browserPreparationAttemptId = randomUUID();
   const children: ManagedChild[] = [];
   const gatewaySupervisor = new AgentGatewaySupervisor(
@@ -334,7 +333,93 @@ export async function resolvePackagedRuntimeMigrationTargets(
     env.MEMMY_AGENT_WORKSPACE ?? configuredWorkspace ?? defaultWorkspace
   );
   await mkdir(agentWorkspace, { recursive: true });
-  return { configPath, agentWorkspace };
+  return { configPath, agentWorkspace: await realpath(agentWorkspace) };
+}
+
+export async function runPackagedMigrationCommand(options: {
+  agentEntry: string;
+  configPath: string;
+  agentWorkspace: string;
+  logDirectory: string;
+  logLevel: LogLevel;
+  spawnProcess?: typeof spawn;
+  timeoutMs?: number;
+}): Promise<void> {
+  const logWriter = createRotatingWriter({
+    filePath: join(options.logDirectory, "migration.log"),
+    maxSize: DAEMON_LOG_MAX_SIZE,
+    maxFiles: DAEMON_LOG_MAX_FILES
+  });
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    ELECTRON_RUN_AS_NODE: "1",
+    NODE_ENV: process.env.NODE_ENV ?? "production",
+    MEMMY_LOG_LEVEL: options.logLevel
+  };
+  delete env[MIGRATIONS_READY_CONFIG_ENV];
+  delete env[MIGRATIONS_READY_WORKSPACE_ENV];
+
+  let child: ChildProcess;
+  try {
+    child = (options.spawnProcess ?? spawn)(
+      process.execPath,
+      [
+        options.agentEntry,
+        "migrate",
+        "--config",
+        options.configPath,
+        "--workspace",
+        options.agentWorkspace
+      ],
+      {
+        env,
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: process.platform !== "win32",
+        windowsHide: true,
+        shell: false
+      }
+    );
+  } catch (error) {
+    logWriter.close();
+    throw new Error(`Migration command failed to start: ${String(error)}`);
+  }
+
+  child.stdout?.setEncoding("utf8");
+  child.stderr?.setEncoding("utf8");
+  child.stdout?.on("data", (chunk) => logWriter.write(String(chunk)));
+  child.stderr?.on("data", (chunk) => logWriter.write(String(chunk)));
+
+  try {
+    await new Promise<void>((resolveCommand, rejectCommand) => {
+      let settled = false;
+      const finish = (error?: Error): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        if (error) rejectCommand(error);
+        else resolveCommand();
+      };
+      const timeout = setTimeout(() => {
+        terminateProcessTreeSync(child);
+        finish(new Error(`Migration command timed out after ${options.timeoutMs ?? STARTUP_TIMEOUT_MS}ms`));
+      }, options.timeoutMs ?? STARTUP_TIMEOUT_MS);
+      timeout.unref?.();
+      child.once("error", (error) => finish(
+        new Error(`Migration command failed: ${error.message}`)
+      ));
+      child.once("close", (code, signal) => {
+        if (code === 0) {
+          finish();
+          return;
+        }
+        finish(new Error(
+          `Migration command exited with ${signal ? `signal ${signal}` : `code ${code ?? "unknown"}`}`
+        ));
+      });
+    });
+  } finally {
+    logWriter.close();
+  }
 }
 
 export async function resolveAgentGatewayRuntimeConfig(): Promise<{
@@ -784,6 +869,8 @@ export class AgentGatewaySupervisor {
       MEMMY_MEMORY_TOKEN: this.runtimeConfig.memoryToken,
       MEMORY_SERVICE_URL: this.runtimeConfig.memoryBaseUrl,
       MEMORY_SERVICE_TOKEN: this.runtimeConfig.memoryToken,
+      [MIGRATIONS_READY_CONFIG_ENV]: this.runtimeConfig.configPath,
+      [MIGRATIONS_READY_WORKSPACE_ENV]: this.runtimeConfig.agentWorkspace,
       [DESKTOP_MANAGED_GATEWAY_ENV]: "1",
       ...(this.browserPreparationAttemptId
         ? { [BROWSER_PREPARATION_ATTEMPT_ID_ENV]: this.browserPreparationAttemptId }

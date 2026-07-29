@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { runMigrations, withRuntimeConfigWriteLock } from "@memmy/migrations";
+import { withRuntimeConfigWriteLock } from "@memmy/migrations";
 import fs from "node:fs";
 import http from "node:http";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -74,6 +74,7 @@ import {
   validateModelCatalogForSave,
 } from "./onboard.js";
 import { StreamRenderer, ThinkingSpinner } from "./stream.js";
+import { prepareStartupMigrations } from "./startup-migrations.js";
 
 export const app = new Command("memmy");
 
@@ -169,60 +170,6 @@ export function loadRuntimeConfig(config?: string | null, workspace?: string | n
   warnDeprecatedConfigKeys(configPath ?? getConfigPath());
   if (workspace) loaded.agents.defaults.workspace = workspace;
   return loaded;
-}
-
-const migrationLogger = {
-  info: (event: string, fields?: Record<string, string | number>) =>
-    console.info(`[migration] ${event}`, fields ?? {}),
-  warn: (event: string, fields?: Record<string, string | number>) =>
-    console.warn(`[migration] ${event}`, fields ?? {}),
-  error: (event: string, fields?: Record<string, string | number>) =>
-    console.error(`[migration] ${event}`, fields ?? {}),
-};
-
-function configuredWorkspaceForMigration(configPath: string): string | null {
-  if (!fs.existsSync(configPath)) return null;
-  try {
-    const parsed = YAML.parse(fs.readFileSync(configPath, "utf8"));
-    const configured = parsed?.agents?.defaults?.workspace;
-    return typeof configured === "string" && configured.trim() ? configured : null;
-  } catch {
-    // The runtime-config migration reports malformed YAML with a stable migration error.
-    return null;
-  }
-}
-
-export function resolveCliMigrationTargets(
-  config?: string | null,
-  workspace?: string | null,
-): { runtimeConfigFile: string; agentWorkspace: string } {
-  const runtimeConfigFile = config
-    ? path.resolve(config.replace(/^~(?=$|\/)/, process.env.HOME ?? "~"))
-    : path.resolve(getConfigPath());
-  if (config) setConfigPath(runtimeConfigFile);
-  const workspacePath = getWorkspacePath(
-    workspace ?? configuredWorkspaceForMigration(runtimeConfigFile),
-  );
-  return {
-    runtimeConfigFile,
-    agentWorkspace: fs.realpathSync(workspacePath),
-  };
-}
-
-export async function loadMigratedRuntimeConfig(
-  config?: string | null,
-  workspace?: string | null,
-): Promise<Config> {
-  if (config) {
-    const configPath = path.resolve(config.replace(/^~(?=$|\/)/, process.env.HOME ?? "~"));
-    if (!fs.existsSync(configPath)) throw new Error(`Config file not found: ${configPath}`);
-  }
-  const targets = resolveCliMigrationTargets(config, workspace);
-  await runMigrations({
-    targets,
-    logger: migrationLogger,
-  });
-  return loadRuntimeConfig(config, workspace);
 }
 
 export function mergeMissingDefaults(existing: any, defaults: any): any {
@@ -458,7 +405,7 @@ export async function runRootInteractiveAgent({
   project?: string | null;
 } = {}): Promise<unknown> {
   if (rootInteractiveRunnerForTest) return rootInteractiveRunnerForTest();
-  const loaded = await loadMigratedRuntimeConfig(null, null);
+  const loaded = loadRuntimeConfig(null, null);
   syncRuntimeWorkspaceTemplates(loaded);
   const loop = AgentLoop.fromConfig(loaded);
   const target = resolveTerminalTarget(loop, { sessionId, standalone, project });
@@ -527,9 +474,30 @@ export async function main(argv: string[] = process.argv): Promise<void> {
   }
   const rootTarget = rootTerminalOptions(argv);
   if (rootTarget) {
+    await prepareStartupMigrations();
     await runRootInteractiveAgent(rootTarget);
     return;
   }
+
+  app.hook("preAction", async (_command, actionCommand) => {
+    const opts = actionCommand.optsWithGlobals() as {
+      config?: string;
+      workspace?: string;
+    };
+    await prepareStartupMigrations(
+      { config: opts.config, workspace: opts.workspace },
+      process.env,
+      { force: actionCommand.name() === "migrate" },
+    );
+  });
+
+  app
+    .command("migrate", { hidden: true })
+    .option("-w, --workspace <dir>", "Workspace directory")
+    .option("-c, --config <path>", "Path to config file")
+    .action(() => {
+      console.log("Migrations ready.");
+    });
 
   app
     .command("onboard")
@@ -680,10 +648,6 @@ export async function onboard({
     ? path.resolve(config.replace(/^~(?=$|\/)/, process.env.HOME ?? "~"))
     : getConfigPath();
   if (config) setConfigPath(configPath);
-  if (fs.existsSync(configPath)) {
-    const targets = resolveCliMigrationTargets(configPath, workspace);
-    await runMigrations({ targets, logger: migrationLogger });
-  }
   let loaded: Config;
   if (fs.existsSync(configPath)) {
     if (wizard) {
@@ -821,7 +785,7 @@ export async function serve({
   config?: string | null;
   verbose?: boolean;
 } = {}): Promise<http.Server> {
-  const loaded = await loadMigratedRuntimeConfig(config, workspace);
+  const loaded = loadRuntimeConfig(config, workspace);
   syncRuntimeWorkspaceTemplates(loaded);
   setCliRuntimeLogs(Boolean(verbose));
   const loop = AgentLoop.fromConfig(loaded);
@@ -1034,7 +998,7 @@ export async function gateway({
   config?: string | null;
   verbose?: boolean;
 } = {}): Promise<GatewayRuntime> {
-  const loaded = await loadMigratedRuntimeConfig(config, workspace);
+  const loaded = loadRuntimeConfig(config, workspace);
   const workspacePath = syncRuntimeWorkspaceTemplates(loaded);
   setCliRuntimeLogs(Boolean(verbose));
   // Gateway daemon mode: filter console output by the MEMMY_LOG_LEVEL injected by the desktop app.
@@ -1459,7 +1423,7 @@ export async function agent({
   logs?: boolean;
 } = {}): Promise<string | null> {
   const invocationCwd = process.cwd();
-  const loaded = await loadMigratedRuntimeConfig(config, workspace);
+  const loaded = loadRuntimeConfig(config, workspace);
   syncRuntimeWorkspaceTemplates(loaded);
   setCliRuntimeLogs(Boolean(logs));
   const loop = AgentLoop.fromConfig(loaded);

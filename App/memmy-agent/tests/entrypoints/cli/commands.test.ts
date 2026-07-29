@@ -54,11 +54,15 @@ import {
 } from "../../../src/entrypoints/cli/commands.js";
 import { API_MAX_BODY_BYTES } from "../../../src/entrypoints/openai-like-api/server.js";
 import { setQuestionary } from "../../../src/entrypoints/cli/onboard.js";
+import { prepareStartupMigrations } from "../../../src/entrypoints/cli/startup-migrations.js";
 import { VERSION } from "../../../src/version.js";
 
 const ENV_KEYS = [
   "MEMMY_AGENT_DATA_DIR",
+  "MEMMY_AGENT_WORKSPACE",
   "MEMMY_CONFIG",
+  "MEMMY_MIGRATIONS_READY_CONFIG",
+  "MEMMY_MIGRATIONS_READY_WORKSPACE",
   "MEMMY_CLOUD_SERVICE",
   "OAUTH_CLI_KIT_TOKEN_PATH",
   "OPENAI_CODEX_TOKEN_PATH",
@@ -203,6 +207,9 @@ describe("CLI command helpers", () => {
   });
 
   it("routes bare memmy to the Ink TUI", async () => {
+    const root = tempRoot();
+    setConfigPath(writeConfig(root, {}));
+    process.env.MEMMY_AGENT_WORKSPACE = path.join(root, "workspace");
     const runRoot = vi.fn(async () => undefined);
     setRootInteractiveRunnerForTest(runRoot);
 
@@ -210,6 +217,29 @@ describe("CLI command helpers", () => {
     await main(["node", "memmy"]);
 
     expect(runRoot).toHaveBeenCalledOnce();
+  });
+
+  it("stops before the root TUI when startup migrations fail", async () => {
+    const root = tempRoot("memmy-root-migration-failure-");
+    const workspace = path.join(root, "workspace");
+    const statePath = path.join(
+      workspace,
+      ".memmy-migrations",
+      "agent-workspace.json",
+    );
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    fs.writeFileSync(statePath, "{invalid-json", "utf8");
+    setConfigPath(writeConfig(root, {
+      agents: { defaults: { workspace } },
+    }));
+    process.env.MEMMY_AGENT_WORKSPACE = workspace;
+    const runRoot = vi.fn(async () => undefined);
+    setRootInteractiveRunnerForTest(runRoot);
+
+    await expect(main(["node", "memmy"])).rejects.toMatchObject({
+      code: "migration_state_invalid",
+    });
+    expect(runRoot).not.toHaveBeenCalled();
   });
 
   it("matches explicit provider prefixes", () => {
@@ -593,6 +623,7 @@ describe("CLI command helpers", () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.spyOn(console, "info").mockImplementation(() => undefined);
 
+    await prepareStartupMigrations({ config: configPath });
     const runtime = await gateway({ config: configPath });
     const address = runtime.healthServer.address();
     const actualPort = typeof address === "object" && address ? address.port : 0;
@@ -717,7 +748,7 @@ describe("CLI command helpers", () => {
     const fromConfig = vi.spyOn(AgentLoop, "fromConfig");
     vi.spyOn(console, "error").mockImplementation(() => undefined);
 
-    await expect(gateway({ config: configPath })).rejects.toMatchObject({
+    await expect(prepareStartupMigrations({ config: configPath })).rejects.toMatchObject({
       code: "migration_state_invalid",
     });
     expect(fromConfig).not.toHaveBeenCalled();
