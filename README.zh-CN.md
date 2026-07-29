@@ -1,32 +1,58 @@
-# memmy-agent
+
+<br>
+<div align="center">
+  <a href="https://memmy.bot/">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-dark.svg">
+      <source media="(prefers-color-scheme: light)" srcset="docs/assets/logo-light.svg">
+      <img alt="Memmy Logo" src="docs/assets/logo-light.svg" width="50%">
+    </picture>
+  </a>
+</div>
+<br>
+<br>
+<p align="center">
+    <a href="https://memmy.bot/docs/"><img src="https://img.shields.io/badge/Docs-Get--Start-006400?labelColor=gray&style=for-the-badge&logo=googledocs&logoColor=white" alt="Docs"></a>
+    <a href="https://github.com/MemTensor/memmy-agent/releases"><img src="https://img.shields.io/badge/News-ED8D45?labelColor=gray&style=for-the-badge&logo=applenews&logoColor=white" alt="applenews"></a>
+    <a href="https://www.producthunt.com/products/memmy?launch=memmy-agent"><img src="https://img.shields.io/badge/Memmy--Agent-DA552F?labelColor=gray&style=for-the-badge&logo=producthunt&logoColor=white" alt="producthunt"></a>
+    <a href="docs/assets/wechat-code.png"><img src="https://img.shields.io/badge/WeCom-Memmy_社区-07C160?labelColor=gray&style=for-the-badge&logo=wechat&logoColor=white" alt="WeChat">
+    <a href="https://x.com/Memmy_ai"><img src="https://img.shields.io/badge/Follow-Memmy-000000?labelColor=gray&style=for-the-badge&logo=x&logoColor=white" alt="X"></a>
+  </p>
+
+<div align="center">
+  
+## Memmy，让所有AI，都记得同一个你
+
+</div>
+
+<div align="center">
+
+[English](README.md) • **简体中文**
 
 ![image](docs/assets/banner-zh.png)
 
-Memmy，让所有AI，都记得同一个你
+</div>
 
-它将你的知识、偏好和项目经验沉淀为个人记忆，并让 Cursor、Claude Code、Codex、OpenClaw 等不同 Agent 共享同一份上下文。
-
-提供桌面应用、CLI 和 API，让你以不同方式使用同一套长期记忆。一次积累，多处使用。
-
-[文档](https://memmy.cn/docs/) • [快速开始](#%E5%BF%AB%E9%80%9F%E5%BC%80%E5%A7%8B) • [核心概念](#%E6%A0%B8%E5%BF%83%E6%A6%82%E5%BF%B5) • [从源码构建](#%E4%BB%8E%E6%BA%90%E7%A0%81%E6%9E%84%E5%BB%BA)
-
-**简体中文** • [English](README.md)
 
 ## 🚀 开始体验 Memmy
 
-点击进入[官网下载](https://memmy.cn/)或者[github release](https://github.com/MemTensor/memmy-agent/releases)下载
+点击进入[官网下载](https://memmy.cn/)或者 [GitHub Release](https://github.com/MemTensor/memmy-agent/releases)下载。
 
-注册 Memmy 后，即可获得免费 AI 使用额度，系统会自动进行模型调度，帮助你体验完整的 Memory + Agent Runtime。体验额度：
-
-- 注册赠送 Agent 任务体验 Token，当前额度和使用情况以应用内显示为准
-
-当体验额度用尽后，可切换至 BYOK 模式，使用自己的模型 API。
+> [!TIP]
+> 注册 Memmy 后，即可获得免费 AI 使用额度，系统会自动进行模型调度，帮助你体验完整的 Memory + Agent Runtime。
+> **体验额度：** 
+> 注册赠送 Agent 任务体验 Token，当前额度和使用情况以应用内显示为准
+> 当体验额度用尽后，可切换至 BYOK 模式，使用自己的模型 API。
 
 ## 什么是 Memmy？
 
 每一次 AI 协作都会产生新的上下文和经验，但这些信息通常被隔离在不同工具和会话中。当你切换 Agent 或工作场景时，新的 AI 又需要重新认识你。
 
-通过 Memmy，Cursor、Claude Code、Codex 等 Agent 可以基于统一上下文持续协作，让 AI 从一次性对话变成长期理解你的 Agent。
+通过 Memmy，Cursor、Claude Code、Codex、OpenClaw、Hermes Agent 等 AI Agent 可以基于统一上下文持续协作，让 AI 从一次性对话变成长期理解你的 Agent。
+
+它将你的知识、偏好和项目经验沉淀为个人记忆，并让不同 Agent 共享同一份上下文。
+
+提供桌面应用、CLI 和 API，让你以不同方式使用同一套长期记忆。一次积累，多处使用。
 
 ### 🧠 跨 Agent 记忆层
 
@@ -80,8 +106,6 @@ Memmy 不只是一个聊天界面，而是一套运行在本地的 AI Agent 
 | 🖥️ User Interface  | 提供使用入口         | Desktop App、CLI/TUI、Web 接口              |
 
 ### 仓库架构
-
-Memmy 采用 npm workspaces monorepo 架构：
 
 ![Memmy 系统架构](docs/assets/memmy-architecture-zh.png)
 
