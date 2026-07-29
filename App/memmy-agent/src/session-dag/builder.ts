@@ -397,7 +397,6 @@ The top-level object must be exactly:
 If this turn has no durable task state, return {"ops":[]}.
 Usually this means all are true: no tool call, unrelated to the current DAG task, and only meaningless small talk.
 If the turn answers a factual question, changes the task direction, records a decision, reports a result, or uses tools, it normally has durable task state.
-If this turn has durable task state and dag_context.root_task_id is null, the first meaningful op must add a task node.
 
 Allowed output operations and fields:
 
@@ -452,11 +451,9 @@ Edge type meanings:
 
 Task operation rules:
 - In one patch, the same task may be either added or updated, never both.
-- If dag_context.root_task_id is null and this turn has durable task state, add exactly one task as the first meaningful op. Its status must be active or blocked. Do not update that new task in the same patch.
-- If dag_context.root_task_id is not null, first decide whether the existing task is still the current task phase.
+- If dag_context.root_task_id is null and this turn has durable task state, add exactly one task as the first meaningful op. Its status must be active or blocked.
 - Adding a task while dag_context.root_task_id exists is a task switch. Emit at most one new task in a patch.
-- Keep the existing task when the turn stays within the same topic.
-- If the existing task is still current, do not add or update any task. Add or update only subtask/decision nodes under it.
+- If the turn remains within the existing task or topic, keep that task unchanged and add or update only subtask/decision nodes under it.
 - If this turn clearly completes, closes, or replaces the existing task, update that existing task to done or frozen, then add a new task for the new task phase. The old root must connect directly to the new task with continues or supersedes in the same patch.
 - For one-turn question-answer turns, keep the task active and store the completed answer/result in a done subtask or decision under that task.
 - Do not add final, closure, or finish nodes.
@@ -467,7 +464,6 @@ Semantic rules:
 - When no active/blocked child exists, active_path may end at the latest completed subtask/decision. That endpoint is historical progress, not an instruction to treat a done node as active.
 - Nodes are coarse durable task-state units, not individual messages; do not create one node for every message.
 - Temporary ids are patch-local: use n0/n1/n2 only for add_node.temp_id and add_edge source_id/target_id in the same patch. The program replaces them with persisted node ids after validation.
-- Do not create orphan subtask or decision nodes.
 - Every new subtask or decision must be connected by add_edge so it is reachable from a task root.
 - Continue the same topic by updating the active/blocked subtask, or by adding the next subtask with a continues edge.
 - If a new node replaces an old node, update the old node to status="frozen" and add a supersedes edge with source_id set to the old node id and target_id set to the new node id.

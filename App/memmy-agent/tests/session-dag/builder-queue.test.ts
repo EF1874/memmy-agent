@@ -196,7 +196,6 @@ describe("Session DAG builder and queue", () => {
       expect(systemPrompt).toContain('Use exactly "n0", "n1", "n2"');
       expect(systemPrompt).toContain("n0/n1/n2 are invalid here");
       expect(systemPrompt).toContain("Temporary ids are patch-local");
-      expect(systemPrompt).toContain("Do not create orphan subtask or decision nodes.");
       expect(systemPrompt).toContain("Every new subtask or decision must be connected by add_edge so it is reachable from a task root.");
       expect(systemPrompt).toContain('For add_node with kind="task", status must be "active" or "blocked"');
       expect(systemPrompt).toContain("Node kind meanings");
