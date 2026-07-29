@@ -80,7 +80,7 @@ describe("AgentRuntimeBridge", () => {
     expect(connectionEffect).toContain("scheduleRetry();");
     expect(connectionEffect).toContain("registerConnectionHandlers(nextConnection);");
     expect(connectionEffect).toContain("connectAttemptRef.current = 0;");
-    expect(connectionEffect).toContain("[cleanupConnection, clearConnectRetryTimer, clients?.memmyAgent, dispatch, enabled, registerConnectionHandlers]");
+    expect(connectionEffect).toContain("[cleanupConnection, clearConnectRetryTimer, clients?.memmyAgent, dispatch, enabled, refreshModelCatalog, registerConnectionHandlers]");
   });
 
   it("subscribes the current chat and routes non-current lifecycle events without duplicate dispatch", () => {
@@ -93,6 +93,20 @@ describe("AgentRuntimeBridge", () => {
     expect(lifecycleBlock).toContain("if (chatId === subscribedChatRef.current)");
     expect(lifecycleBlock).toContain("return;");
     expect(lifecycleBlock).toContain("dispatch(agentActions.wsEventReceived(event));");
+  });
+
+  it("refreshes the chat catalog and settings model config from the same config change event", () => {
+    const source = readBridgeSource();
+    const refreshBlock = source.slice(
+      source.indexOf("const refreshModelCatalog"),
+      source.indexOf("const registerConnectionHandlers")
+    );
+
+    expect(refreshBlock).toContain("agentClient.getSettings()");
+    expect(refreshBlock).toContain("configClient.getModelConfig()");
+    expect(refreshBlock).toContain("dispatch(agentActions.modelCatalogLoaded(");
+    expect(refreshBlock).toContain("dispatch(appActions.modelConfigUpdated(modelConfig));");
+    expect(refreshBlock).toContain("version === modelCatalogRefreshVersionRef.current");
   });
 
   it("keeps current chat subscribed after connection becomes available outside HomePage", () => {

@@ -7,6 +7,7 @@ import {
   buildAgentTasks,
   defaultAgentSidebarState,
   initialAgentState,
+  selectedModelPresetForScope,
   type AgentState,
   updateSidebarStateForTask
 } from "../agent-chat-slice.js";
@@ -37,6 +38,60 @@ afterEach(() => {
 });
 
 describe("agent chat slice", () => {
+  it("moves deleted Session and draft selections to the latest available default", () => {
+    const state: AgentState = {
+      ...initialAgentState,
+      modelPresets: [
+        { name: "model-a", provider: "openai", model: "gpt-a", is_default: true, available: true },
+        { name: "model-b", provider: "anthropic", model: "claude-b", is_default: false, available: true }
+      ],
+      defaultModelPreset: "model-a",
+      pendingPresetByScope: { "draft:1": "model-a" },
+      committedPresetByScope: { "chat-1": "model-a" }
+    };
+
+    const refreshed = agentReducer(state, {
+      type: "agent/modelCatalogLoaded",
+      presets: [
+        { name: "model-b", provider: "anthropic", model: "claude-b", is_default: true, available: true }
+      ],
+      defaultPreset: "model-b"
+    });
+
+    expect(refreshed.pendingPresetByScope).not.toHaveProperty("draft:1");
+    expect(refreshed.committedPresetByScope["chat-1"]).toBeNull();
+    expect(selectedModelPresetForScope(refreshed, "draft:1")).toBe("model-b");
+    expect(selectedModelPresetForScope(refreshed, "chat-1")).toBe("model-b");
+  });
+
+  it("keeps a Session model change temporary until the gateway confirms a sent message", () => {
+    const state: AgentState = {
+      ...initialAgentState,
+      modelPresets: [
+        { name: "model-a", provider: "openai", model: "gpt-a", is_default: true, available: true },
+        { name: "model-b", provider: "anthropic", model: "claude-b", is_default: false, available: true }
+      ],
+      defaultModelPreset: "model-a",
+      pendingPresetByScope: { "chat-1": "model-b" },
+      committedPresetByScope: { "chat-1": "model-a" }
+    };
+
+    expect(selectedModelPresetForScope(state, "chat-1")).toBe("model-b");
+
+    const confirmed = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message_accepted",
+        chat_id: "chat-1",
+        client_request_id: "11111111-1111-4111-8111-111111111111",
+        model_preset: "model-b"
+      }
+    });
+
+    expect(confirmed.pendingPresetByScope).not.toHaveProperty("chat-1");
+    expect(confirmed.committedPresetByScope["chat-1"]).toBe("model-b");
+  });
+
   it("starts with the chat view marked invisible until routing bootstrap resolves", () => {
     expect(initialAgentState.chatViewVisible).toBe(false);
   });

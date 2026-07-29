@@ -805,6 +805,58 @@ export type PresetAction =
   | { type: "edit"; name: string; preset: ModelPresetConfig | Record<string, any> }
   | { type: "delete"; name: string };
 
+export function normalizeModelCatalogReferences(config: Config): void {
+  const names = Object.keys(config.modelPresets);
+  const defaults = config.agents.defaults;
+  if (defaults.modelPreset && !names.includes(defaults.modelPreset)) {
+    defaults.modelPreset = names[0] ?? null;
+  }
+  defaults.fallbackModels = defaults.fallbackModels.filter((candidate) =>
+    typeof candidate !== "string" || names.includes(candidate)
+  );
+}
+
+export function validateModelCatalogForSave(config: Config): void {
+  const pairs = new Set<string>();
+  for (const [name, preset] of Object.entries(config.modelPresets)) {
+    if (name === "default") {
+      throw new Error("model preset name 'default' is reserved");
+    }
+    if (name === "memmy-account" && (
+      preset.provider !== "memmy_account"
+      || preset.model !== "agent_chat"
+    )) {
+      throw new Error("model preset name 'memmy-account' is reserved for account login");
+    }
+    const model = preset.model.trim();
+    const provider = config.getProviderName(model, { preset })
+      ?? (preset.provider !== "auto" ? preset.provider : providerFromModelPrefix(model));
+    if (!model) throw new Error(`model preset '${name}' requires a model`);
+    if (!provider) throw new Error(`model preset '${name}' requires a valid provider`);
+    const pair = `${provider}\0${model}`;
+    if (pairs.has(pair)) {
+      throw new Error(`duplicate provider/model pair: ${provider} / ${model}`);
+    }
+    pairs.add(pair);
+  }
+  const defaultPreset = config.agents.defaults.modelPreset;
+  if (defaultPreset && !(defaultPreset in config.modelPresets)) {
+    throw new Error(`agents.defaults.modelPreset references missing preset '${defaultPreset}'`);
+  }
+  for (const candidate of config.agents.defaults.fallbackModels) {
+    if (typeof candidate === "string" && !(candidate in config.modelPresets)) {
+      throw new Error(`agents.defaults.fallbackModels references missing preset '${candidate}'`);
+    }
+  }
+}
+
+function providerFromModelPrefix(model: string): string | null {
+  const prefix = model.split("/", 1)[0]?.trim();
+  return prefix && PROVIDERS.some((provider) => provider.name === prefix)
+    ? prefix
+    : null;
+}
+
 export async function configureModelPresets(config: Config, actions: PresetAction[] | null = null): Promise<Config> {
   syncPresetCache(config);
   if (actions) {
@@ -812,12 +864,16 @@ export async function configureModelPresets(config: Config, actions: PresetActio
       if (action.type === "delete") {
         delete config.modelPresets[action.name];
       } else {
-        if (!action.name || action.name === "default") throw new Error("model preset name is invalid or reserved");
+        if (!action.name || action.name === "default" || action.name === "memmy-account") {
+          throw new Error("model preset name is invalid or reserved");
+        }
         config.modelPresets[action.name] =
           action.preset instanceof ModelPresetConfig ? action.preset : new ModelPresetConfig(action.preset);
       }
+      normalizeModelCatalogReferences(config);
       syncPresetCache(config);
     }
+    validateModelCatalogForSave(config);
     return config;
   }
 
@@ -830,7 +886,7 @@ export async function configureModelPresets(config: Config, actions: PresetActio
     if (answer === "[+] Add new preset") {
       const name = (await getQuestionary().text("Preset name:", { validate: (value) => (value.trim() ? true : "Name cannot be empty") }).ask())?.trim();
       if (!name) continue;
-      if (name === "default" || name in config.modelPresets) continue;
+      if (name === "default" || name === "memmy-account" || name in config.modelPresets) continue;
       const updated = await configureDraftModel(
         new ModelPresetConfig({
           model: config.agents.defaults.model,
@@ -852,6 +908,7 @@ export async function configureModelPresets(config: Config, actions: PresetActio
     if (action === "Delete") {
       if (await getQuestionary().confirm(`Delete preset '${presetName}'?`, { default: false }).ask()) {
         delete config.modelPresets[presetName];
+        normalizeModelCatalogReferences(config);
         syncPresetCache(config);
       }
     } else if (action === "Edit") {
@@ -1171,6 +1228,7 @@ export async function promptMainMenuExit(hasChanges: boolean): Promise<string> {
 
 function finishExit(original: Config, current: Config, answer: string): OnboardResult | null {
   if (answer === "[S] Save and Exit") {
+    validateModelCatalogForSave(current);
     if (shouldUseClackPromptUi()) clackOutro("Configuration saved.");
     return new OnboardResult({ config: current, shouldSave: true, changed: hasUnsavedChanges(original, current) });
   }
@@ -1193,6 +1251,7 @@ export async function runOnboard(
   const config = cloneValue(options.initialConfig ?? new Config());
   if (options.actions) {
     await configureModelPresets(config, options.actions);
+    validateModelCatalogForSave(config);
     return new OnboardResult({ config, shouldSave: options.shouldSave ?? true, changed: options.actions.length > 0 });
   }
   syncPresetCache(config);

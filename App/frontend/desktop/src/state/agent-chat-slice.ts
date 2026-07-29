@@ -14,7 +14,8 @@ import type {
   MemmyAgentSidebarState,
   MemmyAgentWebuiThread,
   MemmyAgentWsEvent,
-  WebuiSessionTarget
+  WebuiSessionTarget,
+  ChatModelPreset
 } from "../api/memmy-agent-client.js";
 import { chatIdToSessionKey } from "../api/memmy-agent-client.js";
 import type { PendingAttachment } from "./agent-composer-state.js";
@@ -141,6 +142,10 @@ export interface AgentState {
   lastRecoveredGeneration: number;
   chatSelectionEpoch: number;
   modelName: string | null;
+  modelPresets: ChatModelPreset[];
+  defaultModelPreset: string | null;
+  committedPresetByScope: Record<string, string | null>;
+  pendingPresetByScope: Partial<Record<string, string | null>>;
   chatViewVisible: boolean;
   currentChatId: string | null;
   currentSessionKey: string | null;
@@ -198,6 +203,10 @@ export interface AgentState {
 export type AgentAction =
   | { type: "agent/bootstrapStarted" }
   | { type: "agent/bootstrapSucceeded"; modelName: string | null }
+  | { type: "agent/modelCatalogLoaded"; presets: ChatModelPreset[]; defaultPreset: string | null }
+  | { type: "agent/pendingModelPresetUpdated"; scopeKey: string; preset: string | null }
+  | { type: "agent/pendingModelPresetCleared"; scopeKey: string }
+  | { type: "agent/modelSelectionCommitted"; scopeKey: string; chatId: string; preset: string }
   | { type: "agent/connectionConnecting" }
   | { type: "agent/connectionFailed"; message: string }
   | { type: "agent/connectionDisposed" }
@@ -274,6 +283,10 @@ export const initialAgentState: AgentState = {
   lastRecoveredGeneration: 0,
   chatSelectionEpoch: 0,
   modelName: null,
+  modelPresets: [],
+  defaultModelPreset: null,
+  committedPresetByScope: {},
+  pendingPresetByScope: {},
   chatViewVisible: false,
   currentChatId: null,
   currentSessionKey: null,
@@ -334,6 +347,36 @@ export function agentReducer(state: AgentState, action: AgentAction): AgentState
       return { ...state, connectionStatus: "bootstrapping", connectionError: null };
     case "agent/bootstrapSucceeded":
       return { ...state, modelName: action.modelName, connectionError: null };
+    case "agent/modelCatalogLoaded":
+      return reconcileModelCatalog(state, action.presets, action.defaultPreset);
+    case "agent/pendingModelPresetUpdated":
+      return {
+        ...state,
+        pendingPresetByScope: {
+          ...state.pendingPresetByScope,
+          [action.scopeKey]: action.preset
+        }
+      };
+    case "agent/pendingModelPresetCleared":
+      return {
+        ...state,
+        pendingPresetByScope: clearChatMapValue(
+          state.pendingPresetByScope,
+          action.scopeKey
+        )
+      };
+    case "agent/modelSelectionCommitted": {
+      const pendingPresetByScope = { ...state.pendingPresetByScope };
+      delete pendingPresetByScope[action.scopeKey];
+      return {
+        ...state,
+        committedPresetByScope: {
+          ...state.committedPresetByScope,
+          [action.chatId]: action.preset
+        },
+        pendingPresetByScope
+      };
+    }
     case "agent/connectionConnecting":
       return { ...state, connectionStatus: "connecting", connectionError: null };
     case "agent/connectionFailed":
@@ -1114,6 +1157,13 @@ function completeSessionsLoad(state: AgentState, sessions: MemmyAgentSessionSumm
   }
 
   const canonicalChatIds = new Set(sessions.map((session) => sessionKeyToChatId(session.key)));
+  const committedPresetByScope = { ...state.committedPresetByScope };
+  for (const session of sessions) {
+    const chatId = sessionKeyToChatId(session.key);
+    committedPresetByScope[chatId] = typeof session.model_preset === "string"
+      ? session.model_preset
+      : null;
+  }
   const optimisticTasksByChatId = pruneOptimisticTasks(state.optimisticTasksByChatId, canonicalChatIds);
   const knownChatIds = new Set([
     ...canonicalChatIds,
@@ -1134,6 +1184,7 @@ function completeSessionsLoad(state: AgentState, sessions: MemmyAgentSessionSumm
   const nextState = {
     ...state,
     sessions,
+    committedPresetByScope,
     optimisticTasksByChatId,
     retryWaitStatusByChatId: pruneOptionalMap(state.retryWaitStatusByChatId, knownChatIds),
     completedUnseenByChatId: pruneNumberMap(state.completedUnseenByChatId, knownChatIds),
@@ -1153,6 +1204,59 @@ function completeSessionsLoad(state: AgentState, sessions: MemmyAgentSessionSumm
       ? isChatBusy(nextState, nextState.currentChatId) || chatHasLiveStream(nextState, nextState.currentChatId)
       : nextState.isSending
   });
+}
+
+function reconcileModelCatalog(
+  state: AgentState,
+  presets: ChatModelPreset[],
+  defaultPreset: string | null
+): AgentState {
+  const availableNames = new Set(
+    presets.filter((preset) => preset.available).map((preset) => preset.name)
+  );
+  const pendingPresetByScope = { ...state.pendingPresetByScope };
+  for (const [scopeKey, preset] of Object.entries(pendingPresetByScope)) {
+    if (preset === undefined || (preset !== null && !availableNames.has(preset))) {
+      delete pendingPresetByScope[scopeKey];
+    }
+  }
+  const committedPresetByScope = { ...state.committedPresetByScope };
+  for (const [scopeKey, preset] of Object.entries(committedPresetByScope)) {
+    if (preset !== null && !availableNames.has(preset)) {
+      committedPresetByScope[scopeKey] = null;
+    }
+  }
+  return {
+    ...state,
+    modelPresets: presets,
+    defaultModelPreset: defaultPreset && availableNames.has(defaultPreset)
+      ? defaultPreset
+      : null,
+    pendingPresetByScope,
+    committedPresetByScope
+  };
+}
+
+export function selectedModelPresetForScope(
+  state: Pick<
+    AgentState,
+    "modelPresets" | "defaultModelPreset" | "pendingPresetByScope" | "committedPresetByScope"
+  >,
+  scopeKey: string
+): string | null {
+  const availableNames = new Set(
+    state.modelPresets
+      .filter((preset) => preset.available)
+      .map((preset) => preset.name)
+  );
+  if (Object.prototype.hasOwnProperty.call(state.pendingPresetByScope, scopeKey)) {
+    const pending = state.pendingPresetByScope[scopeKey];
+    if (pending && availableNames.has(pending)) return pending;
+    if (pending === null) return state.defaultModelPreset;
+  }
+  const committed = state.committedPresetByScope[scopeKey];
+  if (committed && availableNames.has(committed)) return committed;
+  return state.defaultModelPreset;
 }
 
 function failSessionsLoad(state: AgentState, requestId: string | undefined): AgentState {
@@ -1996,6 +2100,19 @@ function reduceWsEvent(state: AgentState, event: MemmyAgentWsEvent): AgentState 
       return event.chat_id ? markChatIdle(state, event.chat_id, { source: "stop_result", turnId: eventTurnId(event) }) : state;
     case "session_updated":
       return event.chat_id ? markSessionUpdated(state, event.chat_id, event.scope) : state;
+    case "message_accepted":
+      if (!event.chat_id || typeof event.model_preset !== "string") return state;
+      return {
+        ...state,
+        committedPresetByScope: {
+          ...state.committedPresetByScope,
+          [event.chat_id]: event.model_preset
+        },
+        pendingPresetByScope: clearChatMapValue(
+          state.pendingPresetByScope,
+          event.chat_id
+        )
+      };
     case "runtime_model_updated":
       return typeof event.model_name === "string" ? { ...state, modelName: event.model_name } : state;
     default:

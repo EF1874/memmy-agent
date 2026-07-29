@@ -9,9 +9,12 @@ import { InboundMessage } from "../../../src/core/runtime-messages/events.js";
 import { Config } from "../../../src/config/schema.js";
 import { LLMResponse } from "../../../src/providers/base.js";
 import { GOAL_STATE_KEY } from "../../../src/core/session/goal-state.js";
+import { Session, SessionManager } from "../../../src/core/session/manager.js";
+import { GuiTranscriptMirror } from "../../../src/entrypoints/frontend-bridge/gui-transcript-sync.js";
 
 const roots: string[] = [];
 const originalHome = process.env.HOME;
+const originalDataDir = process.env.MEMMY_AGENT_DATA_DIR;
 
 function workspace(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-loop-"));
@@ -49,6 +52,8 @@ afterEach(() => {
   vi.restoreAllMocks();
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
+  if (originalDataDir === undefined) delete process.env.MEMMY_AGENT_DATA_DIR;
+  else process.env.MEMMY_AGENT_DATA_DIR = originalDataDir;
   for (const dir of roots.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -91,6 +96,41 @@ describe("AgentLoop direct processing", () => {
       content: "first answer",
       finish_reason: "stop",
     });
+  });
+
+  it("keeps a projected CLI Session on its canonical workspace across the whole turn", async () => {
+    const root = workspace();
+    process.env.MEMMY_AGENT_DATA_DIR = path.join(root, "data");
+    const canonicalWorkspace = path.join(root, "canonical");
+    const workspaceAlias = path.join(root, "alias");
+    fs.mkdirSync(canonicalWorkspace, { recursive: true });
+    fs.symlinkSync(canonicalWorkspace, workspaceAlias, "dir");
+    const sessions = new SessionManager(path.join(canonicalWorkspace, "sessions"));
+    const session = new Session({
+      key: "cli:direct",
+      metadata: {
+        webui: true,
+        webuiProjectId: null,
+        webuiWorkspaceCwd: fs.realpathSync(canonicalWorkspace),
+      },
+    });
+    sessions.save(session, { fsync: true });
+    const p = provider(["projected answer"]);
+    const agent = new AgentLoop({
+      provider: p,
+      workspace: workspaceAlias,
+      model: "test-model",
+      contextWindowTokens: 4096,
+      sessionDir: sessions.root,
+      sessionManager: sessions,
+      config: new Config({ memmyMemory: { enabled: false } }),
+    });
+    agent.guiTranscriptMirror = new GuiTranscriptMirror(sessions, canonicalWorkspace);
+
+    const outbound = await agent.processDirect("hello", { sessionKey: "cli:direct" });
+
+    expect(outbound?.content).toBe("projected answer");
+    expect(p.chat).toHaveBeenCalledOnce();
   });
 
   it("treats a GUI cancellation of an independent cli turn as a normal stopped result", async () => {

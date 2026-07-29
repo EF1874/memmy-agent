@@ -140,7 +140,9 @@ function displayModelName(model: string): string {
 function modelLabel(config: Config): string {
   const resolved = config.resolvePreset();
   const preset = config.agents.defaults.modelPreset;
-  return preset ? `${displayModelName(resolved.model)} @${preset}` : displayModelName(resolved.model);
+  const provider = config.getProviderName(resolved.model, { preset: resolved }) ?? "unknown";
+  const value = `${provider} / ${displayModelName(resolved.model)}`;
+  return preset ? `${value} @${preset}` : value;
 }
 
 const TOOLSET_ORDER = ["web", "exec", "file", "runtime", "image", "goal", "cron", "mcp", "other"] as const;
@@ -693,12 +695,14 @@ function formatCompactToolsets(toolsets: ToolsetSummary[]): string {
 function Banner({
   columns,
   config,
+  model,
   target,
   toolsets,
   version,
 }: {
   columns: number;
   config: Config;
+  model: string;
   target: TerminalTarget | null;
   toolsets: ToolsetSummary[];
   version: string;
@@ -749,7 +753,7 @@ function Banner({
               <MetaLine label="config" value={getConfigPath()} />
             </TitledFrameRow>
             <TitledFrameRow width={panelWidth}>
-              <MetaLine label="model" value={modelLabel(config)} />
+              <MetaLine label="model" value={model} />
             </TitledFrameRow>
             <TitledFrameRow width={panelWidth}>
               <MetaLine label="tools" value={formatCompactToolsets(toolsets)} />
@@ -806,7 +810,7 @@ function Banner({
             <TitledFrameRow width={panelWidth}>
               <Box flexDirection={contentDirection}>
                 <Box width={workspaceColumnWidth}>
-                  <MetaLine label="model" value={modelLabel(config)} />
+                  <MetaLine label="model" value={model} />
                 </Box>
                 <Box paddingLeft={toolColumnGap} width={toolColumnWidth + toolColumnGap}>
                   {visibleToolsets[2] ? (
@@ -853,6 +857,7 @@ function StatusRule({
   busy,
   columns,
   config,
+  model,
   elapsedMs,
   inputLength,
   notice,
@@ -860,6 +865,7 @@ function StatusRule({
   busy: boolean;
   columns: number;
   config: Config;
+  model: string;
   elapsedMs: number;
   inputLength: number;
   notice: string;
@@ -873,7 +879,7 @@ function StatusRule({
     <Box flexDirection="column">
       <Box paddingLeft={1}>
         <Text color={busy ? PALETTE.primary : PALETTE.success} bold>
-          {busy ? "*" : "$"} {modelLabel(config)}
+          {busy ? "*" : "$"} {model}
         </Text>
         <Text color={PALETTE.lineDim}> | </Text>
         <Text color={PALETTE.lemon}>{ctx}</Text>
@@ -905,6 +911,7 @@ function MemmyTui({ config, registerCleanup, sessionId, target, toolsets, versio
   const inputCursorRef = useRef(0);
   const [messages, setMessages] = useState<TuiMessage[]>(() => []);
   const [notice, setNotice] = useState("ready");
+  const [currentModelLabel, setCurrentModelLabel] = useState(() => modelLabel(config));
   const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
@@ -938,6 +945,18 @@ function MemmyTui({ config, registerCleanup, sessionId, target, toolsets, versio
     setMessages((prev) => prev.map((message) => (message.id === id ? { ...message, text: message.text + delta } : message)));
   }, []);
 
+  const refreshCurrentModelLabel = useCallback((loop: AgentLoop) => {
+    const session = loop.sessions.get(sessionId);
+    const selection = loop.resolveTurnModelSelection({
+      sessionPreset: typeof session?.metadata?.modelPreset === "string"
+        ? session.metadata.modelPreset
+        : null,
+    });
+    setCurrentModelLabel(selection
+      ? `${selection.provider} / ${displayModelName(selection.model)} @${selection.preset}`
+      : "(none configured)");
+  }, [sessionId]);
+
   const finishTurn = useCallback(() => {
     activeAssistantIdRef.current = null;
     setBusy(false);
@@ -953,6 +972,12 @@ function MemmyTui({ config, registerCleanup, sessionId, target, toolsets, versio
   }, [busy]);
 
   useEffect(() => {
+    const initialLoop = activeLoopRef.current ?? AgentLoop.fromConfig(config);
+    if (!initialLoop.guiTranscriptMirror) {
+      initialLoop.guiTranscriptMirror = new GuiTranscriptMirror(initialLoop.sessions, initialLoop.workspace);
+    }
+    activeLoopRef.current = initialLoop;
+    refreshCurrentModelLabel(initialLoop);
     const cleanup = onceCleanup(async () => {
       const activeLoop = activeLoopRef.current;
       const loop = activeLoop ?? AgentLoop.fromConfig(config);
@@ -975,7 +1000,7 @@ function MemmyTui({ config, registerCleanup, sessionId, target, toolsets, versio
     return () => {
       void cleanup();
     };
-  }, [config, registerCleanup, sessionId]);
+  }, [config, refreshCurrentModelLabel, registerCleanup, sessionId]);
 
   const handleProgress = useCallback(
     async (content: string, opts: ProgressOptions = {}) => {
@@ -1043,11 +1068,12 @@ function MemmyTui({ config, registerCleanup, sessionId, target, toolsets, versio
           const message = error instanceof Error ? error.message : String(error);
           appendMessage("system", `Error: ${message}`);
         } finally {
+          refreshCurrentModelLabel(loop);
           finishTurn();
         }
       })();
     },
-    [appendAssistantDelta, appendMessage, busy, config, exit, finishTurn, handleProgress, sessionId, sessionParts, setDraft],
+    [appendAssistantDelta, appendMessage, busy, config, exit, finishTurn, handleProgress, refreshCurrentModelLabel, sessionId, sessionParts, setDraft],
   );
 
   useInput((value, key) => {
@@ -1157,7 +1183,7 @@ function MemmyTui({ config, registerCleanup, sessionId, target, toolsets, versio
 
   return (
     <Box flexDirection="column" paddingX={1}>
-      <Banner columns={columns} config={config} target={target} toolsets={toolsets} version={version} />
+      <Banner columns={columns} config={config} model={currentModelLabel} target={target} toolsets={toolsets} version={version} />
 
       {messages.length ? (
         <Box flexDirection="column">
@@ -1171,6 +1197,7 @@ function MemmyTui({ config, registerCleanup, sessionId, target, toolsets, versio
         busy={busy}
         columns={columns}
         config={config}
+        model={currentModelLabel}
         elapsedMs={elapsedMs}
         inputLength={input.length}
         notice={notice}

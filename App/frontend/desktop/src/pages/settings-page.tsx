@@ -1,7 +1,7 @@
 /** Settings page for account, model, token usage, and desktop preferences. */
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type Dispatch, type ReactNode } from "react";
-import { Brain, Palette, Rocket, Settings2, Shield, User, Zap, ArrowRight, ArrowLeft, Bell, ExternalLink, FolderOpen, Gift, Info, KeyRound, LogOut, Wrench, Search, Eye, EyeOff, ChevronDown, ChevronUp, ChevronRight, Database, Loader2, CheckCircle2, XCircle, Check, AlertTriangle, Mic, Image as ImageIcon } from "lucide-react";
-import type { AppSettingsDto, ByokTokenUsageByKind, ByokTokenUsageKind, ByokTokenUsageSummary, Language, PrivacySettingsDto, TokenQuotaEligibility, TokenSceneUsageDto, TokenUsageDto } from "@memmy/local-api-contracts";
+import { Brain, Palette, Rocket, Settings2, Shield, User, Zap, ArrowRight, ArrowLeft, Bell, ExternalLink, FolderOpen, Gift, Info, KeyRound, LogOut, Wrench, Search, Eye, EyeOff, ChevronDown, ChevronUp, ChevronRight, Database, Loader2, CheckCircle2, XCircle, X, Check, AlertTriangle, Mic, Image as ImageIcon } from "lucide-react";
+import type { AppSettingsDto, ByokTokenUsageByKind, ByokTokenUsageByProvider, ByokTokenUsageKind, ByokTokenUsageSummary, Language, PrivacySettingsDto, TokenQuotaEligibility, TokenSceneUsageDto, TokenUsageDto } from "@memmy/local-api-contracts";
 import { useApiClients } from "../app/providers.js";
 import { resolveGiftTokenUsage } from "../app/routes.js";
 import { useUpdateCoordinator, type UpdateCoordinatorValue, type UpdatePhase } from "../app/update-coordinator.js";
@@ -10,7 +10,8 @@ import { useAnalytics } from "../analytics/use-analytics.js";
 import type { AccountClient } from "../api/account-client.js";
 import type { ByokTokenUsageClient } from "../api/byok-token-usage-client.js";
 import type { TokenQuotaClient } from "../api/token-quota-client.js";
-import type { ConfigClient } from "../api/config-client.js";
+import type { ConfigClient, TextModelProviderConfig } from "../api/config-client.js";
+import { ApiRequestError } from "../api/http.js";
 import {
   readCloseMainWindowAction,
   writeCloseMainWindowAction,
@@ -149,9 +150,10 @@ const EMPTY_BYOK_TOKEN_USAGE: ByokTokenUsageSummary = {
   outputTokens: 0,
   totalTokens: 0,
   cachedInputTokens: 0,
-  cacheCreationInputTokens: 0,
-  updatedAt: null,
-  byKind: []
+      cacheCreationInputTokens: 0,
+      updatedAt: null,
+      byKind: [],
+      byProvider: []
 };
 
 // Display order for both panels. Platform Cloud scenes omit embedding; BYOK
@@ -252,7 +254,25 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const [nicknameDraft, setNicknameDraft] = useState("");
   const [accountBusy, setAccountBusy] = useState(false);
   const [accountError, setAccountError] = useState<string | null>(null);
+  const [modelConfigSaving, setModelConfigSaving] = useState(false);
+  const [modelConfigSaveError, setModelConfigSaveError] = useState<string | null>(null);
+  const modelConfigSaveInFlightRef = useRef(false);
+  const modelConfigSaveRequestIdRef = useRef(0);
+  const settingsMountedRef = useRef(true);
+  const modelConfigSaveRevisionRef = useRef<{
+    base: string | undefined;
+    result: string | undefined;
+  } | null>(null);
   const [showUsageDetail, setShowUsageDetail] = useState(false);
+
+  useEffect(() => {
+    settingsMountedRef.current = true;
+    return () => {
+      settingsMountedRef.current = false;
+      modelConfigSaveInFlightRef.current = false;
+      modelConfigSaveRequestIdRef.current += 1;
+    };
+  }, []);
 
   /** Syncs the Token usage detail sub-page's visibility so the AppFrame draggable top bar does not cover the back button. */
   function updateShowUsageDetail(next: boolean) {
@@ -276,6 +296,13 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const isAccountMode = appSettings?.userMode === "account";
   const initialModelForm = hydrateModelConfigForm(state.modelConfig, isByokMode ? "local" : "cloud");
   const [showApiConfig, setShowApiConfig] = useState(false);
+  const [textModelProviders, setTextModelProviders] = useState<TextModelProviderConfig[]>(
+    () => state.modelConfig.providers ?? []
+  );
+  const [defaultModelPreset, setDefaultModelPreset] = useState<string | null>(
+    state.modelConfig.defaultModelPreset ?? null
+  );
+  const [newProviderProtocol, setNewProviderProtocol] = useState<Protocol>("openai");
   const [protocol, setProtocol] = useState<Protocol>(initialModelForm.protocol);
   const [modelId, setModelId] = useState(initialModelForm.modelId);
   const [endpoint, setEndpoint] = useState(initialModelForm.endpoint);
@@ -343,11 +370,6 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const improvementPlan = privacySettings?.allowMemoryImprovementUpload ?? false;
   const hasAccountSession = Boolean(state.account.email || state.account.phoneNumber || state.account.registeredAt);
   const hasByokConfig = state.modelConfig.configured === true;
-  const modelMode = resolveInitialModelMode(appSettings?.userMode);
-  const modelModeLabel = t(modelMode === "platform" ? "settings.model.platformMode" : "settings.model.customMode");
-  const modelModeClass = modelMode === "platform" ? "bg-action-sky/10 text-action-sky" : "bg-status-success-soft text-status-success";
-  const modelDotClass = modelMode === "platform" ? "bg-action-sky" : "bg-status-success";
-  const modelHeaderSpacing = modelMode === "platform" && !showApiConfig ? "" : " mb-4";
   const tokenUsage = bootstrap?.tokenUsage ?? FALLBACK_TOKEN_USAGE;
   const giftUsedTokens = tokenUsage.usedTokens;
   // The summary bar tracks Agent 任务 (the task model), not the plan total:
@@ -358,7 +380,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const giftRemainingTokens = agentQuota?.remainingTokens ?? tokenUsage.remainingTokens;
   const giftBarUsedTokens = agentQuota?.usedTokens ?? giftUsedTokens;
   const { usagePercent, isTokenLow } = resolveGiftTokenUsage(giftBarUsedTokens, giftTotalTokens, giftRemainingTokens);
-  const showGiftQuota = !isByokMode;
+  const showGiftQuota = hasAccountSession;
   const canApplyMoreByPromotion = bootstrap?.promotions?.applyMore ?? true;
   const quotaRequestPending = quotaEligibility?.state === "pending";
   const quotaApplicationBlocked = quotaEligibility !== null && quotaEligibility.state !== "available";
@@ -368,7 +390,14 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     ? t(quotaEligibilityMessage.key, quotaEligibilityMessage.values)
     : null;
   const customUsedTokens = byokUsage.totalTokens;
-  const primaryModelId = state.modelConfig.configured ? modelId || state.modelConfig.model : "";
+  const selectedDefaultModel = textModelProviders
+    .flatMap((provider) => provider.models.map((model) => ({ provider, model })))
+    .find(({ model }) => (model.presetName ?? model.draftId) === defaultModelPreset)
+    ?? null;
+  const primaryModelId = selectedDefaultModel?.model.model ?? "";
+  const primaryModelDisplay = selectedDefaultModel
+    ? `${selectedDefaultModel.provider.provider} / ${selectedDefaultModel.model.model}`
+    : "";
   const mainModelTestKey = createModelConfigValidationKey(mainModelFormValues);
   const isMainModelTestStale = Boolean(llmValidation.testedKey && llmValidation.testedKey !== mainModelTestKey);
   const primaryModelValues: PrimaryModelValues = {
@@ -391,7 +420,24 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const isImageGenUsable = canSaveModelConfig(imageGenFormValues, imageGenValidation);
   const imageGenTestKey = createModelConfigValidationKey(imageGenFormValues);
   const isImageGenTestStale = Boolean(imageGenValidation.testedKey && imageGenValidation.testedKey !== imageGenTestKey);
-  const canSaveApiConfig = canSaveModelConfig(mainModelFormValues, llmValidation)
+  const canSaveTextModels = textModelProviders.length > 0
+    && textModelProviders.every((provider) => (
+      provider.provider.trim()
+      && provider.models.length > 0
+      && provider.models.every((model) => model.model.trim())
+      && (!provider.editable || Boolean(provider.apiKey.trim() || provider.apiKeyMasked))
+    ))
+    && Boolean(defaultModelPreset)
+    && textModelProviders.some((provider) => provider.models.some((model) => (
+      (model.presetName ?? model.draftId) === defaultModelPreset
+    )))
+    && new Set(textModelProviders.flatMap((provider) => (
+      provider.models.map((model) => `${provider.provider}\0${model.model.trim()}`)
+    ))).size === textModelProviders.reduce(
+      (total, provider) => total + provider.models.length,
+      0
+    );
+  const canSaveApiConfig = canSaveTextModels
     && canUseModelConfig(memoryModel, memoryModelFormValues)
     && canUseModelConfig(skillModel, skillModelFormValues)
     && canSaveEmbeddingModelConfig(embeddingMode, embFormValues, embValidation);
@@ -400,7 +446,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
 
   /** Keeps the last known state on failure; submission still receives server-side validation. */
   const refreshQuotaEligibility = useCallback(async (): Promise<TokenQuotaEligibility | null> => {
-    if (!tokenQuotaClient || !isAccountMode) {
+    if (!tokenQuotaClient || !hasAccountSession) {
       setQuotaEligibility(null);
       return null;
     }
@@ -413,9 +459,22 @@ export function SettingsPageView(props: SettingsPageViewProps) {
       console.warn("load token quota eligibility failed", error);
       return null;
     }
-  }, [isAccountMode, tokenQuotaClient]);
+  }, [hasAccountSession, tokenQuotaClient]);
 
   useEffect(() => {
+    if (modelConfigSaving) {
+      const save = modelConfigSaveRevisionRef.current;
+      const incomingRevision = state.modelConfig.configRevision;
+      if (
+        save
+        && incomingRevision
+        && incomingRevision !== save.base
+        && incomingRevision !== save.result
+      ) {
+        setModelConfigSaveError(t("settings.model.configChanged"));
+      }
+      return;
+    }
     if (preserveSuccessfulTestHydrateRef.current) {
       // The auto-save after a successful test only updates the global config; it must not clear the plaintext key currently being edited or the success state.
       preserveSuccessfulTestHydrateRef.current = false;
@@ -450,11 +509,141 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     setImageGenWarningAcknowledged(false);
     setMemoryModel(hydrated.memoryModel);
     setSkillModel(hydrated.skillModel);
-  }, [isByokMode, state.modelConfig]);
+    setTextModelProviders(state.modelConfig.providers ?? []);
+    setDefaultModelPreset(state.modelConfig.defaultModelPreset ?? null);
+  }, [isByokMode, modelConfigSaving, state.modelConfig, t]);
+
+  function updateTextModelProvider(index: number, patch: Partial<TextModelProviderConfig>) {
+    setTextModelProviders((current) => current.map((provider, providerIndex) => (
+      providerIndex === index ? { ...provider, ...patch } : provider
+    )));
+  }
+
+  function addTextModelProvider() {
+    const protocolToAdd = PROTOCOL_OPTIONS
+      .map((option) => option.value)
+      .find((protocolOption) => (
+        protocolOption === newProviderProtocol
+        && !textModelProviders.some(
+          (provider) => provider.provider === fromProtocol(protocolOption)
+        )
+      ))
+      ?? PROTOCOL_OPTIONS
+        .map((option) => option.value)
+        .find((protocolOption) => !textModelProviders.some(
+          (provider) => provider.provider === fromProtocol(protocolOption)
+        ));
+    if (!protocolToAdd) return;
+    const providerName = fromProtocol(protocolToAdd);
+    if (textModelProviders.some((provider) => provider.provider === providerName)) return;
+    const draftId = `draft-${crypto.randomUUID()}`;
+    setTextModelProviders((current) => [...current, {
+      provider: providerName,
+      endpoint: DEFAULT_ENDPOINTS[protocolToAdd],
+      apiType: "auto",
+      apiKey: "",
+      apiKeyMasked: "",
+      configured: false,
+      accountManaged: false,
+      editable: true,
+      models: [{
+        draftId,
+        model: "",
+        isDefault: current.length === 0,
+        available: false
+      }]
+    }]);
+    if (!defaultModelPreset) setDefaultModelPreset(draftId);
+  }
+
+  function removeTextModelProvider(index: number) {
+    const removed = textModelProviders[index];
+    if (!removed?.editable) return;
+    const removedIds = new Set(removed.models.map((model) => model.presetName ?? model.draftId));
+    const remaining = textModelProviders.filter((_, providerIndex) => providerIndex !== index);
+    setTextModelProviders(remaining);
+    if (defaultModelPreset && removedIds.has(defaultModelPreset)) {
+      setDefaultModelPreset(
+        remaining.flatMap((provider) => provider.models)
+          .map((model) => model.presetName ?? model.draftId)
+          .find((value): value is string => Boolean(value))
+        ?? null
+      );
+    }
+  }
+
+  function updateTextModel(providerIndex: number, modelIndex: number, value: string) {
+    const currentModel = textModelProviders[providerIndex]?.models[modelIndex];
+    if (!currentModel || currentModel.model === value) return;
+    const draftId = currentModel.draftId ?? `draft-${crypto.randomUUID()}`;
+    if (defaultModelPreset === currentModel.presetName) {
+      setDefaultModelPreset(draftId);
+    }
+    setTextModelProviders((current) => current.map((provider, currentProviderIndex) => {
+      if (currentProviderIndex !== providerIndex) return provider;
+      return {
+        ...provider,
+        models: provider.models.map((model, currentModelIndex) => {
+          if (currentModelIndex !== modelIndex) return model;
+          return {
+            ...model,
+            presetName: undefined,
+            draftId,
+            model: value,
+            available: false
+          };
+        })
+      };
+    }));
+  }
+
+  function addTextModel(providerIndex: number) {
+    const draftId = `draft-${crypto.randomUUID()}`;
+    setTextModelProviders((current) => current.map((provider, currentIndex) => (
+      currentIndex === providerIndex
+        ? {
+            ...provider,
+            models: [...provider.models, {
+              draftId,
+              model: "",
+              isDefault: false,
+              available: false
+            }]
+          }
+        : provider
+    )));
+  }
+
+  function removeTextModel(providerIndex: number, modelIndex: number) {
+    const totalModels = textModelProviders.reduce(
+      (total, provider) => total + provider.models.length,
+      0
+    );
+    if (totalModels <= 1) return;
+    const removed = textModelProviders[providerIndex]?.models[modelIndex];
+    const removedId = removed?.presetName ?? removed?.draftId;
+    const remaining = textModelProviders.map((provider, currentProviderIndex) => (
+      currentProviderIndex === providerIndex
+        ? {
+            ...provider,
+            models: provider.models.filter((_, currentModelIndex) => currentModelIndex !== modelIndex)
+          }
+        : provider
+    )).filter((provider) => provider.models.length > 0);
+    setTextModelProviders(remaining);
+    if (removedId && defaultModelPreset === removedId) {
+      setDefaultModelPreset(
+        remaining.flatMap((provider) => provider.models)
+          .map((model) => model.presetName ?? model.draftId)
+          .find((value): value is string => Boolean(value))
+        ?? null
+      );
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
-    if (!configClient || !isAccountMode) {
+    if (!configClient || !hasAccountSession) {
       return () => {
         cancelled = true;
       };
@@ -471,7 +660,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     return () => {
       cancelled = true;
     };
-  }, [configClient, dispatch, isAccountMode]);
+  }, [configClient, dispatch, hasAccountSession]);
 
   useEffect(() => {
     void refreshQuotaEligibility();
@@ -484,7 +673,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   }, [quotaApplicationBlocked]);
 
   useEffect(() => {
-    if (!quotaRequestPending || !isAccountMode) {
+    if (!quotaRequestPending || !hasAccountSession) {
       return undefined;
     }
 
@@ -509,7 +698,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     return () => {
       window.removeEventListener("focus", handleWindowFocus);
     };
-  }, [configClient, dispatch, isAccountMode, quotaRequestPending, refreshQuotaEligibility]);
+  }, [configClient, dispatch, hasAccountSession, quotaRequestPending, refreshQuotaEligibility]);
 
   useEffect(() => {
     let cancelled = false;
@@ -975,11 +1164,15 @@ export function SettingsPageView(props: SettingsPageViewProps) {
    * Persists the filled API Key configuration and switches the app into BYOK mode.
    */
   function persistApiConfig() {
-    if (!canSaveApiConfig) {
+    if (!canSaveApiConfig || modelConfigSaveInFlightRef.current) {
       return;
     }
 
     const nextConfig = {
+      ...state.modelConfig,
+      configRevision: state.modelConfig.configRevision,
+      providers: textModelProviders,
+      defaultModelPreset,
       provider: fromProtocol(protocol),
       endpoint,
       model: modelId,
@@ -996,7 +1189,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
             apiKeyMasked: embApiKey.trim() ? "" : embApiKeyMasked,
             configured: Boolean(embEndpoint.trim() && embModelId.trim() && (embApiKey.trim() || embApiKeyMasked))
           }
-        : embeddingMode === "local"
+          : embeddingMode === "local"
           ? {
               mode: "local" as const,
               endpoint: "",
@@ -1005,21 +1198,98 @@ export function SettingsPageView(props: SettingsPageViewProps) {
               apiKeyMasked: "",
               configured: true
             }
-          : undefined,
+          : {
+              mode: "cloud" as const,
+              endpoint: "",
+              model: "",
+              apiKey: "",
+              apiKeyMasked: "",
+              configured: true
+            },
       asr: isAsrUsable ? createAsrProviderConfig(asrModelId, asrEndpoint, asrApiKey, asrApiKeyMasked) : null,
       imageGen: isImageGenUsable
         ? createImageGenProviderConfig(imageGenProtocol, imageGenModel, imageGenEndpoint, imageGenApiKey, imageGenApiKeyMasked)
         : null
     };
 
-    void (configClient?.saveModelConfig(nextConfig) ?? Promise.resolve(nextConfig)).then((savedConfig) => {
-      dispatch(appActions.modelConfigUpdated(savedConfig));
-      setShowApiConfig(false);
-      track({ name: "model_config_saved", params: { page_path: "/settings" }, consentTier: "basic" });
-      if (!isByokMode) {
-        persistSettings({ userMode: "byok" });
-      }
-    });
+    modelConfigSaveInFlightRef.current = true;
+    const saveRequestId = ++modelConfigSaveRequestIdRef.current;
+    setModelConfigSaving(true);
+    setModelConfigSaveError(null);
+    modelConfigSaveRevisionRef.current = {
+      base: state.modelConfig.configRevision,
+      result: undefined
+    };
+    void promiseWithTimeout(
+      configClient?.saveModelConfig(nextConfig) ?? Promise.resolve(nextConfig),
+      15_000,
+      t("settings.model.saveFailed")
+    )
+      .then((savedConfig) => {
+        if (
+          !settingsMountedRef.current
+          || saveRequestId !== modelConfigSaveRequestIdRef.current
+        ) {
+          return;
+        }
+        if (modelConfigSaveRevisionRef.current) {
+          modelConfigSaveRevisionRef.current.result = savedConfig.configRevision;
+        }
+        dispatch(appActions.modelConfigUpdated(savedConfig));
+        setShowApiConfig(false);
+        track({ name: "model_config_saved", params: { page_path: "/settings" }, consentTier: "basic" });
+      })
+      .catch(async (error: unknown) => {
+        if (
+          !settingsMountedRef.current
+          || saveRequestId !== modelConfigSaveRequestIdRef.current
+        ) {
+          return;
+        }
+        if (
+          error instanceof ApiRequestError
+          && error.status === 409
+          && error.code === "model_config_changed"
+          && configClient
+        ) {
+          try {
+            const latest = await promiseWithTimeout(
+              configClient.getModelConfig(),
+              15_000,
+              t("settings.model.saveFailed")
+            );
+            if (
+              !settingsMountedRef.current
+              || saveRequestId !== modelConfigSaveRequestIdRef.current
+            ) {
+              return;
+            }
+            dispatch(appActions.modelConfigUpdated(latest));
+            setModelConfigSaveError(t("settings.model.configChanged"));
+          } catch (refreshError) {
+            setModelConfigSaveError(
+              refreshError instanceof Error
+                ? refreshError.message
+                : t("settings.model.saveFailed")
+            );
+          }
+          return;
+        }
+        setModelConfigSaveError(
+          error instanceof Error ? error.message : t("settings.model.saveFailed")
+        );
+      })
+      .finally(() => {
+        if (
+          !settingsMountedRef.current
+          || saveRequestId !== modelConfigSaveRequestIdRef.current
+        ) {
+          return;
+        }
+        modelConfigSaveInFlightRef.current = false;
+        modelConfigSaveRevisionRef.current = null;
+        setModelConfigSaving(false);
+      });
   }
 
   /**
@@ -1130,10 +1400,20 @@ export function SettingsPageView(props: SettingsPageViewProps) {
       setAccountError(null);
       try {
         await (accountClient?.logout() ?? Promise.resolve({ ok: true as const }));
+        const refreshedModelConfig = configClient
+          ? await configClient.getModelConfig()
+          : null;
+        if (refreshedModelConfig) {
+          dispatch(appActions.modelConfigUpdated(refreshedModelConfig));
+        }
+        const hasRemainingModel = refreshedModelConfig?.configured
+          ?? hasUsableNonAccountTextModel(state.modelConfig);
         track({ name: "account_logout", params: { page_path: "/settings" }, consentTier: "basic" });
         dispatch(appActions.accountCleared());
-        persistSettings({ userMode: "unset" });
-        dispatch(appActions.navigate("/welcome"));
+        persistSettings({ userMode: hasRemainingModel ? "byok" : "unset" });
+        if (!hasRemainingModel) {
+          dispatch(appActions.navigate("/welcome"));
+        }
         setConfirm(null);
       } catch (error) {
         console.warn("logout account failed", error);
@@ -1252,46 +1532,24 @@ export function SettingsPageView(props: SettingsPageViewProps) {
         </Section>
 
         <Section icon={<Brain size={16} className="text-text-ink/60" />} title={t("settings.model")} sectionId="model-config">
-          <div className={`flex items-center justify-between gap-3${modelHeaderSpacing}`}>
+          <div className="flex items-center justify-between gap-3 mb-4">
             <div className="flex items-center gap-3 min-w-0">
-              <span className="text-sm text-text-ink/75 shrink-0">{t("settings.model.currentMode")}</span>
-              <span className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-normal rounded-tag ${modelModeClass}`}>
-                <span className={`w-1.5 h-1.5 rounded-full ${modelDotClass}`} />
-                {modelModeLabel}
+              <span className="text-sm text-text-ink/75 shrink-0">
+                {t("settings.model.providerCount", { count: textModelProviders.length })}
               </span>
-              {modelMode === "custom" && !showApiConfig && (
-                <button type="button" onClick={() => setShowApiConfig(true)} className="text-xs text-action-sky hover:underline cursor-pointer">
-                  {t("settings.model.editConfig")}
-                </button>
-              )}
             </div>
-
-            {modelMode === "platform" && hasAccountSession ? (
-              <button
-                type="button"
-                onClick={handleSwitchToCustom}
-                className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 text-xs text-action-sky border border-action-sky/30 rounded-btn hover:bg-action-sky/8 transition-colors cursor-pointer"
-              >
-                {t("settings.model.switchToCustom")}
-                <ArrowRight size={13} />
-              </button>
-            ) : (
-              modelMode === "custom" && hasAccountSession && hasByokConfig && (
-                <button
-                  type="button"
-                  onClick={handleSwitchToPlatform}
-                  className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 text-xs text-action-sky border border-action-sky/30 rounded-btn hover:bg-action-sky/8 transition-colors cursor-pointer"
-                >
-                  {t("settings.model.switchToPlatform")}
-                  <ArrowRight size={13} />
-                </button>
-              )
-            )}
+            <button
+              type="button"
+              onClick={() => setShowApiConfig((current) => !current)}
+              className="text-xs text-action-sky hover:underline cursor-pointer"
+            >
+              {showApiConfig ? t("common.cancel") : t("settings.model.editConfig")}
+            </button>
           </div>
 
-          {modelMode === "custom" && !showApiConfig && (
+          {!showApiConfig && (
             <div className="space-y-2 p-3 bg-canvas-oat/40 rounded-card">
-              <ModuleRow label={t("settings.model.agentTask")} desc={t("settings.model.primary")} model={primaryModelId || t("settings.model.notSet")} />
+              <ModuleRow label={t("settings.model.agentTask")} desc={t("settings.model.primary")} model={primaryModelDisplay || t("settings.model.notSet")} />
               <ModuleRow
                 label={t("settings.model.memorySummary")}
                 desc={t("settings.model.memoryDesc")}
@@ -1321,35 +1579,175 @@ export function SettingsPageView(props: SettingsPageViewProps) {
           )}
 
           {showApiConfig && (
-            <div className="space-y-5">
-              <div className="bg-canvas-oat/40 rounded-card p-5 space-y-3.5">
-                <div className="flex items-center gap-2 mb-1">
-                  <Brain size={16} className="text-action-sky" />
-                  <span className="text-sm font-normal text-text-ink/70">{t("apiKey.llm")}</span>
-                  <span className="text-xs text-status-error font-normal">{t("settings.model.required")}</span>
-                </div>
-                <p className="text-xs text-text-ink/50 -mt-1">{t("apiKey.llmHint")}</p>
+            <fieldset
+              disabled={modelConfigSaving}
+              className="min-w-0 space-y-5 border-0 p-0"
+            >
+              <div className="space-y-3">
+                {textModelProviders.map((provider, providerIndex) => (
+                  <div
+                    key={provider.provider}
+                    className="bg-canvas-oat/40 rounded-card p-5 space-y-3.5"
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <div className="text-sm text-text-ink/75">{provider.provider}</div>
+                        {provider.accountManaged && (
+                          <div className="text-[11px] text-text-ink/45">
+                            {t("settings.model.accountManaged")}
+                          </div>
+                        )}
+                      </div>
+                      {provider.editable && (
+                        <button
+                          type="button"
+                          aria-label={t("settings.model.removeProvider")}
+                          disabled={textModelProviders.length <= 1}
+                          onClick={() => removeTextModelProvider(providerIndex)}
+                          className="p-1.5 text-text-ink/40 hover:text-status-error disabled:opacity-30"
+                        >
+                          <X size={14} />
+                        </button>
+                      )}
+                    </div>
 
-                <ProtocolSelect value={protocol} onChange={handleProtocolChange} />
-                <Field label={t("apiKey.model")} placeholder={`${t("apiKey.examplePrefix")} ${DEFAULT_MODEL_IDS[protocol]}`} value={modelId} onChange={setModelId} />
-                <Field label={t("apiKey.endpoint")} placeholder={`${t("apiKey.examplePrefix")} ${DEFAULT_ENDPOINTS[protocol]}`} value={endpoint} onChange={setEndpoint} />
-                <PasswordField label={t("apiKey.key")} placeholder="sk-..." maskedValue={apiKeyMasked} value={apiKey} onChange={setApiKey} show={showKey} onToggle={() => setShowKey(!showKey)} />
+                    <Field
+                      label={t("apiKey.endpoint")}
+                      placeholder={t("apiKey.endpoint")}
+                      value={provider.endpoint}
+                      onChange={(value) => updateTextModelProvider(providerIndex, { endpoint: value })}
+                      readOnly={!provider.editable}
+                    />
+                    {provider.editable && (
+                      <PasswordField
+                        label={t("apiKey.key")}
+                        placeholder="sk-..."
+                        maskedValue={provider.apiKeyMasked}
+                        value={provider.apiKey}
+                        onChange={(value) => updateTextModelProvider(providerIndex, { apiKey: value })}
+                        show={showKey}
+                        onToggle={() => setShowKey(!showKey)}
+                      />
+                    )}
+                    {provider.editable && (
+                      <label className="block">
+                        <span className="block text-xs text-text-ink/55 mb-1.5">API Type</span>
+                        <select
+                          value={provider.apiType}
+                          onChange={(event) => updateTextModelProvider(providerIndex, {
+                            apiType: event.target.value as TextModelProviderConfig["apiType"]
+                          })}
+                          className="w-full px-3 py-2.5 border border-border-stone/40 rounded-input bg-background-paper text-sm"
+                        >
+                          <option value="auto">auto</option>
+                          <option value="chatCompletions">chatCompletions</option>
+                          <option value="responses">responses</option>
+                        </select>
+                      </label>
+                    )}
 
-                <button type="button" onClick={() => setShowAdvanced(!showAdvanced)} className="flex items-center gap-1.5 text-xs text-text-ink/55 hover:text-text-ink/75 cursor-pointer transition-colors">
-                  {showAdvanced ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-                  {t("apiKey.advanced")}
-                </button>
-                {showAdvanced && (
-                  <div className="space-y-3.5">
-                    <Field label={t("apiKey.maxTokens")} placeholder={t("apiKey.noLimit")} value={maxTokens} onChange={setMaxTokens} suffix="tokens" />
-                    <Field label={t("apiKey.dailyLimit")} placeholder={t("apiKey.noLimit")} value={dailyLimit} onChange={setDailyLimit} />
+                    <div className="space-y-2">
+                      {provider.models.map((model, modelIndex) => {
+                        const modelKey = model.presetName ?? model.draftId ?? `${providerIndex}-${modelIndex}`;
+                        return (
+                          <div key={modelKey} className="flex items-center gap-2">
+                            <input
+                              aria-label={`${provider.provider} ${t("apiKey.model")}`}
+                              value={model.model}
+                              disabled={!provider.editable}
+                              onChange={(event) => updateTextModel(
+                                providerIndex,
+                                modelIndex,
+                                event.target.value
+                              )}
+                              placeholder={t("apiKey.model")}
+                              className="min-w-0 flex-1 px-3 py-2.5 border border-border-stone/40 rounded-input bg-background-paper text-sm"
+                            />
+                            {provider.editable && (
+                              <button
+                                type="button"
+                                aria-label={t("settings.model.removeModel")}
+                                disabled={textModelProviders.reduce(
+                                  (total, item) => total + item.models.length,
+                                  0
+                                ) <= 1}
+                                onClick={() => removeTextModel(providerIndex, modelIndex)}
+                                className="p-1.5 text-text-ink/40 hover:text-status-error disabled:opacity-30"
+                              >
+                                <X size={14} />
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })}
+                      {provider.editable && (
+                        <button
+                          type="button"
+                          onClick={() => addTextModel(providerIndex)}
+                          className="text-xs text-action-sky hover:underline"
+                        >
+                          + {t("settings.model.addModel")}
+                        </button>
+                      )}
+                    </div>
                   </div>
-                )}
+                ))}
 
-                <div className="flex min-h-9 items-center justify-end gap-3">
-                  <ValidationMessage validation={llmValidation} stale={isMainModelTestStale} />
-                  <TestButton status={llmValidation.status} onClick={testMainModelConnection} disabled={false} />
+                <div className="flex items-end gap-2">
+                  <label className="min-w-0 flex-1">
+                    <span className="block text-xs text-text-ink/55 mb-1.5">
+                      {t("settings.model.addProvider")}
+                    </span>
+                    <select
+                      value={newProviderProtocol}
+                      onChange={(event) => setNewProviderProtocol(event.target.value as Protocol)}
+                      className="w-full px-3 py-2.5 border border-border-stone/40 rounded-input bg-background-paper text-sm"
+                    >
+                      {PROTOCOL_OPTIONS
+                        .filter((option) => !textModelProviders.some(
+                          (provider) => provider.provider === fromProtocol(option.value)
+                        ))
+                        .map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {t(option.labelKey)}
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+                  <button
+                    type="button"
+                    onClick={addTextModelProvider}
+                    disabled={PROTOCOL_OPTIONS.every((option) => textModelProviders.some(
+                      (provider) => provider.provider === fromProtocol(option.value)
+                    ))}
+                    className="px-3 py-2.5 text-xs text-action-sky border border-action-sky/30 rounded-btn disabled:opacity-40"
+                  >
+                    + {t("settings.model.addProvider")}
+                  </button>
                 </div>
+
+                <label className="block">
+                  <span className="block text-xs text-text-ink/55 mb-1.5">
+                    {t("settings.model.defaultModel")}
+                  </span>
+                  <select
+                    value={defaultModelPreset ?? ""}
+                    onChange={(event) => setDefaultModelPreset(event.target.value || null)}
+                    className="w-full px-3 py-2.5 border border-border-stone/40 rounded-input bg-background-paper text-sm"
+                  >
+                    {textModelProviders.flatMap((provider) => provider.models.map((model) => (
+                      <option
+                        key={model.presetName ?? model.draftId}
+                        value={model.presetName ?? model.draftId}
+                      >
+                        {provider.provider} / {model.model}
+                      </option>
+                    )))}
+                  </select>
+                </label>
+                <p className="text-[11px] text-text-ink/45">
+                  {t("settings.model.agentNoConnectionTest")}
+                </p>
               </div>
 
               <ModelConfigCard
@@ -1386,7 +1784,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
                   onValueChange={(value) => setEmbeddingMode(value as EmbeddingMode)}
                   className="select-control--paper"
                   options={[
-                    ...(!isByokMode ? [{ value: "cloud", label: t("settings.model.cloudEmbeddingOption") }] : []),
+                    ...(hasAccountSession ? [{ value: "cloud", label: t("settings.model.cloudEmbeddingOption") }] : []),
                     { value: "local", label: t("settings.model.localEmbeddingOffline") },
                     { value: "custom", label: t("settings.model.customEmbeddingOption") }
                   ]}
@@ -1505,10 +1903,16 @@ export function SettingsPageView(props: SettingsPageViewProps) {
                 </div>
               </div>
 
+              {modelConfigSaveError && (
+                <p className="text-xs text-status-error" role="alert">
+                  {modelConfigSaveError}
+                </p>
+              )}
               <div className="flex gap-3 justify-end">
                 <button
                   type="button"
                   onClick={() => setShowApiConfig(false)}
+                  disabled={modelConfigSaving}
                   className="px-5 py-2.5 text-sm text-text-ink/70 bg-canvas-oat border border-border-stone/40 rounded-btn hover:bg-canvas-oat/80 transition-colors cursor-pointer"
                 >
                   {t("settings.model.cancelConfig")}
@@ -1516,13 +1920,13 @@ export function SettingsPageView(props: SettingsPageViewProps) {
                 <button
                   type="button"
                   onClick={handleSaveApiConfig}
-                  disabled={!canSaveApiConfig}
+                  disabled={!canSaveApiConfig || modelConfigSaving}
                   className="px-5 py-2.5 text-sm text-white bg-action-sky rounded-btn hover:bg-action-sky-hover transition-all cursor-pointer shadow-md disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   {t("settings.model.saveConfig")}
                 </button>
               </div>
-            </div>
+            </fieldset>
           )}
         </Section>
 
@@ -1947,6 +2351,8 @@ export function UsageDetailView(props: UsageDetailViewProps) {
   // backend payload; TOKEN_USAGE_SCENES only fixes the display order.
   const platformScenes = orderByScene(props.platformUsage.sceneUsages, (usage) => usage.scene);
   const byKind = orderByScene(props.byokUsage.byKind, (usage) => usage.kind);
+  const byProvider = [...props.byokUsage.byProvider]
+    .sort((left, right) => left.provider.localeCompare(right.provider));
   const byokSummaryReady = props.byokUsageStatus !== "loading" && props.byokUsageStatus !== "error";
   const showPlatform = props.showPlatform && platformScenes.length > 0;
   // Sum the Cloud/Nacos scene budgets — same additive total the exhausted modal
@@ -2025,7 +2431,7 @@ export function UsageDetailView(props: UsageDetailViewProps) {
                 <div className="text-xs text-text-ink/45 mt-1">{t("settings.token.loadFailedHint")}</div>
               </div>
             </div>
-          ) : byKind.length === 0 ? (
+          ) : byProvider.length === 0 ? (
             <div className={usageStyles.usageState}>
               <div>
                 <div className="text-sm">{t("settings.token.noByokUsage")}</div>
@@ -2034,14 +2440,45 @@ export function UsageDetailView(props: UsageDetailViewProps) {
             </div>
           ) : (
             <div className={usageStyles.byokUsageList}>
-              {byKind.map((usage) => (
-                <ByokUsageRow key={usage.kind} usage={usage} showDesc={describeScenesInByok} />
+              {byProvider.map((provider) => (
+                <ByokProviderUsageGroup
+                  key={provider.provider}
+                  usage={provider}
+                  showDesc={describeScenesInByok}
+                />
               ))}
             </div>
           )}
         </section>
       </div>
     </div>
+  );
+}
+
+function ByokProviderUsageGroup(props: {
+  usage: ByokTokenUsageByProvider;
+  showDesc: boolean;
+}) {
+  const byKind = orderByScene(props.usage.byKind, (usage) => usage.kind);
+  return (
+    <section className={usageStyles.byokProviderGroup}>
+      <div className={usageStyles.byokProviderHead}>
+        <h3>{props.usage.provider}</h3>
+        <span>
+          <strong>{formatCompactTokenCount(props.usage.totalTokens)}</strong>
+          <em>Token</em>
+        </span>
+      </div>
+      <div className={usageStyles.byokProviderRows}>
+        {byKind.map((usage) => (
+          <ByokUsageRow
+            key={`${props.usage.provider}:${usage.kind}`}
+            usage={usage}
+            showDesc={props.showDesc}
+          />
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -3207,6 +3644,26 @@ function normalizeQuotaReviewNote(value: string | null): string | null {
   return normalized || null;
 }
 
+function promiseWithTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = globalThis.setTimeout(() => reject(new Error(message)), timeoutMs);
+    void promise.then(
+      (value) => {
+        globalThis.clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        globalThis.clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
+
 function formatQuotaNextAllowedAt(epochMs: number, language: "zh-CN" | "en-US"): string {
   const date = new Date(epochMs);
   if (language === "zh-CN") {
@@ -3236,6 +3693,14 @@ export function formatUsageUpdatedAt(value: string): string {
   const pad = (n: number) => String(n).padStart(2, "0");
   // Display in the local time zone (the original implementation just truncated the ISO string, showing UTC directly, off by 8 hours).
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function hasUsableNonAccountTextModel(config: AppState["modelConfig"]): boolean {
+  return (config.providers ?? []).some((provider) => (
+    !provider.accountManaged
+    && provider.configured
+    && provider.models.some((model) => model.available)
+  ));
 }
 
 /**

@@ -38,6 +38,10 @@ export class ByokTokenUsageRecorder implements ByokTokenUsageRecorderLike {
 
       const modelId = stringOrNull(input.modelId);
       const provider = stringOrNull(input.provider) ?? stringOrNull(this.options.resolveProviderName?.(modelId)) ?? "";
+      if (!provider) {
+        console.error("BYOK token usage recorder skipped event without an actual provider");
+        return false;
+      }
       if (provider === ACCOUNT_PROVIDER) return false;
 
       const operationId = stringOrNull(input.operationId) ?? randomUUID();

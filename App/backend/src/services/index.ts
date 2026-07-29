@@ -291,8 +291,6 @@ function createUnavailableMemmyConfigWriter(): MemmyConfigWriter {
   return {
     writeAccountModelProjection: async () => unavailable(),
     clearAccountModelProjection: async () => unavailable(),
-    writeByokModelProjection: async () => unavailable(),
-    writeActiveMemoryProfile: async () => unavailable(),
     patchChannelConfig: async () => unavailable(),
     patchMcpServerConfig: async () => unavailable()
   };

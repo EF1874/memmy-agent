@@ -8,6 +8,10 @@ import { getWorkspacePath } from "../../config/paths.js";
 import { CONTEXT_SAFETY_BUFFER_TOKENS } from "../../token-budget.js";
 import { CronService } from "../../cron/service.js";
 import { makeProvider } from "../../providers/factory.js";
+import {
+  resolveModelSelection,
+  type ResolvedModelSelection,
+} from "../../providers/model-catalog.js";
 import { makeReloadingProviderSnapshotLoader, makeReloadingToolsSnapshotLoader } from "../../providers/snapshot-loader.js";
 import {
   readWebuiSessionBinding,
@@ -56,6 +60,12 @@ import {
 } from "../../entrypoints/frontend-bridge/projects.js";
 
 export const UNIFIED_SESSION_KEY = "unified:default";
+
+function isSessionOrderedCommand(raw: string): boolean {
+  const command = raw.trim().toLowerCase();
+  return command === "/model" || command.startsWith("/model ");
+}
+
 type ToolRegistryInstance = ReturnType<ToolLoader["loadRegistry"]>;
 type GuiMirrorTurn = { sessionKey: string; chatId: string; turnId: string };
 type GuiTranscriptMirrorLike = {
@@ -148,6 +158,10 @@ export class TurnContext {
   sessionProjectId: string | null = null;
   trustedSessionBinding: WebuiSessionBinding | null = null;
   mirrorTurn: GuiMirrorTurn | null = null;
+  modelSelection: ResolvedModelSelection | null = null;
+  actualModelProvider: string | null = null;
+  actualModel: string | null = null;
+  consolidator: Consolidator | null = null;
 
   constructor(init: { msg: InboundMessage; sessionKey?: string; state?: TurnState; turnId?: string; session?: Session | null }) {
     this.msg = init.msg;
@@ -185,6 +199,10 @@ type AgentLoopInit = {
   presetSnapshotLoader?: ((name: string) => any) | null;
   providerSignature?: any[] | string | null;
   runtimeModelPublisher?: ((model: string | null, modelPreset?: string | null) => void) | null;
+  modelSelectionResolver?: ((input: {
+    requestedPreset?: string | null;
+    sessionPreset?: string | null;
+  }) => ResolvedModelSelection | null) | null;
   mcpServers?: Record<string, any>;
   cronService?: CronService;
   hooks?: AgentHook[];
@@ -451,6 +469,10 @@ export class AgentLoop {
   toolsSnapshotLoader: (() => any) | null = null;
   presetSnapshotLoader: ((name: string) => any) | null = null;
   runtimeModelPublisher: ((model: string | null, modelPreset?: string | null) => void) | null = null;
+  private readonly modelSelectionResolver: ((input: {
+    requestedPreset?: string | null;
+    sessionPreset?: string | null;
+  }) => ResolvedModelSelection | null) | null;
   private activePresetValue: string | null = null;
   defaultSelectionSignature: any[] | null = null;
   mcpServers: Record<string, any>;
@@ -477,6 +499,7 @@ export class AgentLoop {
     this.providerSignature = init.providerSignature ?? null;
     this.defaultSelectionSignature = defaultSelectionSignature(Array.isArray(this.providerSignature) ? this.providerSignature : null);
     this.runtimeModelPublisher = init.runtimeModelPublisher ?? null;
+    this.modelSelectionResolver = init.modelSelectionResolver ?? null;
     this.extraHooks = [...(init.hooks ?? [])];
     this.bus = init.bus ?? new MessageBus();
     const initConfig = init.config ?? new Config();
@@ -606,19 +629,37 @@ export class AgentLoop {
     return this.tools.toolNames ?? [];
   }
 
-  llmRuntime(): LLMRuntime {
-    this.refreshProviderSnapshot();
-    return new LLMRuntime(this.provider, this.model ?? "");
+  llmRuntime(modelPreset?: string | null): LLMRuntime {
+    if (!this.modelSelectionResolver && modelPreset === undefined) {
+      this.refreshProviderSnapshot();
+      return new LLMRuntime(this.provider, this.model ?? "");
+    }
+    const selection = this.resolveTurnModelSelection({
+      ...(modelPreset !== undefined ? { requestedPreset: modelPreset } : {}),
+    });
+    if (!selection) throw new SessionWorkspaceError("model_unavailable");
+    return new LLMRuntime(selection.snapshot.provider, selection.snapshot.model);
   }
 
   static fromConfig(config: Config, bus: MessageBus = new MessageBus(), extra: AgentLoopInit = {}): AgentLoop {
     const runtimeConfig = new Config(config.toObject());
     const defaults = runtimeConfig.agents.defaults;
-    const provider = extra.provider ?? makeProvider(runtimeConfig);
     const resolved = runtimeConfig.resolvePreset();
+    let provider = extra.provider;
+    if (!provider) {
+      try {
+        provider = makeProvider(runtimeConfig);
+      } catch {
+        // Keep history/settings surfaces available when the model catalog is
+        // empty or incomplete. Every real turn is still rejected by the live
+        // model resolver before a Session or message is created.
+        provider = makeProvider("openai", { model: resolved.model });
+      }
+    }
     const providerSnapshotLoader = extra.providerSnapshotLoader ?? (extra.provider ? null : makeReloadingProviderSnapshotLoader());
     const toolsSnapshotLoader = extra.toolsSnapshotLoader ?? makeReloadingToolsSnapshotLoader();
-    const presetSnapshotLoader = extra.presetSnapshotLoader ?? makePresetSnapshotLoader(runtimeConfig, providerSnapshotLoader);
+    const presetSnapshotLoader = extra.presetSnapshotLoader
+      ?? makePresetSnapshotLoader(runtimeConfig, providerSnapshotLoader);
     return new AgentLoop({
       ...extra,
       config: runtimeConfig,
@@ -634,6 +675,10 @@ export class AgentLoop {
       providerSnapshotLoader,
       toolsSnapshotLoader,
       presetSnapshotLoader,
+      modelSelectionResolver: extra.modelSelectionResolver
+        ?? (extra.provider
+          ? null
+          : (input) => resolveModelSelection(input)),
     });
   }
 
@@ -645,12 +690,16 @@ export class AgentLoop {
     capturedSessionWorkspace: string,
     readonlySkillRoots: readonly string[] | undefined,
     messageSendCallback: MessageSendCallback | null = null,
+    modelSelection: ResolvedModelSelection | null = null,
   ): ToolContext {
+    const subagentManager = modelSelection
+      ? this.createTurnSubagentManager(modelSelection)
+      : this.subagents;
     return new ToolContext({
       config: this.config.tools,
       workspace: capturedSessionWorkspace,
       bus: this.bus,
-      subagentManager: this.subagents,
+      subagentManager,
       cronService: this.cronService,
       sessions: this.sessions,
       execSessionManager: this.execSessionManager,
@@ -670,10 +719,12 @@ export class AgentLoop {
       includeConnectedMcp = false,
       messageSendCallback = null,
       readonlySkillRoots,
+      modelSelection = null,
     }: {
       includeConnectedMcp?: boolean;
       messageSendCallback?: MessageSendCallback | null;
       readonlySkillRoots?: readonly string[];
+      modelSelection?: ResolvedModelSelection | null;
     } = {},
   ): ToolRegistryInstance {
     this.refreshToolsSnapshot();
@@ -681,11 +732,33 @@ export class AgentLoop {
       capturedSessionWorkspace,
       readonlySkillRoots,
       messageSendCallback,
+      modelSelection ?? null,
     );
     const registry = new ToolLoader({ workspace: this.workspace, ctx: toolCtx }).loadRegistry(toolCtx);
     if (includeConnectedMcp) this.copyConnectedMcpTools(registry);
     this.registerHookTools(toolCtx, phase, registry);
     return registry;
+  }
+
+  private createTurnSubagentManager(selection: ResolvedModelSelection): Record<string, any> {
+    const manager = this.subagents;
+    return {
+      get maxConcurrent() {
+        return manager.maxConcurrent;
+      },
+      get maxConcurrentSubagents() {
+        return manager.maxConcurrentSubagents;
+      },
+      getRunningCount: () => manager.getRunningCount(),
+      spawn: (input: Record<string, any>) => manager.spawn({
+        ...input,
+        provider: selection.snapshot.provider,
+        model: selection.snapshot.model,
+        contextWindowTokens: selection.snapshot.contextWindowTokens,
+        modelPreset: selection.preset,
+        modelProvider: selection.provider,
+      }),
+    };
   }
 
   private projectReadonlySkillRoots(): readonly string[] {
@@ -972,13 +1045,16 @@ export class AgentLoop {
     return AgentLoop.runtimeChatId(msg);
   }
 
-  replayTokenBudget(): number {
-    if (this.contextWindowTokens <= 0) return 0;
-    const reserved = Number(this.provider?.generation?.maxTokens ?? 4096);
-    const budget = this.contextWindowTokens
+  replayTokenBudget(modelSelection: ResolvedModelSelection | null = null): number {
+    const contextWindowTokens = modelSelection?.snapshot.contextWindowTokens
+      ?? this.contextWindowTokens;
+    const provider = modelSelection?.snapshot.provider ?? this.provider;
+    if (contextWindowTokens <= 0) return 0;
+    const reserved = Number(provider?.generation?.maxTokens ?? 4096);
+    const budget = contextWindowTokens
       - Math.max(1, reserved)
       - CONTEXT_SAFETY_BUFFER_TOKENS;
-    return budget > 0 ? budget : Math.max(128, Math.floor(this.contextWindowTokens / 2));
+    return budget > 0 ? budget : Math.max(128, Math.floor(contextWindowTokens / 2));
   }
 
   scheduleBackground(promise: Promise<any>): void {
@@ -1048,6 +1124,90 @@ export class AgentLoop {
       reasoningEffort: preset.reasoningEffort,
       signature: `${normalized}:${preset.model}:${preset.contextWindowTokens}:${preset.maxTokens}`,
     };
+  }
+
+  resolveTurnModelSelection(input: {
+    requestedPreset?: string | null;
+    sessionPreset?: string | null;
+  }): ResolvedModelSelection | null {
+    if (this.modelSelectionResolver) {
+      try {
+        return this.modelSelectionResolver(input);
+      } catch {
+        return null;
+      }
+    }
+
+    const defaultPreset = this.activePresetValue
+      ?? this.config.agents.defaults.modelPreset
+      ?? "default";
+    let selected = defaultPreset;
+    if (Object.prototype.hasOwnProperty.call(input, "requestedPreset")) {
+      if (input.requestedPreset) {
+        try {
+          selected = this.normalizedPresetName(input.requestedPreset);
+        } catch {
+          selected = defaultPreset;
+        }
+      }
+    } else if (input.sessionPreset) {
+      try {
+        selected = this.normalizedPresetName(input.sessionPreset);
+      } catch {
+        selected = defaultPreset;
+      }
+    }
+
+    try {
+      const snapshot = !this.modelSelectionResolver && selected === "default"
+        ? {
+            provider: this.provider,
+            model: this.model ?? this.defaultModelPreset.model,
+            contextWindowTokens: this.contextWindowTokens,
+            signature: ["default", this.model ?? this.defaultModelPreset.model]
+          }
+        : this.buildModelPresetSnapshot(selected);
+      const provider = String(
+        snapshot.provider?.spec?.name
+        ?? snapshot.provider?.name
+        ?? this.config.getProviderName(snapshot.model, {
+          preset: selected === "default"
+            ? this.defaultModelPreset
+            : this.modelPresets[selected],
+        })
+        ?? "unknown",
+      );
+      return {
+        preset: selected,
+        provider,
+        model: String(snapshot.model),
+        snapshot: {
+          provider: snapshot.provider,
+          model: String(snapshot.model),
+          contextWindowTokens: Number(snapshot.contextWindowTokens),
+          signature: Array.isArray(snapshot.signature) ? snapshot.signature : [snapshot.signature],
+        },
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Persists a TUI/CLI model choice while the caller already owns this Session's turn lock.
+   *
+   * This method deliberately does not acquire the lock itself; command dispatch runs inside
+   * the same ordered Session turn as ordinary messages.
+   */
+  applySessionModelPresetLocked(session: Session, requestedPreset: string): ResolvedModelSelection {
+    const selection = this.resolveTurnModelSelection({ requestedPreset });
+    if (!selection || selection.preset !== requestedPreset) {
+      throw new Error(`Unknown or unavailable model preset '${requestedPreset}'`);
+    }
+    session.metadata.modelPreset = selection.preset;
+    this.sessions.save(session, { fsync: true });
+    this.guiTranscriptMirror?.sessionUpdated(session.key);
+    return selection;
   }
 
   applyProviderSnapshot(
@@ -1317,6 +1477,13 @@ export class AgentLoop {
             webui_request_digest: msg.metadata.webui_request_digest,
           }
         : {}),
+      ...(typeof msg.metadata?.model_preset === "string"
+        ? {
+            model_preset: msg.metadata.model_preset,
+            model_provider: msg.metadata.model_provider ?? null,
+            model: msg.metadata.model ?? null,
+          }
+        : {}),
       ...extra,
     };
     session.addMessage("user", typeof msg.content === "string" ? msg.content : "", metadataExtra);
@@ -1338,6 +1505,9 @@ export class AgentLoop {
         metadata: {
           webuiMessageAccepted: true,
           clientRequestId,
+          modelPreset: msg.metadata?.model_preset ?? null,
+          modelProvider: msg.metadata?.model_provider ?? null,
+          model: msg.metadata?.model ?? null,
         },
       }),
     );
@@ -1426,7 +1596,22 @@ export class AgentLoop {
     return out;
   }
 
-  saveTurn(session: Session, messages: Record<string, any>[], skip: number, { turnLatencyMs }: { turnLatencyMs?: number } = {}): void {
+  saveTurn(
+    session: Session,
+    messages: Record<string, any>[],
+    skip: number,
+    {
+      turnLatencyMs,
+      modelPreset,
+      modelProvider,
+      modelName,
+    }: {
+      turnLatencyMs?: number;
+      modelPreset?: string | null;
+      modelProvider?: string | null;
+      modelName?: string | null;
+    } = {},
+  ): void {
     let lastAssistantIdx: number | null = null;
     for (const message of messages.slice(skip)) {
       const entry = { ...message };
@@ -1452,6 +1637,11 @@ export class AgentLoop {
           entry.content = filtered;
         }
       }
+      if (role === "assistant") {
+        if (modelPreset) entry.model_preset = modelPreset;
+        if (modelProvider) entry.model_provider = modelProvider;
+        if (modelName) entry.model_name = modelName;
+      }
       entry.timestamp ??= new Date().toISOString();
       session.messages.push(entry);
       if (role === "assistant") lastAssistantIdx = session.messages.length - 1;
@@ -1460,7 +1650,13 @@ export class AgentLoop {
     session.updatedAt = new Date().toISOString();
   }
 
-  enqueueSessionDagTurn(session: Session, turnId: string, messageStart: number, messageEnd: number): void {
+  enqueueSessionDagTurn(
+    session: Session,
+    turnId: string,
+    messageStart: number,
+    messageEnd: number,
+    modelSelection: ResolvedModelSelection | null = null,
+  ): void {
     if (!this.sessionDagQueue || !this.config.sessionDag.enabled) return;
     if (messageEnd <= messageStart) return;
     const turnMessages = session.messages.slice(messageStart, messageEnd);
@@ -1472,7 +1668,16 @@ export class AgentLoop {
       assistant_text: lastMessageText(turnMessages, "assistant"),
     };
     try {
-      this.sessionDagQueue.enqueueSavedTurn(session.key, turn);
+      this.sessionDagQueue.enqueueSavedTurn(
+        session.key,
+        turn,
+        modelSelection
+          ? {
+              provider: modelSelection.snapshot.provider,
+              model: modelSelection.snapshot.model,
+            }
+          : undefined,
+      );
     } catch (error) {
       console.warn("Session DAG enqueue failed:", error);
     }
@@ -1627,6 +1832,7 @@ export class AgentLoop {
       boundary = null,
       tools = null,
       sessionWorkspace = this.workspace,
+      modelSelection = null,
     }: {
       onProgress?: any;
       onStream?: any;
@@ -1644,10 +1850,24 @@ export class AgentLoop {
       boundary?: TurnCancellationBoundary | null;
       tools?: ToolRegistryInstance | null;
       sessionWorkspace?: string;
+      modelSelection?: ResolvedModelSelection | null;
     } = {},
-  ): Promise<[string, string[], Record<string, any>[], string, boolean, boolean]> {
-    this.refreshProviderSnapshot();
+  ): Promise<[
+    string,
+    string[],
+    Record<string, any>[],
+    string,
+    boolean,
+    boolean,
+    string | null,
+    string | null,
+  ]> {
+    if (!modelSelection) this.refreshProviderSnapshot();
     this.syncSubagentRuntimeLimits();
+    const activeProvider = modelSelection?.snapshot.provider ?? this.provider;
+    const activeModel = modelSelection?.snapshot.model ?? this.model;
+    const activeContextWindowTokens = modelSelection?.snapshot.contextWindowTokens
+      ?? this.contextWindowTokens;
     const activeTools = tools ?? this.tools;
     const checkpointSession = session;
     const checkpoint = checkpointSession ? (payload: Record<string, any>) => this.setRuntimeCheckpoint(checkpointSession, payload) : null;
@@ -1676,18 +1896,18 @@ export class AgentLoop {
     const result = await this.runner.run(
       new AgentRunSpec({
         messages: initialMessages,
-        provider: this.provider,
+        provider: activeProvider,
         tools: activeTools,
-        model: this.model,
+        model: activeModel,
         maxIterations: this.maxIterations,
-        maxTokens: this.provider?.generation?.maxTokens ?? this.config.agents.defaults.maxTokens,
-        temperature: this.provider?.generation?.temperature ?? this.config.agents.defaults.temperature,
-        reasoningEffort: this.provider?.generation?.reasoningEffort ?? this.config.agents.defaults.reasoningEffort,
+        maxTokens: activeProvider?.generation?.maxTokens ?? this.config.agents.defaults.maxTokens,
+        temperature: activeProvider?.generation?.temperature ?? this.config.agents.defaults.temperature,
+        reasoningEffort: activeProvider?.generation?.reasoningEffort ?? this.config.agents.defaults.reasoningEffort,
         maxToolResultChars: this.maxToolResultChars,
         toolResultMaxCharsByName: SESSION_TOOL_RESULT_MAX_CHARS_BY_NAME,
         workspace: sessionWorkspace,
         sessionKey: activeSessionKey,
-        contextWindowTokens: this.contextWindowTokens,
+        contextWindowTokens: activeContextWindowTokens,
         contextBlockLimit: this.contextBlockLimit,
         providerRetryMode: this.providerRetryMode,
         progressCallback: onProgress,
@@ -1716,6 +1936,8 @@ export class AgentLoop {
       result.stopReason ?? "",
       Boolean(result.hadInjections),
       Boolean(result.finalContentStreamed),
+      firstString(result.response?.actualProvider, activeProvider?.spec?.name),
+      firstString(result.response?.actualModel, activeModel),
     ];
   }
 
@@ -1751,6 +1973,49 @@ export class AgentLoop {
   async stateRestore(ctx: TurnContext): Promise<string> {
     let msg = ctx.msg;
     const existingSession = this.sessions.get(ctx.sessionKey);
+    const hasRequestedPreset = Object.prototype.hasOwnProperty.call(
+      msg.metadata ?? {},
+      "model_preset",
+    );
+    const modelSelection = this.resolveTurnModelSelection({
+      ...(hasRequestedPreset
+        ? {
+            requestedPreset: typeof msg.metadata?.model_preset === "string"
+              ? msg.metadata.model_preset
+              : null,
+          }
+        : {}),
+      sessionPreset: typeof existingSession?.metadata?.modelPreset === "string"
+        ? existingSession.metadata.modelPreset
+        : null,
+    });
+    if (!modelSelection) throw new SessionWorkspaceError("model_unavailable");
+    ctx.modelSelection = modelSelection;
+    ctx.consolidator = this.modelSelectionResolver
+      ? this.consolidator.withProviderSnapshot(
+          modelSelection.snapshot.provider,
+          modelSelection.snapshot.model,
+          modelSelection.snapshot.contextWindowTokens,
+        )
+      : this.consolidator;
+    msg = ctx.msg = new InboundMessage({
+      channel: msg.channel,
+      chatId: msg.chatId,
+      senderId: msg.senderId,
+      content: msg.content,
+      media: msg.media,
+      metadata: msg.channel === "websocket" || msg.metadata?.webui === true
+        ? {
+            ...(msg.metadata ?? {}),
+            model_preset: modelSelection.preset,
+            model_provider: modelSelection.provider,
+            model: modelSelection.model,
+          }
+        : { ...(msg.metadata ?? {}) },
+      sessionKey: ctx.sessionKey,
+      sessionKeyOverride: msg.sessionKeyOverride,
+      timestamp: msg.timestamp,
+    });
     const reservation = existingSession
       || msg.channel !== "websocket"
       || msg.metadata?.webui !== true
@@ -1763,11 +2028,15 @@ export class AgentLoop {
         reservation !== null,
       );
     }
+    ctx.session.metadata.modelPreset = modelSelection.preset;
     const projectedBinding = this.guiTranscriptMirror?.prepareSession(
       msg,
       ctx.session,
       ctx.sessionKey,
     ) ?? null;
+    if (!ctx.trustedSessionBinding && projectedBinding) {
+      ctx.trustedSessionBinding = projectedBinding;
+    }
     if (projectedBinding && msg.metadata?.webui !== true) {
       msg = ctx.msg = new InboundMessage({
         channel: msg.channel,
@@ -1785,7 +2054,7 @@ export class AgentLoop {
       msg,
       ctx.session,
       reservation,
-      ctx.trustedSessionBinding ?? projectedBinding,
+      ctx.trustedSessionBinding,
     );
     ctx.sessionWorkspace = binding.cwd;
     ctx.sessionProjectId = binding.projectId;
@@ -1874,13 +2143,17 @@ export class AgentLoop {
         }
       };
     }
-    await this.consolidator.maybeConsolidateByTokens(ctx.session!, compactionOptions);
+    await (ctx.consolidator ?? this.consolidator).maybeConsolidateByTokens(
+      ctx.session!,
+      compactionOptions,
+    );
     ctx.tools = this.createToolRegistry("turn", sessionWorkspace, {
       includeConnectedMcp: true,
       messageSendCallback: ctx.messageSendCallback,
       ...(ctx.sessionProjectId !== null
         ? { readonlySkillRoots: this.projectReadonlySkillRoots() }
         : {}),
+      modelSelection: ctx.modelSelection,
     });
     this.setToolContext(
       ctx.msg.channel,
@@ -1895,8 +2168,9 @@ export class AgentLoop {
     if (messageTool instanceof MessageTool) messageTool.startTurn();
     ctx.history = ctx.session!.getHistory({
       maxMessages: this.maxMessages,
-      maxTokens: this.replayTokenBudget(),
+      maxTokens: this.replayTokenBudget(ctx.modelSelection),
       includeTimestamps: true,
+      targetProvider: ctx.modelSelection?.provider,
     });
     if (
       ctx.userPersistedEarly
@@ -1949,7 +2223,16 @@ export class AgentLoop {
   }
 
   async stateRun(ctx: TurnContext): Promise<string> {
-    const [finalContent, toolsUsed, allMessages, stopReason, hadInjections, finalContentStreamed] = await this.runAgentLoop(ctx.initialMessages, {
+    const [
+      finalContent,
+      toolsUsed,
+      allMessages,
+      stopReason,
+      hadInjections,
+      finalContentStreamed,
+      actualModelProvider,
+      actualModel,
+    ] = await this.runAgentLoop(ctx.initialMessages, {
       onProgress: ctx.onProgress,
       onStream: ctx.onStream,
       onStreamEnd: ctx.onStreamEnd,
@@ -1966,6 +2249,7 @@ export class AgentLoop {
       boundary: ctx.boundary,
       tools: ctx.tools,
       sessionWorkspace: ctx.sessionWorkspace ?? this.workspace,
+      modelSelection: ctx.modelSelection,
     });
     if (ctx.abortSignal?.aborted || stopReason === "cancelled") {
       throw createTaskCancelledError();
@@ -1976,6 +2260,8 @@ export class AgentLoop {
     ctx.stopReason = stopReason;
     ctx.hadInjections = hadInjections;
     ctx.finalContentStreamed = finalContentStreamed;
+    ctx.actualModelProvider = actualModelProvider;
+    ctx.actualModel = actualModel;
     return "ok";
   }
 
@@ -1986,6 +2272,9 @@ export class AgentLoop {
     const dagMessageStart = Math.max(0, ctx.session!.messages.length - (ctx.userPersistedEarly ? 1 : 0));
     this.saveTurn(ctx.session!, ctx.allMessages, ctx.saveSkip, {
       turnLatencyMs: ctx.turnLatencyMs,
+      modelPreset: ctx.modelSelection?.preset,
+      modelProvider: ctx.actualModelProvider ?? ctx.modelSelection?.provider,
+      modelName: ctx.actualModel ?? ctx.modelSelection?.model,
     });
     this.clearPendingUserTurn(ctx.session!);
     this.clearRuntimeCheckpoint(ctx.session!);
@@ -2007,12 +2296,21 @@ export class AgentLoop {
       await maybeGenerateWebuiTitle({
         sessions: this.sessions,
         sessionKey: ctx.sessionKey,
-        provider: this.provider,
-        model: this.model ?? this.provider?.getDefaultModel?.() ?? "",
+        provider: ctx.modelSelection?.snapshot.provider ?? this.provider,
+        model: ctx.modelSelection?.snapshot.model
+          ?? this.model
+          ?? this.provider?.getDefaultModel?.()
+          ?? "",
       });
     }
-    this.enqueueSessionDagTurn(ctx.session!, ctx.turnId, dagMessageStart, ctx.session!.messages.length);
-    const followupCompaction = this.consolidator.maybeConsolidateByTokens(ctx.session!, {
+    this.enqueueSessionDagTurn(
+      ctx.session!,
+      ctx.turnId,
+      dagMessageStart,
+      ctx.session!.messages.length,
+      ctx.modelSelection,
+    );
+    const followupCompaction = (ctx.consolidator ?? this.consolidator).maybeConsolidateByTokens(ctx.session!, {
       replayMaxMessages: this.maxMessages,
     });
     if (ctx.sessionKey.startsWith("cli:")) await followupCompaction;
@@ -2051,13 +2349,56 @@ export class AgentLoop {
       sessionBindingOverride?: WebuiSessionBinding | null;
     } = {},
   ): Promise<OutboundMessage | null> {
-    this.refreshProviderSnapshot();
     const rawChatId = String(msg.chatId ?? "");
     const separator = rawChatId.indexOf(":");
     const channel = separator >= 0 ? rawChatId.slice(0, separator) : "cli";
     const chatId = separator >= 0 ? rawChatId.slice(separator + 1) : rawChatId;
     const key = sessionKey ?? msg.sessionKeyOverride ?? `${channel}:${chatId}`;
-    let session = await this.getOrCreateSession(key);
+    const existingSession = this.sessions.get(key);
+    const hasRequestedPreset = Object.prototype.hasOwnProperty.call(
+      msg.metadata ?? {},
+      "model_preset",
+    );
+    const modelSelection = this.resolveTurnModelSelection({
+      ...(hasRequestedPreset
+        ? {
+            requestedPreset: typeof msg.metadata?.model_preset === "string"
+              ? msg.metadata.model_preset
+              : null,
+          }
+        : {}),
+      sessionPreset: typeof existingSession?.metadata?.modelPreset === "string"
+        ? existingSession.metadata.modelPreset
+        : null,
+    });
+    if (!modelSelection) throw new SessionWorkspaceError("model_unavailable");
+    const scopedConsolidator = this.modelSelectionResolver
+      ? this.consolidator.withProviderSnapshot(
+          modelSelection.snapshot.provider,
+          modelSelection.snapshot.model,
+          modelSelection.snapshot.contextWindowTokens,
+        )
+      : this.consolidator;
+    msg = new InboundMessage({
+      channel: msg.channel,
+      chatId: msg.chatId,
+      senderId: msg.senderId,
+      content: msg.content,
+      media: msg.media,
+      metadata: msg.channel === "websocket" || msg.metadata?.webui === true
+        ? {
+            ...(msg.metadata ?? {}),
+            model_preset: modelSelection.preset,
+            model_provider: modelSelection.provider,
+            model: modelSelection.model,
+          }
+        : { ...(msg.metadata ?? {}) },
+      sessionKey: key,
+      sessionKeyOverride: msg.sessionKeyOverride,
+      timestamp: msg.timestamp,
+    });
+    let session = existingSession ?? await this.getOrCreateSession(key);
+    session.metadata.modelPreset = modelSelection.preset;
     const sessionBinding = this.resolveSessionWorkspace(
       msg,
       session,
@@ -2071,7 +2412,7 @@ export class AgentLoop {
     const prepared = this.autoCompact.prepareSession(session, key);
     session = prepared[0];
     const pendingSummary = prepared[1];
-    await this.consolidator.maybeConsolidateByTokens(session, {
+    await scopedConsolidator.maybeConsolidateByTokens(session, {
       replayMaxMessages: this.maxMessages,
     });
     const tools = this.createToolRegistry(
@@ -2082,6 +2423,7 @@ export class AgentLoop {
         ...(sessionBinding.projectId !== null
           ? { readonlySkillRoots: this.projectReadonlySkillRoots() }
           : {}),
+        modelSelection,
       },
     );
 
@@ -2099,8 +2441,9 @@ export class AgentLoop {
 
     const history = session.getHistory({
       maxMessages: this.maxMessages,
-      maxTokens: this.replayTokenBudget(),
+      maxTokens: this.replayTokenBudget(modelSelection),
       includeTimestamps: true,
+      targetProvider: modelSelection.provider,
     });
     const currentRole = isSubagent ? "assistant" : "user";
     const messages = this.context.buildMessages({
@@ -2127,7 +2470,16 @@ export class AgentLoop {
     });
 
     const started = Date.now();
-    const [rawFinalContent, , allMessages, stopReason] = await this.runAgentLoop(messages, {
+    const [
+      rawFinalContent,
+      ,
+      allMessages,
+      stopReason,
+      ,
+      ,
+      actualModelProvider,
+      actualModel,
+    ] = await this.runAgentLoop(messages, {
       onProgress,
       onStream,
       onStreamEnd,
@@ -2141,6 +2493,7 @@ export class AgentLoop {
       abortSignal,
       tools,
       sessionWorkspace,
+      modelSelection,
     });
     if (abortSignal?.aborted || stopReason === "cancelled") {
       throw createTaskCancelledError();
@@ -2148,14 +2501,27 @@ export class AgentLoop {
     const finalContent = this.localizeUserFacingApiError(channel, msg.metadata, session, rawFinalContent, stopReason);
     const latencyMs = Math.max(0, Date.now() - started);
     const dagMessageStart = session.messages.length;
-    this.saveTurn(session, allMessages, 1 + history.length, { turnLatencyMs: latencyMs });
+    this.saveTurn(session, allMessages, 1 + history.length, {
+      turnLatencyMs: latencyMs,
+      modelPreset: modelSelection.preset,
+      modelProvider: actualModelProvider ?? modelSelection.provider,
+      modelName: actualModel ?? modelSelection.model,
+    });
     this.clearRuntimeCheckpoint(session);
     session.enforceFileCap((messages) =>
       this.context.memory.rawArchive(messages, { sessionKey: key }),
     );
     this.sessions.save(session);
-    this.enqueueSessionDagTurn(session, turnId ?? firstString(msg.metadata?.turn_id, msg.metadata?.turnId) ?? cryptoRandomId(), dagMessageStart, session.messages.length);
-    this.scheduleBackground(this.consolidator.maybeConsolidateByTokens(session, { replayMaxMessages: this.maxMessages }));
+    this.enqueueSessionDagTurn(
+      session,
+      turnId ?? firstString(msg.metadata?.turn_id, msg.metadata?.turnId) ?? cryptoRandomId(),
+      dagMessageStart,
+      session.messages.length,
+      modelSelection,
+    );
+    this.scheduleBackground(scopedConsolidator.maybeConsolidateByTokens(session, {
+      replayMaxMessages: this.maxMessages,
+    }));
 
     const metadata: Record<string, any> = {};
     if (channel === "slack" && key.startsWith("slack:") && key.split(":").length >= 3) {
@@ -2196,7 +2562,7 @@ export class AgentLoop {
       sessionBindingOverride?: WebuiSessionBinding | null;
     } = {},
   ): Promise<OutboundMessage | null> {
-    this.refreshProviderSnapshot();
+    if (!this.modelSelectionResolver) this.refreshProviderSnapshot();
     if (message.channel === "system") {
       return this.processSystemMessage(message, sessionKey, {
         onProgress,
@@ -2550,7 +2916,7 @@ export class AgentLoop {
         ? this.pendingQueues.get(effectiveKey)
         : null;
       if (legacyPending) {
-        if (this.commands.isDispatchableCommand(raw)) {
+        if (this.commands.isDispatchableCommand(raw) && !isSessionOrderedCommand(raw)) {
           await this.dispatchCommandInline(msg, effectiveKey, raw, (ctx) => this.commands.dispatch(ctx));
           continue;
         }
@@ -2575,7 +2941,7 @@ export class AgentLoop {
       }
       const dispatchableCommand = this.commands.isDispatchableCommand(raw);
       if (lastSlot?.route === route) {
-        if (dispatchableCommand) {
+        if (dispatchableCommand && !isSessionOrderedCommand(raw)) {
           await this.dispatchCommandInline(msg, effectiveKey, raw, (ctx) => this.commands.dispatch(ctx));
           continue;
         }

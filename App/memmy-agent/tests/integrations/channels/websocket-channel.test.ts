@@ -34,6 +34,20 @@ function sent(ws: { send: ReturnType<typeof vi.fn> }, index = 0): any {
   return JSON.parse(ws.send.mock.calls[index][0]);
 }
 
+function modelSelection(preset: string, provider: string, model: string): any {
+  return {
+    preset,
+    provider,
+    model,
+    snapshot: {
+      provider: null,
+      model,
+      contextWindowTokens: 200_000,
+      signature: [provider, model],
+    },
+  };
+}
+
 const oldDataDir = process.env.MEMMY_AGENT_DATA_DIR;
 const roots: string[] = [];
 
@@ -90,6 +104,83 @@ describe("WebSocket channel", () => {
     expect(parseInboundPayload("raw text")).toBe("raw text");
     expect(isValidChatId("chat-1")).toBe(true);
     expect(isValidChatId("")).toBe(false);
+  });
+
+  it("uses one request id and the confirmed fallback model for a new chat's first message", async () => {
+    const root = tempDataDir();
+    const workspace = path.join(root, "workspace");
+    fs.mkdirSync(workspace, { recursive: true });
+    const bus = new MessageBus();
+    const resolver = vi.fn(() => modelSelection("current-default", "openai", "gpt-5"));
+    const channel = new WebSocketChannel({}, bus, {
+      sessionManager: new SessionManager(path.join(root, "sessions")),
+      workspacePath: workspace,
+      modelSelectionResolver: resolver,
+    });
+    const ws = connection();
+    const requestId = "11111111-1111-4111-8111-111111111111";
+
+    await channel.dispatchEnvelope(ws, "client-1", {
+      type: "new_chat",
+      client_request_id: requestId,
+      model_preset: "deleted-model",
+    });
+
+    const attached = sent(ws);
+    expect(attached).toMatchObject({
+      event: "attached",
+      client_request_id: requestId,
+      model_preset: "current-default",
+      model_provider: "openai",
+      model: "gpt-5",
+    });
+
+    await channel.dispatchEnvelope(ws, "client-1", {
+      type: "message",
+      chat_id: attached.chat_id,
+      content: "hello",
+      webui: true,
+      client_request_id: requestId,
+      model_preset: attached.model_preset,
+      target: { kind: "standalone" },
+    });
+
+    const inbound = await bus.nextInbound();
+    expect(inbound.chatId).toBe(attached.chat_id);
+    expect(inbound.metadata).toMatchObject({
+      client_request_id: requestId,
+      model_preset: "current-default",
+      model_provider: "openai",
+      model: "gpt-5",
+    });
+    expect(resolver).toHaveBeenNthCalledWith(1, {
+      requestedPreset: "deleted-model",
+      sessionPreset: null,
+    });
+    expect(resolver).toHaveBeenNthCalledWith(2, {
+      requestedPreset: "current-default",
+      sessionPreset: null,
+    });
+  });
+
+  it("rejects new chat creation when no usable default model exists", async () => {
+    const channel = new WebSocketChannel({}, new MessageBus(), {
+      modelSelectionResolver: () => null,
+    });
+    const ws = connection();
+
+    await channel.dispatchEnvelope(ws, "client-1", {
+      type: "new_chat",
+      client_request_id: "22222222-2222-4222-8222-222222222222",
+    });
+
+    expect(sent(ws)).toEqual({
+      event: "error",
+      client_request_id: "22222222-2222-4222-8222-222222222222",
+      detail: "new_chat_rejected",
+      reason: "model_preset_invalid",
+    });
+    expect(channel.subscriptions.size).toBe(0);
   });
 
   it("sends messages to attached chat connections", async () => {

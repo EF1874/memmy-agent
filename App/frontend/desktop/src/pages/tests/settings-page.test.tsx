@@ -110,8 +110,8 @@ describe("SettingsPageView", () => {
     expect(html).toContain("g***@example.com");
     expect(html).toContain("g***@example.com");
     expect(html).toContain("注册时间：2026-04-12");
-    expect(html).toContain("赠送大模型额度已用 18.4M Token");
-    expect(html).toContain("共 30.0M Token");
+    expect(html).toContain("Agent 任务额度已用 1.4M Token");
+    expect(html).toContain("共 5.0M Token");
     expect(html).toContain("平台赠送大模型");
     expect(html).toContain("自有 API Key");
     expect(html).toContain("查看用量详情");
@@ -302,7 +302,7 @@ describe("SettingsPageView", () => {
     expect(html).toContain("中文");
     expect(html).not.toContain("<select");
     expect(html).toContain("已关闭行为数据收集");
-    expect(html).toContain("赠送大模型额度已用 18.4M Token");
+    expect(html).toContain("Agent 任务额度已用 1.4M Token");
     expect(html).not.toContain("已使用 0 Token");
     expect(html).not.toContain("System");
     expect(html).not.toContain("注册于");
@@ -338,7 +338,7 @@ describe("SettingsPageView", () => {
     expect(html).not.toContain("本月剩余 3/3 次");
   });
 
-  it("注册账号模式展示账户、Token 用量和平台赠送模型模式", () => {
+  it("注册账号同时展示统一模型目录、账户额度和 BYOK 用量入口", () => {
     const html = normalizeSsrHtml(renderSettingsPageView(createAccountModeState()));
     const modelConfigHtml = html.slice(html.indexOf("模型配置"), html.indexOf("Token 用量"));
 
@@ -347,24 +347,25 @@ describe("SettingsPageView", () => {
     expect(html).toContain("注册时间：2026-04-12");
     expect(html).toContain("修改昵称");
     expect(html).toContain("Token 用量");
-    expect(html).toContain("平台赠送 Token");
     expect(html).toContain("平台赠送大模型");
     expect(html).toContain("自有 API Key");
     expect(html).toContain("查看用量详情");
-    expect(html).not.toContain("协议类型");
-    expect(modelConfigHtml).not.toContain("自有 API Key</span>");
+    expect(modelConfigHtml).toContain("0 个 Provider");
+    expect(modelConfigHtml).toContain("修改配置");
+    expect(modelConfigHtml).not.toContain("切换为自有 API Key");
+    expect(modelConfigHtml).not.toContain("切换回平台 Token");
   });
 
-  it("平台 Token 模式下模型配置卡不保留空正文间距", () => {
-    const html = normalizeSsrHtml(renderSettingsPageView(createAccountModeState()));
+  it("账户登录后本地模型仍按 Provider 卡片和默认模型统一展示", () => {
+    const html = normalizeSsrHtml(renderSettingsPageView(createAccountModeWithSavedModelState()));
     const modelConfigStart = html.indexOf("模型配置");
     const tokenUsageStart = html.indexOf("Token 用量");
     const modelConfigHtml = html.slice(modelConfigStart, tokenUsageStart);
 
-    expect(modelConfigHtml).toContain("当前模式：");
-    expect(modelConfigHtml).toContain("平台赠送 Token");
-    expect(modelConfigHtml).toContain("切换为自有 API Key");
-    expect(modelConfigHtml).not.toContain("mb-4");
+    expect(modelConfigHtml).toContain("1 个 Provider");
+    expect(modelConfigHtml).toContain("openai / gpt-4o");
+    expect(modelConfigHtml).not.toContain("当前模式：");
+    expect(modelConfigHtml).not.toContain("平台赠送 Token");
   });
 
   it("手机号注册账号区展示手机号，邮箱注册账号区展示邮箱", () => {
@@ -383,7 +384,7 @@ describe("SettingsPageView", () => {
     expect(html).not.toContain("未绑定邮箱");
   });
 
-  it("注册账号即使已有本地模型配置也先展示平台 Token 原型态", () => {
+  it("注册账号已有本地模型配置时仍展示该模型而不是切换成账户模式", () => {
     const html = normalizeSsrHtml(renderSettingsPageView(createAccountModeWithSavedModelState()));
     const modelConfigHtml = html.slice(html.indexOf("模型配置"), html.indexOf("Token 用量"));
 
@@ -391,31 +392,28 @@ describe("SettingsPageView", () => {
     expect(html).toContain("g***@example.com");
     expect(html).toContain("注册时间：2026-04-12");
     expect(html).toContain("Token 用量");
-    expect(html).toContain("平台赠送 Token");
-    expect(html).toContain("切换为自有 API Key");
-    expect(modelConfigHtml).not.toContain("自有 API Key</span>");
-    expect(html).not.toContain("Agent 执行任务");
+    expect(modelConfigHtml).toContain("openai / gpt-4o");
+    expect(modelConfigHtml).toContain("Agent 执行任务");
+    expect(modelConfigHtml).not.toContain("切换为自有 API Key");
+    expect(modelConfigHtml).not.toContain("切换回平台 Token");
     expect(html).not.toContain("协议类型");
     expect(html).not.toContain("API 地址");
     expect(html).not.toContain("本地模式");
     expect(html).not.toContain("无需注册账号");
   });
 
-  it("注册账号 Token 切换按钮按三态逻辑处理自有 API Key 表单和模式持久化", () => {
+  it("模型设置不再通过 userMode 在平台和 BYOK 之间切换", () => {
     const source = readFileSync(settingsPageSourcePath, "utf8");
 
-    expect(source).toContain("function handleSwitchToCustom()");
     expect(source).toContain("const hasAccountSession");
-    expect(source).toContain("const hasByokConfig");
     expect(source).toContain("setShowApiConfig(true)");
-    expect(source).toContain('persistSettings({ userMode: "byok" })');
-    expect(source).toContain('persistSettings({ userMode: "account" })');
     expect(source).toContain("createMemmyMemoryProviderConfig");
     expect(source).toContain("configClient?.saveModelConfig(nextConfig)");
-    expect(source).toContain('onClick={handleSwitchToCustom}');
     expect(source).toContain("{showApiConfig && (");
     expect(source).toContain('t("settings.model.localEmbeddingModelHint")');
     expect(source).toContain('t("settings.model.saveConfig")');
+    expect(source).not.toContain('onClick={handleSwitchToCustom}');
+    expect(source).not.toContain("切换为自有 API Key");
     expect(source).not.toContain("setForcedModelMode");
     expect(source).not.toContain('navigate("/api-key")');
   });
@@ -430,60 +428,37 @@ describe("SettingsPageView", () => {
     expect(source).toContain("EMPTY_BYOK_TOKEN_USAGE");
     expect(source).toContain("function ChannelStat");
     expect(source).toContain("function UsageDetailView");
-    expect(source).toContain("function UsageKindRow");
-    expect(source).toContain("function TokenMetric");
+    expect(source).toContain("function ByokUsageRow");
+    expect(source).toContain("function PlatformQuotaRow");
+    expect(source).toContain("props.byokUsage.byProvider");
     expect(source).toContain('props.tone === "success" ? formatTokenSummary(props.value) : formatNumber(props.value)');
     expect(source).toContain("function formatTokenSummary");
     expect(source).toContain('return abbreviated === "0.0M" ? formatTokens(value) : abbreviated;');
     expect(source).toContain('import usageStyles from "./settings-token-usage.module.css";');
     expect(source).toContain("usageStyles.detailPage");
-    expect(source).toContain('className="app-frame-page-content"');
-    expect(source).toContain("usageStyles.overview");
-    expect(source).toContain("usageStyles.usageCard");
-    expect(source).toContain("usageStyles.shareDial");
-    expect(source).toContain('t("settings.token.amount")');
-    expect(styles).toContain("width: min(100%, 1080px);");
-    const pageRule = styles.match(/\.page\s*\{[^}]*\}/)?.[0] ?? "";
-    expect(pageRule).toContain("padding: calc(var(--codex-toolbar-height) + 8px) 0 40px;");
-    expect(styles.match(/padding: calc\(var\(--codex-toolbar-height\) \+ 8px\) 0/g)?.length).toBeGreaterThanOrEqual(3);
-    expect(styles).toContain("grid-template-columns: repeat(2, minmax(0, 1fr));");
-    expect(styles).toContain("width: 40px;");
-    expect(styles).toContain("width: 54px;");
-    expect(styles).toContain("width: 42px;");
-    expect(styles).toContain("grid-template-columns: repeat(3, minmax(0, 1fr));");
+    expect(source).toContain("app-frame-page-content");
+    expect(source).toContain("usageStyles.byokProviderGroup");
     expect(styles).toContain(".backButton");
-    const backButtonRule = styles.match(/\.backButton\s*\{[^}]*\}/)?.[0] ?? "";
-    expect(backButtonRule).toContain("z-index: 10000");
-    expect(backButtonRule).toContain("min-height: 44px;");
-    expect(backButtonRule).toContain("margin: 0 0 10px -12px;");
-    expect(backButtonRule).toContain("padding: 8px 12px;");
-    expect(backButtonRule).toContain("pointer-events: auto");
-    expect(backButtonRule).toContain("touch-action: manipulation;");
-    expect(backButtonRule).toContain("-webkit-app-region: no-drag");
-    expect(styles).toContain("@media (max-width: 420px)");
-    expect(styles).toContain("conic-gradient(var(--tone) calc(var(--share) * 1%), #eaf3f1 0)");
-    expect(styles).toContain("background: #f8fbfa;");
-    expect(source).toContain('aria-label={`${share}%`}');
-    expect(source).toContain("const hasByokRows");
-    expect(source).toContain('t("settings.token.kind.agentChat")');
-    expect(source).toContain('t("settings.token.kind.memorySummary")');
-    expect(source).toContain('t("settings.token.kind.memoryEvolution")');
-    expect(source).toContain('t("settings.token.kind.embedding")');
+    expect(styles).toContain(".byokProviderGroup");
+    expect(styles).toContain(".byokProviderHead");
+    expect(source).toContain("const byProvider");
+    expect(source).toContain('t("settings.token.agentTask")');
+    expect(source).toContain('t("settings.token.memorySummary")');
+    expect(source).toContain('t("settings.token.memoryEvolution")');
+    expect(source).toContain('t("settings.token.embedding")');
     expect(source).toContain("updateShowUsageDetail(true)");
     expect(source).toContain('reserveTopBar={!showUsageDetail}');
     expect(source).toContain('t("settings.token.breakdown")');
-    expect(source).toContain('t("settings.token.categoryStats")');
-    expect(source).toContain('t("settings.token.breakdownHint")');
     expect(source).toContain('t("settings.token.input")');
     expect(source).toContain('t("settings.token.output")');
     expect(source).toContain('t("settings.token.cacheHit")');
     expect(source).not.toContain("meta.barClass");
   });
 
-  it("模型测试连接按钮固定位置和尺寸，状态提示展示在按钮左侧", () => {
+  it("Agent 文本模型不做连接测试，Memory、Embedding、ASR 和生图仍保留测试", () => {
     const source = readFileSync(settingsPageSourcePath, "utf8");
-    const messageIndex = source.indexOf("<ValidationMessage validation={llmValidation} stale={isMainModelTestStale} />");
-    const buttonIndex = source.indexOf("<TestButton status={llmValidation.status} onClick={testMainModelConnection} disabled={false} />");
+    const messageIndex = source.indexOf("<ValidationMessage validation={embValidation} stale={isEmbeddingTestStale} />");
+    const buttonIndex = source.indexOf("<TestButton status={embValidation.status} onClick={testEmbeddingConnection} disabled={false} />");
 
     expect(source).toContain('className="flex min-h-9 items-center justify-end gap-3"');
     expect(source).toContain("inline-flex w-[112px] h-10 shrink-0 items-center justify-center px-4");
@@ -495,6 +470,8 @@ describe("SettingsPageView", () => {
     expect(source).not.toContain("function simulateTest");
     expect(source).toContain("testModelConfigConnection");
     expect(source).toContain("testEmbeddingConnection");
+    expect(source).not.toContain("onClick={testMainModelConnection}");
+    expect(source).toContain('t("settings.model.agentNoConnectionTest")');
     expect(source).toContain('"embedding"');
     expect(source).toContain("canUseModelConfig");
     expect(source).toContain("canSaveEmbeddingModelConfig");
@@ -525,17 +502,15 @@ describe("SettingsPageView", () => {
       expect(modelSource).toContain(`${protocol}: "${placeholder}"`);
     }
 
-    expect(source).toContain("setEndpoint(DEFAULT_ENDPOINTS[nextProtocol])");
-    expect(source).toContain('setModelId("")');
-    expect(source).toContain('setApiKey("");');
-    expect(source).toContain('setApiKeyMasked("");');
+    expect(source).toContain("endpoint: DEFAULT_ENDPOINTS[protocolToAdd]");
+    expect(source).toContain('model: ""');
+    expect(source).toContain('apiKey: ""');
     expect(source).toContain("props.onPatch(createModelProtocolPatch(value))");
     expect(modelSource).toContain("endpoint: DEFAULT_ENDPOINTS[protocol]");
     expect(modelSource).toContain('modelId: ""');
     expect(modelSource).toContain('apiKey: ""');
     expect(source).toContain("hydrateModelConfigForm(state.modelConfig");
     expect(source).toContain("useState(initialModelForm.modelId)");
-    expect(source).toContain('placeholder={`${t("apiKey.examplePrefix")} ${DEFAULT_MODEL_IDS[protocol]}`}');
     expect(source).toContain('placeholder={`${t("apiKey.examplePrefix")} ${DEFAULT_MODEL_IDS[props.cfg.protocol]}`}');
     expect(source).not.toContain("DEFAULT_MODEL_PLACEHOLDER");
     expect(source).not.toContain('placeholder="例如 qwen2.5-32b-instruct"');
@@ -582,7 +557,7 @@ describe("SettingsPageView", () => {
     expect(html).toContain("自有 API Key");
     expect(html).toContain("查看用量详情");
     expect(html).not.toContain("切换回平台 Token");
-    expect(html).not.toContain("赠送大模型额度已用");
+    expect(html).toContain("赠送大模型额度已用");
     expect(html).not.toContain("协议类型");
     expect(html).not.toContain("API 地址");
     expect(html).not.toContain('class="text-text-ink/65">API Key</span>');
@@ -633,7 +608,7 @@ describe("SettingsPageView", () => {
   it("设置页模型配置表单展示已保存脱敏 key 状态且保存不回传脱敏值", () => {
     const source = readFileSync(settingsPageSourcePath, "utf8");
 
-    expect(source).toContain("maskedValue={apiKeyMasked}");
+    expect(source).toContain("maskedValue={provider.apiKeyMasked}");
     expect(source).toContain("maskedValue={embApiKeyMasked}");
     expect(source).toContain("maskedValue={asrApiKeyMasked}");
     expect(source).toContain("maskedValue={imageGenApiKeyMasked}");
@@ -1044,6 +1019,24 @@ function createAccountModeWithSavedModelState(): AppState {
   return appReducer(
     accountState,
     appActions.modelConfigUpdated({
+      configRevision: "account-model-revision",
+      providers: [{
+        provider: "openai",
+        endpoint: "https://api.openai.com/v1",
+        apiType: "auto",
+        apiKey: "",
+        apiKeyMasked: "sk••••test",
+        configured: true,
+        accountManaged: false,
+        editable: true,
+        models: [{
+          presetName: "desktop-openai-gpt-4o-abcd1234",
+          model: "gpt-4o",
+          isDefault: true,
+          available: true
+        }]
+      }],
+      defaultModelPreset: "desktop-openai-gpt-4o-abcd1234",
       provider: "openai",
       endpoint: "https://api.openai.com/v1",
       model: "gpt-4o",
@@ -1079,6 +1072,24 @@ function createByokModeWithSavedModelState(): AppState {
   return appReducer(
     createByokModeState(),
     appActions.modelConfigUpdated({
+      configRevision: "byok-model-revision",
+      providers: [{
+        provider: "openai",
+        endpoint: "https://main.example.com/v1",
+        apiType: "auto",
+        apiKey: "",
+        apiKeyMasked: "sk-m••••main",
+        configured: true,
+        accountManaged: false,
+        editable: true,
+        models: [{
+          presetName: "desktop-openai-main-model-abcd1234",
+          model: "main-model",
+          isDefault: true,
+          available: true
+        }]
+      }],
+      defaultModelPreset: "desktop-openai-main-model-abcd1234",
       provider: "openai",
       endpoint: "https://main.example.com/v1",
       model: "main-model",

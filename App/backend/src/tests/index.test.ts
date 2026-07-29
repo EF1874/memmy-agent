@@ -51,6 +51,7 @@ describe("local api", () => {
         createLocalBackend({
           databasePath: join(tempDir, "app.sqlite"),
           runtimeConfigPath: join(tempDir, "runtime.json"),
+          agentWorkspace: tempDir,
           localToken: "test-token",
           memoryClient: createMockMemoryClient(),
           cloudClient: createMockCloudClient()
@@ -76,6 +77,7 @@ describe("local api", () => {
     backend = await createLocalBackend({
       databasePath: join(tempDir, "app.sqlite"),
       runtimeConfigPath: join(tempDir, "runtime.json"),
+      agentWorkspace: tempDir,
       localToken: "test-token",
       memoryBaseUrl: "http://127.0.0.1:18960",
       memoryClient,
@@ -96,6 +98,7 @@ describe("local api", () => {
       backend = await createLocalBackend({
         databasePath: join(tempDir, "app.sqlite"),
         runtimeConfigPath: join(tempDir, "runtime.json"),
+        agentWorkspace: tempDir,
         localToken: "test-token",
         memoryClient: createMockMemoryClient(),
         memmyConfigPath: join(tempDir, "config.yaml")
@@ -139,6 +142,7 @@ describe("local api", () => {
       backend = await createLocalBackend({
         databasePath,
         runtimeConfigPath: join(tempDir, "runtime.json"),
+        agentWorkspace: tempDir,
         localToken: "test-token",
         memoryClient: createMockMemoryClient(),
         memmyConfigPath: join(tempDir, "config.yaml")
@@ -181,6 +185,7 @@ describe("local api", () => {
         createLocalBackend({
           databasePath: join(tempDir, "app.sqlite"),
           runtimeConfigPath: join(tempDir, "runtime.json"),
+          agentWorkspace: tempDir,
           localToken: "test-token",
           cloudClient: createMockCloudClient(),
           memmyConfigPath: join(tempDir, "config.yaml")
@@ -302,6 +307,9 @@ describe("local api", () => {
         "    apiKey: cloud.login.uuid",
         "memmyMemory:",
         "  activeProfile: account",
+        "  profiles:",
+        "    account:",
+        "      userId: account-user",
         ""
       ].join("\n"),
       "utf8"
@@ -310,6 +318,7 @@ describe("local api", () => {
     backend = await createLocalBackend({
       databasePath,
       runtimeConfigPath: join(tempDir, "runtime.json"),
+      agentWorkspace: tempDir,
       localToken: "test-token",
       memoryClient: createMockMemoryClient(),
       cloudClient: createMockCloudClient(),
@@ -356,6 +365,7 @@ describe("local api", () => {
       backend = await createLocalBackend({
         databasePath: join(tempDir, "app.sqlite"),
         runtimeConfigPath: join(tempDir, "runtime.json"),
+        agentWorkspace: tempDir,
         localToken: "test-token",
         memoryClient: createMockMemoryClient(),
         cloudClient: createMockCloudClient()
@@ -367,6 +377,13 @@ describe("local api", () => {
           "x-memmy-local-token": "test-token"
         }
       });
+      const currentModelConfigResponse = await fetch(`${backend.runtimeConfig.baseUrl}/api/app/model-config`, {
+        method: "GET",
+        headers: {
+          "x-memmy-local-token": "test-token"
+        }
+      });
+      const currentModelConfig = await currentModelConfigResponse.json() as any;
       const modelConfigResponse = await fetch(`${backend.runtimeConfig.baseUrl}/api/app/model-config`, {
         method: "PUT",
         headers: {
@@ -374,10 +391,14 @@ describe("local api", () => {
           "x-memmy-local-token": "test-token"
         },
         body: JSON.stringify({
-          provider: "openai_compatible",
-          baseUrl: "https://api.changed.example/v1",
-          modelId: "gpt-4.1-mini",
-          apiKey: "sk-changed"
+          configRevision: currentModelConfig.configRevision,
+          providers: [{
+            provider: "openai",
+            apiBase: "https://api.changed.example/v1",
+            apiKey: "sk-changed",
+            models: [{ model: "gpt-4.1-mini" }]
+          }],
+          defaultModelPreset: null
         })
       });
 
@@ -389,7 +410,8 @@ describe("local api", () => {
       });
       expect(modelConfigResponse.status).toBe(200);
       const parsedConfig = YAML.parse(readFileSync(memmyConfigPath, "utf8")) as any;
-      expect(parsedConfig.agents.defaults).toEqual({
+      expect(parsedConfig.agents.defaults.modelPreset).toMatch(/^desktop-openai-gpt-4-1-mini-/);
+      expect(parsedConfig.modelPresets[parsedConfig.agents.defaults.modelPreset]).toMatchObject({
         provider: "openai",
         model: "gpt-4.1-mini"
       });
@@ -635,6 +657,13 @@ describe("local api", () => {
         loginSource: "Memmy"
       })
     });
+    const currentModelConfigResponse = await fetch(`${backend.runtimeConfig.baseUrl}/api/app/model-config`, {
+      method: "GET",
+      headers: {
+        "x-memmy-local-token": "test-token"
+      }
+    });
+    const currentModelConfig = await currentModelConfigResponse.json() as any;
     const modelConfigResponse = await fetch(`${backend.runtimeConfig.baseUrl}/api/app/model-config`, {
       method: "PUT",
       headers: {
@@ -642,10 +671,25 @@ describe("local api", () => {
         "x-memmy-local-token": "test-token"
       },
       body: JSON.stringify({
-        provider: "openai_compatible",
-        baseUrl: "https://api.example.com/v1",
-        modelId: "gpt-4.1-mini",
-        apiKey: "sk-local-secret"
+        configRevision: currentModelConfig.configRevision,
+        providers: [
+          ...currentModelConfig.providers.map((provider: any) => ({
+            provider: provider.provider,
+            apiBase: provider.apiBase,
+            apiType: provider.apiType,
+            models: provider.models.map((model: any) => ({
+              presetName: model.presetName,
+              model: model.model
+            }))
+          })),
+          {
+            provider: "openai",
+            apiBase: "https://api.example.com/v1",
+            apiKey: "sk-local-secret",
+            models: [{ model: "gpt-4.1-mini" }]
+          }
+        ],
+        defaultModelPreset: currentModelConfig.defaultModelPreset
       })
     });
     const settingsResponse = await fetch(`${backend.runtimeConfig.baseUrl}/api/app/settings`, {
@@ -737,6 +781,7 @@ describe("local api", () => {
     backend = await createLocalBackend({
       databasePath,
       runtimeConfigPath: join(tempDir, "runtime.json"),
+      agentWorkspace: tempDir,
       localToken: "test-token",
       memoryClient: createMockMemoryClient(),
       cloudClient,
@@ -900,6 +945,7 @@ describe("local api", () => {
       backend = await createLocalBackend({
         databasePath: join(tempDir, "app.sqlite"),
         runtimeConfigPath: join(tempDir, "runtime.json"),
+        agentWorkspace: tempDir,
         localToken: "test-token",
         memoryClient: createMockMemoryClient(),
         memmyConfigPath
@@ -1041,6 +1087,7 @@ async function createTempBackend(
   return createLocalBackend({
     databasePath: join(tempDir, "app.sqlite"),
     runtimeConfigPath: join(tempDir, "runtime.json"),
+    agentWorkspace: tempDir,
     localToken: "test-token",
     heartbeatIntervalMs: options.heartbeatIntervalMs,
     memoryClient: options.memoryClient ?? createMockMemoryClient(),

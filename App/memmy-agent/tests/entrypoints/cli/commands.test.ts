@@ -434,13 +434,6 @@ describe("CLI command helpers", () => {
   it("serve connects MCP on startup and closes it when the API server closes", async () => {
     const root = tempRoot("memmy-serve-mcp-");
     const workspace = path.join(root, "workspace");
-    const migrationStatePath = path.join(
-      workspace,
-      ".memmy-migrations",
-      "agent-workspace.json",
-    );
-    fs.mkdirSync(path.dirname(migrationStatePath), { recursive: true });
-    fs.writeFileSync(migrationStatePath, "invalid migration state", "utf8");
     const configPath = writeConfig(root, {
       agents: { defaults: { workspace, model: "openai/test-model" } },
       api: { host: "127.0.0.1", port: 0, timeout: 1 },
@@ -451,7 +444,6 @@ describe("CLI command helpers", () => {
 
     const server = await serve({ config: configPath });
     expect(loop.connectMcp).toHaveBeenCalledTimes(1);
-    expect(fs.readFileSync(migrationStatePath, "utf8")).toBe("invalid migration state");
     await closeServer(server);
 
     expect(loop.closeMcp).toHaveBeenCalledTimes(1);
@@ -563,7 +555,10 @@ describe("CLI command helpers", () => {
       dispatchMessage: vi.fn(async () => undefined),
       processMessage: vi.fn(async () => null),
       processDirect: vi.fn(async () => null),
-      llmRuntime: vi.fn(() => ({ provider: {}, model: "openai/test-model" })),
+      llmRuntime: vi.fn(() => {
+        fakeLoop.refreshProviderSnapshot();
+        return { provider: {}, model: fakeLoop.model };
+      }),
       scheduleBackground: vi.fn((promise: Promise<any>) => {
         void promise.catch(() => undefined);
       }),
@@ -617,12 +612,16 @@ describe("CLI command helpers", () => {
       ".memmy-migrations",
       "agent-workspace.json",
     );
-    expect(JSON.parse(fs.readFileSync(migrationStatePath, "utf8")).applied).toEqual([
+    expect(JSON.parse(fs.readFileSync(migrationStatePath, "utf8")).applied).toEqual(expect.arrayContaining([
       expect.objectContaining({
         id: "v1.0.4/0001-add-webui-session-binding",
         introducedIn: "1.0.4",
       }),
-    ]);
+      expect.objectContaining({
+        id: "v1.0.5/0001-flatten-memory-model-config",
+        introducedIn: "1.0.5",
+      }),
+    ]));
     expect(missing.status).toBe(404);
     expect(runtime.heartbeat.enabled).toBe(false);
     expect(runtime.heartbeat.intervalS).toBe(900);
@@ -692,7 +691,7 @@ describe("CLI command helpers", () => {
     const migratedBytes = fs.readFileSync(legacySessionPath);
     const secondRuntime = await gateway({ config: configPath });
     expect(fs.readFileSync(legacySessionPath)).toEqual(migratedBytes);
-    expect(JSON.parse(fs.readFileSync(migrationStatePath, "utf8")).applied).toHaveLength(1);
+    expect(JSON.parse(fs.readFileSync(migrationStatePath, "utf8")).applied).toHaveLength(2);
     await secondRuntime.stop();
     expect(fakeLoop.stop).toHaveBeenCalledTimes(2);
   });
@@ -1107,6 +1106,14 @@ describe("CLI command helpers", () => {
         }),
         closeMcp: vi.fn(async () => undefined),
         config,
+        sessions: {
+          get: vi.fn(() => null),
+        },
+        resolveTurnModelSelection: vi.fn(() => ({
+          preset: "default",
+          provider: "openai",
+          model: "test-model",
+        })),
       } as any;
     });
 

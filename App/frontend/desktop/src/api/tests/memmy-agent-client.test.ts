@@ -576,15 +576,30 @@ describe("memmy-agent client", () => {
     connection.status("");
     connection.historyDag("chat-2");
     connection.historyDag("");
-    sockets[0]?.emit({ event: "attached", chat_id: "chat-new" });
+    const newChatRequestId = JSON.parse(sockets[0]!.sent[0]!).client_request_id as string;
+    sockets[0]?.emit({
+      event: "attached",
+      chat_id: "chat-new",
+      client_request_id: newChatRequestId,
+      model_preset: "desktop-openai-gpt-5"
+    });
 
-    await expect(newChat).resolves.toBe("chat-new");
+    await expect(newChat).resolves.toEqual({
+      chatId: "chat-new",
+      modelPreset: "desktop-openai-gpt-5"
+    });
     expect(events).toEqual([
       { event: "ready", chat_id: "chat-1", client_id: "frontend-test", connection_generation: 1 },
-      { event: "attached", chat_id: "chat-new", connection_generation: 1 }
+      {
+        event: "attached",
+        chat_id: "chat-new",
+        client_request_id: newChatRequestId,
+        model_preset: "desktop-openai-gpt-5",
+        connection_generation: 1
+      }
     ]);
     expect(sockets[0]?.sent.map((item) => JSON.parse(item))).toEqual([
-      { type: "new_chat" },
+      { type: "new_chat", client_request_id: newChatRequestId },
       { type: "attach", chat_id: "chat-2" },
       {
         type: "message",
@@ -675,12 +690,26 @@ describe("memmy-agent client", () => {
     });
 
     const connection = await connectReady(client, sockets);
-    const pending = connection.newChat(1);
-    expect(sockets[0]?.sent.map((item) => JSON.parse(item))).toContainEqual({ type: "new_chat" });
+    const clientRequestId = "11111111-1111-4111-8111-111111111111";
+    const pending = connection.newChat(1, 5000, "desktop-openai-gpt-5", clientRequestId);
+    const request = JSON.parse(sockets[0]!.sent[0]!);
+    expect(request).toEqual({
+      type: "new_chat",
+      client_request_id: clientRequestId,
+      model_preset: "desktop-openai-gpt-5"
+    });
 
-    sockets[0]?.emit({ event: "attached", chat_id: "server-chat" });
+    sockets[0]?.emit({
+      event: "attached",
+      chat_id: "server-chat",
+      client_request_id: request.client_request_id,
+      model_preset: "desktop-openai-gpt-5"
+    });
 
-    await expect(pending).resolves.toBe("server-chat");
+    await expect(pending).resolves.toEqual({
+      chatId: "server-chat",
+      modelPreset: "desktop-openai-gpt-5"
+    });
   });
 
   it("newChat rejects when another new chat is in flight", async () => {
@@ -700,8 +729,17 @@ describe("memmy-agent client", () => {
     const pending = connection.newChat(1);
 
     await expect(connection.newChat(1)).rejects.toThrow("newChat already in flight");
-    sockets[0]?.emit({ event: "attached", chat_id: "server-chat" });
-    await expect(pending).resolves.toBe("server-chat");
+    const request = JSON.parse(sockets[0]!.sent[0]!);
+    sockets[0]?.emit({
+      event: "attached",
+      chat_id: "server-chat",
+      client_request_id: request.client_request_id,
+      model_preset: "desktop-openai-gpt-5"
+    });
+    await expect(pending).resolves.toEqual({
+      chatId: "server-chat",
+      modelPreset: "desktop-openai-gpt-5"
+    });
   });
 
   it("newChat rejects on timeout and clears pending state", async () => {
@@ -725,8 +763,17 @@ describe("memmy-agent client", () => {
 
     await rejection;
     const second = connection.newChat(1);
-    sockets[0]?.emit({ event: "attached", chat_id: "server-chat" });
-    await expect(second).resolves.toBe("server-chat");
+    const request = JSON.parse(sockets[0]!.sent.at(-1)!);
+    sockets[0]?.emit({
+      event: "attached",
+      chat_id: "server-chat",
+      client_request_id: request.client_request_id,
+      model_preset: "desktop-openai-gpt-5"
+    });
+    await expect(second).resolves.toEqual({
+      chatId: "server-chat",
+      modelPreset: "desktop-openai-gpt-5"
+    });
   });
 
   it("newChat rejects on socket close and clears pending state", async () => {
@@ -752,8 +799,17 @@ describe("memmy-agent client", () => {
     await vi.advanceTimersByTimeAsync(500);
     sockets[1]?.emit({ event: "ready", chat_id: "ready-2" });
     const second = connection.newChat(2);
-    sockets[1]?.emit({ event: "attached", chat_id: "server-chat" });
-    await expect(second).resolves.toBe("server-chat");
+    const request = JSON.parse(sockets[1]!.sent.at(-1)!);
+    sockets[1]?.emit({
+      event: "attached",
+      chat_id: "server-chat",
+      client_request_id: request.client_request_id,
+      model_preset: "desktop-openai-gpt-5"
+    });
+    await expect(second).resolves.toEqual({
+      chatId: "server-chat",
+      modelPreset: "desktop-openai-gpt-5"
+    });
     connection.close();
   });
 

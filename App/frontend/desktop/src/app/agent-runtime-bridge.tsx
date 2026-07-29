@@ -10,7 +10,7 @@ import {
   type MemmyAgentWebSocketConnection,
   type MemmyAgentWsEvent
 } from "../api/memmy-agent-client.js";
-import { agentActions, createAgentOperationError, type AppAction } from "../state/app-actions.js";
+import { agentActions, appActions, createAgentOperationError, type AppAction } from "../state/app-actions.js";
 import { updateSidebarStateForTask, type AgentState } from "../state/agent-chat-slice.js";
 import { useAppState } from "../state/app-state.js";
 import { useApiClients } from "./providers.js";
@@ -570,6 +570,9 @@ export function AgentRuntimeBridge(props: {
   const { state, dispatch } = useAppState();
   const enabled = isAgentRuntimeBridgeRoute(state.navigation.currentPath);
   const connectionRef = useRef<MemmyAgentWebSocketConnection | null>(null);
+  const modelCatalogRefreshInFlightRef = useRef(false);
+  const modelCatalogRefreshQueuedRef = useRef(false);
+  const modelCatalogRefreshVersionRef = useRef(0);
   const [connection, setConnection] = useState<MemmyAgentWebSocketConnection | null>(null);
   const connectionUnsubscribersRef = useRef<MemmyAgentUnsubscribe[]>([]);
   const chatUnsubscribeRef = useRef<MemmyAgentUnsubscribe | null>(null);
@@ -612,6 +615,8 @@ export function AgentRuntimeBridge(props: {
 
   const cleanupConnection = useCallback((): void => {
     const hadActiveConnection = Boolean(connectionRef.current || connectInFlightRef.current);
+    modelCatalogRefreshVersionRef.current += 1;
+    modelCatalogRefreshQueuedRef.current = false;
     clearConnectRetryTimer();
     connectAttemptRef.current = 0;
     connectInFlightRef.current = false;
@@ -649,6 +654,44 @@ export function AgentRuntimeBridge(props: {
     }
     subscribeAgentChat(currentConnection, chatId);
   }, [subscribeAgentChat]);
+
+  const refreshModelCatalog = useCallback(async (): Promise<void> => {
+    const agentClient = clients?.memmyAgent;
+    const configClient = clients?.config;
+    if (!agentClient || !configClient) return;
+    modelCatalogRefreshVersionRef.current += 1;
+    if (modelCatalogRefreshInFlightRef.current) {
+      modelCatalogRefreshQueuedRef.current = true;
+      return;
+    }
+    modelCatalogRefreshInFlightRef.current = true;
+    try {
+      do {
+        modelCatalogRefreshQueuedRef.current = false;
+        const version = modelCatalogRefreshVersionRef.current;
+        try {
+          const [settings, modelConfig] = await Promise.all([
+            agentClient.getSettings(),
+            configClient.getModelConfig()
+          ]);
+          if (version === modelCatalogRefreshVersionRef.current) {
+            dispatch(agentActions.modelCatalogLoaded(
+              settings.model_presets,
+              settings.agent.model_preset
+            ));
+            dispatch(appActions.modelConfigUpdated(modelConfig));
+          }
+        } catch (error) {
+          console.error("Agent model catalog refresh failed:", error);
+        }
+      } while (modelCatalogRefreshQueuedRef.current);
+    } finally {
+      modelCatalogRefreshInFlightRef.current = false;
+      if (modelCatalogRefreshQueuedRef.current) {
+        void refreshModelCatalog();
+      }
+    }
+  }, [clients?.config, clients?.memmyAgent, dispatch]);
 
   const registerConnectionHandlers = useCallback((nextConnection: MemmyAgentWebSocketConnection): void => {
     connectionUnsubscribersRef.current = [
@@ -718,8 +761,20 @@ export function AgentRuntimeBridge(props: {
         }
 
         dispatch(agentActions.bootstrapSucceeded(boot.model_name));
+        await refreshModelCatalog();
+        if (!isActive) {
+          return;
+        }
         dispatch(agentActions.connectionConnecting());
         const nextConnection = await client.connectWebSocket((event) => {
+          if (event.event === "model_catalog_updated") {
+            modelCatalogRefreshVersionRef.current += 1;
+            if (event.status === "invalid") {
+              dispatch(agentActions.modelCatalogLoaded([], null));
+            } else {
+              void refreshModelCatalog();
+            }
+          }
           if (isAgentConnectionEvent(event)) {
             dispatch(agentActions.wsEventReceived(event));
           }
@@ -752,7 +807,7 @@ export function AgentRuntimeBridge(props: {
       isActive = false;
       cleanupConnection();
     };
-  }, [cleanupConnection, clearConnectRetryTimer, clients?.memmyAgent, dispatch, enabled, registerConnectionHandlers]);
+  }, [cleanupConnection, clearConnectRetryTimer, clients?.memmyAgent, dispatch, enabled, refreshModelCatalog, registerConnectionHandlers]);
 
   useEffect(() => {
     const chatId = state.agent.currentChatId;

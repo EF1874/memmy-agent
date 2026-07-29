@@ -17,6 +17,21 @@ const BootstrapSchema = z.object({
   model_name: z.string().nullable()
 });
 
+const ChatModelPresetSchema = z.object({
+  name: z.string(),
+  provider: z.string(),
+  model: z.string(),
+  is_default: z.boolean(),
+  available: z.boolean()
+});
+
+const AgentSettingsSchema = z.object({
+  agent: z.object({
+    model_preset: z.string().nullable()
+  }).passthrough(),
+  model_presets: z.array(ChatModelPresetSchema)
+}).passthrough();
+
 const SessionSummarySchema = z.object({
   key: z.string(),
   title: z.string().optional(),
@@ -24,7 +39,8 @@ const SessionSummarySchema = z.object({
   updatedAt: z.string().optional(),
   run_started_at: z.number().optional(),
   projectId: z.string().nullable(),
-  cwd: z.string()
+  cwd: z.string(),
+  model_preset: z.string().nullable().optional()
 }).passthrough();
 
 const ProjectSchema = z.object({
@@ -189,6 +205,8 @@ const UploadedAgentMediaResponseSchema = z.object({
 });
 
 export type MemmyAgentBootstrap = z.infer<typeof BootstrapSchema>;
+export type ChatModelPreset = z.infer<typeof ChatModelPresetSchema>;
+export type MemmyAgentSettings = z.infer<typeof AgentSettingsSchema>;
 export type MemmyAgentSessionSummary = z.infer<typeof SessionSummarySchema>;
 export type MemmyAgentProject = z.infer<typeof ProjectSchema>;
 export type MemmyAgentSessionSnapshot = z.infer<typeof SessionSnapshotSchema>;
@@ -282,7 +300,13 @@ export type MemmyAgentSendMessageInput = {
   target?: WebuiSessionTarget;
   language?: MemmyAgentUiLanguage;
   media?: MemmyAgentMediaInput[];
+  modelPreset?: string | null;
 };
+
+export interface MemmyAgentNewChatResult {
+  chatId: string;
+  modelPreset: string;
+}
 
 export type MemmyAgentWsEvent = {
   event: string;
@@ -323,6 +347,7 @@ export type MemmyAgentRunLifecycleEvent = MemmyAgentWsEvent & {
 
 export interface MemmyAgentClient {
   bootstrap(options?: { force?: boolean }): Promise<MemmyAgentBootstrap>;
+  getSettings(): Promise<MemmyAgentSettings>;
   getSessionSnapshot(options?: MemmyAgentRequestOptions): Promise<MemmyAgentSessionSnapshot>;
   listSessions(): Promise<MemmyAgentSessionSummary[]>;
   listSlashCommands(): Promise<MemmyAgentSlashCommand[]>;
@@ -364,7 +389,12 @@ export type MemmyAgentUnsubscribe = () => void;
 
 export interface MemmyAgentWebSocketConnection {
   getReadyGeneration(): number | null;
-  newChat(expectedGeneration: number, timeoutMs?: number): Promise<string>;
+  newChat(
+    expectedGeneration: number,
+    timeoutMs?: number,
+    modelPreset?: string | null,
+    clientRequestId?: string
+  ): Promise<MemmyAgentNewChatResult>;
   attach(chatId: string): void;
   sendMessage(input: MemmyAgentSendMessageInput, expectedGeneration: number): Promise<void>;
   stop(chatId: string): void;
@@ -597,6 +627,10 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
 
   async getSessionSnapshot(options: MemmyAgentRequestOptions = {}): Promise<MemmyAgentSessionSnapshot> {
     return this.request("/api/sessions", SessionSnapshotSchema, options);
+  }
+
+  async getSettings(): Promise<MemmyAgentSettings> {
+    return this.request("/api/settings", AgentSettingsSchema);
   }
 
   async listSessions(): Promise<MemmyAgentSessionSummary[]> {
@@ -854,7 +888,8 @@ interface MemmyAgentWebSocketSessionInput {
 
 interface PendingNewChat {
   generation: number;
-  resolve: (chatId: string) => void;
+  clientRequestId: string;
+  resolve: (result: MemmyAgentNewChatResult) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
 }
@@ -931,7 +966,12 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     return this.readyGeneration;
   }
 
-  newChat(expectedGeneration: number, timeoutMs = 5000): Promise<string> {
+  newChat(
+    expectedGeneration: number,
+    timeoutMs = 5000,
+    modelPreset?: string | null,
+    suppliedClientRequestId?: string
+  ): Promise<MemmyAgentNewChatResult> {
     if (this.pendingNewChat) {
       return Promise.reject(new Error("newChat already in flight"));
     }
@@ -942,9 +982,11 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
       return Promise.reject(error);
     }
 
-    return new Promise<string>((resolve, reject) => {
+    return new Promise<MemmyAgentNewChatResult>((resolve, reject) => {
+      const clientRequestId = suppliedClientRequestId ?? crypto.randomUUID();
       const pending: PendingNewChat = {
         generation: expectedGeneration,
+        clientRequestId,
         resolve,
         reject,
         timer: setTimeout(() => {
@@ -956,7 +998,11 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
       };
       this.pendingNewChat = pending;
       try {
-        this.sendOrdinaryFrame({ type: "new_chat" }, expectedGeneration);
+        this.sendOrdinaryFrame({
+          type: "new_chat",
+          client_request_id: clientRequestId,
+          ...(modelPreset !== undefined ? { model_preset: modelPreset } : {})
+        }, expectedGeneration);
       } catch (error) {
         this.pendingNewChat = null;
         clearTimeout(pending.timer);
@@ -1287,7 +1333,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     if (normalized.event === "attached") {
       if (normalized.chat_id) {
         this.knownChats.add(normalized.chat_id);
-        this.resolvePendingNewChat(normalized.chat_id, generation);
+        this.resolvePendingNewChat(normalized, generation);
         this.dispatchChat(normalized.chat_id, normalized);
       }
       return;
@@ -1462,6 +1508,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
       ...(input.clientRequestId ? { client_request_id: input.clientRequestId } : {}),
       ...(input.target ? { target: input.target } : {}),
       ...(input.language ? { language: input.language } : {}),
+      ...(input.modelPreset !== undefined ? { model_preset: input.modelPreset } : {}),
       ...(input.media?.length ? { media_paths: input.media.map((item) => item.path) } : {})
     }, expectedGeneration);
     this.knownChats.add(input.chatId);
@@ -1606,14 +1653,24 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     this.pendingInboundByChat.set(chatId, queue);
   }
 
-  private resolvePendingNewChat(chatId: string, generation: number): void {
+  private resolvePendingNewChat(event: MemmyAgentWsEvent, generation: number): void {
     const pending = this.pendingNewChat;
-    if (!pending || pending.generation !== generation) {
+    if (
+      !pending
+      || pending.generation !== generation
+      || event.client_request_id !== pending.clientRequestId
+      || !event.chat_id
+      || typeof event.model_preset !== "string"
+      || !event.model_preset
+    ) {
       return;
     }
     this.pendingNewChat = null;
     clearTimeout(pending.timer);
-    pending.resolve(chatId);
+    pending.resolve({
+      chatId: event.chat_id,
+      modelPreset: event.model_preset
+    });
   }
 
   private rejectPendingNewChat(error: Error): void {
@@ -1739,6 +1796,7 @@ function sameMessageAttempt(
     clientRequestId: left.clientRequestId,
     target: left.target ?? null,
     language: left.language ?? null,
+    modelPreset: left.modelPreset ?? null,
     mediaPaths: left.media?.map((item) => item.path) ?? []
   }) === JSON.stringify({
     chatId: right.chatId,
@@ -1746,6 +1804,7 @@ function sameMessageAttempt(
     clientRequestId: right.clientRequestId,
     target: right.target ?? null,
     language: right.language ?? null,
+    modelPreset: right.modelPreset ?? null,
     mediaPaths: right.media?.map((item) => item.path) ?? []
   });
 }

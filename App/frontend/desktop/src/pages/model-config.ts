@@ -345,8 +345,14 @@ export function createMemmyMemoryProviderConfig(
   primary: PrimaryModelValues
 ): MemmyMemoryProviderConfig {
   return {
-    summary: toRoleModelProviderConfig(createModelFormValues(memoryModel, primary)),
-    evolution: toRoleModelProviderConfig(createModelFormValues(skillModel, primary))
+    summary: {
+      ...toRoleModelProviderConfig(createModelFormValues(memoryModel, primary)),
+      mode: memoryModel.reuse ? "follow" : "fixed"
+    },
+    evolution: {
+      ...toRoleModelProviderConfig(createModelFormValues(skillModel, primary)),
+      mode: skillModel.reuse ? "follow" : "fixed"
+    }
   };
 }
 
@@ -449,7 +455,7 @@ function toRoleModelProviderConfig(values: ModelConfigFormValues): RoleModelProv
 }
 
 function hydrateRoleModelConfig(role: RoleModelProviderConfig | undefined, primary: PrimaryModelValues): ModelConfig {
-  if (!role?.configured && !role?.apiKeyMasked) {
+  if (!role || role.mode === "follow" || (!role.configured && !role.apiKeyMasked)) {
     return createModelConfig(primary.protocol);
   }
 

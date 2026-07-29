@@ -33,7 +33,7 @@ import { formatConversationTitleForDisplay } from "../lib/format-conversation-ti
 import { useTaskBus, type TaskBusAgentMessage } from "../lib/task-bus.js";
 import type { AppAction } from "../state/app-actions.js";
 import { agentActions, appActions, createAgentOperationError } from "../state/app-actions.js";
-import type { AgentChatMessage, AgentState } from "../state/agent-chat-slice.js";
+import { selectedModelPresetForScope, type AgentChatMessage, type AgentState } from "../state/agent-chat-slice.js";
 import { useAppState } from "../state/app-state.js";
 import { isComposingKeyboardEvent } from "../utils/keyboard.js";
 import {
@@ -186,7 +186,12 @@ export interface SubmitAgentComposerMessageInput {
   clientRequestId?: string;
   connection: {
     getReadyGeneration(): number | null;
-    newChat(expectedGeneration: number, timeoutMs?: number): Promise<string>;
+    newChat(
+      expectedGeneration: number,
+      timeoutMs?: number,
+      modelPreset?: string | null,
+      clientRequestId?: string
+    ): Promise<{ chatId: string; modelPreset: string }>;
     sendMessage(
       ...args: Parameters<MemmyAgentWebSocketConnection["sendMessage"]>
     ): ReturnType<MemmyAgentWebSocketConnection["sendMessage"]> | void;
@@ -205,6 +210,7 @@ export interface SubmitAgentComposerMessageInput {
   chatSelectionEpoch?: number;
   getChatSelectionEpoch?: () => number;
   scopeKey?: string;
+  modelPreset?: string | null;
 }
 
 export interface RequestAgentStopInput {
@@ -523,6 +529,9 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
   if (expectedGeneration === null) {
     return false;
   }
+  if (input.modelPreset === null) {
+    return false;
+  }
   if (input.pendingAttachments.some((item) => !isPendingAttachmentReadyForUpload(item))) {
     input.setComposerMediaError?.("home.media.error.sendReadFailed");
     return false;
@@ -532,6 +541,7 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
   }
 
   let chatId = input.chatId;
+  let confirmedModelPreset = input.modelPreset;
   const clientRequestId = input.clientRequestId ?? crypto.randomUUID();
   const capturedTarget = input.chatId ? null : input.target ?? { kind: "standalone" as const };
   const capturedChatSelectionEpoch = input.chatSelectionEpoch ?? 0;
@@ -539,7 +549,14 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
   if (!chatId) {
     input.setCreatingChat?.(true);
     try {
-      chatId = await input.connection.newChat(expectedGeneration);
+      const created = await input.connection.newChat(
+        expectedGeneration,
+        5000,
+        input.modelPreset,
+        clientRequestId
+      );
+      chatId = created.chatId;
+      confirmedModelPreset = created.modelPreset;
     } catch (error) {
       input.dispatch(agentActions.operationFailed("chat", createAgentOperationError({
         source: "new-chat",
@@ -582,6 +599,7 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
     client_request_id: clientRequestId,
     ...(capturedTarget ? { target: capturedTarget } : {}),
     ...(input.language ? { language: input.language } : {}),
+    ...(confirmedModelPreset !== undefined ? { model_preset: confirmedModelPreset } : {}),
     ...(uploadedAttachments.length ? { media_paths: uploadedAttachments.map((item) => item.path) } : {})
   };
   if (encodedPayloadBytes(payload) > AGENT_WS_SAFE_FRAME_BYTES) {
@@ -603,6 +621,7 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
       clientRequestId,
       ...(capturedTarget ? { target: capturedTarget } : {}),
       ...(input.language ? { language: input.language } : {}),
+      ...(confirmedModelPreset !== undefined ? { modelPreset: confirmedModelPreset } : {}),
       media: uploadedAttachments
     }, expectedGeneration);
   } catch (error) {
@@ -638,6 +657,9 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
     ...(capturedTarget ? { target: capturedTarget } : {})
   }));
   input.clearComposer();
+  if (input.scopeKey) {
+    input.dispatch(agentActions.pendingModelPresetCleared(input.scopeKey));
+  }
   if (createdNewChat) {
     input.onNewChatMessageSent?.(chatId);
   }
@@ -704,6 +726,10 @@ export function HomePage() {
   draftTargetRevisionRef.current = state.agent.draftTargetRevisionByScope;
   const asrRecorder = useAsrRecorder(clients?.asr, { emptyAudioMessage: t("home.asrEmptyAudio") });
   const chatScopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
+  const selectedModelPreset = selectedModelPresetForScope(state.agent, chatScopeKey);
+  const selectedChatModel = state.agent.modelPresets.find(
+    (preset) => preset.name === selectedModelPreset && preset.available
+  ) ?? null;
   const input = composerDrafts[chatScopeKey] ?? "";
   const pendingAttachments = pendingAttachmentsByScope[chatScopeKey] ?? [];
   const draftTarget = state.agent.draftTargetsByScope[chatScopeKey] ?? { kind: "standalone" as const };
@@ -1196,7 +1222,8 @@ export function HomePage() {
       || currentSessionProjectBlocked
       || draftProjectBlocked
       || state.agent.connectionStatus !== "connected"
-      || state.agent.recoveringGeneration !== null;
+      || state.agent.recoveringGeneration !== null
+      || selectedChatModel === null;
   const centerComposerControls = isComposerSingleLine && pendingAttachments.length === 0;
 
   useEffect(() => {
@@ -1301,6 +1328,7 @@ export function HomePage() {
         chatSelectionEpoch: state.agent.chatSelectionEpoch,
         getChatSelectionEpoch: () => chatSelectionEpochRef.current,
         scopeKey: sendScopeKey,
+        modelPreset: selectedModelPreset,
         onNewChatMessageSent: clients?.memmyAgent
           ? (chatId) => {
             rememberFirstEncounterRelayChatIfArmed(chatId);
@@ -2041,6 +2069,15 @@ export function HomePage() {
                 className="w-full px-5 pt-4 pb-12 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40"
               />
               <div className="absolute bottom-3 right-4 flex items-center gap-2 z-10">
+                <ChatModelSelector
+                  presets={state.agent.modelPresets}
+                  value={selectedModelPreset}
+                  disabled={isCurrentAgentRunning || messageSendInFlight}
+                  label={t("home.modelSelect")}
+                  onChange={(preset) => dispatch(
+                    agentActions.pendingModelPresetUpdated(chatScopeKey, preset)
+                  )}
+                />
                 <button
                   type="button"
                   aria-label={t("home.media.menu")}
@@ -2191,6 +2228,15 @@ export function HomePage() {
                   className={`${isComposerSingleLine ? "agent-composer-input--single " : ""}block w-full pl-4 pr-20 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40`}
                 />
                 <div className={`absolute right-2.5 flex items-center gap-1 z-10 ${centerComposerControls ? "top-1/2 -translate-y-1/2" : "bottom-2"}`}>
+                  <ChatModelSelector
+                    presets={state.agent.modelPresets}
+                    value={selectedModelPreset}
+                    disabled={isCurrentAgentRunning || messageSendInFlight}
+                    label={t("home.modelSelect")}
+                    onChange={(preset) => dispatch(
+                      agentActions.pendingModelPresetUpdated(chatScopeKey, preset)
+                    )}
+                  />
                   <button
                     type="button"
                     aria-label={t("home.media.menu")}
@@ -2227,6 +2273,33 @@ export function HomePage() {
         </section>
       )}
     </AppFrame>
+  );
+}
+
+function ChatModelSelector(props: {
+  presets: AgentState["modelPresets"];
+  value: string | null;
+  disabled: boolean;
+  label: string;
+  onChange: (preset: string) => void;
+}) {
+  const available = props.presets.filter((preset) => preset.available);
+  return (
+    <select
+      aria-label={props.label}
+      title={props.label}
+      value={props.value ?? ""}
+      disabled={props.disabled || !available.length}
+      onChange={(event) => props.onChange(event.target.value)}
+      className="max-w-48 h-7 px-2 rounded-lg bg-canvas-oat/55 text-[11px] text-text-ink/65 border border-border-stone/35 disabled:opacity-40"
+    >
+      {!props.value && <option value="">{props.label}</option>}
+      {available.map((preset) => (
+        <option key={preset.name} value={preset.name}>
+          {preset.provider} / {preset.model}
+        </option>
+      ))}
+    </select>
   );
 }
 

@@ -7,6 +7,7 @@ import {
   setRestartNoticeToEnv,
   type ManagedRestartNotice
 } from "../utils/restart.js";
+import { readModelCatalog, resolveModelSelection } from "../providers/model-catalog.js";
 import { handlePairingCommand } from "../integrations/channel-auth/store.js";
 import { DEFAULT_MAX_TOKENS } from "../token-budget.js";
 import { buildStatusContent } from "../utils/helpers.js";
@@ -34,7 +35,7 @@ export const BUILTIN_COMMAND_SPECS = [
   new BuiltinCommandSpec("/stop", "Stop current task", "Cancel the active agent turn for this chat.", "square"),
   new BuiltinCommandSpec("/restart", "Restart memmy", "Restart the bot process in place.", "rotate-cw"),
   new BuiltinCommandSpec("/status", "Show status", "Display runtime, provider, and channel status.", "activity"),
-  new BuiltinCommandSpec("/model", "Switch model preset", "Show or switch the active model preset.", "brain", "[preset]"),
+  new BuiltinCommandSpec("/model", "Switch model preset", "Show, list, or switch the active model preset.", "brain", "[list|preset]"),
   new BuiltinCommandSpec("/history", "Show conversation history", "Print the last N persisted conversation messages.", "history", "[n]"),
   new BuiltinCommandSpec("/history-dag", "Show history DAG", "Show the task-state DAG for this chat.", "git-branch"),
   new BuiltinCommandSpec("/goal", "Start long-running goal", "Tell the agent to treat the request as a long-running goal.", "activity", "<goal>"),
@@ -236,22 +237,38 @@ function formatPresetNames(names: string[]): string {
   return names.length ? names.map((name) => `\`${name}\``).join(", ") : "(none configured)";
 }
 
-function modelPresetNames(loop: any): string[] {
-  const names = new Set(Object.keys(loop.modelPresets ?? {}));
-  names.add("default");
-  return ["default", ...[...names].filter((name) => name !== "default").sort()];
+function modelPresetNames(): string[] {
+  return readModelCatalog().items
+    .filter((item) => item.available)
+    .map((item) => item.preset);
 }
 
-function activeModelPresetName(loop: any): string {
-  return loop.modelPreset ?? "default";
+function modelCommandList(): string {
+  const items = readModelCatalog().items.filter((item) => item.available);
+  return [
+    "## Model presets",
+    ...(items.length
+      ? items.map((item) => `- \`${item.preset}\` -> \`${item.provider} / ${item.model}\``)
+      : ["- (none configured)"]),
+  ].join("\n");
 }
 
-function modelCommandStatus(loop: any): string {
+function sessionModelPreset(ctx: CommandContext): string | null {
+  const session = ctx.session ?? ctx.loop?.sessions?.get?.(ctx.key);
+  return typeof session?.metadata?.modelPreset === "string"
+    ? session.metadata.modelPreset
+    : null;
+}
+
+function modelCommandStatus(ctx: CommandContext): string {
+  const selection = resolveModelSelection({
+    sessionPreset: sessionModelPreset(ctx),
+  });
   return [
     "## Model",
-    `- Current model: \`${loop.model}\``,
-    `- Current preset: \`${activeModelPresetName(loop)}\``,
-    `- Available presets: ${formatPresetNames(modelPresetNames(loop))}`,
+    `- Current model: \`${selection ? `${selection.provider} / ${selection.model}` : "(none configured)"}\``,
+    `- Current preset: \`${selection?.preset ?? "(none configured)"}\``,
+    `- Available presets: ${formatPresetNames(modelPresetNames())}`,
   ].join("\n");
 }
 
@@ -259,25 +276,43 @@ export async function cmdModel(ctx: CommandContext): Promise<OutboundMessage> {
   const loop = ctx.loop;
   const args = ctx.args.trim();
   const metadata = { renderAs: "text" };
-  if (!args) return reply(ctx, modelCommandStatus(loop), metadata);
+  if (!args) return reply(ctx, modelCommandStatus(ctx), metadata);
   const parts = args.split(/\s+/);
-  if (parts.length !== 1) return reply(ctx, "Usage: `/model [preset]`", metadata);
-
-  try {
-    loop.setModelPreset(parts[0]);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return reply(ctx, `Could not switch model preset: ${message}\n\nAvailable presets: ${formatPresetNames(modelPresetNames(loop))}`, metadata);
+  if (parts.length !== 1) return reply(ctx, "Usage: `/model [list|preset]`", metadata);
+  if (parts[0]?.toLowerCase() === "list") {
+    return reply(ctx, modelCommandList(), metadata);
   }
 
-  const maxTokens = loop.provider?.generation?.max_tokens ?? loop.provider?.generation?.maxTokens;
-  const lines = [
-    `Switched model preset to \`${activeModelPresetName(loop)}\`.`,
-    `- Model: \`${loop.model}\``,
-    `- Context window: ${loop.contextWindowTokens}`,
-  ];
-  if (maxTokens != null) lines.push(`- Max output tokens: ${maxTokens}`);
-  return reply(ctx, lines.join("\n"), metadata);
+  try {
+    const session = ctx.session ?? loop?.sessions?.get?.(ctx.key);
+    if (!session) throw new Error("No active Session is available");
+    const selection = typeof loop?.applySessionModelPresetLocked === "function"
+      ? loop.applySessionModelPresetLocked(session, parts[0])
+      : resolveAndPersistSessionModel(loop, session, parts[0]);
+    const lines = [
+      `Switched this Session to \`${selection.preset}\`.`,
+      `- Model: \`${selection.provider} / ${selection.model}\``,
+      `- Context window: ${selection.snapshot.contextWindowTokens}`,
+    ];
+    const maxTokens = selection.snapshot.provider?.generation?.maxTokens;
+    if (maxTokens != null) lines.push(`- Max output tokens: ${maxTokens}`);
+    return reply(ctx, lines.join("\n"), metadata);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return reply(ctx, `Could not switch model preset: ${message}\n\nAvailable presets: ${formatPresetNames(modelPresetNames())}`, metadata);
+  }
+}
+
+function resolveAndPersistSessionModel(loop: any, session: any, preset: string) {
+  const selection = resolveModelSelection({ requestedPreset: preset });
+  const requested = readModelCatalog().items.find((item) => item.preset === preset && item.available);
+  if (!selection || !requested || selection.preset !== preset) {
+    throw new Error(`Unknown or unavailable model preset '${preset}'`);
+  }
+  session.metadata.modelPreset = selection.preset;
+  loop.sessions.save(session, { fsync: true });
+  loop.guiTranscriptMirror?.sessionUpdated?.(session.key);
+  return selection;
 }
 
 const GOAL_PROMPT_TEMPLATE = `The user declared a sustained objective for this thread.

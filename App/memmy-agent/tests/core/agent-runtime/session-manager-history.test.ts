@@ -342,6 +342,50 @@ describe("SessionManager history and previews", () => {
     ]);
   });
 
+  it("removes provider-specific reasoning state after a Session switches providers", () => {
+    const session = new Session({ key: "test:cross-provider-replay" });
+    session.messages.push({ role: "user", content: "hi" });
+    session.messages.push({
+      role: "assistant",
+      content: "done",
+      model_provider: "anthropic",
+      reasoning_content: "anthropic reasoning",
+      thinking_blocks: [{ type: "thinking", thinking: "anthropic reasoning", signature: "sig" }],
+      extra_content: { cache_control: { type: "ephemeral" } },
+      tool_calls: [{
+        id: "tc_1",
+        type: "function",
+        provider_specific_fields: { signature: "anthropic" },
+        function: {
+          name: "read_file",
+          arguments: "{}",
+          provider_specific_fields: { signature: "anthropic" },
+        },
+      }],
+    });
+
+    const history = session.getHistory({
+      maxMessages: 500,
+      targetProvider: "openai",
+    });
+
+    expect(history).toEqual([
+      { role: "user", content: "hi" },
+      {
+        role: "assistant",
+        content: "done",
+        tool_calls: [{
+          id: "tc_1",
+          type: "function",
+          function: {
+            name: "read_file",
+            arguments: "{}",
+          },
+        }],
+      },
+    ]);
+  });
+
   it("annotates user turns but not assistant turns with timestamps", () => {
     const session = new Session({ key: "test:timestamps" });
     session.messages.push({ role: "user", content: "10 点提醒是昨天发生的", timestamp: "2026-04-26T22:00:00" });

@@ -93,6 +93,9 @@ function sessionSummary(session: Session, filePath: string, options: { repairPre
     preview: messagePreviewText(previewMessage),
     updatedAt: session.updatedAt,
     path: filePath,
+    model_preset: typeof session.metadata?.modelPreset === "string"
+      ? session.metadata.modelPreset
+      : null,
   };
   if (session.metadata?.[WEBUI_SESSION_METADATA_KEY] === true) {
     const binding = readWebuiSessionBinding(session);
@@ -152,6 +155,35 @@ function synthesizeContent(message: Record<string, any>, includeTimestamps: bool
   return entry;
 }
 
+function sanitizeCrossProviderReplay(
+  message: Record<string, any>,
+  targetProvider: string | null | undefined,
+): Record<string, any> {
+  if (
+    message.role !== "assistant"
+    || !targetProvider
+    || message.model_provider === targetProvider
+  ) {
+    return message;
+  }
+  const sanitized = { ...message };
+  delete sanitized.reasoning_content;
+  delete sanitized.thinking_blocks;
+  delete sanitized.extra_content;
+  if (Array.isArray(sanitized.tool_calls)) {
+    sanitized.tool_calls = sanitized.tool_calls.map((call: Record<string, any>) => {
+      const next = { ...call };
+      delete next.provider_specific_fields;
+      if (next.function && typeof next.function === "object") {
+        next.function = { ...next.function };
+        delete next.function.provider_specific_fields;
+      }
+      return next;
+    });
+  }
+  return sanitized;
+}
+
 export class Session {
   key: string;
   messages: Record<string, any>[];
@@ -187,10 +219,12 @@ export class Session {
       maxMessages?: number;
       maxTokens?: number;
       includeTimestamps?: boolean;
+      targetProvider?: string | null;
     } = {},
     options: {
       maxTokens?: number;
       includeTimestamps?: boolean;
+      targetProvider?: string | null;
     } = {},
   ): Record<string, any>[] {
     const historyOptions = typeof maxMessagesOrOptions === "number"
@@ -200,6 +234,7 @@ export class Session {
       maxMessages = 120,
       maxTokens,
       includeTimestamps = false,
+      targetProvider = null,
     } = historyOptions ?? {};
     const visibleMessages = this.messages.slice(this.lastConsolidated);
     const effectiveMsgLimit = maxMessages > 0 ? maxMessages : 120;
@@ -208,7 +243,10 @@ export class Session {
     const legalStart = findLegalMessageStart(window);
     if (legalStart) window = window.slice(legalStart);
     window = window.filter((message) => !message.commandMessage);
-    const synthesized = window.map((msg) => synthesizeContent(msg, includeTimestamps));
+    const synthesized = window.map((msg) => synthesizeContent(
+      sanitizeCrossProviderReplay(msg, targetProvider),
+      includeTimestamps,
+    ));
     let out = synthesized.filter((message): message is Record<string, any> => message != null);
     if (maxTokens != null && maxTokens > 0 && out.length) {
       const selected: Record<string, any>[] = [];

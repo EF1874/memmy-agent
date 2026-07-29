@@ -211,6 +211,54 @@
   text-align: center;
 }
 
+.byokProviderGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.byokProviderGroup + .byokProviderGroup {
+  padding-top: 12px;
+  border-top: 1px solid var(--border-content-panel);
+}
+
+.byokProviderHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.byokProviderHead h3 {
+  margin: 0;
+  color: var(--usage-ink);
+  font-size: var(--codex-text-sm);
+  font-weight: 600;
+}
+
+.byokProviderHead span {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  color: var(--usage-muted);
+  font-size: var(--codex-text-xs);
+}
+
+.byokProviderHead strong {
+  color: var(--usage-ink);
+  font-weight: 600;
+}
+
+.byokProviderHead em {
+  font-style: normal;
+}
+
+.byokProviderRows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 /* --- Row cards (shared between platform & byok) --- */
 
 .platformQuotaRow,

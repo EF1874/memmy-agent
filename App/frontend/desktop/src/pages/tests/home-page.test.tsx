@@ -902,7 +902,15 @@ describe("HomePage", () => {
   });
 
   it("blank composer first send creates chat then sends message", async () => {
-    const newChat = vi.fn(async () => "chat-new");
+    const newChat = vi.fn(async (
+      _expectedGeneration: number,
+      _timeoutMs?: number,
+      _modelPreset?: string | null,
+      _clientRequestId?: string
+    ) => ({
+      chatId: "chat-new",
+      modelPreset: "desktop-openai-gpt-5-confirmed"
+    }));
     const sendMessage = vi.fn();
     const getReadyGeneration = vi.fn(() => 1);
     const ensureChatSubscription = vi.fn();
@@ -935,7 +943,7 @@ describe("HomePage", () => {
       onNewChatMessageSent
     })).resolves.toBe(true);
 
-    expect(newChat).toHaveBeenCalledWith(1);
+    expect(newChat).toHaveBeenCalledWith(1, 5000, undefined, expect.any(String));
     expect(dispatch).toHaveBeenNthCalledWith(1, { type: "agent/newChatCreated", chatId: "chat-new" });
     expect(dispatch).toHaveBeenNthCalledWith(2, {
       type: "agent/userMessageQueued",
@@ -958,11 +966,13 @@ describe("HomePage", () => {
       clientRequestId: expect.any(String),
       target: { kind: "standalone" },
       language: "zh-CN",
+      modelPreset: "desktop-openai-gpt-5-confirmed",
       media: [
         { path: "/media/websocket/webui/shot.png", url: "http://agent.local/api/media/sig/shot", name: "shot.png", kind: "image", mime: "image/png", bytes: 3 },
         { path: "/media/websocket/webui/小短文.pdf", url: "http://agent.local/api/media/sig/report", name: "小短文.pdf", kind: "file", mime: "application/pdf", bytes: 12 }
       ]
     }, 1);
+    expect(newChat.mock.calls[0]?.[3]).toBe(sendMessage.mock.calls[0]?.[0].clientRequestId);
     expect(ensureChatSubscription).toHaveBeenCalledWith("chat-new");
     expect(mockCallOrder(ensureChatSubscription)).toBeLessThan(mockCallOrder(sendMessage));
     expect(mockCallOrder(sendMessage)).toBeLessThan(mockCallOrder(dispatch, 1));
@@ -983,7 +993,7 @@ describe("HomePage", () => {
       target: projectTarget,
       connection: {
         getReadyGeneration: () => 1,
-        newChat: vi.fn(async () => "chat-project"),
+        newChat: vi.fn(async () => ({ chatId: "chat-project", modelPreset: "desktop-openai-gpt-5" })),
         sendMessage
       },
       content: "检查项目",
@@ -1009,7 +1019,7 @@ describe("HomePage", () => {
   });
 
   it("existing chat send does not create a new chat", async () => {
-    const newChat = vi.fn(async () => "unused-chat");
+    const newChat = vi.fn(async () => ({ chatId: "unused-chat", modelPreset: "desktop-openai-gpt-5" }));
     const sendMessage = vi.fn();
     const getReadyGeneration = vi.fn(() => 1);
     const ensureChatSubscription = vi.fn();
@@ -1077,7 +1087,11 @@ describe("HomePage", () => {
 
     await expect(submitAgentComposerMessage({
       chatId: "chat-1",
-      connection: { getReadyGeneration: () => 1, newChat: vi.fn(async () => "unused-chat"), sendMessage },
+      connection: {
+        getReadyGeneration: () => 1,
+        newChat: vi.fn(async () => ({ chatId: "unused-chat", modelPreset: "desktop-openai-gpt-5" })),
+        sendMessage
+      },
       content: "不要静默丢失",
       pendingAttachments: [],
       uploadAgentMedia: vi.fn(async () => []),
@@ -1105,7 +1119,11 @@ describe("HomePage", () => {
 
     await expect(submitAgentComposerMessage({
       chatId: "chat-1",
-      connection: { getReadyGeneration: () => generation, newChat: vi.fn(async () => "unused-chat"), sendMessage },
+      connection: {
+        getReadyGeneration: () => generation,
+        newChat: vi.fn(async () => ({ chatId: "unused-chat", modelPreset: "desktop-openai-gpt-5" })),
+        sendMessage
+      },
       content: "发送后立刻断线",
       pendingAttachments: [],
       uploadAgentMedia: vi.fn(async () => []),
@@ -1136,7 +1154,7 @@ describe("HomePage", () => {
       chatId: null,
       connection: {
         getReadyGeneration: () => 1,
-        newChat: vi.fn(async () => "background-chat"),
+        newChat: vi.fn(async () => ({ chatId: "background-chat", modelPreset: "desktop-openai-gpt-5" })),
         sendMessage: vi.fn()
       },
       ensureChatSubscription,
@@ -1168,7 +1186,11 @@ describe("HomePage", () => {
 
     await expect(submitAgentComposerMessage({
       chatId: "chat-1",
-      connection: { getReadyGeneration: () => 1, newChat: vi.fn(async () => "unused-chat"), sendMessage },
+      connection: {
+        getReadyGeneration: () => 1,
+        newChat: vi.fn(async () => ({ chatId: "unused-chat", modelPreset: "desktop-openai-gpt-5" })),
+        sendMessage
+      },
       content: "看这个文件",
       pendingAttachments: [readyFile({ fileName: "large.pdf", originalBytes: 10 * 1024 * 1024 + 1 })],
       uploadAgentMedia: vi.fn(async () => { throw new MemmyAgentRequestError("file too large", 413); }),

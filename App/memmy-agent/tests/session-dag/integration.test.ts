@@ -100,6 +100,10 @@ describe("Session DAG integration", () => {
         user_text: "hello",
         assistant_text: "summary",
       }),
+      expect.objectContaining({
+        provider: expect.any(Object),
+        model: "test-model",
+      }),
     );
   });
 

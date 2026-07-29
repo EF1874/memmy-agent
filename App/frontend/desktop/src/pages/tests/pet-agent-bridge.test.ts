@@ -241,7 +241,7 @@ function createFakeSocket(): { connection: MemmyAgentWebSocketConnection; unsubs
   const unsubscribe = vi.fn<MemmyAgentUnsubscribe>();
   const connection: MemmyAgentWebSocketConnection = {
     getReadyGeneration: vi.fn(() => 1),
-    newChat: vi.fn(async () => "chat-1"),
+    newChat: vi.fn(async () => ({ chatId: "chat-1", modelPreset: "desktop-openai-gpt-5" })),
     attach: vi.fn(),
     sendMessage: vi.fn(),
     stop: vi.fn(),

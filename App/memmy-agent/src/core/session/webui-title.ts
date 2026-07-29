@@ -65,7 +65,11 @@ export class WebuiTitleService {
 
     let runtime: ReturnType<LLMRuntimeResolver>;
     try {
-      runtime = this.llmRuntime();
+      runtime = this.llmRuntime(
+        typeof input.metadata?.model_preset === "string"
+          ? input.metadata.model_preset
+          : null,
+      );
     } catch (error) {
       console.error("WebUI title runtime capture failed:", error);
       return;

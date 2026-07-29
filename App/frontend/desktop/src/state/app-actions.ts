@@ -16,7 +16,7 @@ import { isIntegrationSetupDiagnosticError, logHiddenIntegrationSetupDiagnosticE
 import type { IntegrationsClient } from "../api/integrations-client.js";
 import type { IntegrationConnection } from "../integrations/connection-state.js";
 import type { IntegrationMeta } from "../integrations/integration-meta.js";
-import type { MemmyAgentRunStatusSnapshot, MemmyAgentSessionSnapshot, MemmyAgentSessionSummary, MemmyAgentSidebarState, MemmyAgentWebuiThread, MemmyAgentWsEvent, WebuiSessionTarget } from "../api/memmy-agent-client.js";
+import type { ChatModelPreset, MemmyAgentRunStatusSnapshot, MemmyAgentSessionSnapshot, MemmyAgentSessionSummary, MemmyAgentSidebarState, MemmyAgentWebuiThread, MemmyAgentWsEvent, WebuiSessionTarget } from "../api/memmy-agent-client.js";
 import type { PendingAttachment } from "./agent-composer-state.js";
 import type {
   AgentAction,
@@ -235,6 +235,22 @@ export const agentActions = {
 
   bootstrapSucceeded(modelName: string | null): AppAction {
     return { type: "agent/bootstrapSucceeded", modelName };
+  },
+
+  modelCatalogLoaded(presets: ChatModelPreset[], defaultPreset: string | null): AppAction {
+    return { type: "agent/modelCatalogLoaded", presets, defaultPreset };
+  },
+
+  pendingModelPresetUpdated(scopeKey: string, preset: string | null): AppAction {
+    return { type: "agent/pendingModelPresetUpdated", scopeKey, preset };
+  },
+
+  pendingModelPresetCleared(scopeKey: string): AppAction {
+    return { type: "agent/pendingModelPresetCleared", scopeKey };
+  },
+
+  modelSelectionCommitted(scopeKey: string, chatId: string, preset: string): AppAction {
+    return { type: "agent/modelSelectionCommitted", scopeKey, chatId, preset };
   },
 
   connectionConnecting(): AppAction {

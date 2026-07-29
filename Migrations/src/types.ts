@@ -1,4 +1,4 @@
-export type MigrationScope = "agent-workspace";
+export type MigrationScope = "agent-workspace" | "runtime-config";
 
 export type MigrationLoggerFields = Record<string, string | number>;
 
@@ -17,6 +17,7 @@ export type MigrationResult = {
 export type AgentWorkspaceMigrationContext = {
   profileWorkspace: string;
   sessionsDir: string;
+  runtimeConfigFile: string;
   logger: MigrationLogger;
 };
 
@@ -33,6 +34,7 @@ export type MigrationErrorCode =
   | "migration_target_unavailable"
   | "migration_lock_timeout"
   | "migration_state_invalid"
+  | "migration_config_invalid"
   | "migration_source_changed"
   | "migration_io_failed";
 
@@ -63,6 +65,7 @@ export class MigrationError extends Error {
 export type RunMigrationsOptions = {
   targets: {
     agentWorkspace: string;
+    runtimeConfigFile: string;
   };
   logger: MigrationLogger;
 };

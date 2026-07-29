@@ -5,9 +5,12 @@ import * as lockfile from "proper-lockfile";
 import { migrations, validateMigrationRegistry } from "./registry.js";
 import {
   getMigrationStatePaths,
+  isMigrationApplied,
+  migrationTargetFor,
   readMigrationState,
   writeMigrationState,
 } from "./state-store.js";
+import { withRuntimeConfigWriteLock } from "./runtime-config-lock.js";
 import {
   MigrationError,
   type MigrationDefinition,
@@ -42,9 +45,15 @@ function targetError(cause: unknown): MigrationError {
   );
 }
 
-function ioError(filePath: string, cause: unknown, migrationId: string | null = null): MigrationError {
+function ioError(
+  filePath: string,
+  cause: unknown,
+  migrationId: string | null = null,
+  scope: MigrationDefinition["scope"] = "agent-workspace",
+): MigrationError {
   return new MigrationError("migration_io_failed", `Migration I/O failed for ${filePath}`, {
     migrationId,
+    scope,
     cause,
   });
 }
@@ -71,6 +80,17 @@ async function resolveTarget(target: string): Promise<string> {
   } catch (error) {
     throw targetError(error);
   }
+}
+
+function resolveRuntimeConfigTarget(target: string): string {
+  if (typeof target !== "string" || !target.trim()) {
+    throw new MigrationError(
+      "migration_target_unavailable",
+      "Runtime config migration target is unavailable",
+      { scope: "runtime-config" },
+    );
+  }
+  return path.normalize(path.resolve(target));
 }
 
 function isLockContention(error: unknown): boolean {
@@ -103,6 +123,7 @@ async function runMigrationsInternal(
   validateMigrationRegistry(definitions);
 
   const profileWorkspace = await resolveTarget(options.targets.agentWorkspace);
+  const runtimeConfigFile = resolveRuntimeConfigTarget(options.targets.runtimeConfigFile);
   const statePaths = getMigrationStatePaths(profileWorkspace);
   try {
     await fs.mkdir(statePaths.directory, { recursive: true });
@@ -133,14 +154,13 @@ async function runMigrationsInternal(
   let executionError: unknown = null;
   try {
     const state = await readMigrationState(statePaths.file, definitions);
-    const appliedIds = new Set(state.applied.map((item) => item.id));
     const skipped = definitions
-      .filter((definition) => appliedIds.has(definition.id))
+      .filter((definition) => isMigrationApplied(state, definition, runtimeConfigFile))
       .map((definition) => definition.id);
     const applied: RunMigrationsResult["applied"] = [];
 
     for (const definition of definitions) {
-      if (appliedIds.has(definition.id)) continue;
+      if (isMigrationApplied(state, definition, runtimeConfigFile)) continue;
       options.logger.info("migration_started", {
         migrationId: definition.id,
         scope: definition.scope,
@@ -148,16 +168,25 @@ async function runMigrationsInternal(
 
       let result: MigrationResult;
       try {
-        result = await definition.up({
+        const run = () => definition.up({
           profileWorkspace,
           sessionsDir: path.join(profileWorkspace, "sessions"),
+          runtimeConfigFile,
           logger: options.logger,
         });
+        result = definition.scope === "runtime-config"
+          ? await withRuntimeConfigWriteLock(runtimeConfigFile, run)
+          : await run();
       } catch (error) {
         const migrationError =
           error instanceof MigrationError
             ? error
-            : ioError(profileWorkspace, error, definition.id);
+            : ioError(
+                definition.scope === "runtime-config" ? runtimeConfigFile : profileWorkspace,
+                error,
+                definition.id,
+                definition.scope,
+              );
         options.logger.error("migration_failed", {
           migrationId: definition.id,
           scope: definition.scope,
@@ -170,9 +199,9 @@ async function runMigrationsInternal(
         id: definition.id,
         introducedIn: definition.introducedIn,
         appliedAt: (internals.now ?? (() => new Date()))().toISOString(),
+        target: migrationTargetFor(definition, runtimeConfigFile),
       });
       await writeMigrationState(statePaths, state, definition.id);
-      appliedIds.add(definition.id);
       applied.push({
         id: definition.id,
         introducedIn: definition.introducedIn,

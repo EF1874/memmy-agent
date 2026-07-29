@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { runMigrations } from "@memmy/migrations";
+import { runMigrations, withRuntimeConfigWriteLock } from "@memmy/migrations";
 import fs from "node:fs";
 import http from "node:http";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -51,6 +51,7 @@ import {
   loginOpenAICodexInteractive,
 } from "../../providers/openai-codex-oauth.js";
 import { PROVIDERS } from "../../providers/registry.js";
+import { ModelCatalogWatcher } from "../../providers/model-catalog-watcher.js";
 import { evaluateResponse } from "../../utils/evaluator.js";
 import { installConsoleLevelGate } from "../../runtime-log-level.js";
 import { syncWorkspaceTemplates } from "../../utils/helpers.js";
@@ -67,7 +68,11 @@ import {
   GatewayTranscriptMonitor,
   GuiTranscriptMirror,
 } from "../frontend-bridge/gui-transcript-sync.js";
-import { getQuestionary, runOnboard } from "./onboard.js";
+import {
+  getQuestionary,
+  runOnboard,
+  validateModelCatalogForSave,
+} from "./onboard.js";
 import { StreamRenderer, ThinkingSpinner } from "./stream.js";
 
 export const app = new Command("memmy");
@@ -165,6 +170,61 @@ export function loadRuntimeConfig(config?: string | null, workspace?: string | n
   if (workspace) loaded.agents.defaults.workspace = workspace;
   return loaded;
 }
+
+const migrationLogger = {
+  info: (event: string, fields?: Record<string, string | number>) =>
+    console.info(`[migration] ${event}`, fields ?? {}),
+  warn: (event: string, fields?: Record<string, string | number>) =>
+    console.warn(`[migration] ${event}`, fields ?? {}),
+  error: (event: string, fields?: Record<string, string | number>) =>
+    console.error(`[migration] ${event}`, fields ?? {}),
+};
+
+function configuredWorkspaceForMigration(configPath: string): string | null {
+  if (!fs.existsSync(configPath)) return null;
+  try {
+    const parsed = YAML.parse(fs.readFileSync(configPath, "utf8"));
+    const configured = parsed?.agents?.defaults?.workspace;
+    return typeof configured === "string" && configured.trim() ? configured : null;
+  } catch {
+    // The runtime-config migration reports malformed YAML with a stable migration error.
+    return null;
+  }
+}
+
+export function resolveCliMigrationTargets(
+  config?: string | null,
+  workspace?: string | null,
+): { runtimeConfigFile: string; agentWorkspace: string } {
+  const runtimeConfigFile = config
+    ? path.resolve(config.replace(/^~(?=$|\/)/, process.env.HOME ?? "~"))
+    : path.resolve(getConfigPath());
+  if (config) setConfigPath(runtimeConfigFile);
+  const workspacePath = getWorkspacePath(
+    workspace ?? configuredWorkspaceForMigration(runtimeConfigFile),
+  );
+  return {
+    runtimeConfigFile,
+    agentWorkspace: fs.realpathSync(workspacePath),
+  };
+}
+
+export async function loadMigratedRuntimeConfig(
+  config?: string | null,
+  workspace?: string | null,
+): Promise<Config> {
+  if (config) {
+    const configPath = path.resolve(config.replace(/^~(?=$|\/)/, process.env.HOME ?? "~"));
+    if (!fs.existsSync(configPath)) throw new Error(`Config file not found: ${configPath}`);
+  }
+  const targets = resolveCliMigrationTargets(config, workspace);
+  await runMigrations({
+    targets,
+    logger: migrationLogger,
+  });
+  return loadRuntimeConfig(config, workspace);
+}
+
 export function mergeMissingDefaults(existing: any, defaults: any): any {
   if (!existing || typeof existing !== "object" || Array.isArray(existing)) return existing;
   if (!defaults || typeof defaults !== "object" || Array.isArray(defaults)) return existing;
@@ -175,22 +235,24 @@ export function mergeMissingDefaults(existing: any, defaults: any): any {
   return merged;
 }
 
-export function onboardPlugins(configPath: string): void {
+export async function onboardPlugins(configPath: string): Promise<void> {
   if (!fs.existsSync(configPath)) return;
-  const raw = fs.readFileSync(configPath, "utf8");
-  let data: any = {};
-  try {
-    data = YAML.parse(raw || "{}");
-  } catch {
-    data = {};
-  }
-  const channels = (data.channels ??= {});
-  for (const [name, cls] of Object.entries(discoverAll())) {
-    const defaults = (cls as any).defaultConfig?.() ?? { enabled: false };
-    channels[name] = name in channels ? mergeMissingDefaults(channels[name], defaults) : defaults;
-  }
-  fs.mkdirSync(path.dirname(configPath), { recursive: true });
-  fs.writeFileSync(configPath, YAML.stringify(data), "utf8");
+  await withRuntimeConfigWriteLock(configPath, async () => {
+    const raw = fs.readFileSync(configPath, "utf8");
+    let data: any = {};
+    try {
+      data = YAML.parse(raw || "{}");
+    } catch {
+      data = {};
+    }
+    const channels = (data.channels ??= {});
+    for (const [name, cls] of Object.entries(discoverAll())) {
+      const defaults = (cls as any).defaultConfig?.() ?? { enabled: false };
+      channels[name] = name in channels ? mergeMissingDefaults(channels[name], defaults) : defaults;
+    }
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(configPath, YAML.stringify(data), "utf8");
+  });
 }
 
 export function modelDisplay(config: Config): [string, string] {
@@ -291,6 +353,9 @@ export function resolveTerminalTarget(
   } else {
     key = standalone || project ? `cli:${crypto.randomUUID()}` : "cli:direct";
     const existing = reload(key);
+    if (!existing && !loop.resolveTurnModelSelection({})) {
+      throw new Error("No usable default model is configured. Run `memmy onboard` first.");
+    }
     if (existing) {
       binding = readWebuiSessionBinding(existing);
     } else if (project) {
@@ -393,7 +458,7 @@ export async function runRootInteractiveAgent({
   project?: string | null;
 } = {}): Promise<unknown> {
   if (rootInteractiveRunnerForTest) return rootInteractiveRunnerForTest();
-  const loaded = loadRuntimeConfig(null, null);
+  const loaded = await loadMigratedRuntimeConfig(null, null);
   syncRuntimeWorkspaceTemplates(loaded);
   const loop = AgentLoop.fromConfig(loaded);
   const target = resolveTerminalTarget(loop, { sessionId, standalone, project });
@@ -615,6 +680,10 @@ export async function onboard({
     ? path.resolve(config.replace(/^~(?=$|\/)/, process.env.HOME ?? "~"))
     : getConfigPath();
   if (config) setConfigPath(configPath);
+  if (fs.existsSync(configPath)) {
+    const targets = resolveCliMigrationTargets(configPath, workspace);
+    await runMigrations({ targets, logger: migrationLogger });
+  }
   let loaded: Config;
   if (fs.existsSync(configPath)) {
     if (wizard) {
@@ -653,12 +722,15 @@ export async function onboard({
       console.log("Configuration discarded. No changes were saved.");
       return loaded;
     }
-    saveConfig(loaded, configPath);
+    validateModelCatalogForSave(loaded);
+    await withRuntimeConfigWriteLock(configPath, async () => {
+      saveConfig(loaded, configPath);
+    });
     console.log(`Config saved at ${configPath}`);
   } else if (!fs.existsSync(configPath)) {
     saveConfig(loaded, configPath);
   }
-  onboardPlugins(configPath);
+  await onboardPlugins(configPath);
   const workspacePath = getWorkspacePath(loaded.agents.defaults.workspace);
   fs.mkdirSync(workspacePath, { recursive: true });
   syncWorkspaceTemplates(workspacePath, undefined, {
@@ -749,7 +821,7 @@ export async function serve({
   config?: string | null;
   verbose?: boolean;
 } = {}): Promise<http.Server> {
-  const loaded = loadRuntimeConfig(config, workspace);
+  const loaded = await loadMigratedRuntimeConfig(config, workspace);
   syncRuntimeWorkspaceTemplates(loaded);
   setCliRuntimeLogs(Boolean(verbose));
   const loop = AgentLoop.fromConfig(loaded);
@@ -962,20 +1034,12 @@ export async function gateway({
   config?: string | null;
   verbose?: boolean;
 } = {}): Promise<GatewayRuntime> {
-  const loaded = loadRuntimeConfig(config, workspace);
+  const loaded = await loadMigratedRuntimeConfig(config, workspace);
   const workspacePath = syncRuntimeWorkspaceTemplates(loaded);
   setCliRuntimeLogs(Boolean(verbose));
   // Gateway daemon mode: filter console output by the MEMMY_LOG_LEVEL injected by the desktop app.
   installConsoleLevelGate();
   const canonicalWorkspace = fs.realpathSync(workspacePath);
-  await runMigrations({
-    targets: { agentWorkspace: canonicalWorkspace },
-    logger: {
-      info: (event, fields) => console.info(`[migration] ${event}`, fields ?? {}),
-      warn: (event, fields) => console.warn(`[migration] ${event}`, fields ?? {}),
-      error: (event, fields) => console.error(`[migration] ${event}`, fields ?? {}),
-    },
-  });
   const bus = new MessageBus();
   const cron = new CronService(path.join(workspacePath, "cron", "jobs.json"));
   const projectStore = new ProjectStore();
@@ -1007,9 +1071,13 @@ export async function gateway({
     sessionManager: loop.sessions,
     workspacePath,
     webuiRuntimeModelName: () => {
-      loop.refreshProviderSnapshot();
-      return loop.model ?? null;
+      try {
+        return loop.llmRuntime().model;
+      } catch {
+        return null;
+      }
     },
+    webuiModelSelectionResolver: (input) => loop.resolveTurnModelSelection(input),
     cancelActiveTasks: cancelSessionTasks,
     closeBrowserChat: (channel, chatId) => loop.closeBrowserChat(channel, chatId),
   });
@@ -1038,7 +1106,7 @@ export async function gateway({
       new WebuiTitleService({
         bus,
         sessions: loop.sessions,
-        llmRuntime: () => loop.llmRuntime(),
+        llmRuntime: (preset) => loop.llmRuntime(preset),
         scheduleBackground: (promise) => loop.scheduleBackground(promise),
         tokenUsageRecorder: createByokTokenUsageRecorder(loaded),
       }),
@@ -1325,6 +1393,19 @@ export async function gateway({
     `memmy gateway started (${manager.enabledChannels.join(", ") || "no channels enabled"})`,
   );
   console.log(`Health endpoint: http://${bindHost}:${bindPort}/health`);
+  const modelCatalogWatcher = new ModelCatalogWatcher(getConfigPath(), (status, fingerprint) => {
+    bus.outbound.put(new OutboundMessage({
+      channel: "websocket",
+      chatId: "*",
+      content: "",
+      metadata: {
+        modelCatalogUpdated: true,
+        modelCatalogStatus: status,
+        fingerprint,
+      },
+    }));
+  });
+  modelCatalogWatcher.start();
   return {
     bus,
     loop,
@@ -1333,6 +1414,7 @@ export async function gateway({
     cron,
     healthServer,
     stop: async () => {
+      modelCatalogWatcher.close();
       heartbeat.stop();
       cron.stop();
       loop.stop();
@@ -1377,7 +1459,7 @@ export async function agent({
   logs?: boolean;
 } = {}): Promise<string | null> {
   const invocationCwd = process.cwd();
-  const loaded = loadRuntimeConfig(config, workspace);
+  const loaded = await loadMigratedRuntimeConfig(config, workspace);
   syncRuntimeWorkspaceTemplates(loaded);
   setCliRuntimeLogs(Boolean(logs));
   const loop = AgentLoop.fromConfig(loaded);
@@ -1497,7 +1579,16 @@ export async function runInteractiveAgent(
     if (target) loop.guiTranscriptMirror.sessionUpdated(target.sessionId);
   }
   if (!promptSession) initPromptSession();
-  const [model, presetTag] = modelDisplay(config);
+  const existing = loop.sessions.get(sessionId);
+  const selection = loop.resolveTurnModelSelection({
+    sessionPreset: typeof existing?.metadata?.modelPreset === "string"
+      ? existing.metadata.modelPreset
+      : null,
+  });
+  const model = selection
+    ? `${selection.provider} / ${selection.model}`
+    : "(none configured)";
+  const presetTag = selection ? ` (preset: ${selection.preset})` : "";
   console.log(`memmy Interactive mode (${model})${presetTag} - type exit or Ctrl+C to quit\n`);
 
   const [cliChannel, cliChatId] = sessionId.includes(":")

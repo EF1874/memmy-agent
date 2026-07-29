@@ -382,9 +382,9 @@ function createServer(overrides: Record<string, unknown> = {}): FastifyInstance 
 
 function memoryModels() {
   return {
-    summary: { provider: "openai_compatible", model: "memory_summary", configured: true, remote: true },
-    evolution: { provider: "openai_compatible", model: "memory_evolution", configured: true, remote: true },
-    embedding: { provider: "local", model: "hash-embedding-v1", configured: true, remote: false }
+    summary: { provider: "openai_compatible", model: "memory_summary", configured: true, remote: true, routing: "fixed" as const },
+    evolution: { provider: "openai_compatible", model: "memory_evolution", configured: true, remote: true, routing: "follow" as const },
+    embedding: { provider: "local", model: "hash-embedding-v1", configured: true, remote: false, mode: "local" as const }
   };
 }
 

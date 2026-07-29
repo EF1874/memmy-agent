@@ -1,3 +1,4 @@
+import { runMigrations } from "@memmy/migrations";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -31,6 +32,7 @@ export interface PackagedRuntimeServices {
     baseUrl: string;
     bootstrapSecret: string;
     configPath: string;
+    workspace: string;
   };
   restartMemory(): Promise<void>;
   close(): Promise<void>;
@@ -114,6 +116,18 @@ export async function startPackagedRuntimeServices(
   options: StartPackagedRuntimeServicesOptions
 ): Promise<PackagedRuntimeServices> {
   const entries = resolveRuntimeEntryPaths(options);
+  const migrationTargets = await resolvePackagedRuntimeMigrationTargets();
+  await runMigrations({
+    targets: {
+      agentWorkspace: migrationTargets.agentWorkspace,
+      runtimeConfigFile: migrationTargets.configPath
+    },
+    logger: {
+      info: (event, fields) => console.info(`[migration] ${event}`, fields ?? {}),
+      warn: (event, fields) => console.warn(`[migration] ${event}`, fields ?? {}),
+      error: (event, fields) => console.error(`[migration] ${event}`, fields ?? {})
+    }
+  });
   const runtimeConfig = await preparePackagedRuntimeConfig();
   const browserPreparationAttemptId = randomUUID();
   const children: ManagedChild[] = [];
@@ -154,7 +168,8 @@ export async function startPackagedRuntimeServices(
       agentGateway: {
         baseUrl: runtimeConfig.agentGatewayBaseUrl,
         bootstrapSecret: runtimeConfig.agentGatewayBootstrapSecret,
-        configPath: runtimeConfig.configPath
+        configPath: runtimeConfig.configPath,
+        workspace: runtimeConfig.agentWorkspace
       },
       async restartMemory() {
         if (closing) {
@@ -221,7 +236,6 @@ export async function preparePackagedRuntimeConfig(
     config.fileMemory.enabled = false;
     changed = true;
   }
-  changed = repairMemoryActiveProfile(memmyMemory) || changed;
   const defaultWorkspace = join(memmyHome, "workspace");
   const configuredWorkspace = stringValue(defaults.workspace);
   const agentWorkspace = resolvePath(env.MEMMY_AGENT_WORKSPACE ?? configuredWorkspace ?? defaultWorkspace);
@@ -294,6 +308,33 @@ export async function preparePackagedRuntimeConfig(
     agentGatewayHealthPort: gatewayHealthPort,
     agentGatewayBootstrapSecret
   };
+}
+
+export async function resolvePackagedRuntimeMigrationTargets(
+  env: RuntimeEnv = process.env
+): Promise<{ configPath: string; agentWorkspace: string }> {
+  const memmyHome = resolvePath(env.MEMMY_HOME ?? "~/.memmy");
+  const configPath = resolvePath(env.MEMMY_CONFIG ?? join(memmyHome, "config.yaml"));
+  const defaultWorkspace = join(memmyHome, "workspace");
+  let configuredWorkspace: string | undefined;
+  try {
+    const source = await readFile(configPath, "utf8");
+    const parsed = source.trim() ? YAML.parse(source) : {};
+    if (isRecord(parsed)) {
+      const agents = isRecord(parsed.agents) ? parsed.agents : null;
+      const defaults = agents && isRecord(agents.defaults) ? agents.defaults : null;
+      configuredWorkspace = defaults ? stringValue(defaults.workspace) : undefined;
+    }
+  } catch (error) {
+    if (!isMissingFileError(error) && (error as Error).name !== "YAMLParseError") {
+      throw error;
+    }
+  }
+  const agentWorkspace = resolvePath(
+    env.MEMMY_AGENT_WORKSPACE ?? configuredWorkspace ?? defaultWorkspace
+  );
+  await mkdir(agentWorkspace, { recursive: true });
+  return { configPath, agentWorkspace };
 }
 
 export async function resolveAgentGatewayRuntimeConfig(): Promise<{
@@ -1164,29 +1205,6 @@ function setMissing(record: ConfigRecord, key: string, value: unknown): boolean 
   }
   record[key] = value;
   return true;
-}
-
-function repairMemoryActiveProfile(memmyMemory: ConfigRecord): boolean {
-  const profiles = isRecord(memmyMemory.profiles) ? memmyMemory.profiles : null;
-  if (!profiles || memoryProfileName(memmyMemory.activeProfile)) {
-    return false;
-  }
-
-  const fallbackProfile = isRecord(profiles.byok)
-    ? "byok"
-    : isRecord(profiles.account)
-      ? "account"
-      : undefined;
-  if (!fallbackProfile) {
-    return false;
-  }
-
-  memmyMemory.activeProfile = fallbackProfile;
-  return true;
-}
-
-function memoryProfileName(value: unknown): "account" | "byok" | undefined {
-  return value === "account" || value === "byok" ? value : undefined;
 }
 
 function isRecord(value: unknown): value is ConfigRecord {

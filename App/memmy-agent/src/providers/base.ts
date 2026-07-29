@@ -56,6 +56,8 @@ export class LLMResponse {
   errorCode?: string | null;
   errorRetryAfterS?: number | null;
   errorShouldRetry?: boolean | null;
+  actualProvider?: string | null;
+  actualModel?: string | null;
 
   constructor(init: {
     content: string | null;
@@ -71,6 +73,8 @@ export class LLMResponse {
     errorCode?: string | null;
     errorRetryAfterS?: number | null;
     errorShouldRetry?: boolean | null;
+    actualProvider?: string | null;
+    actualModel?: string | null;
   }) {
     this.content = init.content;
     this.toolCalls = init.toolCalls ?? [];
@@ -85,6 +89,8 @@ export class LLMResponse {
     this.errorCode = init.errorCode ?? null;
     this.errorRetryAfterS = init.errorRetryAfterS ?? null;
     this.errorShouldRetry = init.errorShouldRetry ?? null;
+    this.actualProvider = init.actualProvider ?? null;
+    this.actualModel = init.actualModel ?? null;
   }
 
   get hasToolCalls(): boolean {

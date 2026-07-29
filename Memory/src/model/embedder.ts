@@ -196,7 +196,7 @@ class HttpEmbedder implements Embedder {
       throw new Error(`${provider} embedding provider requires apiKey or endpoint`);
     }
     const response = await postJsonWithRetry<OpenAiEmbeddingResponse>({
-      provider,
+      provider: this.config.sourceProvider ?? provider,
       operation: `embedding.${role}`,
       model: this.config.model,
       url,

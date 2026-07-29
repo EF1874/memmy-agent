@@ -289,7 +289,7 @@ describe("packaged desktop runtime config", () => {
     expect((await readYaml(configPath)).fileMemory).toEqual(expected);
   });
 
-  it("repairs missing memory active profile when profiles are configured", async () => {
+  it("does not restore the retired memory active profile field", async () => {
     const memmyHome = await makeTempRoot();
     const configPath = join(memmyHome, "config.yaml");
     await writeFile(configPath, YAML.stringify({
@@ -319,8 +319,9 @@ describe("packaged desktop runtime config", () => {
     });
     const config = await readYaml(configPath);
 
-    expect(recordValue(config, "memmyMemory")).toMatchObject({
-      activeProfile: "byok",
+    const memmyMemory = recordValue(config, "memmyMemory");
+    expect(memmyMemory).not.toHaveProperty("activeProfile");
+    expect(memmyMemory).toMatchObject({
       profiles: {
         byok: {
           summary: {

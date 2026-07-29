@@ -383,7 +383,9 @@ export function createPetAgentBridge(options: CreatePetAgentBridgeOptions): PetA
       if (closed) {
         throw new Error(unavailableMessage);
       }
-      return nextConnection.newChat(expectedGeneration, newChatTimeoutMs);
+      return nextConnection
+        .newChat(expectedGeneration, newChatTimeoutMs)
+        .then((result) => result.chatId);
     });
     newChatQueue = pending.catch(() => undefined);
     return pending.catch((error: unknown) => {

@@ -11,6 +11,7 @@ import { BaseChannel, type ChannelHandleMessageOptions } from "./base.js";
 import { OUTBOUND_META_AGENT_UI, MessageBus, OutboundMessage } from "../../core/runtime-messages/index.js";
 import { builtinCommandPalette } from "../../command/builtin.js";
 import { loadConfig } from "../../config/loader.js";
+import type { ResolvedModelSelection } from "../../providers/model-catalog.js";
 import { getMediaDir, getWorkspacePath } from "../../config/paths.js";
 import type { CronService } from "../../cron/service.js";
 import { goalStateWsBlob } from "../../core/session/goal-state.js";
@@ -114,6 +115,10 @@ type WebSocketChannelOptions = {
   staticDistPath?: string | null;
   workspacePath?: string | null;
   runtimeModelName?: RuntimeModelNameResolver;
+  modelSelectionResolver?: ((input: {
+    requestedPreset?: string | null;
+    sessionPreset?: string | null;
+  }) => ResolvedModelSelection | null) | null;
   cancelActiveTasks?: (sessionKey: string) => Promise<number>;
   closeBrowserChat?: (channel: string, chatId: string) => Promise<void>;
   fileMemoryEnabled?: boolean;
@@ -573,6 +578,7 @@ export class WebSocketChannel extends BaseChannel {
   terminalRunControl: TerminalRunControl | null = null;
   staticDistPath: string | null = null;
   runtimeModelName: RuntimeModelNameResolver = null;
+  modelSelectionResolver: WebSocketChannelOptions["modelSelectionResolver"] = null;
   workspacePath: string;
   readonly fileMemoryEnabled: boolean;
   cancelActiveTasks: ((sessionKey: string) => Promise<number>) | null = null;
@@ -610,6 +616,9 @@ export class WebSocketChannel extends BaseChannel {
     const staticDistPath = options.staticDistPath ?? config?.staticDistPath ?? null;
     this.staticDistPath = staticDistPath ? path.resolve(String(staticDistPath)) : null;
     this.runtimeModelName = options.runtimeModelName ?? config?.runtimeModelName ?? null;
+    this.modelSelectionResolver = options.modelSelectionResolver
+      ?? config?.modelSelectionResolver
+      ?? null;
     this.fileMemoryEnabled = options.fileMemoryEnabled === true;
     this.cancelActiveTasks = options.cancelActiveTasks ?? config?.cancelActiveTasks ?? null;
     this.closeBrowserChat = options.closeBrowserChat ?? config?.closeBrowserChat ?? null;
@@ -726,12 +735,14 @@ export class WebSocketChannel extends BaseChannel {
     mediaPaths,
     language,
     target,
+    modelPreset,
   }: {
     chatId: string;
     content: string;
     mediaPaths: string[];
     language: WebuiLanguage | null;
     target: WebuiSessionTarget | null;
+    modelPreset: string | null | undefined;
   }): string {
     return crypto.createHash("sha256").update(JSON.stringify({
       chat_id: chatId,
@@ -739,7 +750,43 @@ export class WebSocketChannel extends BaseChannel {
       media_paths: mediaPaths,
       language,
       target,
+      model_preset: modelPreset,
     })).digest("hex");
+  }
+
+  private resolveMessageModel(
+    requestedPreset: string | null | undefined,
+    session: Session | null,
+  ): ResolvedModelSelection | null {
+    if (!this.modelSelectionResolver) {
+      const preset = requestedPreset || (
+        typeof session?.metadata?.modelPreset === "string"
+          ? session.metadata.modelPreset
+          : "default"
+      );
+      const model = resolveBootstrapModelName(this.runtimeModelName) ?? "";
+      return {
+        preset,
+        provider: "unknown",
+        model,
+        snapshot: {
+          provider: null as any,
+          model,
+          contextWindowTokens: 0,
+          signature: [],
+        },
+      };
+    }
+    try {
+      return this.modelSelectionResolver({
+        ...(requestedPreset !== undefined ? { requestedPreset } : {}),
+        sessionPreset: typeof session?.metadata?.modelPreset === "string"
+          ? session.metadata.modelPreset
+          : null,
+      });
+    } catch {
+      return null;
+    }
   }
 
   private acceptedSessionMessage(
@@ -2487,6 +2534,38 @@ export class WebSocketChannel extends BaseChannel {
       });
       return;
     }
+    const hasRequestedPreset = Object.prototype.hasOwnProperty.call(
+      envelope,
+      "model_preset",
+    );
+    if (
+      hasRequestedPreset
+      && envelope.model_preset !== null
+      && typeof envelope.model_preset !== "string"
+    ) {
+      await this.sendWebuiRequestError(connection, {
+        chatId,
+        clientRequestId,
+        detail: "message_request_rejected",
+        reason: "model_preset_invalid",
+      });
+      return;
+    }
+    const requestedPreset = hasRequestedPreset
+      ? (typeof envelope.model_preset === "string"
+        ? envelope.model_preset
+        : null)
+      : undefined;
+    const modelSelection = this.resolveMessageModel(requestedPreset, existing);
+    if (!modelSelection) {
+      await this.sendWebuiRequestError(connection, {
+        chatId,
+        clientRequestId,
+        detail: "message_request_rejected",
+        reason: "model_preset_invalid",
+      });
+      return;
+    }
 
     const language = normalizeWebuiLanguage(envelope.language);
     const normalizedTarget = envelope.target == null
@@ -2508,6 +2587,7 @@ export class WebSocketChannel extends BaseChannel {
           mediaPaths,
           language,
           target: normalizedTarget,
+          modelPreset: requestedPreset,
         })
       : null;
     if (existing && clientRequestId) {
@@ -2526,6 +2606,9 @@ export class WebSocketChannel extends BaseChannel {
         await this.sendEvent(connection, "message_accepted", {
           chat_id: chatId,
           client_request_id: clientRequestId,
+          model_preset: accepted.model_preset ?? null,
+          model_provider: accepted.model_provider ?? null,
+          model: accepted.model ?? null,
         });
         return;
       }
@@ -2583,6 +2666,9 @@ export class WebSocketChannel extends BaseChannel {
     const metadata: Record<string, any> = {
       remote: connection?.remoteAddress ?? null,
       webui: envelope.webui === true,
+      model_preset: modelSelection.preset,
+      model_provider: modelSelection.provider,
+      model: modelSelection.model,
     };
     if (clientRequestId && digest) {
       metadata.client_request_id = clientRequestId;
@@ -2637,9 +2723,58 @@ export class WebSocketChannel extends BaseChannel {
   async dispatchEnvelope(connection: any, clientId: string, envelope: Record<string, any>): Promise<void> {
     const type = envelope.type;
     if (type === "new_chat") {
+      const clientRequestId = typeof envelope.client_request_id === "string"
+        && UUID_RE.test(envelope.client_request_id)
+        ? envelope.client_request_id
+        : null;
+      if (!clientRequestId) {
+        await this.sendEvent(connection, "error", {
+          detail: "new_chat_rejected",
+          reason: "message_request_id_required",
+        });
+        return;
+      }
+      const hasRequestedPreset = Object.prototype.hasOwnProperty.call(
+        envelope,
+        "model_preset",
+      );
+      if (
+        hasRequestedPreset
+        && envelope.model_preset !== null
+        && typeof envelope.model_preset !== "string"
+      ) {
+        await this.sendEvent(connection, "error", {
+          client_request_id: clientRequestId,
+          detail: "new_chat_rejected",
+          reason: "model_preset_invalid",
+        });
+        return;
+      }
+      const modelSelection = this.resolveMessageModel(
+        hasRequestedPreset
+          ? (typeof envelope.model_preset === "string"
+            ? envelope.model_preset
+            : null)
+          : undefined,
+        null,
+      );
+      if (!modelSelection) {
+        await this.sendEvent(connection, "error", {
+          client_request_id: clientRequestId,
+          detail: "new_chat_rejected",
+          reason: "model_preset_invalid",
+        });
+        return;
+      }
       const chatId = crypto.randomUUID();
       this.attachConnection(connection, chatId);
-      await this.sendEvent(connection, "attached", { chat_id: chatId });
+      await this.sendEvent(connection, "attached", {
+        chat_id: chatId,
+        client_request_id: clientRequestId,
+        model_preset: modelSelection.preset,
+        model_provider: modelSelection.provider,
+        model: modelSelection.model,
+      });
       await this.hydrateAfterSubscribe(chatId);
       return;
     }
@@ -2879,6 +3014,9 @@ export class WebSocketChannel extends BaseChannel {
         event: "message_accepted",
         chat_id: message.chatId,
         client_request_id: clientRequestId,
+        model_preset: message.metadata.modelPreset ?? null,
+        model_provider: message.metadata.modelProvider ?? null,
+        model: message.metadata.model ?? null,
       };
       for (const connection of inflight?.connections ?? this.subscriptions.get(message.chatId) ?? []) {
         await this.safeSendTo(connection, payload);
@@ -2889,6 +3027,14 @@ export class WebSocketChannel extends BaseChannel {
       await this.sendRuntimeModelUpdated({
         modelName: message.metadata.model,
         modelPreset: message.metadata.model_preset,
+      });
+      return;
+    }
+    if (message.metadata?.modelCatalogUpdated) {
+      await this.broadcastAll({
+        event: "model_catalog_updated",
+        status: message.metadata.modelCatalogStatus === "invalid" ? "invalid" : "ready",
+        fingerprint: String(message.metadata.fingerprint ?? ""),
       });
       return;
     }
@@ -3178,6 +3324,12 @@ export class WebSocketChannel extends BaseChannel {
 
   private async broadcast(chatId: string, payload: Record<string, any>): Promise<void> {
     for (const connection of this.subscriptions.get(chatId) ?? []) await this.safeSendTo(connection, payload);
+  }
+
+  private async broadcastAll(payload: Record<string, any>): Promise<void> {
+    for (const connection of this.connectionChats.keys()) {
+      await this.safeSendTo(connection, payload);
+    }
   }
 }
 

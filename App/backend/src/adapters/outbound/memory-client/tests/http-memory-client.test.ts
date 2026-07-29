@@ -69,8 +69,10 @@ describe("HttpMemoryClient", () => {
 
     await expect(client.health()).resolves.toMatchObject({ ok: true });
     await expect(client.reloadConfig({ reason: "profile_switched" })).resolves.toMatchObject({
-      activeProfile: "byok",
-      changed: true
+      changed: true,
+      models: {
+        summary: { routing: "fixed" }
+      }
     });
     await expect(client.openSession(openSessionInput())).resolves.toMatchObject({ status: "open" });
     await expect(client.closeSession(closeSessionInput())).resolves.toMatchObject({ status: "closed" });
@@ -402,7 +404,6 @@ function healthOutput() {
     mode: "local",
     storage: { backend: "sqlite", schemaVersion: "3", ready: true },
     capabilities: { routes: ["/api/v1/health"], tools: [], memoryLayers: ["L1", "L2", "L3", "Skill"], supportsCli: true },
-    activeProfile: "byok",
     models: modelStatuses(),
     serverTime: now()
   };
@@ -410,7 +411,6 @@ function healthOutput() {
 
 function reloadConfigOutput() {
   return {
-    activeProfile: "byok",
     changed: true,
     requiresRestart: false,
     models: modelStatuses(),
@@ -420,9 +420,9 @@ function reloadConfigOutput() {
 
 function modelStatuses() {
   return {
-    summary: { provider: "openai_compatible", model: "memory_summary", configured: true, remote: true },
-    evolution: { provider: "openai_compatible", model: "memory_evolution", configured: true, remote: true },
-    embedding: { provider: "local", model: "hash-embedding-v1", configured: true, remote: false }
+    summary: { provider: "openai_compatible", model: "memory_summary", configured: true, remote: true, routing: "fixed" },
+    evolution: { provider: "openai_compatible", model: "memory_evolution", configured: true, remote: true, routing: "follow" },
+    embedding: { provider: "local", model: "hash-embedding-v1", configured: true, remote: false, mode: "local" }
   };
 }
 

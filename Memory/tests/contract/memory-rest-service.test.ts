@@ -790,9 +790,12 @@ describe("MemoryService / REST contract", () => {
 
     expect(readerResponse.status).toBe(403);
     expect(result).toMatchObject({
-      activeProfile: "account",
       changed: true,
-      requiresRestart: false
+      requiresRestart: false,
+      models: {
+        summary: { routing: expect.stringMatching(/^(follow|fixed)$/) },
+        evolution: { routing: expect.stringMatching(/^(follow|fixed)$/) }
+      }
     });
 
     });
