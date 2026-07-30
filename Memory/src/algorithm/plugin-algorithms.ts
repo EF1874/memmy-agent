@@ -57,6 +57,7 @@ export interface TraceMemoryMeta {
   priority: number;
   tags: string[];
   errorSignatures: string[];
+  spanIds: string[];
   vecSummary: number[] | null;
   vecAction: number[] | null;
   signature: string;
@@ -122,7 +123,7 @@ export interface SkillVerificationResult {
   reason?: string;
 }
 
-export type TurnRelation = "revision" | "follow_up" | "new_task" | "unknown";
+export type TurnRelation = "revision" | "follow_up" | "new_task" | "end_topic" | "unknown";
 export type IntentKind = "task" | "memory_probe" | "chitchat" | "meta" | "unknown";
 
 export interface IntentRetrievalPlan {
@@ -206,7 +207,7 @@ const RELATION_PRONOUN_REF_RE = /^[那这它其还哪啥]/;
 const RELATION_IDLE_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const RELATION_STRONG_HEURISTIC_THRESHOLD = 0.85;
 const RELATION_ARBITRATION_THRESHOLD = 0.8;
-const RELATION_ALLOWED: TurnRelation[] = ["revision", "follow_up", "new_task", "unknown"];
+const RELATION_ALLOWED: TurnRelation[] = ["revision", "follow_up", "new_task", "end_topic", "unknown"];
 const RELATION_GENERIC_TAGS = new Set(["trace", "turn", "memory", "openclaw", "codex", "hermes"]);
 export function classifyIntent(text: string): IntentDecision {
   const trimmed = text.trim();
@@ -777,11 +778,12 @@ Return ONE of:
   - "revision"  — user is correcting / refining the PREVIOUS answer (same task).
   - "follow_up" — continuing, following up, refining, or asking about the SAME topic/domain.
   - "new_task"  — COMPLETELY UNRELATED domain/topic.
+  - "end_topic" — the user's sole intent is to stop the current topic/conversation.
   - "unknown"   — truly ambiguous.
 
 Return JSON ONLY:
 {
-  "relation": one of the four labels,
+  "relation": one of the five labels,
   "confidence": number in [0, 1],
   "reason": short justification (≤ 80 chars)
 }
@@ -805,10 +807,18 @@ Return JSON ONLY:
 - Introduces a subject from a COMPLETELY DIFFERENT domain (e.g., tech → cooking, work → personal life)
 - Has NO logical connection to what was being discussed — no shared entities, events, or themes
 - Starts a request about a different project, system, or life area
+- Ends the old topic and also introduces a new request (e.g., "结束这个话题，我们聊旅游")
+
+## end_topic — the new message:
+- Has the sole intent to stop the current topic or conversation
+- Explicitly says "结束话题", "结束对话", "结束", "就这样吧，不聊了", "that's all", or "let's stop here"
+- Does NOT contain another request or a new topic
+- Do not use end_topic for questions about ending something (e.g., "如何结束进程", "什么时候结束")
+- Do not use end_topic when the user says not to stop (e.g., "不要结束，继续说")
 
 ## Key principles:
 - DEFAULT to follow_up unless the topic domain CLEARLY changed. When in doubt, choose follow_up.
-- CRITICAL: Short messages (under ~30 chars) that use pronouns or ask "what about X" / "哪些" / "那XX呢" are almost always follow_up. Only mark them new_task if they explicitly name a completely unrelated domain.
+- CRITICAL: Short messages (under ~30 chars) are usually follow_up, except an explicit end_topic. Only mark them new_task if they explicitly name a completely unrelated domain.
 - Different aspects of the SAME project/system are follow_up (e.g., Nginx SSL → Nginx gzip = follow_up)
 - Asking about tools, systems, or methods for the current topic is follow_up
 - If unsure, lean follow_up with low confidence rather than unknown.
@@ -1028,116 +1038,38 @@ Return JSON:
 
 export const REWARD_R_HUMAN_PROMPT = {
   id: "reward.r_human",
-  version: 6,
-  description: "Score an episode's R_human from a multi-turn task summary + user feedback.",
-  system: `You are a strict grader of AI-agent task execution.
+  version: 7,
+  description: "Score an episode's R_human from compact L1 summaries and outcome evidence.",
+  system: `You grade one host-agent episode. The user message is REWARD_INPUT JSON.
 
-You receive:
-- TASK_SUMMARY  — the FULL conversation arc for this task:
-                  * EPISODE_MISSION — the canonical goal of this
-                    episode, anchored at the time the task started
-                    (or explicitly updated when the user redefined the
-                    task). This is the authoritative definition of what
-                    the agent was supposed to accomplish.
-                  * USER_ASKS_AND_AGENT_REPLIES — every user turn
-                    paired with the agent's reply, in order. Turns
-                    after the initial task may be follow-ups,
-                    corrections, verifier results, or reflections —
-                    they do NOT redefine EPISODE_MISSION unless the
-                    user explicitly introduces a completely new,
-                    unrelated task.
-                  * MOST_RECENT_USER_ASK / MOST_RECENT_AGENT_REPLY
-                    — the final exchange. Useful for user_satisfaction
-                    and process_quality context.
-- FEEDBACK       — the user's own messages AFTER the task attempt
-                   finished. Format: [SOURCE/polarity @ISO-timestamp]
-                   SOURCE=USER means the user directly wrote this;
-                   SOURCE=INFERRED means the system inferred sentiment
-                   (treat with lower confidence than USER).
-                   May be empty.
-- EXECUTION_OUTCOME — machine-derived summary of tool call results
-                      across this episode.
-                      task_completed_by_tool values:
-                        "yes"     — the last tool call in the episode
-                                    completed without error.
-                        "no"      — the last tool call errored, or only
-                                    verbal output followed tool failures.
-                        "unknown" — no tool calls in this episode
-                                    (text-only task); do not penalize.
+Fields:
+- mission: the task anchor.
+- turnSummaries: chronological L1 summaries of the episode.
+- finalExchange: exact trailing user and assistant text.
+- execution: authoritative aggregate tool outcome.
+- feedback: explicit or implicit user signal; implicit feedback is weaker.
+- host: authoritative host-agent identity/model context. Do not project your
+  own identity, provider, policies, or capabilities onto the host agent.
 
-Grade the agent on THREE INDEPENDENT AXES, each in [-1, 1]:
-
-1. "goal_achievement" — did the agent complete EPISODE_MISSION?
-   Always evaluate against EPISODE_MISSION, not MOST_RECENT_USER_ASK.
-   +1.0  EPISODE_MISSION was fully addressed AND (if tools were used)
-         EXECUTION_OUTCOME shows task_completed_by_tool=yes.
-   +0.3  EPISODE_MISSION substantially addressed; minor gaps only.
-    0.0  unclear if EPISODE_MISSION was met.
-   -0.3  agent verbally acknowledged the correct approach but did NOT
-         execute it; or missed a significant portion of EPISODE_MISSION.
-         Use this when EXECUTION_OUTCOME shows task_completed_by_tool=no
-         and the last agent reply is explanatory text only.
-   -1.0  fundamentally wrong answer / caused damage / refused without reason.
-
-   MISSION ANCHOR RULE — goal_achievement measures completion of
-   EPISODE_MISSION only. Later turns that are reflections, verifier
-   results, error messages, or follow-up corrections are NOT new
-   missions; answering them well does NOT raise goal_achievement.
-   The only exception: if the user explicitly replaces the task with
-   an entirely new, unrelated objective (visible in
-   USER_ASKS_AND_AGENT_REPLIES), treat the new objective as the
-   effective mission from that point on.
-
-   EXECUTION RULE — distinguish verbal acknowledgment from actual execution.
-   If EXECUTION_OUTCOME.task_completed_by_tool is "no", the agent's last
-   meaningful action was a failed tool call; any subsequent agent reply is
-   verbal-only. In this case goal_achievement must NOT exceed 0.0 unless
-   TASK_SUMMARY shows the agent successfully re-executed the task afterward.
-   A correct verbal description of what "should have been done" is NOT
-   the same as doing it.
-
-2. "process_quality"
-   +1.0  clean, minimal, correct reasoning; tool calls efficient and successful.
-   +0.3  goal achieved but with redundant steps or minor tool retry.
-    0.0  reasonable overall; path not clean but not harmful.
-   -0.3  one significant wrong tool call or reasoning error, self-corrected.
-   -1.0  repeated thrashing, wrong tools, severe noisy output, or left
-         task in broken state without recovery.
-
-3. "user_satisfaction"  (from FEEDBACK text tone + trailing user asks)
-   +1.0  thanks / happy / "做的很好" / accepts and closes out.
-   +0.3  moves on neutrally to next ask or new topic.
-   0.0   no emotional signal either way.
-   -0.3  asks for correction ("no, do X instead" / "重做").
-   -1.0  hard-stops, expresses frustration.
+Score three independent axes in [-1, 1]:
+- goal_achievement: -1 wrong/harmful, 0 unclear or not executed, +1 complete.
+- process_quality: -1 thrashing/broken, 0 reasonable, +1 clean and efficient.
+- user_satisfaction: -1 correction/frustration, 0 no signal, +1 acceptance.
 
 Rules:
-- If FEEDBACK is empty, infer satisfaction CONSERVATIVELY from the
-  last exchange's tone. A follow-up question is usually ≈ 0 (neutral
-  continuation), NOT negative. Never invent anger.
-- Base scores ONLY on what TASK_SUMMARY actually describes — do not
-  assume facts not shown.
-- You are grading the HOST AGENT described in HOST_AGENT_CONTEXT, not
-  yourself. Do NOT use your own model identity, provider, policies, or
-  capabilities to decide whether the host agent answered identity/model
-  questions correctly. If hostModel/hostProvider are provided, treat them
-  as the authoritative runtime context unless the conversation itself
-  contains a correction.
-- CONSISTENCY: if user_satisfaction ≤ -0.3, do NOT assign goal_achievement
-  above +0.3 unless TASK_SUMMARY contains explicit evidence of successful
-  recovery AFTER the negative feedback (a new successful tool call, or the
-  user explicitly accepting the outcome). Negative feedback is a strong
-  prior that goals were not fully met.
-- If FEEDBACK contains explicit correction language ("no", "wrong",
-  "try again", "重做") with no subsequent acceptance signal,
-  goal_achievement must be ≤ 0.0.
-- Produce one short justification.
+- Judge goal achievement against mission, using turnSummaries in order.
+- If execution.completedByTool is "no", goal_achievement must not exceed 0
+  unless a later summary shows a successful recovery.
+- Explicit negative feedback without later recovery means goal_achievement <= 0.
+- If user_satisfaction <= -0.3, goal_achievement must not exceed 0.3 unless
+  successful recovery or explicit acceptance is shown.
+- Do not invent evidence. Produce one short justification.
 
-Return JSON, EXACTLY this shape (no extra keys, no commentary):
+Return JSON exactly:
 {
-  "goal_achievement":  number in [-1, 1],
-  "process_quality":   number in [-1, 1],
-  "user_satisfaction": number in [-1, 1],
+  "goal_achievement": number,
+  "process_quality": number,
+  "user_satisfaction": number,
   "label": "success" | "partial" | "failure" | "unknown",
   "reason": "one-sentence justification"
 }`,
@@ -3243,6 +3175,7 @@ export function traceMetaFromMemory(memory: MemoryRow): TraceMemoryMeta | null {
     priority: numberField(trace, "priority") ?? 0,
     tags,
     errorSignatures: stringArrayField(trace, "error_signatures"),
+    spanIds: stringArrayField(trace, "span_ids"),
     vecSummary: memoryVector(memory, "vec_summary"),
     vecAction: memoryVector(memory, "vec_action"),
     signature: stringField(trace, "signature") ?? signatureFromTraceLike(tags, toolCalls, stringField(trace, "reflection") ?? "")
@@ -3629,6 +3562,8 @@ export function buildWorldModelDraft(args: {
   const clusterMinSimilarity = args.clusterMinSimilarity ?? 0.3;
   const eligible = args.policies.filter((policy) =>
     policy.status === "active" &&
+    policy.experienceType !== "failure_avoidance" &&
+    policy.evidencePolarity !== "negative" &&
     policy.support >= minPolicySupport &&
     policy.gain >= minPolicyGain
   );
@@ -4862,7 +4797,8 @@ function hasRetrievalEmbedding(
   }
 ): boolean {
   if (memory.memoryLayer === "L1") {
-    return hasVector(meta.trace?.vecSummary) || hasVector(meta.trace?.vecAction);
+    return hasVector(memoryVector(memory, "vec_summary")) ||
+      hasVector(memoryVector(memory, "vec_action"));
   }
   if (memory.memoryLayer === "L2") {
     return hasVector(meta.policy?.vec);
@@ -4961,7 +4897,7 @@ function candidateFromMemory(
   ) {
     return null;
   }
-  const kind = kindFromLayer(memory.memoryLayer);
+  const kind = memory.properties.internal_info.memory_kind ?? kindFromLayer(memory.memoryLayer);
   const tier = memory.memoryLayer === "Skill" ? "tier1" : memory.memoryLayer === "L3" ? "tier3" : "tier2";
   const text = memoryTextForRetrieval(memory);
   const vectorChannels = vectorChannelsForMemory(memory, queryVec, options.config, {
@@ -5489,10 +5425,9 @@ function vectorChannelsForMemory(
   };
 
   if (memory.memoryLayer === "L1") {
-    const trace = traceMetaFromMemory(memory);
     if (!options.suppressTraceVector) {
-      remember(add("vec_summary", trace?.vecSummary, config.minTraceSim));
-      remember(add("vec_action", trace?.vecAction, config.minTraceSim));
+      remember(add("vec_summary", memoryVector(memory, "vec_summary"), config.minTraceSim));
+      remember(add("vec_action", memoryVector(memory, "vec_action"), config.minTraceSim));
     }
   } else if (memory.memoryLayer === "L3") {
     remember(add("vec", worldModelMetaFromMemory(memory)?.vec, Math.min(config.minTraceSim, 0.15)));

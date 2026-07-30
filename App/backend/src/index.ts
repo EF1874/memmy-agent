@@ -15,8 +15,7 @@ import {
 import { resolveDefaultRuntimeConfigPath, writeRuntimeConfigFile } from "./infrastructure/cli-binary/index.js";
 import {
   createMemmyConfigWriter,
-  readAgentGatewayBootstrapSecret,
-  resolveDefaultMemmyConfigPath
+  readAgentGatewayBootstrapSecret
 } from "./infrastructure/memmy-config/index.js";
 import { createPermissionManager } from "./permission/index.js";
 import { createLocalApiServer } from "./adapters/inbound/local-api/server.js";
@@ -35,6 +34,7 @@ export type { BootstrapScenario };
 export { loadCloudServiceEnv };
 export { sendGa4Events, resolveGa4Config } from "./analytics/ga4-client.js";
 export type { Ga4Config, Ga4Event, SendGa4EventsOptions } from "./analytics/ga4-client.js";
+export { trackAnalyticsEvent } from "./analytics/analytics-transport.js";
 
 const DEFAULT_MEMORY_LAYER_TIMEOUT_MS = 20_000;
 
@@ -48,7 +48,7 @@ export interface CreateLocalBackendOptions {
   agentAdapterRegistry?: AgentAdapterRegistry;
   agentAdapterPluginDirectories?: string[];
   runtimeConfigPath?: string;
-  /** Memmy config path. */
+  /** Memmy config path. Required unless MEMMY_CONFIG is set. */
   memmyConfigPath?: string;
   /** Memory service address exposed to desktop and browser-debug clients. */
   memoryBaseUrl?: string;
@@ -56,7 +56,7 @@ export interface CreateLocalBackendOptions {
   desktopInstallFingerprint?: string;
   /** Agent source auto scan interval in ms. Defaults to one hour. */
   agentSourceAutoScanIntervalMs?: number;
-  /** Agent source auto scan initial delay in ms. Defaults to the interval. */
+  /** Agent source startup scan delay in ms. Defaults to five minutes. */
   agentSourceAutoScanInitialDelayMs?: number;
 }
 
@@ -76,7 +76,10 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
   let autoScan: AgentSourceAutoScanService | null = null;
 
   try {
-    const memmyConfigPath = options.memmyConfigPath ?? process.env.MEMMY_CONFIG ?? resolveDefaultMemmyConfigPath();
+    const memmyConfigPath = options.memmyConfigPath ?? process.env.MEMMY_CONFIG;
+    if (!memmyConfigPath) {
+      throw new Error("memmyConfigPath or MEMMY_CONFIG is required");
+    }
     if (options.desktopInstallFingerprint) {
       await resetAccountRuntimeForDesktopInstallChange({
         appStateStore,
@@ -98,7 +101,10 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
     await memoryClient.reloadConfig({ reason: "desktop_startup" });
     const scanWorker = options.memoryClient ? undefined : { databasePath: appStateStore.databasePath };
     const cloudConfig = resolveCloudClientConfig(process.env);
-    const cloudClient = options.cloudClient ?? createDefaultCloudClient(cloudConfig);
+    const cloudClient = options.cloudClient ?? createDefaultCloudClient(
+      cloudConfig,
+      tryGetInstallationId(appStateStore)
+    );
     const agentAdapterRegistry =
       options.agentAdapterRegistry ??
       createDefaultAgentAdapterRegistry({
@@ -185,11 +191,20 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
  * @param config the Cloud HTTP configuration.
  * @returns an HTTP CloudClient pointing at the real cloud account service.
  */
-function createDefaultCloudClient(config: CloudClientConfig): CloudClient {
+function createDefaultCloudClient(config: CloudClientConfig, deviceId?: string): CloudClient {
   return createHttpCloudClient({
     baseUrl: config.baseUrl,
-    timeoutMs: config.timeoutMs
+    timeoutMs: config.timeoutMs,
+    deviceId
   });
+}
+
+function tryGetInstallationId(appStateStore: ReturnType<typeof createAppStateStore>): string | undefined {
+  try {
+    return appStateStore.repositories.deviceIdentity.getOrCreateInstallationId();
+  } catch {
+    return undefined;
+  }
 }
 
 export function readMemoryLayerConfig(env: NodeJS.ProcessEnv): MemoryLayerConfig | null {

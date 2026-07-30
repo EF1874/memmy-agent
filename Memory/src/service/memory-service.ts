@@ -10,8 +10,10 @@ import {
   type MemmyConfig
 } from "../config/index.js";
 import { createMemoryLogger } from "../logging/logger.js";
+import { resolveMemoryAgentRegion } from "../model/agent-region.js";
 import { createEmbedder } from "../model/embedder.js";
 import { createLlmClient } from "../model/llm.js";
+import type { MemoryLlmModelRole } from "../model/token-usage.js";
 import type { Embedder,LlmClient } from "../model/types.js";
 import {
   sqliteBackendCapabilities,
@@ -135,6 +137,7 @@ import {
 } from "./turn/turn-normalization.js";
 import {
   createWorkerJobHandlers,
+  type ClosedEpisodeTrigger,
   type EnqueueJobInput
 } from "./worker/job-handlers.js";
 import { WorkerRunner } from "./worker/worker-runner.js";
@@ -147,6 +150,16 @@ export type { FeedbackResponse } from "./feedback/feedback-experience.js";
 function evolutionUsesSharedLlm(config: MemmyConfig): boolean {
   const evolution = config.evolution;
   return !evolution.provider && !evolution.model && !evolution.endpoint && !evolution.apiKey;
+}
+
+function createConfiguredMemoryLlm(config: MemmyConfig, modelRole: MemoryLlmModelRole): LlmClient {
+  return createLlmClient(
+    modelRole === "memory_summary" ? config.summary : resolveEvolutionConfig(config),
+    {
+      modelRole,
+      agentRegion: resolveMemoryAgentRegion(config.activeProfile)
+    }
+  );
 }
 
 export interface MemoryServiceOptions {
@@ -201,6 +214,7 @@ type InternalMemorySearchRequest = MemorySearchRequest & {
   targetSkillId?: string;
   contextHints?: Record<string, unknown>;
   injectedContextQuery?: string;
+  recordEvent?: boolean;
 };
 
 function requireMemoryDb(options: MemoryServiceOptions): MemoryDb {
@@ -236,11 +250,11 @@ export class MemoryService {
     this.repos = options.backend?.repositories() ?? new Repositories(requireMemoryDb(options).db);
     this.mode = options.mode ?? "local";
     this.config = cloneMemmyConfig(options.config ?? DEFAULT_MEMMY_CONFIG);
-    this.llm = options.llm ?? createLlmClient(this.config.summary, { modelRole: "memory_summary" });
+    this.llm = options.llm ?? createConfiguredMemoryLlm(this.config, "memory_summary");
     this.skillLlm = options.skillLlm ??
       (options.llm && evolutionUsesSharedLlm(this.config)
         ? options.llm
-        : createLlmClient(resolveEvolutionConfig(this.config), { modelRole: "memory_evolution" }));
+        : createConfiguredMemoryLlm(this.config, "memory_evolution"));
     this.embedder = options.embedder ?? createEmbedder(this.config.embedding);
     const workerHandlerOwner = this;
     this.workerHandlers = createWorkerJobHandlers({
@@ -259,9 +273,11 @@ export class MemoryService {
         },
         evolution: {
           induceL2: (job) => this.evolutionJobs.induceL2(job),
+          materializeNegativeExperience: (job) => this.evolutionJobs.materializeNegativeExperience(job),
           abstractL3: (job) => this.evolutionJobs.abstractL3(job),
           crystallizeSkill: (job) => this.evolutionJobs.crystallizeSkill(job),
-          associateL2: (job) => this.evolutionJobs.associateL2(job)
+          associateL2: (job) => this.evolutionJobs.associateL2(job),
+          splitBigTurn: (job) => this.evolutionJobs.splitBigTurn(job)
         },
         feedback: {
           applyReward: (job) => this.evolutionJobs.applyReward(job),
@@ -292,7 +308,6 @@ export class MemoryService {
         llm: this.skillLlm
       }),
       scheduleEmbeddingAfterTextUpdate: (input) => this.embeddingJobs.scheduleEmbeddingAfterTextUpdate(input),
-      attachRepairToPolicies: (...args) => this.feedbackExperience.attachRepairToPolicies(...args),
       repairEvidenceValueDiff: sessionRepairEvidenceValueDiff
     });
     const trialOwner = this;
@@ -485,7 +500,6 @@ export class MemoryService {
       assertMemoryAddEnabled: this.assertMemoryAddEnabled.bind(this),
       assertRawTurnInScope: this.assertRawTurnInScope.bind(this),
       assertSessionInScope: this.assertSessionInScope.bind(this),
-      attachRepairToPolicies: this.feedbackExperience.attachRepairToPolicies.bind(this.feedbackExperience),
       buildMemory: this.buildMemory.bind(this),
       closeSessionNoWrite: this.closeSessionNoWrite.bind(this),
       completeTurnNoWrite: this.completeTurnNoWrite.bind(this),
@@ -601,8 +615,8 @@ export class MemoryService {
     const reloadedAt = nowIso();
 
     this.config = nextConfig;
-    this.llm = createLlmClient(nextConfig.summary, { modelRole: "memory_summary" });
-    this.skillLlm = createLlmClient(resolveEvolutionConfig(nextConfig), { modelRole: "memory_evolution" });
+    this.llm = createConfiguredMemoryLlm(nextConfig, "memory_summary");
+    this.skillLlm = createConfiguredMemoryLlm(nextConfig, "memory_evolution");
     this.embedder = createEmbedder(nextConfig.embedding);
     if (!requiresRestart && request.restartFailedProcessing !== false) {
       this.restartFailedProcessing(reloadedAt);
@@ -1660,7 +1674,7 @@ export class MemoryService {
   private finalizeClosedEpisode(
     episode: EpisodeRecord,
     at: string,
-    trigger: "topic_boundary" | "session_closed" | "episode_rewarded" | "idle_timeout"
+    trigger: ClosedEpisodeTrigger
   ): EvolutionJobRecord[] {
     return this.workerHandlers.finalizeClosedEpisode(episode, at, trigger);
   }
@@ -1826,6 +1840,7 @@ export class MemoryService {
     request: TurnStartRequest & Record<string, unknown>
   ): ReturnType<MemoryService["startTurn"]> {
     const turnId = request.turnId ?? newId("turn");
+    const episodeId = `episode_${stableHash(`readonly:${request.sessionId}:${turnId}`).slice(0, 20)}`;
     const contextHints = turnStartContextHints(request);
     const search = await this.search({
       requestId: request.requestId,
@@ -1842,7 +1857,6 @@ export class MemoryService {
       contextHints,
       injectedContextQuery: request.query
     });
-    const episodeId = `episode_${stableHash(`readonly:${request.sessionId}:${turnId}`).slice(0, 20)}`;
     return {
       contextPacketId: `ctx_${stableHash(`${request.sessionId}:${episodeId}:${turnId}:${search.searchEventId}`).slice(0, 20)}`,
       turnId,
@@ -2085,6 +2099,7 @@ function stringFromMeta(meta: Record<string, unknown> | undefined, key: string):
 }
 
 function memoryIdPrefix(layer: MemoryLayer, kind: MemoryKind): string {
+  if (kind === "span") return "span";
   if (layer === "L1" || kind === "trace") return "trace";
   if (layer === "L2" || kind === "policy") return "policy";
   if (layer === "L3" || kind === "world_model") return "world";

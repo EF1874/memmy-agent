@@ -1,8 +1,9 @@
 /** Settings page for account, model, token usage, and desktop preferences. */
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type Dispatch, type ReactNode } from "react";
-import { Brain, Palette, Rocket, Settings2, Shield, User, Zap, ArrowRight, ArrowLeft, Bell, ExternalLink, FolderOpen, Info, LogOut, Wrench, Search, Eye, EyeOff, ChevronDown, ChevronUp, ChevronRight, Database, Loader2, CheckCircle2, XCircle, Check, AlertTriangle, ArrowDownToLine, ArrowUpFromLine, MessageSquare, FileText, Sparkles, Mic, Image as ImageIcon } from "lucide-react";
-import type { AppSettingsDto, ByokTokenUsageByKind, ByokTokenUsageKind, ByokTokenUsageSummary, Language, PrivacySettingsDto, TokenQuotaEligibility, TokenUsageDto } from "@memmy/local-api-contracts";
+import { Brain, Palette, Rocket, Settings2, Shield, User, Zap, ArrowRight, ArrowLeft, Bell, ExternalLink, FolderOpen, Gift, Info, KeyRound, LogOut, Wrench, Search, Eye, EyeOff, ChevronDown, ChevronUp, ChevronRight, Database, Loader2, CheckCircle2, XCircle, Check, AlertTriangle, Mic, Image as ImageIcon, Copy} from "lucide-react";
+import type { AccountInvitationView, AppSettingsDto, ByokTokenUsageByKind, ByokTokenUsageKind, ByokTokenUsageSummary, Language, PrivacySettingsDto, TokenQuotaEligibility, TokenSceneUsageDto, TokenUsageDto } from "@memmy/local-api-contracts";
 import { useApiClients } from "../app/providers.js";
+import { copyInvitationCode } from "../app/invitation-analytics.js";
 import { resolveGiftTokenUsage } from "../app/routes.js";
 import { useUpdateCoordinator, type UpdateCoordinatorValue, type UpdatePhase } from "../app/update-coordinator.js";
 import type { AnalyticsEvent } from "../analytics/analytics-events.js";
@@ -136,11 +137,12 @@ export function writeLogLevel(storage: Storage | undefined, level: LogLevel): vo
 
 const FALLBACK_TOKEN_USAGE: TokenUsageDto = {
   planName: "Trial Token",
-  totalTokens: 30_000_000,
+  totalTokens: 0,
   usedTokens: 0,
-  remainingTokens: 30_000_000,
+  remainingTokens: 0,
   expiresAt: null,
-  lastSyncedAt: null
+  lastSyncedAt: null,
+  sceneUsages: []
 };
 
 const EMPTY_BYOK_TOKEN_USAGE: ByokTokenUsageSummary = {
@@ -153,7 +155,38 @@ const EMPTY_BYOK_TOKEN_USAGE: ByokTokenUsageSummary = {
   byKind: []
 };
 
-const TOKEN_USAGE_KIND_ORDER: ByokTokenUsageKind[] = ["agent_chat", "memory_summary", "memory_evolution", "embedding"];
+// Display order for both panels. Platform Cloud scenes omit embedding; BYOK
+// kinds already include it in the contract — no backend TokenUsageScene change.
+const TOKEN_USAGE_SCENES = ["agent_chat", "memory_summary", "memory_evolution", "embedding"] as const satisfies readonly ByokTokenUsageKind[];
+
+let activeInvitationRequest: {
+  client: Pick<AccountClient, "getInvitation">;
+  accountKey: string;
+  promise: Promise<AccountInvitationView>;
+} | null = null;
+
+/** Coalesces React remount/re-render requests while the idempotent PUT is in flight. */
+export function requestAccountInvitation(
+  client: Pick<AccountClient, "getInvitation">,
+  accountKey: string
+): Promise<AccountInvitationView> {
+  if (
+    activeInvitationRequest?.client === client
+    && activeInvitationRequest.accountKey === accountKey
+  ) {
+    return activeInvitationRequest.promise;
+  }
+
+  const promise = client.getInvitation();
+  activeInvitationRequest = { client, accountKey, promise };
+  const clear = () => {
+    if (activeInvitationRequest?.promise === promise) {
+      activeInvitationRequest = null;
+    }
+  };
+  void promise.then(clear, clear);
+  return promise;
+}
 
 /**
  * The default analytics-tracking function for the pure view.
@@ -265,6 +298,11 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const [quotaEligibility, setQuotaEligibility] = useState<TokenQuotaEligibility | null>(null);
   const [byokUsage, setByokUsage] = useState<ByokTokenUsageSummary>(EMPTY_BYOK_TOKEN_USAGE);
   const [byokUsageStatus, setByokUsageStatus] = useState<UsageLoadStatus>("idle");
+  const [inviteCopied, setInviteCopied] = useState(false);
+  const [invitationInfo, setInvitationInfo] = useState<AccountInvitationView | null>(null);
+  const [invitationLoadStatus, setInvitationLoadStatus] =
+    useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [invitationReloadVersion, setInvitationReloadVersion] = useState(0);
   const preserveSuccessfulTestHydrateRef = useRef(false);
   const appSettings = bootstrap?.app;
   const privacySettings = bootstrap?.privacy;
@@ -347,10 +385,20 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const modelHeaderSpacing = modelMode === "platform" && !showApiConfig ? "" : " mb-4";
   const tokenUsage = bootstrap?.tokenUsage ?? FALLBACK_TOKEN_USAGE;
   const giftUsedTokens = tokenUsage.usedTokens;
-  const giftTotalTokens = tokenUsage.totalTokens;
-  const giftRemainingTokens = tokenUsage.remainingTokens;
-  const { usagePercent, isTokenLow } = resolveGiftTokenUsage(giftUsedTokens, giftTotalTokens, giftRemainingTokens);
+  // The summary bar tracks Agent 任务 (the task model), not the plan total:
+  // that scene is what blocks the user first. Red / "request more" still use
+  // the original rule — remaining <= 0 or usage >= 80% — on those figures.
+  const agentQuota = tokenUsage.sceneUsages.find((scene) => scene.scene === "agent_chat");
+  const giftTotalTokens = agentQuota?.totalTokens ?? tokenUsage.totalTokens;
+  const giftRemainingTokens = agentQuota?.remainingTokens ?? tokenUsage.remainingTokens;
+  const giftBarUsedTokens = agentQuota?.usedTokens ?? giftUsedTokens;
+  const { usagePercent, isTokenLow } = resolveGiftTokenUsage(giftBarUsedTokens, giftTotalTokens, giftRemainingTokens);
   const showGiftQuota = !isByokMode;
+  const invitationEnabled = bootstrap?.promotions?.invitation?.enabled === true;
+  const displayInviteCode = invitationInfo?.invitationCode ?? null;
+  const inviteDailyLimitReached = invitationInfo?.dailyLimitReached ?? false;
+  const showInvitationBanner = invitationEnabled
+    && (invitationLoadStatus !== "ready" || invitationInfo?.enabled === true);
   const canApplyMoreByPromotion = bootstrap?.promotions?.applyMore ?? true;
   const quotaRequestPending = quotaEligibility?.state === "pending";
   const quotaApplicationBlocked = quotaEligibility !== null && quotaEligibility.state !== "available";
@@ -360,7 +408,6 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     ? t(quotaEligibilityMessage.key, quotaEligibilityMessage.values)
     : null;
   const customUsedTokens = byokUsage.totalTokens;
-  const tokenExpiryText = formatTokenExpiry(tokenUsage.expiresAt, t);
   const primaryModelId = state.modelConfig.configured ? modelId || state.modelConfig.model : "";
   const mainModelTestKey = createModelConfigValidationKey(mainModelFormValues);
   const isMainModelTestStale = Boolean(llmValidation.testedKey && llmValidation.testedKey !== mainModelTestKey);
@@ -465,6 +512,45 @@ export function SettingsPageView(props: SettingsPageViewProps) {
       cancelled = true;
     };
   }, [configClient, dispatch, isAccountMode]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!accountClient || !isAccountMode || !hasAccountSession || !invitationEnabled) {
+      setInvitationInfo(null);
+      setInvitationLoadStatus("idle");
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setInvitationLoadStatus("loading");
+    const accountKey =
+      state.account.email || state.account.phoneNumber || state.account.registeredAt || "account";
+    void requestAccountInvitation(accountClient, accountKey).then((result) => {
+      if (cancelled) {
+        return;
+      }
+      setInvitationInfo(result.enabled ? result : null);
+      setInvitationLoadStatus("ready");
+    }).catch((error) => {
+      if (cancelled) {
+        return;
+      }
+      console.warn("load account invitation failed", error);
+      setInvitationInfo(null);
+      setInvitationLoadStatus("error");
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    accountClient,
+    hasAccountSession,
+    invitationEnabled,
+    invitationReloadVersion,
+    isAccountMode
+  ]);
 
   useEffect(() => {
     void refreshQuotaEligibility();
@@ -1149,7 +1235,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     return (
       <UsageDetailView
         showPlatform={showGiftQuota}
-        platformChatTokens={giftUsedTokens}
+        platformUsage={tokenUsage}
         byokUsage={byokUsage}
         byokUsageStatus={byokUsageStatus}
         onBack={() => updateShowUsageDetail(false)}
@@ -1524,7 +1610,11 @@ export function SettingsPageView(props: SettingsPageViewProps) {
             {showGiftQuota && (
               <div>
                 <div className="flex justify-between text-xs text-text-ink/65 mb-2">
-                  <span>{t("settings.token.giftUsed", { count: formatNumber(giftUsedTokens) })}</span>
+                  <span>
+                    {agentQuota
+                      ? t("settings.token.agentQuotaUsed", { count: formatNumber(giftBarUsedTokens) })
+                      : t("settings.token.giftUsed", { count: formatNumber(giftBarUsedTokens) })}
+                  </span>
                   <span>{t("settings.token.total", { count: formatNumber(giftTotalTokens) })}</span>
                 </div>
                 <div className="h-3 bg-canvas-oat rounded-pill overflow-hidden">
@@ -1534,7 +1624,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
                   />
                 </div>
                 <div className="mt-2">
-                  <span className="text-xs text-text-ink/50">{t("settings.token.remaining", { count: formatNumber(giftRemainingTokens), expiry: tokenExpiryText })}</span>
+                  <span className="text-xs text-text-ink/50">{t("settings.token.remaining", { count: formatNumber(giftRemainingTokens) })}</span>
                 </div>
               </div>
             )}
@@ -1596,6 +1686,90 @@ export function SettingsPageView(props: SettingsPageViewProps) {
             </button>
           </div>
         </Section>
+
+        {isAccountMode && showGiftQuota && showInvitationBanner ? (
+          <div
+            className={`mb-6 flex items-center gap-3 px-4 py-3 rounded-card-lg border ${
+              inviteDailyLimitReached
+                ? "bg-text-ink/[0.05] border-border-stone/50"
+                : "bg-action-sky/6 border-action-sky/15"
+            }`}
+          >
+            <span
+              className={`w-8 h-8 shrink-0 rounded-full flex items-center justify-center ${
+                inviteDailyLimitReached ? "bg-text-ink/10 text-text-ink/40" : "bg-action-sky/12 text-action-sky"
+              }`}
+            >
+              <Gift size={15} strokeWidth={2.1} aria-hidden="true" />
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm text-text-ink/80 leading-5">{t("settings.token.invite.title")}</p>
+              <p
+                className={`mt-0.5 text-xs leading-4 ${
+                  inviteDailyLimitReached ? "text-text-ink/50" : "text-text-ink/45"
+                }`}
+              >
+                {invitationLoadStatus === "error"
+                  ? t("settings.token.invite.loadFailed")
+                  : invitationLoadStatus === "loading" || invitationLoadStatus === "idle"
+                    ? t("settings.token.invite.loading")
+                    : inviteDailyLimitReached
+                      ? t("settings.token.invite.dailyLimit")
+                      : t("settings.token.invite.body")}
+              </p>
+            </div>
+            {displayInviteCode ? (
+              <div className="shrink-0 flex items-center gap-2">
+              <code
+                className={`px-2.5 py-1.5 text-xs font-semibold tracking-wide bg-background-paper rounded-input border ${
+                  inviteDailyLimitReached
+                    ? "text-text-ink/35 border-border-stone/50"
+                    : "text-text-ink border-action-sky/20"
+                }`}
+              >
+                {displayInviteCode}
+              </code>
+              <button
+                type="button"
+                className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-xs rounded-btn border transition-colors cursor-pointer ${
+                  inviteDailyLimitReached
+                    ? "text-text-ink/35 border-border-stone/50 hover:bg-text-ink/[0.03]"
+                    : "text-action-sky border-action-sky/30 hover:bg-action-sky/8"
+                }`}
+                onClick={() => {
+                  void (async () => {
+                    try {
+                      if (typeof navigator === "undefined" || typeof navigator.clipboard?.writeText !== "function") {
+                        throw new Error("Clipboard API is unavailable");
+                      }
+                      await copyInvitationCode({
+                        invitationCode: displayInviteCode,
+                        clipboard: navigator.clipboard,
+                        track
+                      });
+                      setInviteCopied(true);
+                      window.setTimeout(() => setInviteCopied(false), 2000);
+                    } catch (error) {
+                      console.warn("copy invite code failed", error);
+                    }
+                  })();
+                }}
+              >
+                <Copy size={12} strokeWidth={2.2} />
+                {inviteCopied ? t("settings.token.invite.copied") : t("settings.token.invite.copy")}
+              </button>
+              </div>
+            ) : invitationLoadStatus === "error" ? (
+              <button
+                type="button"
+                className="shrink-0 px-2.5 py-1.5 text-xs rounded-btn border text-action-sky border-action-sky/30 hover:bg-action-sky/8 cursor-pointer"
+                onClick={() => setInvitationReloadVersion((current) => current + 1)}
+              >
+                {t("settings.token.invite.retry")}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
 
         <Section icon={<Palette size={16} className="text-text-ink/60" />} title={t("settings.general")}>
           <SelectRow
@@ -1909,14 +2083,14 @@ function ChannelStat(props: ChannelStatProps) {
  *
  * Field meanings:
  * - showPlatform: Whether to show the platform-gifted channel.
- * - platformChatTokens: The platform-gifted LLM Token usage.
+ * - platformUsage: Platform quota aggregate and scene details.
  * - byokUsage: The local BYOK API Key Token usage summary.
  * - byokUsageStatus: The local usage loading status.
  * - onBack: The callback to return to the settings page.
  */
-interface UsageDetailViewProps {
+export interface UsageDetailViewProps {
   showPlatform: boolean;
-  platformChatTokens: number;
+  platformUsage: TokenUsageDto;
   byokUsage: ByokTokenUsageSummary;
   byokUsageStatus: UsageLoadStatus;
   onBack: () => void;
@@ -1928,17 +2102,28 @@ interface UsageDetailViewProps {
  * @param props The Token usage detail page props.
  * @returns A detail page split by the platform-gifted and BYOK API Key channels.
  */
-function UsageDetailView(props: UsageDetailViewProps) {
+export function UsageDetailView(props: UsageDetailViewProps) {
   const { t } = useTranslation();
-  const hasByokRows = props.byokUsage.totalTokens > 0 || props.byokUsage.byKind.length > 0;
-  const byKind = TOKEN_USAGE_KIND_ORDER.map((kind) => {
-    return props.byokUsage.byKind.find((item) => item.kind === kind) ?? emptyUsageKind(kind);
-  });
+  // Neither panel invents rows. The platform grants quota per scene and does
+  // not currently budget embedding at all, while own-key spend only exists for
+  // scenes that have actually run, so both lists come straight from the
+  // backend payload; TOKEN_USAGE_SCENES only fixes the display order.
+  const platformScenes = orderByScene(props.platformUsage.sceneUsages, (usage) => usage.scene);
+  const byKind = orderByScene(props.byokUsage.byKind, (usage) => usage.kind);
+  const byokSummaryReady = props.byokUsageStatus !== "loading" && props.byokUsageStatus !== "error";
+  const showPlatform = props.showPlatform && platformScenes.length > 0;
+  // Sum the Cloud/Nacos scene budgets — same additive total the exhausted modal
+  // uses — so the section heading mirrors the rows below it.
+  const platformUsedTokens = platformScenes.reduce((sum, scene) => sum + scene.usedTokens, 0);
+  const platformTotalTokens = platformScenes.reduce((sum, scene) => sum + scene.totalTokens, 0);
+  // The two panels overlap on scenes, so the descriptions are only worth
+  // spelling out once: in the platform panel, or in the own-key panel when
+  // there is no platform panel above it.
+  const describeScenesInByok = !showPlatform;
 
   return (
     <div className={`${usageStyles.detailPage} settings-page`}>
-      <div className="app-frame-page-content">
-        <div className={usageStyles.page}>
+      <div className={`app-frame-page-content ${usageStyles.page}`}>
         <button
           type="button"
           onClick={props.onBack}
@@ -1950,263 +2135,254 @@ function UsageDetailView(props: UsageDetailViewProps) {
 
         <div className={usageStyles.titlebar}>
           <h1 className={usageStyles.title}>
-            <Zap className={usageStyles.bolt} /> {t("settings.token.detail")}
+            <span className={usageStyles.titleMark}>
+              <Zap className={usageStyles.bolt} />
+            </span>
+            {t("settings.token.detail")}
           </h1>
           <UsageStatusLabel status={props.byokUsageStatus} updatedAt={props.byokUsage.updatedAt} />
         </div>
 
-        <div className={props.showPlatform ? usageStyles.overviewGrid : usageStyles.singleOverview}>
-          {props.showPlatform && (
-            <UsageTotalCard
-              label={t("settings.token.platformModel")}
-              value={props.platformChatTokens}
-              hint={t("settings.token.used")}
-              tone="sky"
+        {showPlatform && (
+          <section className={usageStyles.usageSection}>
+            <UsageSectionHead
+              icon={<Gift size={16} className="text-text-ink/60" />}
+              title={t("settings.token.platformQuota")}
+              stats={[
+                {
+                  label: "",
+                  value: `${formatCompactTokenCount(platformUsedTokens)} / ${formatCompactTokenCount(platformTotalTokens)}`,
+                  unit: "Token"
+                }
+              ]}
             />
-          )}
-          <UsageTotalCard
-            label={t("settings.token.customModel")}
-            value={props.byokUsage.totalTokens}
-            hint={t("settings.token.byokLocalHint")}
-            tone="success"
+            <div className={usageStyles.platformQuotaList}>
+              {platformScenes.map((usage) => (
+                <PlatformQuotaRow key={usage.scene} usage={usage} showDesc />
+              ))}
+            </div>
+          </section>
+        )}
+
+        <section className={usageStyles.usageSection}>
+          <UsageSectionHead
+            icon={<KeyRound size={16} className="text-text-ink/60" />}
+            title={t("settings.token.apiKeyConsumption")}
+            stats={byokSummaryReady && byKind.length > 0 ? [
+              {
+                label: t("settings.token.summaryLocalTotal"),
+                value: formatTokenSummary(props.byokUsage.totalTokens),
+                unit: "Token"
+              }
+            ] : undefined}
           />
-        </div>
-
-        <section>
-          <div className={usageStyles.sectionHead}>
-            <h2>{t("settings.token.categoryStats")}</h2>
-            <p>{t("settings.token.breakdownHint")}</p>
-          </div>
-
           {props.byokUsageStatus === "loading" ? (
-            <div className={usageStyles.statePanel}>
-              <div className={usageStyles.stateContent}>
-                <Loader2 size={16} className="animate-spin" />
-                {t("settings.token.loading")}
-              </div>
+            <div className={usageStyles.usageState}>
+              <Loader2 size={16} className="animate-spin" />
+              {t("settings.token.loading")}
             </div>
           ) : props.byokUsageStatus === "error" ? (
-            <div className={usageStyles.statePanel}>
-              <div className={usageStyles.stateContent}>
+            <div className={usageStyles.usageState}>
+              <div>
                 <div className="text-sm text-status-error">{t("settings.token.loadFailedTitle")}</div>
                 <div className="text-xs text-text-ink/45 mt-1">{t("settings.token.loadFailedHint")}</div>
               </div>
             </div>
-          ) : hasByokRows ? (
-            <div className={usageStyles.grid}>
-              {byKind.map((usage) => (
-                <UsageKindRow
-                  key={usage.kind}
-                  usage={usage}
-                  grandTotal={props.byokUsage.totalTokens}
-                />
-              ))}
-            </div>
-          ) : (
-            <div className={usageStyles.statePanel}>
-              <div className={usageStyles.stateContent}>
-                <div className="text-sm text-text-ink/65">{t("settings.token.noByokUsage")}</div>
+          ) : byKind.length === 0 ? (
+            <div className={usageStyles.usageState}>
+              <div>
+                <div className="text-sm">{t("settings.token.noByokUsage")}</div>
                 <div className="text-xs text-text-ink/45 mt-1">{t("settings.token.noByokUsageHint")}</div>
               </div>
             </div>
+          ) : (
+            <div className={usageStyles.byokUsageList}>
+              {byKind.map((usage) => (
+                <ByokUsageRow key={usage.kind} usage={usage} showDesc={describeScenesInByok} />
+              ))}
+            </div>
           )}
         </section>
-        </div>
       </div>
     </div>
   );
 }
 
 /**
- * Token detail summary card props.
+ * Renders the card header shared by the platform quota and own-key sections.
  *
- * Field meanings:
- * - label: The summary item name.
- * - value: The summarized Token count.
- * - hint: Auxiliary description.
- * - tone: The summary color.
+ * The heading sits above the panel rather than inside it, matching the settings
+ * sections. Platform figures beside the title are the sum of the scene rows.
+ *
+ * @param props.icon The leading icon, which also aligns the title with the
+ * panel's inner text edge the same way the settings sections do.
+ * @param props.title The section heading.
+ * @param props.stats The optional aggregate figures shown beside the heading.
+ * @returns The section heading row, whose next sibling is the detail panel.
  */
-interface UsageTotalCardProps {
-  label: string;
-  value: number;
-  hint: string;
-  tone: "sky" | "success";
-}
+function UsageSectionHead(props: { icon: ReactNode; title: string; stats?: UsageStat[] }) {
+  const stats = props.stats?.filter((stat) => stat !== null) ?? [];
 
-/**
- * Renders the summary card at the top of the detail page.
- *
- * @param props The summary card props.
- * @returns A single channel's detail summary card.
- */
-function UsageTotalCard(props: UsageTotalCardProps) {
   return (
-    <div className={`${usageStyles.panel} ${usageStyles.overview}`}>
-      <div className={usageStyles.eyebrow}>
-        <span className={props.tone === "sky" ? usageStyles.skyDot : usageStyles.dot} />
-        {props.label}
-      </div>
-      <div className={usageStyles.total}>
-        {props.tone === "success" ? formatTokenSummary(props.value) : formatNumber(props.value)}
-        <span>Token</span>
-      </div>
-      <div className={usageStyles.hint}>{props.hint}</div>
+    <div className={usageStyles.sectionHead}>
+      <h2>{props.icon}{props.title}</h2>
+      {stats.length > 0 && (
+        <p className={usageStyles.sectionNote}>
+          {stats.map((stat, index) => (
+            <span key={stat.label || `stat-${index}`}>
+              {stat.label}
+              <strong>{stat.value}</strong>
+              {stat.unit ? <em>{stat.unit}</em> : null}
+            </span>
+          ))}
+        </p>
+      )}
     </div>
   );
 }
 
-function emptyUsageKind(kind: ByokTokenUsageKind): ByokTokenUsageByKind {
-  return {
-    kind,
-    inputTokens: 0,
-    outputTokens: 0,
-    totalTokens: 0,
-    cachedInputTokens: 0,
-    cacheCreationInputTokens: 0,
-    eventCount: 0,
-    updatedAt: null
-  };
+type UsageStat = { label: string; value: string; unit?: string } | null;
+
+/**
+ * Sorts backend-reported usage rows into the canonical scene order.
+ *
+ * Scenes absent from the payload stay absent: the platform budgets quota per
+ * scene and own-key totals only exist once a scene has run, so a placeholder
+ * row would be a number the backend never sent.
+ *
+ * @param items The rows the backend reported, in arbitrary order.
+ * @param sceneOf Reads the scene key off a row.
+ * @returns The same rows ordered by TOKEN_USAGE_SCENES.
+ */
+function orderByScene<T>(items: readonly T[], sceneOf: (item: T) => ByokTokenUsageKind): T[] {
+  return TOKEN_USAGE_SCENES.flatMap((scene) => items.filter((item) => sceneOf(item) === scene));
 }
 
-function usageKindMeta(kind: ByokTokenUsageKind, t: SettingsTranslate): {
-  label: string;
-  description: string;
-  icon: ReactNode;
-  iconClassName: string;
-  dialColor: string;
-} {
-  switch (kind) {
-    case "agent_chat":
-      return {
-        label: t("settings.token.kind.agentChat"),
-        description: t("settings.token.kind.agentChatDesc"),
-        icon: <MessageSquare />,
-        iconClassName: usageStyles.agentIcon ?? "",
-        dialColor: "var(--usage-mint)"
-      };
-    case "memory_summary":
-      return {
-        label: t("settings.token.kind.memorySummary"),
-        description: t("settings.token.kind.memorySummaryDesc"),
-        icon: <FileText />,
-        iconClassName: usageStyles.coralIcon ?? "",
-        dialColor: "var(--usage-coral)"
-      };
-    case "memory_evolution":
-      return {
-        label: t("settings.token.kind.memoryEvolution"),
-        description: t("settings.token.kind.memoryEvolutionDesc"),
-        icon: <Sparkles />,
-        iconClassName: usageStyles.lavIcon ?? "",
-        dialColor: "var(--usage-lav)"
-      };
-    case "embedding":
-      return {
-        label: t("settings.token.kind.embedding"),
-        description: t("settings.token.kind.embeddingDesc"),
-        icon: <Database />,
-        iconClassName: usageStyles.dimIcon ?? "",
-        dialColor: "#74807e"
-      };
-  }
+interface PlatformQuotaRowProps {
+  usage: TokenSceneUsageDto;
+  showDesc: boolean;
 }
 
-interface UsageKindRowProps {
-  usage: ByokTokenUsageByKind;
-  grandTotal: number;
-}
-
-function UsageKindRow(props: UsageKindRowProps) {
+function PlatformQuotaRow(props: PlatformQuotaRowProps) {
   const { t } = useTranslation();
-  const meta = usageKindMeta(props.usage.kind, t);
-  const share = props.grandTotal > 0 ? Math.round((props.usage.totalTokens / props.grandTotal) * 100) : 0;
-  const inactive = props.usage.totalTokens <= 0;
-  const dialStyle = {
-    "--share": Math.min(100, Math.max(0, share)),
-    "--tone": meta.dialColor
-  } as CSSProperties;
-  const cardClassName = inactive ? `${usageStyles.usageCard} ${usageStyles.inactive}` : usageStyles.usageCard;
+  const meta = usageSceneMeta(props.usage.scene, t);
+  const usedRatio = resolveUsedRatio(props.usage);
+  const isOverQuota = usedRatio !== null && usedRatio > 1;
+  const rowClassName = isOverQuota
+    ? `${usageStyles.platformQuotaRow} ${usageStyles.overQuota}`
+    : usageStyles.platformQuotaRow;
 
   return (
-    <article className={cardClassName}>
-      <div className={usageStyles.cardTop}>
-        <div className={usageStyles.kind}>
-          <div className={`${usageStyles.icon} ${meta.iconClassName}`}>
-            {meta.icon}
-          </div>
-          <div>
-            <h3>{meta.label}</h3>
-            <div className={usageStyles.desc}>{meta.description}</div>
-          </div>
-        </div>
-        <div className={usageStyles.shareDial} style={dialStyle} data-share={`${share}%`} aria-label={`${share}%`} />
+    <article className={rowClassName}>
+      <div className={usageStyles.compactScene}>
+        <h3>{meta.label}</h3>
+        {props.showDesc && <p>{meta.desc}</p>}
       </div>
-
-      <div className={usageStyles.amountRow}>
-        <div>
-          <div className={usageStyles.amountLabel}>{t("settings.token.amount")}</div>
-          <div className={usageStyles.amountValue}>{formatTokens(props.usage.totalTokens)}</div>
-        </div>
+      <div className={usageStyles.quotaNumbers}>
+        <strong>{formatCompactTokenCount(props.usage.usedTokens)}</strong>
+        <span>/</span>
+        <span>{formatCompactTokenCount(props.usage.totalTokens)}</span>
+        <em>Token</em>
       </div>
+      <UsageMeter
+        percent={usedRatio === null ? 0 : Math.round(Math.min(1, usedRatio) * 100)}
+        isOverQuota={isOverQuota}
+      />
+    </article>
+  );
+}
 
-      <div className={usageStyles.metrics}>
-        <TokenMetric
-          icon={<ArrowDownToLine />}
-          label={t("settings.token.input")}
-          value={props.usage.inputTokens}
-          accent={usageStyles.metricInput ?? ""}
-        />
-        <TokenMetric
-          icon={<ArrowUpFromLine />}
-          label={t("settings.token.output")}
-          value={props.usage.outputTokens}
-          accent={usageStyles.metricOutput ?? ""}
-        />
-        <TokenMetric
-          icon={<Database />}
-          label={t("settings.token.cacheHit")}
-          value={props.usage.cachedInputTokens}
-          accent={usageStyles.metricCache ?? ""}
-        />
+/**
+ * Renders one own-key scene row.
+ *
+ * Own-key spend has no ceiling to fill up, so this row deliberately carries no
+ * meter: the figures alone say how much each scene cost. Cache hits trail the
+ * input/output pair so the primary spend reads first.
+ *
+ * @param props.usage The scene's cumulative local usage.
+ * @param props.showDesc Whether this panel spells out the scene descriptions.
+ * @returns A single own-key usage row.
+ */
+function ByokUsageRow(props: { usage: ByokTokenUsageByKind; showDesc: boolean }) {
+  const { t } = useTranslation();
+  const meta = usageSceneMeta(props.usage.kind, t);
+  const isActive = props.usage.totalTokens > 0;
+  const rowClassName = isActive
+    ? usageStyles.byokUsageRow
+    : `${usageStyles.byokUsageRow} ${usageStyles.inactive}`;
+
+  return (
+    <article className={rowClassName}>
+      <div className={usageStyles.compactScene}>
+        <h3>{meta.label}</h3>
+        {props.showDesc && <p>{meta.desc}</p>}
+        {isActive && (
+          <p className={usageStyles.byokBreakdown}>
+            <span>
+              {t("settings.token.input")}
+              <strong>{formatCompactTokenCount(props.usage.inputTokens)}</strong>
+            </span>
+            <span>
+              {t("settings.token.output")}
+              <strong>{formatCompactTokenCount(props.usage.outputTokens)}</strong>
+            </span>
+            {props.usage.cachedInputTokens > 0 && (
+              <span>
+                {t("settings.token.cacheHit")}
+                <strong>{formatCompactTokenCount(props.usage.cachedInputTokens)}</strong>
+              </span>
+            )}
+          </p>
+        )}
+      </div>
+      <div className={usageStyles.byokUsageValue}>
+        <strong>{formatCompactTokenCount(props.usage.totalTokens)}</strong>
+        <em>Token</em>
       </div>
     </article>
   );
 }
 
 /**
- * Token category metric props.
+ * Renders the slim consumption meter for a platform quota row.
  *
- * Field meanings:
- * - icon: The category icon.
- * - label: The category name.
- * - value: The category's Token count.
- * - accent: The icon accent color.
+ * Only quota-backed figures get a meter, since a filling bar implies a ceiling.
+ *
+ * @param props.percent The consumed ratio in percent, clamped to 0-100.
+ * @param props.isOverQuota Whether the scene has consumed more than its quota.
+ * @returns A decorative meter track; the numbers next to it carry the value.
  */
-interface TokenMetricProps {
-  icon: ReactNode;
-  label: string;
-  value: number;
-  accent: string;
-}
+function UsageMeter(props: { percent: number; isOverQuota: boolean }) {
+  const percent = Math.min(100, Math.max(0, props.percent));
+  const fillClassName = props.isOverQuota
+    ? `${usageStyles.meterFill} ${usageStyles.meterFillOver}`
+    : usageStyles.meterFill;
 
-/**
- * Renders the input / output / cache-hit mini-metrics within a model row.
- *
- * @param props The metric props.
- * @returns A single category metric.
- */
-function TokenMetric(props: TokenMetricProps) {
   return (
-    <div className={usageStyles.metric}>
-      <div className={`${usageStyles.metricLabel} ${props.accent}`}>
-        {props.icon}
-        <span>{props.label}</span>
-      </div>
-      <div className={usageStyles.metricValue} title={formatTokens(props.value)}>
-        {formatTokens(props.value)}
-      </div>
+    <div className={usageStyles.meter} aria-hidden="true">
+      <span className={fillClassName} style={{ width: `${percent}%` }} />
     </div>
   );
+}
+
+function resolveUsedRatio(usage: TokenSceneUsageDto): number | null {
+  if (usage.totalTokens <= 0) {
+    return null;
+  }
+  return usage.usedTokens / usage.totalTokens;
+}
+
+function usageSceneMeta(kind: ByokTokenUsageKind, t: SettingsTranslate): { label: string; desc: string } {
+  switch (kind) {
+    case "agent_chat":
+      return { label: t("settings.token.agentTask"), desc: t("settings.token.agentTaskDesc") };
+    case "memory_summary":
+      return { label: t("settings.token.memorySummary"), desc: t("settings.token.memorySummaryDesc") };
+    case "memory_evolution":
+      return { label: t("settings.token.memoryEvolution"), desc: t("settings.token.memoryEvolutionDesc") };
+    case "embedding":
+      return { label: t("settings.token.embedding"), desc: t("settings.token.embeddingDesc") };
+  }
 }
 
 /**
@@ -3210,21 +3386,6 @@ function formatQuotaNextAllowedAt(epochMs: number, language: "zh-CN" | "en-US"):
 }
 
 /**
- * Formats the Token expiry time.
- *
- * @param value The ISO 8601 expiry time; null means no expiry limit.
- * @returns A readable validity description for the settings-page Token area.
- */
-function formatTokenExpiry(value: string | null, t: SettingsTranslate): string {
-  if (!value) {
-    return t("settings.token.neverExpires");
-  }
-
-  const [date] = value.split("T");
-  return t("settings.token.expiresAt", { date: date || value });
-}
-
-/**
  * Formats the BYOK usage update time.
  *
  * @param value An ISO 8601 time string.
@@ -3252,6 +3413,17 @@ function formatNumber(value: number): string {
     maximumFractionDigits: 1,
     minimumFractionDigits: 1
   }).format(millions)}M`;
+}
+
+function formatCompactTokenCount(value: number): string {
+  if (value >= 1_000_000) {
+    const millions = Math.floor((value / 1_000_000) * 10) / 10;
+    return `${new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 }).format(millions)}M`;
+  }
+  if (value >= 1_000) {
+    return `${new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(value / 1_000)}K`;
+  }
+  return formatTokens(value);
 }
 
 /**

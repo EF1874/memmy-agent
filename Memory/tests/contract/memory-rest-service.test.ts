@@ -151,7 +151,19 @@ describe("MemoryService / REST contract", () => {
 
   it("preserves lifecycle routing fields across the REST boundary", async () => {
     const { db, service } = createTestService();
-    const server = createMemoryHttpServer({ service });
+    const analyticsEvents: string[] = [];
+    const server = createMemoryHttpServer({
+      service,
+      pluginRuntimeAnalytics: {
+        track(eventName) {
+          analyticsEvents.push(eventName);
+        },
+        async trackAwait(eventName) {
+          analyticsEvents.push(eventName);
+        },
+        async flush() {}
+      }
+    });
     await withServerClosed(server, async () => {
     await new Promise<void>((resolve) => {
       server.listen(0, "127.0.0.1", resolve);
@@ -173,23 +185,31 @@ describe("MemoryService / REST contract", () => {
     });
     const opened = await openedResponse.json() as { sessionId: string };
     expect(openedResponse.status).toBe(200);
+    const beforeStart = {
+      episodes: (db.db.prepare("SELECT COUNT(*) AS count FROM episodes").get() as { count: number }).count,
+      rawTurns: (db.db.prepare("SELECT COUNT(*) AS count FROM raw_turns").get() as { count: number }).count,
+      recalls: (db.db.prepare("SELECT COUNT(*) AS count FROM recall_events").get() as { count: number }).count,
+      apiLogs: (db.db.prepare("SELECT COUNT(*) AS count FROM api_logs").get() as { count: number }).count,
+      idempotency: (db.db.prepare("SELECT COUNT(*) AS count FROM idempotency_keys").get() as { count: number }).count
+    };
 
+    const startRequestBody = {
+      adapterId: "memmy-cursor-hook",
+      requestId: "cursor-start:http-fields",
+      source: "cursor",
+      sessionId: opened.sessionId,
+      turnId: "cursor-http-turn",
+      query: "Continue the hook lifecycle repair",
+      contextHints: {
+        agentIdentity: "cursor-agent",
+        hostProvider: "cursor"
+      },
+      contextBudget: 37
+    };
     const startResponse = await fetch(baseUrl + "/turns/start", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        adapterId: "memmy-cursor-hook",
-        requestId: "cursor-start:http-fields",
-        source: "cursor",
-        sessionId: opened.sessionId,
-        turnId: "cursor-http-turn",
-        query: "Continue the hook lifecycle repair",
-        contextHints: {
-          agentIdentity: "cursor-agent",
-          hostProvider: "cursor"
-        },
-        contextBudget: 37
-      })
+      body: JSON.stringify(startRequestBody)
     });
     const started = await startResponse.json() as {
       episodeId: string;
@@ -198,6 +218,65 @@ describe("MemoryService / REST contract", () => {
     };
     expect(startResponse.status).toBe(200);
     expect(started.turnId).toBe("cursor-http-turn");
+    expect(started.episodeId).toMatch(/^episode_/u);
+    const afterFirstStart = {
+      episodes: (db.db.prepare("SELECT COUNT(*) AS count FROM episodes").get() as { count: number }).count,
+      rawTurns: (db.db.prepare("SELECT COUNT(*) AS count FROM raw_turns").get() as { count: number }).count,
+      recalls: (db.db.prepare("SELECT COUNT(*) AS count FROM recall_events").get() as { count: number }).count,
+      apiLogs: (db.db.prepare("SELECT COUNT(*) AS count FROM api_logs").get() as { count: number }).count,
+      idempotency: (db.db.prepare("SELECT COUNT(*) AS count FROM idempotency_keys").get() as { count: number }).count
+    };
+    expect(afterFirstStart).toEqual({
+      ...beforeStart,
+      episodes: beforeStart.episodes + 1,
+      rawTurns: beforeStart.rawTurns + 1,
+      recalls: beforeStart.recalls + 1,
+      apiLogs: beforeStart.apiLogs + 1,
+      idempotency: beforeStart.idempotency + 1
+    });
+    expect(db.db.prepare(
+      `SELECT episode_id, assistant_text, status
+       FROM raw_turns
+       WHERE session_id = ? AND turn_id = ?`
+    ).get(opened.sessionId, started.turnId)).toEqual({
+      episode_id: started.episodeId,
+      assistant_text: null,
+      status: "started"
+    });
+    expect(db.db.prepare(
+      `SELECT tool_name, json_extract(input_json, '$.retrievalMode') AS retrieval_mode
+       FROM api_logs
+       ORDER BY id DESC
+       LIMIT 1`
+    ).get()).toEqual({
+      tool_name: "memory_search",
+      retrieval_mode: "turn_start"
+    });
+    const duplicateStartResponse = await fetch(baseUrl + "/turns/start", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(startRequestBody)
+    });
+    const duplicateStarted = await duplicateStartResponse.json() as {
+      episodeId: string;
+      searchEventId: string;
+      turnId: string;
+    };
+    expect(duplicateStartResponse.status).toBe(200);
+    expect(duplicateStarted).toMatchObject(started);
+    expect({
+      episodes: (db.db.prepare("SELECT COUNT(*) AS count FROM episodes").get() as { count: number }).count,
+      rawTurns: (db.db.prepare("SELECT COUNT(*) AS count FROM raw_turns").get() as { count: number }).count,
+      recalls: (db.db.prepare("SELECT COUNT(*) AS count FROM recall_events").get() as { count: number }).count,
+      apiLogs: (db.db.prepare("SELECT COUNT(*) AS count FROM api_logs").get() as { count: number }).count,
+      idempotency: (db.db.prepare("SELECT COUNT(*) AS count FROM idempotency_keys").get() as { count: number }).count
+    }).toEqual(afterFirstStart);
+    expect(analyticsEvents).toEqual([
+      "memory_plugin_hook_recall_started",
+      "memory_plugin_hook_recall_succeeded",
+      "memory_plugin_hook_recall_started",
+      "memory_plugin_hook_recall_succeeded"
+    ]);
 
     const completeResponse = await fetch(baseUrl + "/turns/cursor-http-turn/complete", {
       method: "POST",
@@ -207,7 +286,6 @@ describe("MemoryService / REST contract", () => {
         requestId: "cursor-complete:http-fields",
         source: "cursor",
         sessionId: opened.sessionId,
-        episodeId: started.episodeId,
         query: "Continue the hook lifecycle repair",
         answer: "The lifecycle now reuses its started turn and episode.",
         tags: ["hook-lifecycle"],
@@ -237,21 +315,10 @@ describe("MemoryService / REST contract", () => {
       workspace_path: "/tmp/hook-workspace"
     });
 
-    const recallRow = db.db.prepare(
-      "SELECT request_json FROM recall_events WHERE id = ?"
-    ).get(started.searchEventId) as { request_json: string };
-    expect(JSON.parse(recallRow.request_json)).toMatchObject({
-      contextBudget: 37,
-      contextHints: {
-        agentIdentity: "cursor-agent",
-        hostProvider: "cursor"
-      }
-    });
-
     const rawTurn = db.db.prepare(
       "SELECT episode_id, source_memory_ids_json FROM raw_turns WHERE id = ?"
     ).get(completed.rawTurnId) as { episode_id: string; source_memory_ids_json: string };
-    expect(rawTurn.episode_id).toBe(started.episodeId);
+    expect(rawTurn.episode_id).toBe(completed.episodeId);
     expect(JSON.parse(rawTurn.source_memory_ids_json)).toEqual(["memory-from-turn-start"]);
     const artifactCount = db.db.prepare(
       "SELECT COUNT(*) AS count FROM artifacts WHERE raw_turn_id = ?"
@@ -302,6 +369,16 @@ describe("MemoryService / REST contract", () => {
     });
     const complete = await completeResponse.json() as { l1MemoryId: string };
     expect(completeResponse.status).toBe(200);
+
+    const closeResponse = await fetch(
+      `${baseUrl}/sessions/${encodeURIComponent(session.sessionId)}/close`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}"
+      }
+    );
+    expect(closeResponse.status).toBe(200);
 
     await waitFor(() => {
       const row = db.db.prepare(
@@ -496,6 +573,7 @@ describe("MemoryService / REST contract", () => {
        WHERE memory_id = ? AND vector_field = 'vec_summary'`
     ).get(complete.l1MemoryId) as { embedding_dim: number } | undefined;
     expect(queuedRow).toBeUndefined();
+    service.closeSession(session.sessionId);
 
     const server = createMemoryHttpServer({ service, workerStartupFallbackMs: 0 });
     await withServerClosed(server, async () => {

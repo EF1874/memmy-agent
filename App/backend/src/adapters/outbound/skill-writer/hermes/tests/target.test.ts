@@ -150,6 +150,9 @@ describe("hermes skill target", () => {
     expect(pluginInit).toContain("thread.join(timeout=SHUTDOWN_THREAD_TIMEOUT_SECONDS)");
     expect(pluginInit).toContain("urlopen(request, timeout=HTTP_TIMEOUT_SECONDS)");
     expect(pluginInit).toContain("memory_session_id = self._ensure_session(active_session)");
+    expect(pluginInit).toContain('"episodeId": str(turn.get("episodeId") or "")');
+    expect(pluginInit).toContain('"episodeId": turn.get("episodeId") or None');
+    expect(pluginInit).toContain('"sourceMemoryIds": turn.get("sourceMemoryIds")');
     expect(pluginInit).toContain("if isinstance(injected_context, str) and injected_context.strip():");
     expect(pluginInit).toContain("markdown = _optional_text(injected_context.get(\"markdown\"))");
     expect(pluginInit).toContain("def _sanitize_memmy_protocol_text");
@@ -363,7 +366,7 @@ print(json.dumps({"calls": calls, "text": text, "selection": selection}, ensure_
     expect(output.text).not.toContain("Assistant raw summary 1");
     expect(output.text).toContain("5. episode_5");
     expect(output.text).not.toContain("6. episode_6");
-    expect(output.text).toContain("输入 1-5 选择要接续的 episode");
+    expect(output.text).toContain("Enter 1-5 to select an episode to resume.");
     expect(output.calls[0]?.path).toBe("/api/v1/memory/search");
     expect(output.calls[0]?.body.query).toBe("测试query");
     expect(output.calls[0]?.body.layers).toEqual(["L1"]);

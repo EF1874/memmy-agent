@@ -35,6 +35,58 @@ log() {
   printf '[dev-start] %s\n' "$*"
 }
 
+read_dev_edition_from_env_file() {
+  local env_file="$1"
+  local line name value
+
+  [[ -f "$env_file" ]] || return 1
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    if [[ ! "$line" =~ ^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=(.*)$ ]]; then
+      continue
+    fi
+
+    name="${BASH_REMATCH[2]}"
+    [[ "$name" == "MEMMY_APP_EDITION" ]] || continue
+
+    value="${BASH_REMATCH[3]}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    if [[ "$value" == \"*\" && "$value" == *\" ]] || [[ "$value" == \'*\' && "$value" == *\' ]]; then
+      value="${value:1:${#value}-2}"
+    fi
+    printf '%s\n' "$value"
+    return 0
+  done <"$env_file"
+
+  return 1
+}
+
+configure_dev_edition() {
+  local env_file="${1:-$ROOT_DIR/.env}"
+  local edition="${MEMMY_APP_EDITION:-}"
+
+  if [[ -z "$edition" ]]; then
+    edition="$(read_dev_edition_from_env_file "$env_file" || true)"
+  fi
+  edition="${edition:-intl}"
+
+  case "$edition" in
+    cn)
+      export MEMMY_ACCOUNT_CHANNEL="phone"
+      ;;
+    intl)
+      export MEMMY_ACCOUNT_CHANNEL="email"
+      ;;
+    *)
+      printf '[dev-start] MEMMY_APP_EDITION must be either cn or intl; received: %s\n' "$edition" >&2
+      return 1
+      ;;
+  esac
+  export MEMMY_APP_EDITION="$edition"
+}
+
 command_exists() {
   command -v "$1" >/dev/null 2>&1
 }
@@ -65,6 +117,7 @@ ensure_npm_dependencies() {
   local -a required_packages=(
     "concurrently"
     "wait-on"
+    "@types/proper-lockfile/index.d.ts"
     "electron-log/main"
     "electron-log/renderer"
     "@xyflow/react"
@@ -177,6 +230,8 @@ ensure_memmy_agent_dependencies() {
     "react"
     "smol-toml"
     "typescript"
+    "@playwright/mcp"
+    "playwright"
   )
 
   for package in "${required_packages[@]}"; do
@@ -190,7 +245,7 @@ ensure_memmy_agent_dependencies() {
   fi
 
   log "installing memmy-agent npm dependencies (missing: ${missing_packages[*]})"
-  npm ci --prefix "$MEMMY_AGENT_DIR" --include=dev
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --prefix "$MEMMY_AGENT_DIR" --include=dev
 
   missing_packages=()
   for package in "${required_packages[@]}"; do
@@ -494,6 +549,7 @@ run_agent_api() {
 }
 
 run_main() {
+  configure_dev_edition
   require_command node
   require_command npm
   require_command lsof
@@ -503,6 +559,7 @@ run_main() {
   export PATH="$runtime_node_dir:$PATH"
   hash -r
   log "using Node $("$MEMMY_RUNTIME_NODE_PATH" --version) from $MEMMY_RUNTIME_NODE_PATH"
+  log "using desktop edition $MEMMY_APP_EDITION with $MEMMY_ACCOUNT_CHANNEL account channel"
 
   ensure_npm_dependencies
 
@@ -541,6 +598,9 @@ run_main() {
   log "copying built skills into memmy workspace"
   mkdir -p "$MEMMY_WORKSPACE_DIR/skills"
   cp -R "$MEMMY_AGENT_DIR/dist/skills/." "$MEMMY_WORKSPACE_DIR/skills/"
+
+  log "preparing managed Chromium"
+  "$MEMMY_RUNTIME_NODE_PATH" dist/main.js internal browser-prepare
 
   log "starting Memory, agent API, gateway, frontend, and desktop backend"
   cd "$ROOT_DIR"

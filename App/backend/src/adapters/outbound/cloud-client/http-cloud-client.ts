@@ -1,5 +1,6 @@
 /** Http cloud client module. */
 import {
+  AccountInvitationViewSchema,
   ASR_PROVIDER,
   AuthorizeIntegrationResponseSchema,
   resolveCloudServiceBaseUrl,
@@ -7,19 +8,22 @@ import {
   IntegrationConnectionsResponseSchema,
   LegalAgreementUrlsSchema,
   IntegrationToolResultSchema,
+  InvitationResultSchema,
   OkResponseSchema,
   PromotionFlagsSchema,
   QWEN_ASR_MODEL_ID,
   TokenQuotaEligibilitySchema,
   TokenUsageDtoSchema,
   type AuthorizeIntegrationResponse,
+  type AccountInvitationView,
   type IntegrationCapabilitiesResponse,
   type IntegrationConnection,
   type IntegrationConnectionsResponse,
   type LegalAgreementUrls,
   type IntegrationToolResult,
   type OkResponse,
-  type PromotionFlags
+  type PromotionFlags,
+  type TokenSceneUsageDto
 } from "@memmy/local-api-contracts";
 import type {
   CloudAuthorizeIntegrationInput,
@@ -36,6 +40,7 @@ import type {
   CloudLoginResult,
   CloudLogoutInput,
   GetAccountInfoInput,
+  EnsureInvitationCodeInput,
   GetTokenQuotaEligibilityInput,
   GetTokenUsageInput,
   GrantTokensInput,
@@ -56,6 +61,9 @@ const CLOUD_COMPOSIO_ROUTER_TIMEOUT_MS = 60_000;
 const CLOUD_COMPOSIO_UNAVAILABLE_MESSAGE = "工具连接服务暂时不可用";
 const CLOUD_COMPOSIO_SERVICE_UNAVAILABLE_CODE = 60020;
 const CLOUD_COMPOSIO_TOOLKIT_UNSUPPORTED_CODE = 60021;
+const CLOUD_EMAIL_VERIFICATION_CODE_START = 40110;
+const CLOUD_EMAIL_VERIFICATION_CODE_END = 40120;
+const CLOUD_EMAIL_RATE_LIMIT_CODES = new Set([40112, 40113, 40114, 40115]);
 
 export interface CreateHttpCloudClientOptions {
   /** Base url. */
@@ -64,6 +72,8 @@ export interface CreateHttpCloudClientOptions {
   timeoutMs?: number;
   /** Fetch impl. */
   fetchImpl?: typeof fetch;
+  /** Installation-scoped identifier attached only to authentication requests. */
+  deviceId?: string;
 }
 
 /** Creates create http cloud client. */
@@ -71,6 +81,7 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
   const baseUrl = normalizeBaseUrl(options.baseUrl ?? resolveCloudServiceBaseUrl(process.env.MEMMY_CLOUD_SERVICE));
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+  const deviceId = options.deviceId;
 
   return {
     async health(): Promise<CloudHealth> {
@@ -82,12 +93,14 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
     },
 
     async sendEmailCode(input: SendEmailCodeInput): Promise<void> {
-      await requestBoolean(fetchImpl, baseUrl, timeoutMs, "/api/user/sendVerification", {
+      await requestBoolean(fetchImpl, baseUrl, timeoutMs, "/api/agentUser/sendEmailVerification", {
         body: {
           email: input.email,
           zhEnv: input.zhEnv
         },
-        lang: langFromZhEnv(input.zhEnv)
+        lang: langFromZhEnv(input.zhEnv),
+        deviceId,
+        toError: toCloudEmailVerificationError
       });
     },
 
@@ -97,7 +110,8 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
           phoneNumber: input.phoneNumber,
           zhEnv: input.zhEnv
         },
-        lang: langFromZhEnv(input.zhEnv)
+        lang: langFromZhEnv(input.zhEnv),
+        deviceId
       });
     },
 
@@ -107,9 +121,12 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
           ...(input.email ? { email: input.email } : {}),
           ...(input.phoneNumber ? { phoneNumber: input.phoneNumber } : {}),
           verificationCode: input.verificationCode,
-          loginSource: input.loginSource.toLowerCase()
+          loginSource: input.loginSource.toLowerCase(),
+          ...(input.invitationCode ? { invitationCode: input.invitationCode } : {})
         },
-        lang: "zh"
+        lang: "zh",
+        deviceId,
+        ...(input.email ? { toError: toCloudEmailVerificationError } : {})
       });
 
       const uuid = readString(data.uuid) ?? readString(data.token);
@@ -117,13 +134,35 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
         throw new Error("Cloud login response missing uuid");
       }
       const profile = toCloudAccountProfile(data);
+      const invitationResult = InvitationResultSchema.safeParse(data.invitationResult);
+      const userType = readString(data.userType);
 
       return {
         uuid,
         accountUuid: resolveAccountUuid(data, profile),
         profile,
-        isNewUser: readBoolean(data.isNewUser, data.newUser, data.is_new_user, data.new_user, data.firstLogin, data.isFirstLogin)
+        isNewUser: userType === "NEW_USER"
+          ? true
+          : readBoolean(data.isNewUser, data.newUser, data.is_new_user, data.new_user, data.firstLogin, data.isFirstLogin),
+        invitationResult: invitationResult.success
+          ? invitationResult.data
+          : { status: "not_provided" }
       };
+    },
+
+    async ensureInvitationCode(input: EnsureInvitationCodeInput): Promise<AccountInvitationView> {
+      const data = await requestCloudData<unknown>(
+        fetchImpl,
+        baseUrl,
+        timeoutMs,
+        "/api/agentUser/invitation/me/code",
+        {
+          method: "PUT",
+          lang: "zh",
+          bearerCredential: input.uuid
+        }
+      );
+      return AccountInvitationViewSchema.parse(data);
     },
 
     async logout(input: CloudLogoutInput): Promise<void> {
@@ -174,10 +213,9 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
     async grantImprovementProgramTokens(input: GrantTokensInput): Promise<TokenUsageSnapshot> {
       await requestCloudData<unknown>(fetchImpl, baseUrl, timeoutMs, "/api/agentUser/quota/updateTokenTotal", {
         body: {
-          tokenExtra: input.tokenExtra,
-          // Per-user idempotency key: the cloud must grant a named benefit at most once, so
-          // reinstalling and re-accepting cannot stack the improvement-program tokens again.
-          ...(input.grantKey ? { grantKey: input.grantKey } : {})
+          // This client method is dedicated to the improvement-program benefit. Keep the
+          // idempotency key internal so callers cannot accidentally request a generic grant.
+          grantKey: "improvement_program"
         },
         lang: "zh",
         bearerCredential: input.uuid
@@ -357,11 +395,12 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
 }
 
 interface CloudRequestOptions {
-  method?: "GET" | "POST" | "DELETE";
+  method?: "GET" | "POST" | "PUT" | "DELETE";
   body?: Record<string, unknown>;
   lang: "zh" | "en";
   bearerCredential?: string;
   composioMachineToken?: string;
+  deviceId?: string;
   toError?: (status: number, envelope: CloudEnvelope) => Error;
 }
 
@@ -417,7 +456,9 @@ async function requestCloudData<T>(
       ...(options.body === undefined ? {} : { "content-type": "application/json" }),
       lang: options.lang,
       ...(options.bearerCredential ? { authorization: `Bearer ${options.bearerCredential}` } : {}),
-      ...(options.composioMachineToken ? { "x-memmy-composio-token": options.composioMachineToken } : {})
+      ...(options.composioMachineToken ? { "x-memmy-composio-token": options.composioMachineToken } : {}),
+      ...(options.deviceId ? { "x-memmy-device-id": options.deviceId } : {}),
+      "x-agent-region": normalizeAgentRegion(process.env.MEMMY_APP_EDITION)
     },
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
     signal: AbortSignal.timeout(timeoutMs)
@@ -429,6 +470,10 @@ async function requestCloudData<T>(
   }
 
   return envelope.data as T;
+}
+
+function normalizeAgentRegion(value: string | undefined): "cn" | "intl" {
+  return value?.trim().toLowerCase() === "intl" ? "intl" : "cn";
 }
 
 /**
@@ -467,6 +512,7 @@ function toCloudAccountProfile(data: Record<string, unknown>): CloudAccountProfi
   const rawProfile = { ...data };
   delete rawProfile.token;
   delete rawProfile.uuid;
+  delete rawProfile.invitationResult;
 
   return {
     userId: readString(data.id) ?? "unknown",
@@ -557,9 +603,28 @@ function toAgentUserInfoTokenUsageSnapshot(data: Record<string, unknown>): Token
     planName: readString(data.planName) ?? readString(data.plan_name) ?? readString(data.planType) ?? readString(data.plan_type) ?? "体验 Token",
     totalTokens: readNonNegativeInteger(data.tokenTotal),
     usedTokens: readNonNegativeInteger(data.tokenConsumer),
-    remainingTokens: readNonNegativeInteger(data.tokenAvailable),
+    remainingTokens: readInteger(data.tokenAvailable),
     expiresAt: readIsoTime(data.expiresAt, data.expires_at, data.expiredAt, data.expired_at),
-    lastSyncedAt: readIsoTime(data.lastSyncedAt, data.last_synced_at, data.updatedAt, data.updated_at) ?? new Date().toISOString()
+    lastSyncedAt: readIsoTime(data.lastSyncedAt, data.last_synced_at, data.updatedAt, data.updated_at) ?? new Date().toISOString(),
+    sceneUsages: toTokenSceneUsages(data.tokenScenes ?? data.token_scenes)
+  });
+}
+
+function toTokenSceneUsages(value: unknown): TokenSceneUsageDto[] {
+  if (!Array.isArray(value)) return [];
+
+  return value.flatMap((item) => {
+    const record = asRecord(item);
+    const scene = readString(record.scene);
+    if (scene !== "agent_chat" && scene !== "memory_summary" && scene !== "memory_evolution") {
+      return [];
+    }
+    return [{
+      scene,
+      totalTokens: readNonNegativeInteger(record.tokenTotal, record.totalTokens),
+      usedTokens: readNonNegativeInteger(record.tokenConsumer, record.usedTokens),
+      remainingTokens: readInteger(record.tokenAvailable, record.remainingTokens)
+    }];
   });
 }
 
@@ -726,6 +791,27 @@ function toCloudIntegrationError(status: number, envelope: CloudEnvelope): Error
 
   const code = classifyCloudError(status, envelope.code);
   const message = code === "internal" ? CLOUD_COMPOSIO_UNAVAILABLE_MESSAGE : sanitizeMessage(rawMessage);
+  return Object.assign(new Error(message), { code });
+}
+
+/**
+ * Preserves user-facing Cloud errors for email verification flows.
+ *
+ * @param status HTTP status code.
+ * @param envelope Cloud Service response envelope.
+ * @returns an Error recognizable by error-envelope.
+ */
+function toCloudEmailVerificationError(status: number, envelope: CloudEnvelope): Error {
+  const isEmailVerificationError =
+    envelope.code >= CLOUD_EMAIL_VERIFICATION_CODE_START &&
+    envelope.code < CLOUD_EMAIL_VERIFICATION_CODE_END;
+  const code = isEmailVerificationError
+    ? CLOUD_EMAIL_RATE_LIMIT_CODES.has(envelope.code)
+      ? "rate_limited"
+      : "invalid_argument"
+    : classifyCloudError(status, envelope.code);
+  const message = envelope.message || `Cloud email verification request failed with HTTP ${status}`;
+
   return Object.assign(new Error(message), { code });
 }
 
@@ -906,6 +992,27 @@ function readNonNegativeInteger(...values: unknown[]): number {
     const parsed = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value.trim()) : Number.NaN;
     if (Number.isFinite(parsed) && parsed >= 0) {
       return Math.floor(parsed);
+    }
+  }
+
+  return 0;
+}
+
+/**
+ * Reads a signed integer from candidate cloud fields.
+ *
+ * @param values fields that may contain a number or a numeric string.
+ * @returns the first finite integer; returns 0 when missing.
+ */
+function readInteger(...values: unknown[]): number {
+  for (const value of values) {
+    const parsed = typeof value === "number"
+      ? value
+      : typeof value === "string" && value.trim()
+        ? Number(value.trim())
+        : Number.NaN;
+    if (Number.isFinite(parsed)) {
+      return Math.trunc(parsed);
     }
   }
 

@@ -40,7 +40,9 @@ const baseBootstrap = AppBootstrapResponseSchema.parse({
   promotions: {
     loginBanner: true,
     improvementGift: true,
-    applyMore: true
+    improvementGiftRewardTokens: 1_000_000,
+    applyMore: true,
+    agentChatTokenTotal: 2_000_000
   }
 });
 

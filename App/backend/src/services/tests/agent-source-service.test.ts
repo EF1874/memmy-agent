@@ -1,5 +1,9 @@
 /** Agent source service tests. */
 import { DatabaseSync } from "node:sqlite";
+import { MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH } from "@memmy/local-api-contracts";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createSourceRegistry } from "../../adapters/outbound/agent-source/source-registry.js";
 import type {
@@ -13,13 +17,25 @@ import { createAgentSourceRepository, type AgentSourceRepository } from "../../i
 import { createMockMemoryClient } from "../../tests/support/mock-memory-client.js";
 import type { IngestionService } from "../ingestion-service.js";
 import { createAgentSourceService, type AgentSourceService } from "../agent-source-service.js";
+import {
+  AGENT_SOURCE_ANALYTICS_EVENTS,
+  buildAgentSourceConflictParams,
+  buildAgentSourcePluginLifecycleParams,
+  buildAgentSourceSkillLifecycleParams,
+  type AgentSourceLifecycleAnalytics,
+} from "../../analytics/agent-source-analytics.js";
 import type { SkillDistributionService } from "../skill-distribution-service.js";
 
 let db: DatabaseSync | undefined;
+let tempDir: string | undefined;
 
 afterEach(() => {
   db?.close();
   db = undefined;
+  if (tempDir) {
+    rmSync(tempDir, { recursive: true, force: true });
+    tempDir = undefined;
+  }
 });
 
 describe("agent source service", () => {
@@ -87,6 +103,52 @@ describe("agent source service", () => {
       sourceId: "cursor",
       lastScannedAt: "2026-05-28T10:00:00.000Z"
     });
+  });
+
+  it("completes the scan and advances checkpoints when every memory is skipped", async () => {
+    const repository = createRepository();
+    const messages = createCompleteMemoryMessages("cursor", 1, "2026-05-28T10:00:00.000Z");
+    const service = createService({
+      repository,
+      adapters: [createFakeAdapter("cursor", messages)],
+      ingestionService: {
+        async ingest(input) {
+          const collected: ConversationMessage[] = [];
+          for await (const message of input) {
+            collected.push(message);
+          }
+          return {
+            attempted: collected.length,
+            written: 0,
+            deduped: collected.length,
+            failed: 0,
+            writtenMemories: 0,
+            dedupedMemories: 0,
+            failedMemories: 0,
+            memoryIds: [],
+            conversations: 1,
+            completedConversationIds: ["cursor-conv-1"],
+            incompleteConversationIds: [],
+            failedConversationIds: [],
+            errors: []
+          };
+        }
+      }
+    });
+
+    const result = await service.scanOne("cursor");
+
+    expect(result).toEqual({
+      sourceId: "cursor",
+      discoveredConversations: 1,
+      emittedMessages: 2,
+      skipped: 2,
+      memoryIds: [],
+      errors: []
+    });
+    expect(repository.getConversationCheckpoint("cursor", "cursor-conv-1")).not.toBeNull();
+    expect(repository.getScanWatermark("cursor")).not.toBeNull();
+    expect(repository.listSources()[0]?.messageCount).toBe(0);
   });
 
   it("forwards adapter scan progress through scan options", async () => {
@@ -302,6 +364,66 @@ describe("agent source service", () => {
 
     expectMemoryCount(collected.messages, 10);
     expect(collected.messages.some((message) => message.messageId.includes("incomplete"))).toBe(false);
+  });
+
+  it("excludes units whose first or last message violates the complete-turn boundary", async () => {
+    const valid = createCompleteMemoryMessages("cursor", 1, "2026-05-01T00:00:00.000Z", {
+      includeTool: true
+    });
+    const invalid = [
+      {
+        ...createMessage("cursor", 20),
+        messageId: "invalid-user",
+        conversationId: "invalid-user-tool",
+        role: "user" as const,
+        content: "query"
+      },
+      {
+        ...createMessage("cursor", 21),
+        messageId: "invalid-tool",
+        conversationId: "invalid-user-tool",
+        role: "tool" as const,
+        content: "tool output"
+      },
+      {
+        ...createMessage("cursor", 22),
+        messageId: "orphan-assistant",
+        conversationId: "orphan-assistant",
+        role: "assistant" as const,
+        content: "answer without query"
+      },
+      {
+        ...createMessage("cursor", 23),
+        messageId: "trailing-user",
+        conversationId: "assistant-then-user",
+        role: "user" as const,
+        content: "query"
+      },
+      {
+        ...createMessage("cursor", 24),
+        messageId: "middle-assistant",
+        conversationId: "assistant-then-user",
+        role: "assistant" as const,
+        content: "answer"
+      },
+      {
+        ...createMessage("cursor", 25),
+        messageId: "trailing-tool",
+        conversationId: "assistant-then-user",
+        role: "tool" as const,
+        content: "late tool"
+      }
+    ];
+    const service = createService({
+      adapters: [createFakeAdapter("cursor", [...invalid, ...valid])]
+    });
+
+    const collected = await service.collectOne("cursor", { mode: "initial_subset" });
+
+    expectMemoryCount(collected.messages, 1);
+    expect(collected.messages.map((message) => message.messageId)).toEqual(
+      valid.map((message) => message.messageId)
+    );
   });
 
   it("collects all source messages before ingesting any raw memories", async () => {
@@ -613,18 +735,201 @@ describe("agent source service", () => {
     const service = createService();
 
     const added = await service.addManual({
-      displayName: "Manual Agent",
-      dataPath: "/tmp/manual-agent"
+      displayName: "Manual Agent"
     });
     await service.remove(added.sourceId);
 
     expect(added).toMatchObject({
       displayName: "Manual Agent",
-      dataPath: "/tmp/manual-agent",
+      dataPath: MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH,
       builtin: false
     });
     await expect(service.list()).resolves.not.toEqual(
       expect.arrayContaining([expect.objectContaining({ sourceId: added.sourceId })])
+    );
+  });
+
+  it("imports AI-normalized history and records the 500th-turn sync boundary", async () => {
+    const repository = createRepository();
+    const ingested: ConversationMessage[] = [];
+    let memorySource: string | undefined;
+    const service = createService({
+      repository,
+      ingestionService: {
+        async ingest(messages, context) {
+          memorySource = context.memorySource;
+          for await (const message of messages) {
+            ingested.push(message);
+          }
+          return {
+            attempted: ingested.length,
+            written: ingested.length,
+            deduped: 0,
+            failed: 0,
+            writtenMemories: 1,
+            dedupedMemories: 0,
+            failedMemories: 0,
+            memoryIds: [],
+            conversations: 1,
+            completedConversationIds: ["conversation-1"],
+            incompleteConversationIds: [],
+            failedConversationIds: [],
+            errors: []
+          };
+        }
+      }
+    });
+    const source = await service.addManual({ displayName: "Aider" });
+
+    const result = await service.importManaged(source.sourceId, {
+      mode: "initial_subset",
+      dataPath: "/Users/test/.aider/history.jsonl",
+      syncBoundaryAt: "2026-07-01T10:00:00.000Z",
+      final: true,
+      messages: [
+        {
+          messageId: "user-1",
+          conversationId: "conversation-1",
+          role: "user",
+          content: "question",
+          createdAt: "2026-07-01T10:00:00.000Z"
+        },
+        {
+          messageId: "assistant-1",
+          conversationId: "conversation-1",
+          role: "assistant",
+          content: "answer",
+          createdAt: "2026-07-01T10:00:01.000Z"
+        }
+      ]
+    });
+
+    expect(ingested.map((message) => message.sourceId)).toEqual([source.sourceId, source.sourceId]);
+    expect(memorySource).toBe("Aider");
+    expect(result).toMatchObject({
+      sourceId: source.sourceId,
+      attempted: 2,
+      written: 2,
+      syncBoundaryAt: "2026-07-01T10:00:00.000Z",
+      errors: []
+    });
+    await expect(service.list()).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        sourceId: source.sourceId,
+        dataPath: "/Users/test/.aider/history.jsonl",
+        lastScannedAt: "2026-05-28T10:00:00.000Z",
+        syncBoundaryAt: "2026-07-01T10:00:00.000Z"
+      })
+    ]));
+  });
+
+  it("persists the AI-discovered recipe and later syncs without another Agent session", async () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-managed-sync-"));
+    const historyPath = join(tempDir, "history.jsonl");
+    writeFileSync(historyPath, [
+      JSON.stringify({ id: "u1", conversation: "c1", role: "user", content: "old", createdAt: "2026-07-01T10:00:00.000Z" }),
+      JSON.stringify({ id: "a1", conversation: "c1", role: "assistant", content: "old answer", createdAt: "2026-07-01T10:00:01.000Z" }),
+      JSON.stringify({ id: "u2", conversation: "c1", role: "user", content: "new", createdAt: "2026-07-02T10:00:00.000Z" }),
+      JSON.stringify({ id: "a2", conversation: "c1", role: "assistant", content: "new answer", createdAt: "2026-07-02T10:00:01.000Z" })
+    ].join("\n"), "utf8");
+    const repository = createRepository();
+    const ingestionCalls: ConversationMessage[][] = [];
+    const service = createService({
+      repository,
+      ingestionService: {
+        async ingest(messages) {
+          const ingested: ConversationMessage[] = [];
+          for await (const message of messages) ingested.push(message);
+          ingestionCalls.push(ingested);
+          return {
+            attempted: ingested.length,
+            written: ingested.length,
+            deduped: 0,
+            failed: 0,
+            writtenMemories: ingested.length > 0 ? 1 : 0,
+            dedupedMemories: 0,
+            failedMemories: 0,
+            memoryIds: [],
+            conversations: ingested.length > 0 ? 1 : 0,
+            completedConversationIds: ingested.length > 0 ? ["c1"] : [],
+            incompleteConversationIds: [],
+            failedConversationIds: [],
+            errors: []
+          };
+        }
+      }
+    });
+    const source = await service.addManual({ displayName: "Example Agent" });
+    await service.importManaged(source.sourceId, {
+      mode: "initial_subset",
+      messages: [
+        {
+          messageId: "u1",
+          conversationId: "c1",
+          role: "user",
+          content: "old",
+          createdAt: "2026-07-01T10:00:00.000Z"
+        },
+        {
+          messageId: "a1",
+          conversationId: "c1",
+          role: "assistant",
+          content: "old answer",
+          createdAt: "2026-07-01T10:00:01.000Z"
+        }
+      ],
+      syncBoundaryAt: "2026-07-01T10:00:00.000Z",
+      final: true
+    });
+    const updated = await service.updateManaged(source.sourceId, {
+      dataPath: historyPath,
+      syncRecipe: {
+        version: 1,
+        format: "jsonl",
+        path: historyPath,
+        fields: {
+          messageId: "id",
+          conversationId: "conversation",
+          role: "role",
+          content: "content",
+          createdAt: "createdAt"
+        },
+        timestampFormat: "auto"
+      }
+    });
+
+    const result = await service.syncManaged(source.sourceId);
+
+    expect(updated.syncReady).toBe(true);
+    expect(ingestionCalls.at(-1)?.map((message) => message.messageId)).toEqual(["u2", "a2"]);
+    expect(result).toMatchObject({
+      attempted: 2,
+      written: 2,
+      syncBoundaryAt: "2026-07-01T10:00:00.000Z"
+    });
+  });
+
+  it("updates Skill state only for AI-managed sources", async () => {
+    const repository = createRepository();
+    repository.upsertSource({
+      sourceId: "cursor",
+      displayName: "Cursor",
+      dataPath: "/tmp/cursor",
+      builtin: true
+    });
+    const service = createService({ repository });
+    const source = await service.addManual({ displayName: "Aider" });
+
+    await expect(service.updateManaged(source.sourceId, {
+      dataPath: "/Users/test/.aider",
+      skillInstalled: true
+    })).resolves.toMatchObject({
+      sourceId: source.sourceId,
+      dataPath: "/Users/test/.aider",
+      status: "skill_installed"
+    });
+    await expect(service.updateManaged("cursor", { skillInstalled: true })).rejects.toThrow(
+      "not managed by Memmy Agent"
     );
   });
 
@@ -734,6 +1039,171 @@ describe("agent source service", () => {
       }
     ]);
   });
+
+  it("emits agent source lifecycle and conflict analytics", async () => {
+    const repository = createRepository();
+    repository.upsertSource({
+      sourceId: "cursor",
+      displayName: "Cursor",
+      dataPath: "/tmp/cursor",
+      builtin: true
+    });
+    const analytics = createAgentSourceAnalyticsRecorder();
+    const service = createService({
+      repository,
+      adapters: [createFakeAdapter("cursor")],
+      agentSourceAnalytics: analytics.recorder,
+      getScanPermission: async () => "scan_and_write_skill",
+      skillDistributionService: {
+        async install() {
+          return undefined;
+        },
+        async uninstall() {
+          return undefined;
+        },
+        async installPlugin() {
+          return undefined;
+        },
+        async uninstallPlugin() {
+          return undefined;
+        },
+        async detectMemoryPluginConflicts() {
+          return [
+            {
+              sourceId: "openclaw",
+              displayName: "OpenClaw",
+              configPath: "/tmp/openclaw/openclaw.json",
+              installedPluginId: "memory-core"
+            }
+          ];
+        }
+      }
+    });
+
+    await service.installPlugin("cursor", { installType: "manual" });
+    await service.uninstallPlugin("cursor", { installType: "manual" });
+    await service.detectMemoryPluginConflicts();
+
+    expect(analytics.events.map((event) => event.eventName)).toEqual([
+      AGENT_SOURCE_ANALYTICS_EVENTS.pluginInstalled,
+      AGENT_SOURCE_ANALYTICS_EVENTS.pluginUninstalled,
+      AGENT_SOURCE_ANALYTICS_EVENTS.pluginConflictDetected,
+    ]);
+    expect(analytics.events[0]?.params).toMatchObject({
+      source_id: "cursor",
+      source_kind: "hook",
+      permission: "scan_and_write_skill",
+      status_before: "not_connected",
+      status_after: "plugin_installed",
+      install_type: "manual",
+      success: true,
+    });
+    expect(analytics.events[1]?.params).toMatchObject({
+      source_id: "cursor",
+      status_after: "not_connected",
+      success: true,
+    });
+    expect(analytics.events[2]?.params).toMatchObject({
+      source_id: "openclaw",
+      source_kind: "native_plugin",
+      permission: "scan_and_write_skill",
+      installed_plugin_id: "memory-core",
+    });
+  });
+
+  it("emits skill install analytics", async () => {
+    const repository = createRepository();
+    repository.upsertSource({
+      sourceId: "workbuddy",
+      displayName: "WorkBuddy",
+      dataPath: "/tmp/workbuddy",
+      builtin: true,
+      status: "not_connected",
+    });
+    const analytics = createAgentSourceAnalyticsRecorder();
+    const service = createService({
+      repository,
+      adapters: [createFakeAdapter("workbuddy")],
+      agentSourceAnalytics: analytics.recorder,
+      getScanPermission: async () => "scan_only",
+      skillDistributionService: {
+        async install() {
+          return undefined;
+        },
+        async uninstall() {
+          return undefined;
+        },
+        async installPlugin() {
+          return undefined;
+        },
+        async uninstallPlugin() {
+          return undefined;
+        },
+      },
+    });
+
+    await service.installSkill("workbuddy");
+
+    expect(analytics.events).toHaveLength(1);
+    expect(analytics.events[0]).toMatchObject({
+      eventName: AGENT_SOURCE_ANALYTICS_EVENTS.skillInstalled,
+      params: {
+        source_id: "workbuddy",
+        source_kind: "skill",
+        permission: "scan_only",
+        status_before: "not_connected",
+        status_after: "skill_installed",
+        success: true,
+      },
+    });
+  });
+
+  it("emits failed plugin install analytics before rethrowing", async () => {
+    const repository = createRepository();
+    repository.upsertSource({
+      sourceId: "cursor",
+      displayName: "Cursor",
+      dataPath: "/tmp/cursor",
+      builtin: true
+    });
+    const analytics = createAgentSourceAnalyticsRecorder();
+    const service = createService({
+      repository,
+      adapters: [createFakeAdapter("cursor")],
+      agentSourceAnalytics: analytics.recorder,
+      getScanPermission: async () => "scan_and_write_skill",
+      skillDistributionService: {
+        async install() {
+          return undefined;
+        },
+        async uninstall() {
+          return undefined;
+        },
+        async installPlugin() {
+          throw new Error("install failed");
+        },
+        async uninstallPlugin() {
+          return undefined;
+        }
+      }
+    });
+
+    await expect(service.installPlugin("cursor", { installType: "auto_inject" })).rejects.toThrow("install failed");
+    expect(analytics.events).toHaveLength(1);
+    expect(analytics.events[0]).toMatchObject({
+      eventName: AGENT_SOURCE_ANALYTICS_EVENTS.pluginInstalled,
+      params: {
+        source_id: "cursor",
+        source_kind: "hook",
+        permission: "scan_and_write_skill",
+        status_before: "not_connected",
+        status_after: "not_connected",
+        install_type: "auto_inject",
+        success: false,
+        error_code: "install failed",
+      },
+    });
+  });
 });
 
 function createService(
@@ -743,6 +1213,8 @@ function createService(
     ingestionService?: IngestionService;
     skillDistributionService?: SkillDistributionService;
     memoryClient?: MemoryClient;
+    agentSourceAnalytics?: AgentSourceLifecycleAnalytics;
+    getScanPermission?: () => Promise<import("@memmy/local-api-contracts").ScanPermission>;
   } = {}
 ): AgentSourceService {
   return createAgentSourceService({
@@ -750,6 +1222,8 @@ function createService(
     agentSourceRepository: options.repository ?? createRepository(),
     ingestionService: options.ingestionService ?? createFakeIngestionService(),
     memoryClient: options.memoryClient ?? createMockMemoryClient(),
+    agentSourceAnalytics: options.agentSourceAnalytics,
+    getScanPermission: options.getScanPermission,
     skillDistributionService:
       options.skillDistributionService ??
       ({
@@ -787,6 +1261,7 @@ function createRepository(): AgentSourceRepository {
       builtin         INTEGER NOT NULL CHECK(builtin IN (0,1)),
       status          TEXT NOT NULL DEFAULT 'not_connected',
       last_scanned_at TEXT,
+      sync_recipe_json TEXT,
       created_at      TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
       PRIMARY KEY (uuid, source_id)
@@ -958,4 +1433,49 @@ function createIncompleteUserMessages(sourceId: string, count: number, newestAt:
 
 function expectMemoryCount(messages: readonly ConversationMessage[] | undefined, expected: number): void {
   expect(messages?.filter((message) => message.role === "user")).toHaveLength(expected);
+}
+
+function createAgentSourceAnalyticsRecorder(): {
+  recorder: AgentSourceLifecycleAnalytics;
+  events: Array<{ eventName: string; params: Record<string, unknown> }>;
+} {
+  const events: Array<{ eventName: string; params: Record<string, unknown> }> = [];
+  return {
+    events,
+    recorder: {
+      trackPluginInstalled(input) {
+        events.push({
+          eventName: AGENT_SOURCE_ANALYTICS_EVENTS.pluginInstalled,
+          params: buildAgentSourcePluginLifecycleParams(input),
+        });
+      },
+      trackPluginUninstalled(input) {
+        events.push({
+          eventName: AGENT_SOURCE_ANALYTICS_EVENTS.pluginUninstalled,
+          params: buildAgentSourcePluginLifecycleParams(input),
+        });
+      },
+      trackSkillInstalled(input) {
+        events.push({
+          eventName: AGENT_SOURCE_ANALYTICS_EVENTS.skillInstalled,
+          params: buildAgentSourceSkillLifecycleParams(input),
+        });
+      },
+      trackSkillUninstalled(input) {
+        events.push({
+          eventName: AGENT_SOURCE_ANALYTICS_EVENTS.skillUninstalled,
+          params: buildAgentSourceSkillLifecycleParams(input),
+        });
+      },
+      trackPluginConflictDetected(input) {
+        events.push({
+          eventName: AGENT_SOURCE_ANALYTICS_EVENTS.pluginConflictDetected,
+          params: buildAgentSourceConflictParams(input),
+        });
+      },
+      async flush() {
+        return undefined;
+      },
+    },
+  };
 }

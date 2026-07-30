@@ -88,7 +88,10 @@ describe("MemoryService / session / lifecycle", () => {
     expect(duplicate.l1MemoryId).toBe(complete.l1MemoryId);
     expect(duplicate.duplicate).toBe(true);
     expect(complete.l1MemoryIds).toEqual([complete.l1MemoryId]);
-    expect(complete.jobs.map((job) => job.jobType)).toEqual(["embedding", "episode_idle_close"]);
+    expect(complete.jobs.map((job) => job.jobType)).toEqual([
+      "trace_summary",
+      "episode_idle_close"
+    ]);
     const idleCloseJobs = db.db.prepare(
       `SELECT COUNT(*) AS count
        FROM evolution_jobs
@@ -161,7 +164,7 @@ describe("MemoryService / session / lifecycle", () => {
         trace: Record<string, unknown>;
       };
     };
-    expect(properties.internal_info.summary).toContain("SQLite");
+    expect(properties.internal_info.summary).toBe("");
     expect(properties.internal_info.raw_turn_id).toBe(complete.rawTurnId);
     expect(properties.internal_info.raw_span).toMatchObject({
       user_text: true,
@@ -198,7 +201,7 @@ describe("MemoryService / session / lifecycle", () => {
     expect(duplicateFeedback.feedbackId).toBe(feedback.feedbackId);
     expect(duplicateFeedback.duplicate).toBe(true);
     const workerRun = await service.runWorkerOnce(10);
-    expect(workerRun.jobs.map((job) => job.jobType)).toContain("embedding");
+    expect(workerRun.jobs.map((job) => job.jobType)).not.toContain("embedding");
 
     const recall = await service.search({
       namespace: {

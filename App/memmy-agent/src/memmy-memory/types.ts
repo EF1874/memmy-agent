@@ -43,6 +43,12 @@ export type MemmyMemoryHookOptions = {
   profileId?: string;
   profileLabel?: string;
   userId?: string;
+  /** Optional override for GA4 client_id; defaults to reading desktop-written ~/.memmy/analytics-client-id. */
+  getAnalyticsClientId?: () => string | null | undefined;
+  /** Optional logged-in account id for GA4 user_id; omitted when anonymous. */
+  getAnalyticsUserId?: () => string | null | undefined;
+  /** Optional account | byok for GA4 user_mode; omitted when unset. */
+  getAnalyticsUserMode?: () => string | null | undefined;
 };
 
 export type MemmyMemoryTurnState = {
@@ -52,8 +58,11 @@ export type MemmyMemoryTurnState = {
   userText: string;
   messageStartIndex: number;
   episodeId?: string;
+  sourceMemoryIds?: string[];
   rawTurnId?: string;
   l1MemoryId?: string;
+  hasInjectedContext?: boolean;
+  sourceMemoryCount?: number;
 };
 
 export type MemmyMemoryToolRuntime = {
@@ -62,4 +71,8 @@ export type MemmyMemoryToolRuntime = {
   currentEpisodeId(sessionKey?: string | null): string | null;
   currentTurnId(sessionKey?: string | null): string | null;
   currentUserText(sessionKey?: string | null): string | null;
+  /** Fire-and-forget GA4 memory-op event (search/get/add). */
+  trackMemoryAnalytics?(eventName: string, params?: Record<string, string | number | boolean>): void;
+  /** Session/turn correlation + adapter_id for tool-path memory-op events. */
+  memoryAnalyticsContext?(sessionKey?: string | null): Record<string, string | number | boolean>;
 };

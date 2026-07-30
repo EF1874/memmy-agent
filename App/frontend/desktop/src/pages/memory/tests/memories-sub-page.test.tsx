@@ -113,14 +113,97 @@ describe("MemoriesSubPage", () => {
     expect(html).not.toContain("memory-pill--source");
   });
 
-  it("摘要未完成时用导入 trace 的用户 query 作为记忆标题", () => {
-    expect(displayMemoryTitle({
+  it("摘要完成前或失败时展示 user-text，完成后展示真实摘要", () => {
+    const trace = {
       id: "memory-trace-import",
-      title: "codex turn 2026-06-10 #10",
-      summary: "## user",
+      kind: "trace" as const,
+      title: "修复自动扫描卡顿和标题占位",
       memoryLayer: "L1",
       body: "## user\n\n修复自动扫描卡顿和标题占位\n\n## assistant\n\n已开始排查。"
+    } as const;
+
+    expect(displayMemoryTitle({
+      ...trace,
+      summary: ""
     })).toBe("修复自动扫描卡顿和标题占位");
+    expect(displayMemoryTitle({
+      ...trace,
+      summary: "摘要整理中"
+    })).toBe("修复自动扫描卡顿和标题占位");
+    expect(displayMemoryTitle({
+      ...trace,
+      summary: "已修复自动扫描卡顿，并替换临时标题"
+    })).toBe("已修复自动扫描卡顿，并替换临时标题");
+  });
+
+  it("trace 列表展示完整摘要", () => {
+    const trace = {
+      id: "memory-trace-summary-length",
+      kind: "trace" as const,
+      title: "fallback title",
+      memoryLayer: "L1" as const
+    };
+
+    expect(displayMemoryTitle({
+      ...trace,
+      summary: "甲".repeat(21)
+    })).toBe("甲".repeat(21));
+    expect(displayMemoryTitle({
+      ...trace,
+      summary: Array.from({ length: 21 }, (_value, index) => `word${index + 1}`).join(" ")
+    })).toBe(Array.from({ length: 21 }, (_value, index) => `word${index + 1}`).join(" "));
+  });
+
+  it("span 列表展示子目标，详情只展示子目标和摘要", () => {
+    const spanItem = {
+      ...memoryListItemFixture,
+      id: "span_38dff97911bbdf533513",
+      kind: "span" as const,
+      title: "span_38dff97911bbdf533513",
+      summary: "阅读策略、指标和组合模型相关文件。",
+      metadata: { spanGoal: "读取并分析源码，分类金融策略" }
+    };
+    const spanDetail = {
+      item: {
+        ...spanItem,
+        body: "Goal: 读取并分析源码，分类金融策略\nSummary: 阅读策略、指标和组合模型相关文件。",
+        sourceMemoryIds: [],
+        metadata: {
+          spanDetail: {
+            toolCallStart: 1,
+            toolCalls: [
+              { id: "tool-1", name: "rg", input: { pattern: "span" }, output: "match" },
+              { id: "tool-2", name: "npm_test", output: "passed" }
+            ]
+          },
+          properties: {
+            internal_info: {
+              span: { span_goal: "读取并分析源码，分类金融策略" }
+            }
+          }
+        }
+      },
+      version: 1,
+      etag: "span-detail"
+    };
+
+    const html = renderMemories({
+      status: "ready",
+      data: panelItemsOutput([spanItem]),
+      detail: { status: "ready", data: spanDetail }
+    });
+
+    expect(displayMemoryTitle(spanItem)).toBe("读取并分析源码，分类金融策略");
+    expect(html).toContain("读取并分析源码，分类金融策略");
+    expect(html).toContain("子目标");
+    expect(html).toContain("摘要");
+    expect(html).toContain("阅读策略、指标和组合模型相关文件。");
+    expect(html).toContain("相关步骤");
+    expect(html).toContain("工具调用 · rg");
+    expect(html).toContain("工具调用 · npm_test");
+    expect(html).not.toContain("正文");
+    expect(html).not.toContain("Goal:");
+    expect(html).not.toContain("Summary:");
   });
 
   it("搜索列表和点击详情都调用 memoryRuntime client", async () => {
@@ -258,9 +341,48 @@ describe("MemoriesSubPage", () => {
     expect(html).toContain("重试");
     expect(html).toContain("检查模型设置");
     expect(html).toContain("memory-pill--failed");
+    expect(html).not.toContain("已尝试次数");
   });
 
-  it("重试接口失败时保留原始处理原因，并单独展示本次重试错误", () => {
+  it("重试处理中持续展示上次失败原因", () => {
+    const processing = {
+      memoryId: memoryListItemFixture.id,
+      state: "embedding_pending" as const,
+      stage: "embedding" as const,
+      activeJobId: "embedding-retry",
+      attemptCount: 0,
+      manualRetryCount: 1,
+      retryAction: "retry" as const,
+      errorCode: "model_configuration",
+      errorMessage: "摘要模型未配置",
+      failedAt: "2026-06-03T09:30:00.000Z",
+      updatedAt: "2026-06-03T09:31:00.000Z"
+    };
+    const html = renderMemories({
+      status: "ready",
+      data: panelItemsOutput([{ ...memoryListItemFixture, processing }]),
+      detail: {
+        status: "ready",
+        data: {
+          ...memoryDetailFixture,
+          item: { ...memoryDetailFixture.item, processing }
+        }
+      }
+    }, "zh-CN", {
+      onRetryProcessing: vi.fn(),
+      onOpenSettings: vi.fn()
+    });
+
+    expect(html).toContain("正在重试");
+    expect(html).toContain("上次失败原因");
+    expect(html).toContain("摘要模型未配置");
+    expect(html).toContain("上次失败时间");
+    expect(html).not.toContain("已尝试次数");
+    expect(html).not.toContain("检查模型设置");
+    expect(html).not.toContain("立即重试");
+  });
+
+  it("重试接口失败时只在上方展示最新错误", () => {
     const processing = {
       memoryId: memoryListItemFixture.id,
       state: "failed" as const,
@@ -289,13 +411,17 @@ describe("MemoriesSubPage", () => {
       retryFeedback: {
         memoryId: memoryListItemFixture.id,
         status: "error",
-        message: "本地记忆服务尚未加载重试功能，请完全退出并重新打开 Memmy 后再试"
+        message: "本地记忆服务尚未加载重试功能，请完全退出并重新打开 Memmy 后再试",
+        failedAt: "2026-06-03T09:31:00.000Z"
       }
     });
 
-    expect(html).toContain(processing.errorMessage);
-    expect(html).toContain("本次重试未成功：本地记忆服务尚未加载重试功能");
-    expect(html).toContain("memory-processing-failure__retry-error");
+    const latestError = "本地记忆服务尚未加载重试功能，请完全退出并重新打开 Memmy 后再试";
+    expect(html.split(latestError)).toHaveLength(2);
+    expect(html).not.toContain(processing.errorMessage);
+    expect(html).not.toContain("本次重试未成功");
+    expect(html).not.toContain("memory-processing-failure__retry-error");
+    expect(html).toContain('role="alert"');
   });
 
   it("只把没有结构化错误体的 404 识别为旧的本地重试接口", () => {

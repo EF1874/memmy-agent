@@ -206,6 +206,8 @@ describe("MemoryService / retrieval / injected context", () => {
       query: "rerun the focused sqlite migration pytest after the fix",
       answer: "reran the focused pytest and verified the migration state"
     });
+    service.closeSession(session.sessionId);
+    await service.runWorkerOnce(20);
     await service.runWorkerOnce(20);
 
     const recall = await service.search({
@@ -311,7 +313,7 @@ describe("MemoryService / retrieval / injected context", () => {
     db.close();
   });
 
-  it("records turn.start search correlation and token-budget drops", async () => {
+  it("records turn.start recall context and search log", async () => {
     const { db, service } = createTestService();
     const seedSession = service.openSession({
       namespace: {
@@ -349,40 +351,45 @@ describe("MemoryService / retrieval / injected context", () => {
     expect(prepared.sourceMemoryIds.length).toBeGreaterThanOrEqual(prepared.hits.length);
     expect(prepared.droppedDueToBudget).toEqual([]);
 
-    const recallRow = db.db.prepare(
-      `SELECT turn_id, episode_id, injected_memory_ids_json, dropped_json
+    expect(db.db.prepare(
+      `SELECT turn_id, json_extract(request_json, '$.retrievalMode') AS retrieval_mode
        FROM recall_events
        WHERE id = ?`
-    ).get(prepared.searchEventId) as {
-      turn_id: string | null;
-      episode_id: string | null;
-      injected_memory_ids_json: string;
-      dropped_json: string;
-    };
-    expect(recallRow.turn_id).toBe("turn-budget-prepare");
-    expect(recallRow.episode_id).toBe(prepared.episodeId);
-    expect(JSON.parse(recallRow.injected_memory_ids_json)).toEqual(prepared.sourceMemoryIds);
-    expect(JSON.parse(recallRow.dropped_json)).not.toEqual(expect.arrayContaining([
-      expect.objectContaining({ reason: "token_budget" })
-    ]));
-
-    await service.feedback({
-      sessionId: activeSession.sessionId,
-      recallEventId: prepared.searchEventId,
-      channel: "explicit",
-      polarity: "positive",
-      magnitude: 1,
-      rationale: "all returned memories were visible to the agent"
+    ).get(prepared.searchEventId)).toEqual({
+      turn_id: "turn-budget-prepare",
+      retrieval_mode: "turn_start"
     });
-    const injectedStatsRow = db.db.prepare(
-      `SELECT properties_json
-       FROM memories
-       WHERE id = ?`
-    ).get(prepared.sourceMemoryIds[0]) as { properties_json: string };
-    const injectedStats = JSON.parse(injectedStatsRow.properties_json) as {
-      internal_info?: { recall?: { positive?: number } };
+    expect(db.db.prepare(
+      `SELECT tool_name, json_extract(input_json, '$.retrievalMode') AS retrieval_mode
+       FROM api_logs
+       WHERE tool_name = 'memory_search'
+       ORDER BY id DESC
+       LIMIT 1`
+    ).get()).toEqual({
+      tool_name: "memory_search",
+      retrieval_mode: "turn_start"
+    });
+
+    const completed = service.completeTurn("turn-budget-prepare", {
+      sessionId: activeSession.sessionId,
+      query: "fix sqlite budget migration",
+      answer: "The sqlite budget migration is fixed."
+    });
+    expect(completed.episodeId).toBe(prepared.episodeId);
+    const rawTurn = db.db.prepare(
+      "SELECT source_memory_ids_json, message_payload_json FROM raw_turns WHERE id = ?"
+    ).get(completed.rawTurnId) as {
+      source_memory_ids_json: string;
+      message_payload_json: string;
     };
-    expect(injectedStats.internal_info?.recall?.positive).toBe(1);
+    expect(JSON.parse(rawTurn.source_memory_ids_json)).toEqual(prepared.sourceMemoryIds);
+    expect(JSON.parse(rawTurn.message_payload_json)).toMatchObject({
+      turn_start: {
+        contextPacketId: prepared.contextPacketId,
+        searchEventId: prepared.searchEventId,
+        sourceMemoryIds: prepared.sourceMemoryIds
+      }
+    });
 
     db.close();
   });
@@ -731,7 +738,7 @@ describe("MemoryService / retrieval / injected context", () => {
     db.close();
   });
 
-  it("applies plugin intent retrieval gates on the first turn of an episode", async () => {
+  it("applies turn-start intent gates while creating routed episodes", async () => {
     const { db, service } = createTestService();
     const session = service.openSession({
       namespace: {
@@ -748,14 +755,6 @@ describe("MemoryService / retrieval / injected context", () => {
     expect(chitchat.sourceMemoryIds).toEqual([]);
     expect(chitchat.status).toContain("intent:chitchat:retrieval_skipped");
 
-    let recallRow = db.db.prepare(
-      `SELECT layers_json, candidate_memory_ids_json
-       FROM recall_events
-       WHERE id = ?`
-    ).get(chitchat.searchEventId) as { layers_json: string; candidate_memory_ids_json: string };
-    expect(JSON.parse(recallRow.layers_json)).toEqual([]);
-    expect(JSON.parse(recallRow.candidate_memory_ids_json)).toEqual([]);
-
     service.closeSession(session.sessionId);
     const memoryProbeSession = service.openSession({
       namespace: {
@@ -770,28 +769,7 @@ describe("MemoryService / retrieval / injected context", () => {
       query: "你还记得我们之前讨论过 sqlite migration 吗"
     });
 
-    recallRow = db.db.prepare(
-      `SELECT layers_json
-       FROM recall_events
-       WHERE id = ?`
-    ).get(memoryProbe.searchEventId) as { layers_json: string; candidate_memory_ids_json: string };
-    expect(JSON.parse(recallRow.layers_json)).toEqual(["Skill", "L2", "L1"]);
-
-    const episode = db.db.prepare(
-      `SELECT meta_json
-       FROM episodes
-       WHERE id = ?`
-    ).get(memoryProbe.episodeId) as { meta_json: string };
-    expect(JSON.parse(episode.meta_json)).toMatchObject({
-      intentDecision: {
-        kind: "memory_probe",
-        retrieval: {
-          tier1: true,
-          tier2: true,
-          tier3: false
-        }
-      }
-    });
+    expect(memoryProbe.status).not.toContain("intent:chitchat:retrieval_skipped");
 
     service.closeSession(memoryProbeSession.sessionId);
     const unknownSession = service.openSession({
@@ -808,31 +786,12 @@ describe("MemoryService / retrieval / injected context", () => {
       query: "我喜欢吃什么"
     });
 
-    recallRow = db.db.prepare(
-      `SELECT layers_json, candidate_memory_ids_json
-       FROM recall_events
-       WHERE id = ?`
-    ).get(unknown.searchEventId) as {
-      layers_json: string;
-      candidate_memory_ids_json: string;
-    };
-    expect(JSON.parse(recallRow.layers_json)).toEqual(["Skill", "L2", "L1", "L3"]);
-
-    const unknownEpisode = db.db.prepare(
-      `SELECT meta_json
-       FROM episodes
-       WHERE id = ?`
-    ).get(unknown.episodeId) as { meta_json: string };
-    expect(JSON.parse(unknownEpisode.meta_json)).toMatchObject({
-      intentDecision: {
-        kind: "unknown",
-        retrieval: {
-          tier1: true,
-          tier2: true,
-          tier3: true
-        }
-      }
-    });
+    expect(unknown.status).not.toContain("intent:chitchat:retrieval_skipped");
+    expect(db.db.prepare("SELECT COUNT(*) AS count FROM episodes").get()).toEqual({ count: 3 });
+    expect(db.db.prepare("SELECT COUNT(*) AS count FROM recall_events").get()).toEqual({ count: 3 });
+    expect(db.db.prepare(
+      "SELECT tool_name, COUNT(*) AS count FROM api_logs GROUP BY tool_name"
+    ).all()).toEqual([{ tool_name: "memory_search", count: 3 }]);
     db.close();
   });
 });

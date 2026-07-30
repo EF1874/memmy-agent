@@ -118,13 +118,7 @@ private async reflectSingleTrace(
       agentThinking,
       reflectionText
     ]);
-    const summarized = await this.summarizeTraceForCapture({
-      trace,
-      userText,
-      agentText,
-      toolCalls,
-      reflectionText
-    });
+    const summarized = trace.summary || fallbackTraceSummary(trace);
 
     if (!this.deps.config.algorithm.capture.alphaScoring) {
       const reflection = reflectionText || "RELATED_DEFAULT";
@@ -410,23 +404,19 @@ private async applyBatchReflectionScores(
       }
       const incoming = trace.reflection?.trim() ?? "";
       const reflection = incoming || score.reflectionText;
-      const usable = score.usable;
-      const alpha = clampNumber(score.alpha, 0, 1);
-      const summary = await this.summarizeTraceForCapture({
-        trace,
-        userText: trace.userText,
-        agentText: trace.agentText,
-        toolCalls: trace.toolCalls,
-        reflectionText: reflection
-      });
+      const summary = trace.summary || fallbackTraceSummary(trace);
       const previous = memory;
       const saved = this.deps.repos.memories.update(updateImportPipelineStatus(updateTraceReflection(memory, {
         summary,
         reflection,
-        alpha,
-        usable,
+        alpha: clampNumber(score.alpha, 0, 1),
+        usable: score.usable,
         reason: score.reason,
-        source: incoming ? traceReflectionSource(memory) : score.reflectionText === "RELATED_DEFAULT" ? "none" : "synth",
+        source: incoming
+          ? traceReflectionSource(memory)
+          : score.reflectionText === "RELATED_DEFAULT"
+            ? "none"
+            : "synth",
         tags: memoryHasImportPipeline(memory) ? importStatusTags(memory.tags, "indexing") : memory.tags,
         updatedAt: at
       }), "indexing", at));
@@ -772,8 +762,12 @@ function updateTraceReflection(memory: MemoryRow, input: {
   const internalTrace = isRecord(memory.properties.internal_info.trace)
     ? memory.properties.internal_info.trace
     : {};
+  const {
+    summary_deferred_until_reflection: _summaryDeferredUntilReflection,
+    ...settledTrace
+  } = internalTrace;
   const nextTrace = {
-    ...internalTrace,
+    ...settledTrace,
     summary: input.summary,
     reflection: input.reflection,
     alpha: input.alpha,

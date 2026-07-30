@@ -2,7 +2,7 @@ export type IsoTime = string;
 export const DEFAULT_NAMESPACE_SOURCE = "unknown";
 export type Cursor = string;
 export type MemoryLayer = "L1" | "L2" | "L3" | "Skill";
-export type MemoryKind = "trace" | "policy" | "world_model" | "skill";
+export type MemoryKind = "trace" | "span" | "policy" | "world_model" | "skill";
 export type MemoryStatus = "activated" | "resolving" | "archived" | "deleted";
 export type RetrievalMode =
   | "search"
@@ -44,6 +44,8 @@ export type JobType =
   | "reflection"
   | "embedding"
   | "reward"
+  | "span_big_turn"
+  | "negative_experience"
   | "l2_association"
   | "l2_induction"
   | "l3_abstraction"
@@ -127,7 +129,6 @@ export interface MemoryRow {
 }
 
 export interface MemoryFilter {
-  userId?: string;
   sessionId?: string;
   conversationId?: string;
   agentId?: string;
@@ -303,6 +304,8 @@ export interface SubagentCompleteRequest extends RequestEnvelope {
 export interface MemorySearchRequest extends RequestEnvelope {
   query: string;
   sessionId?: string;
+  episodeId?: string;
+  turnId?: string;
   layers?: MemoryLayer[];
   tags?: string[];
   limit?: number;

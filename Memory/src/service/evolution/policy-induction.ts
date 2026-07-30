@@ -27,6 +27,7 @@ export type PolicyEnhancementResult =
   | { ok: false; reason: string };
 type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
 type PolicyMeta = NonNullable<ReturnType<typeof policyMetaFromMemory>>;
+const L2_INDUCTION_DRAFT_MAX_ATTEMPTS = 3;
 
 type JobChangeKind = "created" | "updated" | "skipped";
 type PolicyLifecycleStatus = "candidate" | "active" | "archived";
@@ -48,7 +49,7 @@ type PolicyTraceLink = {
 type ReposPort = {
   memories: {
     get(id: string): MemoryRow | undefined;
-    getByKey(userId: string, memoryLayer: "L2", memoryKey: string): MemoryRow | undefined;
+    getByKey(memoryLayer: "L2", memoryKey: string): MemoryRow | undefined;
     list(filter: Record<string, unknown>, limit?: number): MemoryRow[];
     getMany(ids: string[]): MemoryRow[];
     update(memory: MemoryRow): MemoryRow;
@@ -212,7 +213,7 @@ export class PolicyInductionEngine {
         }
       }
       const promptEvidenceTraces = [...byEpisode.values()];
-      const matchingPolicy = this.findExistingPolicyForL2Bucket(signature, bucket, source.userId);
+      const matchingPolicy = this.findExistingPolicyForL2Bucket(signature, bucket);
       if (matchingPolicy) {
         for (const trace of bucket) {
           const similarity = tracePolicySimilarity(trace, matchingPolicy);
@@ -226,7 +227,7 @@ export class PolicyInductionEngine {
           });
         }
         this.markCandidatePoolPromoted(source.userId, signature, bucketTraceIds, matchingPolicy.id, at);
-        this.recomputePolicyStats(matchingPolicy.id, source.userId, at, sourceTrace.episodeId);
+        this.recomputePolicyStats(matchingPolicy.id, at, sourceTrace.episodeId);
         for (const episodeId of uniq(
           bucket.map((trace) => trace.episodeId).filter((id): id is string => Boolean(id))
         )) {
@@ -236,7 +237,7 @@ export class PolicyInductionEngine {
       }
 
       const policyKey = `policy:${stableHash(signature).slice(0, 16)}`;
-      const existingPolicyMemory = this.deps.repos.memories.getByKey(source.userId, "L2", policyKey);
+      const existingPolicyMemory = this.deps.repos.memories.getByKey("L2", policyKey);
       const existingPolicy = existingPolicyMemory && !this.isArchivedEvolutionMemory(existingPolicyMemory)
         ? policyMetaFromMemory(existingPolicyMemory)
         : null;
@@ -463,7 +464,7 @@ export class PolicyInductionEngine {
     if (trace.episodeId) {
       this.deps.repos.runtime.appendEpisodeDerivedMemory(trace.episodeId, "L2", matchedPolicy.id, at);
     }
-    this.recomputePolicyStats(matchedPolicy.id, source.userId, at, trace.episodeId);
+    this.recomputePolicyStats(matchedPolicy.id, at, trace.episodeId);
   }
 
   async enhancePolicyDraft(
@@ -476,70 +477,79 @@ export class PolicyInductionEngine {
     }
 
     try {
-      const result = await this.deps.skillLlm.completeJson<{
-        title?: unknown;
-        trigger?: unknown;
-        action?: unknown;
-        procedure?: unknown;
-        verification?: unknown;
-        boundary?: unknown;
-        rationale?: unknown;
-        caveats?: unknown;
-        confidence?: unknown;
-        support_trace_ids?: unknown;
-        tags?: unknown;
-      }>([
-        {
-          role: "system",
-          content: L2_INDUCTION_PROMPT.system
-        },
-        {
-          role: "system",
-          content: languageSteeringLine(detectDominantLanguage(evidenceTraces.flatMap((trace) => [
-            trace.userText,
-            trace.agentText,
-            trace.reflection
-          ])))
-        },
-        {
-          role: "user",
-          content: packL2InductionTraces(
-            evidenceTraces,
-            this.deps.config.algorithm.l2Induction.traceCharCap,
-            signature
-          )
-        }
-      ], {
-        operation: `${L2_INDUCTION_PROMPT.id}.v${L2_INDUCTION_PROMPT.version}`,
-        thinkingMode: "enabled",
-        temperature: 0.1,
-        maxTokens: 1200
-      });
+      let lastInvalidReason: string | null = null;
+      for (let attempt = 0; attempt < L2_INDUCTION_DRAFT_MAX_ATTEMPTS; attempt += 1) {
+        const result = await this.deps.skillLlm.completeJson<{
+          title?: unknown;
+          trigger?: unknown;
+          action?: unknown;
+          procedure?: unknown;
+          verification?: unknown;
+          boundary?: unknown;
+          rationale?: unknown;
+          caveats?: unknown;
+          confidence?: unknown;
+          support_trace_ids?: unknown;
+          tags?: unknown;
+        }>([
+          {
+            role: "system",
+            content: L2_INDUCTION_PROMPT.system
+          },
+          {
+            role: "system",
+            content: languageSteeringLine(detectDominantLanguage(evidenceTraces.flatMap((trace) => [
+              trace.userText,
+              trace.agentText,
+              trace.reflection
+            ])))
+          },
+          {
+            role: "user",
+            content: packL2InductionTraces(
+              evidenceTraces,
+              this.deps.config.algorithm.l2Induction.traceCharCap,
+              signature
+            )
+          }
+        ], {
+          operation: `${L2_INDUCTION_PROMPT.id}.v${L2_INDUCTION_PROMPT.version}`,
+          thinkingMode: "enabled",
+          temperature: 0.1,
+          maxTokens: 1200
+        });
 
-      const invalidReason = l2InductionInvalidReason(result);
-      if (invalidReason) {
-        return { ok: false, reason: invalidReason };
+        const invalidReason = l2InductionInvalidReason(result);
+        if (invalidReason) {
+          lastInvalidReason = invalidReason;
+          continue;
+        }
+
+        const boundary = typeof result.boundary === "string" ? skillMarkdown(result.boundary) : "";
+        const procedure = skillMarkdown(firstString(result.procedure, result.action));
+        const verification = typeof result.verification === "string" ? skillMarkdown(result.verification) : "";
+        const next = {
+          ...fallback,
+          title: skillText(result.title),
+          trigger: skillMarkdown(result.trigger),
+          procedure,
+          verification,
+          boundary,
+          confidence: clampNumber(numberOr(result.confidence, fallback.confidence), 0, 1)
+        };
+
+        return {
+          ok: true,
+          draft: {
+            ...next,
+            body: renderPolicyBody(next)
+          }
+        };
       }
 
-      const boundary = typeof result.boundary === "string" ? skillMarkdown(result.boundary) : "";
-      const procedure = skillMarkdown(firstString(result.procedure, result.action));
-      const verification = typeof result.verification === "string" ? skillMarkdown(result.verification) : "";
-      const next = {
-        ...fallback,
-        title: skillText(result.title),
-        trigger: skillMarkdown(result.trigger),
-        procedure,
-        verification,
-        boundary,
-        confidence: clampNumber(numberOr(result.confidence, fallback.confidence), 0, 1)
-      };
-
       return {
-        ok: true,
-        draft: {
-          ...next,
-          body: renderPolicyBody(next)
-        }
+        ok: false,
+        reason: lastInvalidReason ?? "llm-failed: l2.induction.invalid: unknown"
       };
     } catch (error) {
       return {
@@ -551,8 +561,7 @@ export class PolicyInductionEngine {
 
   private findExistingPolicyForL2Bucket(
     signature: string,
-    evidenceTraces: TraceMeta[],
-    userId: string
+    evidenceTraces: TraceMeta[]
   ): PolicyMeta | null {
     if (evidenceTraces.length === 0) return null;
     const policies = this.deps.repos.memories
@@ -580,7 +589,7 @@ export class PolicyInductionEngine {
     return best?.policy ?? null;
   }
 
-  recomputePolicyStats(policyId: string, userId: string, at: string, triggerEpisodeId?: string): void {
+  recomputePolicyStats(policyId: string, at: string, triggerEpisodeId?: string): void {
     const memory = this.deps.repos.memories.get(policyId);
     if (!memory || memory.memoryLayer !== "L2") return;
     const policy = policyMetaFromMemory(memory);
@@ -588,7 +597,7 @@ export class PolicyInductionEngine {
 
     const linkedTraceIds = new Set(
       this.deps.repos.runtime
-        .listTracePolicyLinks({ userId, l2MemoryId: policy.id, limit: 1000 })
+        .listTracePolicyLinks({ l2MemoryId: policy.id, limit: 1000 })
         .map((link) => link.l1MemoryId)
     );
 

@@ -3,19 +3,22 @@ import type { OnboardingStateDto } from "@memmy/local-api-contracts";
 import { Gift, Key } from "lucide-react";
 import { useEffect, useState } from "react";
 import { resolveDesktopAccountChannel } from "../app/account-channel.js";
+import { buildInvitationSignupEvent } from "../app/invitation-analytics.js";
+import { resolveInvitationToastKind } from "../app/invitation-result.js";
 import { persistLoginModeSelection } from "../app/login-mode.js";
 import { useApiClients } from "../app/providers.js";
 import { buildAccountOnboardingStartPatch, resolveByokEntry, resolvePostLoginRoute } from "../app/routes.js";
 import { AuthCodeForm } from "../components/auth-code-form.js";
 import { LanguageToggleButton } from "../components/language-toggle-button.js";
 import { Memmy } from "../components/mascot/memmy.js";
-import { usePhoneAuth } from "../components/use-phone-auth.js";
+import { useVerificationCodeAuth } from "../components/use-verification-code-auth.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import { getLegalLinkUrl } from "../legal/legal-links.js";
 import { openExternalUrl } from "../utils/open-url.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { appActions } from "../state/app-actions.js";
 import { useAppState } from "../state/app-state.js";
+import { formatTokenGiftAmount } from "./token-gift.js";
 
 /** Handles welcome page. */
 export function WelcomePage() {
@@ -23,27 +26,32 @@ export function WelcomePage() {
   const { clients } = useApiClients();
   const { track } = useAnalytics();
   const { t, language } = useTranslation();
-  const phoneAuth = usePhoneAuth();
+  const verificationCodeAuth = useVerificationCodeAuth();
   const [identifier, setIdentifier] = useState("");
   const [code, setCode] = useState("");
+  const [inviteCode, setInviteCode] = useState("");
   const [modePersistencePending, setModePersistencePending] = useState(false);
   const [modePersistenceFeedback, setModePersistenceFeedback] = useState<{ text: string; tone: "error" | "success" } | null>(null);
   const channel = resolveDesktopAccountChannel();
+  const invitationEnabled = state.bootstrap?.promotions?.invitation?.enabled === true;
   const canContinue = Boolean(identifier.trim() && code.trim());
-  const showLoginBanner = state.bootstrap?.promotions?.loginBanner ?? true;
+  const agentChatTokenTotal = state.bootstrap?.promotions?.agentChatTokenTotal;
+  const showLoginBanner =
+    (state.bootstrap?.promotions?.loginBanner ?? true) && (agentChatTokenTotal ?? 0) > 0;
 
   // Handles use effect.
   useEffect(() => {
     setIdentifier("");
     setCode("");
+    setInviteCode("");
     setModePersistenceFeedback(null);
-    phoneAuth.resetInteractionState();
-  }, [channel, phoneAuth.resetInteractionState]);
+    verificationCodeAuth.resetInteractionState();
+  }, [channel, verificationCodeAuth.resetInteractionState]);
 
   /** Handles toggle language. */
   function toggleLanguage() {
     const nextLanguage = language === "en-US" ? "zh-CN" : "en-US";
-    phoneAuth.clearFeedback();
+    verificationCodeAuth.clearFeedback();
     setModePersistenceFeedback(null);
     dispatch(appActions.settingsUpdated({ language: nextLanguage }));
     void clients?.config.updateSettings({ language: nextLanguage }).catch(() => undefined);
@@ -51,17 +59,31 @@ export function WelcomePage() {
 
   /** Handles submit login. */
   async function submitLogin() {
-    if (!canContinue || phoneAuth.loginPending || modePersistencePending) {
+    if (!canContinue || verificationCodeAuth.loginPending || modePersistencePending) {
       return;
     }
     setModePersistenceFeedback(null);
 
-    const session = await phoneAuth.login(channel, identifier, code);
-    if (!session || !session.authenticated) {
+    const loginResult = await verificationCodeAuth.login(
+      channel,
+      identifier,
+      code,
+      invitationEnabled ? inviteCode : undefined
+    );
+    if (!loginResult || !loginResult.session.authenticated) {
       return;
     }
+    const session = loginResult.session;
+    const invitationToastKind = resolveInvitationToastKind(loginResult.invitationResult);
+    if (invitationToastKind) {
+      dispatch(appActions.showInvitationToast(invitationToastKind));
+    }
 
-    track({ name: "signup_completed", params: { method: channel === "phone" ? "phone" : "email", is_new_user: session.isNewUser }, consentTier: "basic" });
+    track(buildInvitationSignupEvent({
+      channel,
+      isNewUser: session.isNewUser,
+      invitationCode: invitationEnabled ? inviteCode : undefined
+    }));
 
     dispatch(appActions.accountUpdated({
       email: session.profile.email ?? "",
@@ -122,7 +144,7 @@ export function WelcomePage() {
     // Definition for byok entry.
     const byokEntry = resolveByokEntry({ onboarding: state.bootstrap?.onboarding });
 
-    track({ name: "byok_started", consentTier: "basic" });
+    track({ name: "byok_started", params: { user_mode: "byok" }, consentTier: "basic" });
     setModePersistenceFeedback(null);
 
     try {
@@ -173,7 +195,9 @@ export function WelcomePage() {
                 <span className="w-6 h-6 rounded-full bg-action-sky/15 flex items-center justify-center text-action-sky shrink-0">
                   <Gift size={14} strokeWidth={2.2} />
                 </span>
-                <span className="text-sm text-text-ink/70">{t("welcome.gift")}</span>
+                <span className="text-sm text-text-ink/70">
+                  {t("welcome.gift", { count: formatTokenGiftAmount(agentChatTokenTotal) })}
+                </span>
               </button>
             )}
 
@@ -182,13 +206,15 @@ export function WelcomePage() {
                 identifier={identifier}
                 identifierType={channel}
                 code={code}
-                disabled={!canContinue || phoneAuth.loginPending || modePersistencePending}
-                sendCodeDisabled={phoneAuth.sendCodeDisabled}
-                sendCodeLabel={phoneAuth.sendCodeLabel}
-                feedback={modePersistenceFeedback ?? phoneAuth.feedback}
+                inviteCode={inviteCode}
+                disabled={!canContinue || verificationCodeAuth.loginPending || modePersistencePending}
+                sendCodeDisabled={verificationCodeAuth.sendCodeDisabled}
+                sendCodeLabel={verificationCodeAuth.sendCodeLabel}
+                feedback={modePersistenceFeedback ?? verificationCodeAuth.feedback}
                 onIdentifierChange={setIdentifier}
                 onCodeChange={setCode}
-                onSendCode={() => void phoneAuth.sendCode(channel, identifier)}
+                onInviteCodeChange={invitationEnabled ? setInviteCode : undefined}
+                onSendCode={() => void verificationCodeAuth.sendCode(channel, identifier)}
                 onSubmit={() => void submitLogin()}
                 onOpenTerms={() => void openExternalUrl(getLegalLinkUrl("terms", language, state.bootstrap?.legal))}
                 onOpenDataAgreement={() => void openExternalUrl(getLegalLinkUrl("data", language, state.bootstrap?.legal))}

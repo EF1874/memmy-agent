@@ -452,7 +452,7 @@ export class MemoryRepository {
     previous?: MemoryRow;
   } {
     const previous = memory.memoryKey
-      ? this.getByKey(memory.userId, memory.memoryLayer, memory.memoryKey)
+      ? this.getByKey(memory.memoryLayer, memory.memoryKey)
       : undefined;
     if (!previous) {
       return { memory: this.insert(memory), created: true };
@@ -503,8 +503,7 @@ export class MemoryRepository {
     return row ? this.hydrate(memoryFromSql(row)) : undefined;
   }
 
-  getByKey(userId: string, memoryLayer: MemoryLayer, key: string): MemoryRow | undefined {
-    void userId;
+  getByKey(memoryLayer: MemoryLayer, key: string): MemoryRow | undefined {
     const row = this.db
       .prepare(
         `SELECT *
@@ -1857,6 +1856,21 @@ export class RuntimeRepository {
     return row ? recallEventFromSql(row) : undefined;
   }
 
+  getTurnStartRecallEvent(sessionId: string, turnId: string): RecallEventRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT *
+         FROM recall_events
+         WHERE session_id = ?
+           AND turn_id = ?
+           AND json_extract(request_json, '$.retrievalMode') = 'turn_start'
+         ORDER BY created_at DESC
+         LIMIT 1`
+      )
+      .get(sessionId, turnId) as SqlRecallEventRow | undefined;
+    return row ? recallEventFromSql(row) : undefined;
+  }
+
   updateRecallEventOutcome(
     id: string,
     outcome: NonNullable<RecallEventRecord["outcome"]>
@@ -2190,6 +2204,31 @@ export class RuntimeRepository {
            WHERE (status = 'queued'
               OR (status = 'leased' AND leased_until IS NOT NULL AND leased_until <= ?))
              AND attempts < max_attempts
+             AND NOT (
+               job_type = 'reward'
+               AND json_extract(payload_json, '$.l1MemoryId') IS NOT NULL
+               AND (
+                 json_extract(payload_json, '$.polarity') IS NULL
+                 OR json_extract(payload_json, '$.polarity') = 'positive'
+               )
+               AND EXISTS (
+                 SELECT 1
+                 FROM memory_processing_state
+                 JOIN memories ON memories.id = memory_processing_state.memory_id
+                 WHERE memory_processing_state.memory_id =
+                   CAST(json_extract(evolution_jobs.payload_json, '$.l1MemoryId') AS TEXT)
+                   AND NOT EXISTS (
+                     SELECT 1
+                     FROM memory_vector_entries
+                     WHERE memory_vector_entries.memory_id = memory_processing_state.memory_id
+                       AND memory_vector_entries.vector_field = 'vec_summary'
+                   )
+                   AND (
+                     memory_processing_state.state IN ('embedding_pending', 'embedding')
+                   OR memory_processing_state.state IN ('summary_pending', 'summarizing')
+                   )
+               )
+             )
              AND (
                json_extract(payload_json, '$.runAfter') IS NULL
                OR CAST(json_extract(payload_json, '$.runAfter') AS TEXT) <= ?
@@ -2850,7 +2889,10 @@ export class RuntimeRepository {
   } = {}): DecisionRepairRecord[] {
     const clauses = ["1=1"];
     const params: SqlValue[] = [];
-    void input.userId;
+    if (input.userId) {
+      clauses.push("user_id = ?");
+      params.push(input.userId);
+    }
     if (input.contextHash) {
       clauses.push("context_hash = ?");
       params.push(input.contextHash);
@@ -2869,6 +2911,13 @@ export class RuntimeRepository {
       )
       .all(...params, input.limit ?? 50) as SqlDecisionRepairRow[];
     return rows.map(decisionRepairFromSql);
+  }
+
+  getDecisionRepair(id: string): DecisionRepairRecord | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM decision_repairs WHERE id = ?`)
+      .get(id) as SqlDecisionRepairRow | undefined;
+    return row ? decisionRepairFromSql(row) : undefined;
   }
 
   upsertCandidatePoolTrace(input: {
@@ -3488,6 +3537,9 @@ function listTitleForMemory(memory: MemoryRow): string {
   const importedUserTitle = isPlaceholderMemorySummary(placeholderSummary)
     ? firstUserMemoryValueLine(memory.memoryValue)
     : undefined;
+  const pendingTraceUserTitle = memory.memoryLayer === "L1" && !placeholderSummary
+    ? firstUserMemoryValueLine(memory.memoryValue)
+    : undefined;
   const skillTitleCandidates = memory.memoryLayer === "Skill"
     ? [
         stringLike(internal.title),
@@ -3501,6 +3553,7 @@ function listTitleForMemory(memory: MemoryRow): string {
     importedUserTitle,
     stringLike(memory.info.title),
     stringLike(internal.title),
+    pendingTraceUserTitle,
     stringLike(policy.title),
     stringLike(world.title),
     ...skillTitleCandidates,
@@ -3782,7 +3835,6 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
   const clauses = ["deleted_at IS NULL"];
   const params: SqlValue[] = [];
 
-  addValueClause("user_id", filter.userId);
   addValueClause("session_id", filter.sessionId);
   addValueClause("conversation_id", filter.conversationId);
   addAgentIdClause(filter.agentId, filter.excludedAgentIds);
@@ -4769,6 +4821,7 @@ function evolutionJobOrderSql(): string {
              WHEN job_type = 'embedding' THEN 10
              WHEN job_type = 'reflection' THEN 20
              WHEN job_type = 'reward' THEN 30
+             WHEN job_type = 'span_big_turn' THEN 35
              WHEN job_type = 'l2_association' THEN 40
              WHEN job_type = 'l2_induction' THEN 50
              WHEN job_type = 'l3_abstraction' THEN 60

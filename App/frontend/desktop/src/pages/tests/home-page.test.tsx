@@ -16,6 +16,7 @@ import {
   ComposerMediaPreviewStrip,
   ComposerSubmitButton,
   HomePage,
+  AgentOperationErrorSlot,
   agentErrorText,
   agentStatusText,
   agentChatScopeKey,
@@ -36,6 +37,8 @@ import {
   submitAgentComposerMessage,
   updateComposerDraftForScope,
   fileToPendingAttachment,
+  filterProjectTargetPickerProjects,
+  resolveProjectTargetPickerActiveIndex,
   validateAgentMediaFiles,
   type PendingFileAttachment
 } from "../home-page.js";
@@ -72,7 +75,8 @@ describe("HomePage", () => {
     expect(html).toContain("发送");
     expect(html).toContain("Agent 正在连接");
     expect(html).not.toContain('aria-haspopup="menu"');
-    expect(html).not.toContain('aria-expanded=');
+    expect(html).toContain('class="home-project-picker__trigger"');
+    expect(html).toContain('aria-expanded="false"');
     expect(html).toContain(`accept="${AGENT_MEDIA_ACCEPT}"`);
     expect(html).toContain("hidden");
     expect(html).toContain('class="hidden"');
@@ -168,17 +172,35 @@ describe("HomePage", () => {
     expect(source).not.toContain('className="absolute left-1/2 bottom-full mb-3 z-30 -translate-x-1/2"');
   });
 
-  it("keeps operation error auto-dismiss centralized in the runtime bridge", () => {
+  it("keeps all temporary operation error auto-dismiss centralized in the runtime bridge", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
     const bridgeSource = readAgentRuntimeBridgeSource();
 
-    expect(source).toContain("COMPOSER_ERROR_AUTO_DISMISS_MS = 5000");
-    expect(source).toContain("window.setTimeout");
-    expect(source).toContain("agentActions.composerMediaErrorUpdated(chatScopeKey, null)");
-    expect(source).toContain("window.clearTimeout");
+    expect(source).not.toContain("COMPOSER_ERROR_AUTO_DISMISS_MS");
+    expect(source).not.toContain("composerMediaErrorUpdated");
+    expect(source).toContain('agentActions.operationFailed("chat", createAgentOperationError({');
+    expect(source).toContain('source: "send"');
     expect(bridgeSource).toContain("AGENT_OPERATION_ERROR_DISMISS_MS = 5_000");
     expect(bridgeSource).toContain('agentActions.operationErrorDismissed("chat", error.id)');
-    expect(bridgeSource).toContain('agentActions.operationErrorDismissed("sidebar", error.id)');
+    expect(bridgeSource).toContain("state.agent.operationErrorNotice");
+  });
+
+  it("renders operation errors in a neutral rounded toast", () => {
+    const html = renderToString(<AgentOperationErrorSlot message="项目操作未完成，请重试" />);
+    const styles = readFileSync(stylesSourcePath, "utf8");
+    const toastStyles = styles.slice(
+      styles.indexOf(".agent-operation-error-toast {"),
+      styles.indexOf("@keyframes agent-operation-error-toast-lifecycle")
+    );
+
+    expect(html).toContain('class="agent-operation-error-toast"');
+    expect(html).toContain('role="alert"');
+    expect(html).toContain("项目操作未完成，请重试");
+    expect(toastStyles).toContain("border-radius: var(--radius-card);");
+    expect(toastStyles).toContain("background: color-mix(in srgb, var(--color-background-paper) 96%, var(--color-canvas-oat));");
+    expect(toastStyles).toContain("box-shadow: 0 8px 24px rgb(17 29 28 / 0.1);");
+    expect(toastStyles).toContain("color: var(--color-text-ink);");
+    expect(toastStyles).not.toContain("var(--color-status-error)");
   });
 
   it("keeps composer state in the agent reducer instead of HomePage local state", () => {
@@ -186,13 +208,12 @@ describe("HomePage", () => {
 
     expect(source).toContain("state.agent.composerDraftsByScope");
     expect(source).toContain("state.agent.composerPendingAttachmentsByScope");
-    expect(source).toContain("state.agent.composerMediaErrorByScope");
     expect(source).toContain("agentActions.composerDraftUpdated(scopeKey, nextValue)");
     expect(source).toContain("const sendScopeKey = chatScopeKey;");
     expect(source).toContain("clearComposer: () => clearComposerAfterSend(sendScopeKey)");
     expect(source).not.toContain("useState<Record<string, string>>({})");
     expect(source).not.toContain("useState<Record<string, PendingAttachment[]>>({})");
-    expect(source).not.toContain("useState<Record<string, string | null>>({})");
+    expect(source).not.toContain("composerMediaErrorByScope");
   });
 
   it("does not revoke all pending attachments when HomePage unmounts", () => {
@@ -207,6 +228,109 @@ describe("HomePage", () => {
 
     expect(source).toContain("const lastNewChatRequestRef = useRef(state.agent.newChatRequestId);");
     expect(source).not.toContain("const lastNewChatRequestRef = useRef(0);");
+  });
+
+  it("preserves the project target selected for a newly opened draft", () => {
+    const source = readFileSync(homePageSourcePath, "utf8");
+    const resetNewChatLocalUi = source.slice(
+      source.indexOf("function resetNewChatLocalUi()"),
+      source.indexOf("/**\n   * Records the most recently used slash command.")
+    );
+
+    expect(resetNewChatLocalUi).toContain("resetTransientConversationUi();");
+    expect(resetNewChatLocalUi).not.toContain("resetComposerDraftUi();");
+  });
+
+  it("filters projects by name or path and resolves the keyboard-active row", () => {
+    const projects = [
+      { id: "one", name: "memmy-agent", rootPath: "C:\\work\\memmy-agent", pinned: false, createdAt: "2026-01-01" },
+      { id: "two", name: "Playground", rootPath: "D:\\code\\sandbox", pinned: false, createdAt: "2026-01-02" }
+    ];
+
+    expect(filterProjectTargetPickerProjects(projects, "MEMMY")).toEqual([projects[0]]);
+    expect(filterProjectTargetPickerProjects(projects, "sandbox")).toEqual([projects[1]]);
+    expect(filterProjectTargetPickerProjects(projects, "missing")).toEqual([]);
+    expect(resolveProjectTargetPickerActiveIndex(["project:one", "new"], "project:one")).toBe(0);
+    expect(resolveProjectTargetPickerActiveIndex(["project:one", "project:two", "new"], "project:two")).toBe(1);
+    expect(resolveProjectTargetPickerActiveIndex(["project:two", "new"], "project:one")).toBe(0);
+    expect(resolveProjectTargetPickerActiveIndex(["new"], null)).toBe(0);
+  });
+
+  it("shows and searches only the 10 most recently added projects", () => {
+    const projects = Array.from({ length: 12 }, (_, index) => ({
+      id: `project-${index + 1}`,
+      name: `Project ${index + 1}`,
+      rootPath: `C:\\work\\project-${index + 1}`,
+      pinned: false,
+      createdAt: `2026-01-${String(index + 1).padStart(2, "0")}`
+    }));
+
+    expect(filterProjectTargetPickerProjects(projects, "")).toEqual(projects.slice(2).reverse());
+    expect(filterProjectTargetPickerProjects(projects, "project-1")).toEqual([
+      projects[11],
+      projects[10],
+      projects[9]
+    ]);
+    expect(filterProjectTargetPickerProjects(projects, "project-2")).toEqual([]);
+  });
+
+  it("sizes the project menu to its content within composer and viewport caps", () => {
+    const styles = readFileSync(stylesSourcePath, "utf8");
+    const source = readFileSync(homePageSourcePath, "utf8");
+    const triggerStyles = styles.slice(
+      styles.indexOf(".home-project-picker__trigger {"),
+      styles.indexOf(".home-project-picker__trigger:hover")
+    );
+    const searchInputStyles = styles.slice(
+      styles.indexOf(".home-project-picker__search input {"),
+      styles.indexOf(".home-project-picker__search input::placeholder")
+    );
+    const searchFocusStyles = styles.slice(
+      styles.indexOf(".home-project-picker__search:focus-within {"),
+      styles.indexOf(".home-project-picker__list {")
+    );
+    const optionStyles = styles.slice(
+      styles.indexOf(".home-project-picker__option {"),
+      styles.indexOf(".home-project-picker__option:hover")
+    );
+    const listStyles = styles.slice(
+      styles.indexOf(".home-project-picker__list {"),
+      styles.indexOf(".home-project-picker__projects {")
+    );
+    const projectListStyles = styles.slice(
+      styles.indexOf(".home-project-picker__projects {"),
+      styles.indexOf(".home-project-picker__option {")
+    );
+    const selectedOptionStyles = styles.slice(
+      styles.indexOf(".home-project-picker__option--selected {"),
+      styles.indexOf(".home-project-picker__option:focus-visible")
+    );
+
+    expect(styles).toContain("width: max-content;");
+    expect(styles).toContain(".home-project-picker {\n  position: relative;\n  z-index: 45;\n  width: 100%;\n  max-width: 100%;");
+    expect(styles).toContain("width: max-content;\n  max-width: 100%;");
+    expect(styles).toContain("max-height: min(24rem, 45dvh);");
+    expect(styles).toContain("grid-template-rows: auto minmax(0, 1fr);");
+    expect(triggerStyles).toContain("border: 0;");
+    expect(triggerStyles).toContain("border-radius: 999px;");
+    expect(searchInputStyles).toContain("border: 0;");
+    expect(searchInputStyles).toContain("outline: 0;");
+    expect(searchFocusStyles).not.toContain("border:");
+    expect(searchFocusStyles).not.toContain("outline:");
+    expect(listStyles).toContain("overflow: hidden;");
+    expect(listStyles).toContain("grid-template-rows: minmax(0, 1fr) auto auto;");
+    expect(projectListStyles).toContain("overflow-y: auto;");
+    expect(projectListStyles).toContain("overscroll-behavior: contain;");
+    expect(selectedOptionStyles).toContain("background: var(--color-nav-active-bg);");
+    expect(selectedOptionStyles).toContain("color: var(--color-action-sky-hover);");
+    expect(selectedOptionStyles).toContain(".home-project-picker__option--selected > svg:last-child");
+    expect(source).toContain('className="home-project-picker__projects"');
+    expect(source).toContain('className="home-project-picker__actions"');
+    expect(optionStyles).toContain("min-height: 40px;");
+    expect(styles).toContain(".home-project-picker__option--action {\n  min-height: 36px;");
+    expect(source).not.toContain("<ChevronDown");
+    expect(source).not.toContain("<FolderPlus");
+    expect(source).toContain("<LucidePlus");
   });
 
   it("consumes launch chat query params when reading focused agent chat ids", () => {
@@ -291,7 +415,7 @@ describe("HomePage", () => {
     expect(keyDownHandler).not.toContain("!state.agent.isSending && !isCreatingChat");
   });
 
-  it("derives chat scope and active conversation from current chat identity", () => {
+  it("derives chat scope and active conversation from current chat identity and messages", () => {
     expect(agentChatScopeKey("chat-1", 3)).toBe("chat-1");
     expect(agentChatScopeKey(null, 3)).toBe("draft-3");
     expect(hasActiveAgentConversation("chat-1", 1)).toBe(true);
@@ -425,7 +549,7 @@ describe("HomePage", () => {
   it("consumes the shared AgentRuntimeBridge connection instead of owning websocket lifecycle", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
 
-    expect(source).toContain("const { connection, ensureChatSubscription } = useAgentRuntimeBridge();");
+    expect(source).toContain("const { connection, ensureChatSubscription, taskStateCoordinator } = useAgentRuntimeBridge();");
     expect(source).toContain("connection.onStatusResult((chatId, content) => {");
     expect(source).toContain("subscribedChatId: state.agent.currentChatId");
     expect(source).not.toContain("connectWebSocket(");
@@ -507,8 +631,8 @@ describe("HomePage", () => {
 
     expect(refreshEffect).toContain("Object.entries(state.agent.pendingCanonicalHydrateByChatId)");
     expect(refreshEffect).toContain("hydrateAgentThreadInBackground(clients.memmyAgent, dispatch, chatId);");
-    expect(refreshEffect).toContain("void refreshAgentTaskList(clients.memmyAgent, dispatch, { state: state.agent });");
-    expect(refreshTaskList).toContain("client.listSessions()");
+    expect(refreshEffect).toContain("taskStateCoordinator?.refreshTaskState();");
+    expect(refreshTaskList).toContain("client.getSessionSnapshot({ timeoutMs: 10_000 })");
     expect(refreshTaskList).toContain("client.readSidebarState()");
     expect(refreshTaskList).not.toContain("readWebuiThread");
   });
@@ -773,7 +897,7 @@ describe("HomePage", () => {
     expect(agentErrorText("home.media.error.sendUnsupported")).toBe("当前不支持此文件格式。请上传图片、PDF、Office 文档或文本文件。");
     expect(agentErrorText("home.media.error.sendTooManyAttachments")).toBe("最多 4 个附件。");
     expect(agentErrorText("home.media.error.sendFileSize")).toBe("单个文件不能超过 10 MB。");
-    expect(agentErrorText("plain error")).toBe("plain error");
+    expect(agentErrorText("plain error")).toBe("操作未完成，请重试");
     expect(agentErrorText(null)).toBeNull();
   });
 
@@ -822,7 +946,7 @@ describe("HomePage", () => {
         { url: "http://agent.local/api/media/sig/report", name: "小短文.pdf", kind: "file", path: "/media/websocket/webui/小短文.pdf" }
       ],
       focus: true,
-      deliveryUncertain: false
+      target: { kind: "standalone" }
     });
     expect(uploadAgentMedia).toHaveBeenCalledWith([
       { blob: encodedBlob, name: "shot.png", kind: "image", mime: "image/png" },
@@ -831,6 +955,8 @@ describe("HomePage", () => {
     expect(sendMessage).toHaveBeenCalledWith({
       chatId: "chat-new",
       content: "帮我整理计划",
+      clientRequestId: expect.any(String),
+      target: { kind: "standalone" },
       language: "zh-CN",
       media: [
         { path: "/media/websocket/webui/shot.png", url: "http://agent.local/api/media/sig/shot", name: "shot.png", kind: "image", mime: "image/png", bytes: 3 },
@@ -845,6 +971,41 @@ describe("HomePage", () => {
     expect(clearComposer).toHaveBeenCalledTimes(1);
     expect(onNewChatMessageSent).toHaveBeenCalledWith("chat-new");
     expect(track).toHaveBeenCalledWith({ name: "agent_send_message", params: { page_path: "/main" }, consentTier: "basic" });
+  });
+
+  it("keeps a new project target on the optimistic task action", async () => {
+    const dispatch = vi.fn();
+    const sendMessage = vi.fn();
+    const projectTarget = { kind: "project" as const, projectId: "project-a" };
+
+    await expect(submitAgentComposerMessage({
+      chatId: null,
+      target: projectTarget,
+      connection: {
+        getReadyGeneration: () => 1,
+        newChat: vi.fn(async () => "chat-project"),
+        sendMessage
+      },
+      content: "检查项目",
+      pendingAttachments: [],
+      uploadAgentMedia: vi.fn(async () => []),
+      dispatch,
+      track: vi.fn(),
+      clearComposer: vi.fn()
+    })).resolves.toBe(true);
+
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      chatId: "chat-project",
+      target: projectTarget
+    }), 1);
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "agent/userMessageQueued",
+      chatId: "chat-project",
+      content: "检查项目",
+      media: [],
+      focus: true,
+      target: projectTarget
+    });
   });
 
   it("existing chat send does not create a new chat", async () => {
@@ -869,9 +1030,14 @@ describe("HomePage", () => {
     })).resolves.toBe(true);
 
     expect(newChat).not.toHaveBeenCalled();
-    expect(dispatch).toHaveBeenCalledWith({ type: "agent/userMessageQueued", chatId: "chat-1", content: "继续", media: [], focus: true, deliveryUncertain: false });
+    expect(dispatch).toHaveBeenCalledWith({ type: "agent/userMessageQueued", chatId: "chat-1", content: "继续", media: [], focus: true });
     expect(ensureChatSubscription).toHaveBeenCalledWith("chat-1");
-    expect(sendMessage).toHaveBeenCalledWith({ chatId: "chat-1", content: "继续", media: [] }, 1);
+    expect(sendMessage).toHaveBeenCalledWith({
+      chatId: "chat-1",
+      content: "继续",
+      clientRequestId: expect.any(String),
+      media: []
+    }, 1);
     expect(mockCallOrder(ensureChatSubscription)).toBeLessThan(mockCallOrder(sendMessage));
     expect(mockCallOrder(sendMessage)).toBeLessThan(mockCallOrder(dispatch));
     expect(onNewChatMessageSent).not.toHaveBeenCalled();
@@ -930,7 +1096,7 @@ describe("HomePage", () => {
     expect(clearComposer).not.toHaveBeenCalled();
   });
 
-  it("marks a sent message uncertain when the ready generation changes immediately after send", async () => {
+  it("does not restore the old delivery-uncertain flag after an acknowledged send", async () => {
     const dispatch = vi.fn();
     let generation: number | null = 1;
     const sendMessage = vi.fn(() => {
@@ -953,8 +1119,7 @@ describe("HomePage", () => {
       chatId: "chat-1",
       content: "发送后立刻断线",
       media: [],
-      focus: true,
-      deliveryUncertain: true
+      focus: true
     });
   });
 

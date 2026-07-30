@@ -4,6 +4,12 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import { ApiRequestError } from "../../api/http.js";
+import {
+  buildLogsFilterLayer,
+  buildMemoryUiDetailOpenedEvent,
+  buildMemoryUiPanelRefreshedEvent
+} from "../../analytics/memory-ui-analytics.js";
+import { useAnalytics } from "../../analytics/use-analytics.js";
 import { MEMORY_ADD_STATUS_SUMMARIES, type MessageKey, type MessageValues } from "../../i18n/messages.js";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
 import { useTranslation } from "../../i18n/use-translation.js";
@@ -74,12 +80,14 @@ function logsCacheKeys(page: number, tool: "" | MemoryApiLogToolName, sourceAgen
 
 export function LogsSubPage(props: LogsSubPageProps) {
   const { t } = useTranslation();
+  const { track } = useAnalytics();
   const [tool, setTool] = useState<"" | MemoryApiLogToolName>("");
   const [sourceAgent, setSourceAgent] = useState("");
   const [page, setPage] = useState(1);
   const [state, setState] = useState<RemoteData<MemoryApiLogsOutput>>({ status: "loading" });
+  const logsFilterLayer = () => buildLogsFilterLayer(tool, sourceAgent);
 
-  function refresh(nextPage = page, nextTool = tool, nextSourceAgent = sourceAgent, options: { useCache?: boolean } = {}): Promise<void> {
+  function refresh(nextPage = page, nextTool = tool, nextSourceAgent = sourceAgent, options: { useCache?: boolean } = {}): Promise<MemoryApiLogsOutput | undefined> {
     if (!props.client) {
       const message = t("memory.clientNotReady");
       setState({ status: "error", message });
@@ -93,6 +101,7 @@ export function LogsSubPage(props: LogsSubPageProps) {
       .then((data) => {
         writeMemoryPanelCaches(cacheKeys, data);
         setState({ status: "ready", data });
+        return data;
       })
       .catch((error) => {
         setState({ status: "error", message: toErrorMessage(error) });
@@ -118,7 +127,22 @@ export function LogsSubPage(props: LogsSubPageProps) {
         setPage(1);
       }}
       onPageChange={(nextPage) => setPage(normalizePage(nextPage))}
-      onRefresh={() => refresh(page, tool, sourceAgent, { useCache: false })}
+      onRefresh={async () => {
+        const data = await refresh(page, tool, sourceAgent, { useCache: false });
+        if (data) {
+          track(buildMemoryUiPanelRefreshedEvent({
+            subPage: "logs",
+            filterLayer: logsFilterLayer(),
+            resultCount: data.total
+          }));
+        }
+      }}
+      onOpenDetail={() => {
+        track(buildMemoryUiDetailOpenedEvent({
+          subPage: "logs",
+          filterLayer: logsFilterLayer()
+        }));
+      }}
     />
   );
 }
@@ -131,6 +155,7 @@ export interface LogsSubPageViewProps {
   onSourceAgentChange: (sourceAgent: string) => void;
   onPageChange: (page: number) => void;
   onRefresh: () => void | Promise<void>;
+  onOpenDetail: () => void;
 }
 
 export function LogsSubPageView(props: LogsSubPageViewProps) {
@@ -158,6 +183,7 @@ export function LogsSubPageView(props: LogsSubPageViewProps) {
         next.delete(id);
       } else {
         next.add(id);
+        props.onOpenDetail();
       }
       return next;
     });
@@ -317,6 +343,8 @@ interface AddDetail {
   role?: string;
   action?: string;
   summary?: string | null;
+  spanGoal?: string | null;
+  span_goal?: string | null;
   content?: string;
   traceId?: string;
   episodeId?: string;
@@ -581,23 +609,57 @@ function buildSummary(log: MemoryApiLog, input: unknown, output: unknown, t: Tra
     const query = searchInput.query?.trim();
     const counts = memorySearchSummaryCounts(searchOutput);
     const result = t("memory.logs.search.summary", {
-      candidates: counts.candidates,
-      filtered: counts.filtered
+      beforeLlm: counts.beforeLlm,
+      afterLlm: counts.afterLlm
     });
     return query ? { text: query, tail: `· ${result}` } : { text: result };
   }
   const addInput = asRecord(input) as AddInput;
   const addOutput = asRecord(output) as AddOutput;
   const firstDetail = addOutput.details?.[0];
+  const summary = usableAddSummary(firstDetail?.summary);
+  if (firstDetail?.role === "trace" || firstDetail?.role === "span") {
+    const displayText = firstDetail.role === "span"
+      ? usableAddSummary(firstDetail.spanGoal ?? firstDetail.span_goal)
+      : usableTraceSummary(summary);
+    return {
+      text: firstLogText(
+        firstDetail.role === "trace" && displayText ? truncateTraceLogSummary(displayText) : displayText,
+        firstDetail.query,
+        addInput.query
+      ) ?? "memory item"
+    };
+  }
   return {
     text: firstLogText(
-      usableAddSummary(firstDetail?.summary),
+      summary,
       firstDetail?.query,
       addInput.query,
       firstDetail?.content,
       firstDetail?.traceId
     ) ?? "memory item"
   };
+}
+
+function usableTraceSummary(value: string | undefined): string | undefined {
+  return value && !/^RawTurn:\s*/i.test(value) ? value : undefined;
+}
+
+function truncateTraceLogSummary(value: string): string {
+  const characters = Array.from(value);
+  const chineseCharacterCount = characters.filter((character) => /[\u3400-\u9fff]/u.test(character)).length;
+  if (chineseCharacterCount > 0) {
+    if (chineseCharacterCount <= 20) return value;
+    let count = 0;
+    const end = characters.findIndex((character) => {
+      if (/[\u3400-\u9fff]/u.test(character)) count += 1;
+      return count === 20;
+    });
+    return `${characters.slice(0, end + 1).join("")}...`;
+  }
+
+  const words = value.match(/\S+/g) ?? [];
+  return words.length > 20 ? `${words.slice(0, 20).join(" ")}...` : value;
 }
 
 function usableAddSummary(value: string | null | undefined): string | undefined {
@@ -608,19 +670,12 @@ function usableAddSummary(value: string | null | undefined): string | undefined 
   return text;
 }
 
-function memorySearchSummaryCounts(output: SearchOutput): { candidates: number; filtered: number } {
-  const statsCandidateCount = firstNonNegativeInt(output.stats?.raw, output.stats?.ranked);
-  const statsFilteredCount = firstNonNegativeInt(output.stats?.finalReturned, output.stats?.llmFilter?.kept);
-  const candidateArrayCount = output.candidates?.length;
-  const filteredArrayCount = output.filtered?.length;
-
+function memorySearchSummaryCounts(output: SearchOutput): { beforeLlm: number; afterLlm: number } {
   return {
-    candidates: candidateArrayCount !== undefined && candidateArrayCount > 0
-      ? candidateArrayCount
-      : statsCandidateCount ?? candidateArrayCount ?? 0,
-    filtered: filteredArrayCount !== undefined && filteredArrayCount > 0
-      ? filteredArrayCount
-      : statsFilteredCount ?? filteredArrayCount ?? 0
+    beforeLlm: firstNonNegativeInt(output.stats?.ranked) ?? output.candidates?.length ?? 0,
+    afterLlm: firstNonNegativeInt(output.stats?.llmFilter?.kept, output.stats?.finalReturned)
+      ?? output.filtered?.length
+      ?? 0
   };
 }
 

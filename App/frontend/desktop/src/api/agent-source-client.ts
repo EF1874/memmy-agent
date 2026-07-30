@@ -5,13 +5,17 @@ import {
   AgentSourceScanInputSchema,
   AgentSourceScanStatusResponseSchema,
   AgentSourceViewSchema,
+  ManagedAgentSourceImportResultSchema,
   OkResponseSchema,
+  AgentSourcePluginActionInputSchema,
   type AddManualInput,
   type AgentSourceMemoryPluginConflict,
+  type AgentSourcePluginActionInput,
   type AgentSourceScanJobResponse,
   type AgentSourceScanInput,
   type AgentSourceScanStatusResponse,
   type AgentSourceView,
+  type ManagedAgentSourceImportResult,
   type RuntimeConfig
 } from "@memmy/local-api-contracts";
 import { requestJson } from "./http.js";
@@ -23,11 +27,12 @@ export interface AgentSourceClient {
   stopScan(): Promise<void>;
   cancelScan(): Promise<void>;
   addManualSource(input: AddManualInput): Promise<AgentSourceView>;
+  syncManagedSource(sourceId: string): Promise<ManagedAgentSourceImportResult>;
   removeSource(sourceId: string): Promise<void>;
   installSkill(sourceId: string): Promise<void>;
   uninstallSkill(sourceId: string): Promise<void>;
-  installPlugin(sourceId: string): Promise<void>;
-  uninstallPlugin(sourceId: string): Promise<void>;
+  installPlugin(sourceId: string, action?: AgentSourcePluginActionInput): Promise<void>;
+  uninstallPlugin(sourceId: string, action?: AgentSourcePluginActionInput): Promise<void>;
   getMemoryPluginConflicts(): Promise<AgentSourceMemoryPluginConflict[]>;
 }
 
@@ -94,6 +99,15 @@ export function createHttpAgentSourceClient(config: RuntimeConfig): AgentSourceC
       });
     },
 
+    async syncManagedSource(sourceId) {
+      return requestJson({
+        config,
+        path: `/api/agent-sources/${encodeURIComponent(sourceId)}/managed/sync`,
+        schema: ManagedAgentSourceImportResultSchema,
+        init: { method: "POST" }
+      });
+    },
+
     async removeSource(sourceId) {
       await requestJson({
         config,
@@ -121,21 +135,23 @@ export function createHttpAgentSourceClient(config: RuntimeConfig): AgentSourceC
       });
     },
 
-    async installPlugin(sourceId) {
+    async installPlugin(sourceId, action) {
       await requestJson({
         config,
         path: `/api/agent-sources/${encodeURIComponent(sourceId)}/plugin`,
         schema: OkResponseSchema,
-        init: { method: "POST" }
+        init: { method: "POST" },
+        body: AgentSourcePluginActionInputSchema.parse(action ?? {})
       });
     },
 
-    async uninstallPlugin(sourceId) {
+    async uninstallPlugin(sourceId, action) {
       await requestJson({
         config,
         path: `/api/agent-sources/${encodeURIComponent(sourceId)}/plugin`,
         schema: OkResponseSchema,
-        init: { method: "DELETE" }
+        init: { method: "DELETE" },
+        body: AgentSourcePluginActionInputSchema.parse(action ?? {})
       });
     }
   };

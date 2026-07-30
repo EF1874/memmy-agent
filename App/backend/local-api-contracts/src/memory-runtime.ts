@@ -10,7 +10,7 @@ export const CursorSchema = z.string();
 export type Cursor = z.infer<typeof CursorSchema>;
 
 /** Schema for memory kind. */
-export const MemoryKindSchema = z.enum(["trace", "policy", "world_model", "skill"]);
+export const MemoryKindSchema = z.enum(["trace", "span", "policy", "world_model", "skill"]);
 export type MemoryKind = z.infer<typeof MemoryKindSchema>;
 
 /** Schema for memory layer. */
@@ -33,6 +33,7 @@ export const JobTypeSchema = z.enum([
   "reflection",
   "embedding",
   "reward",
+  "span_big_turn",
   "l2_association",
   "l2_induction",
   "l3_abstraction",
@@ -322,7 +323,7 @@ export const CompleteTurnInputSchema = RuntimeRequestFieldsSchema.extend({
   artifacts: z.array(z.unknown()).optional(),
   sourceMemoryIds: z.array(NonEmptyStringSchema).optional(),
   usage: z.record(z.string(), z.unknown()).optional(),
-  status: z.enum(["succeeded", "failed", "cancelled"]).optional()
+  status: z.enum(["succeeded", "failed"]).optional()
 });
 export type CompleteTurnInput = z.infer<typeof CompleteTurnInputSchema>;
 
@@ -344,6 +345,8 @@ export type CompleteTurnOutput = z.infer<typeof CompleteTurnOutputSchema>;
 export const SearchInputSchema = RuntimeRequestFieldsSchema.extend({
   query: NonEmptyStringSchema,
   sessionId: z.string().optional(),
+  episodeId: z.string().optional(),
+  turnId: z.string().optional(),
   layers: z.array(MemoryLayerSchema).optional(),
   verbose: z.boolean().optional()
 });

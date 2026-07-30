@@ -870,6 +870,7 @@ function StatusRule({
 
 function MemmyTui({ config, registerCleanup, sessionId, toolsets, version }: TuiProps) {
   const { exit } = useApp();
+  const exitTriggerRef = useRef<"quit" | "interrupt">("quit");
   const { columns, rows } = useTerminalSize();
   const activeLoopRef = useRef<AgentLoop | null>(null);
   const activeAssistantIdRef = useRef<number | null>(null);
@@ -930,17 +931,28 @@ function MemmyTui({ config, registerCleanup, sessionId, toolsets, version }: Tui
 
   useEffect(() => {
     const cleanup = onceCleanup(async () => {
-      const loop = activeLoopRef.current;
-      if (!loop) return;
-      loop.stop();
-      await settleWithTimeout([loop.closeMcp()], 1500);
-      activeLoopRef.current = null;
+      const activeLoop = activeLoopRef.current;
+      const loop = activeLoop ?? AgentLoop.fromConfig(config);
+      try {
+        await settleWithTimeout(
+          [loop.emitSessionEnd(null, sessionId, exitTriggerRef.current)],
+          5_000,
+        );
+      } finally {
+        if (activeLoop) activeLoop.stop();
+        await settleWithTimeout([
+          typeof (loop as any).closeRuntimeTools === "function"
+            ? loop.closeRuntimeTools()
+            : loop.closeMcp(),
+        ], 1_500);
+        if (activeLoopRef.current === activeLoop) activeLoopRef.current = null;
+      }
     });
     registerCleanup(cleanup);
     return () => {
       void cleanup();
     };
-  }, [registerCleanup]);
+  }, [config, registerCleanup, sessionId]);
 
   const handleProgress = useCallback(
     async (content: string, opts: ProgressOptions = {}) => {
@@ -966,6 +978,7 @@ function MemmyTui({ config, registerCleanup, sessionId, toolsets, version }: Tui
       if (!text) return;
       if (["exit", "quit", "/exit", "/quit", ":q"].includes(text.toLowerCase())) {
         appendMessage("system", "Goodbye.");
+        exitTriggerRef.current = "quit";
         exit();
         return;
       }
@@ -978,9 +991,10 @@ function MemmyTui({ config, registerCleanup, sessionId, toolsets, version }: Tui
       appendMessage("user", text);
       setBusy(true);
       setNotice("queued");
-      setTurnStartedAt(Date.now());
+      const startedAt = Date.now();
+      setTurnStartedAt(startedAt);
       activeAssistantIdRef.current = null;
-      const loop = AgentLoop.fromConfig(config);
+      const loop = activeLoopRef.current ?? AgentLoop.fromConfig(config);
       activeLoopRef.current = loop;
       void (async () => {
         try {
@@ -1003,8 +1017,6 @@ function MemmyTui({ config, registerCleanup, sessionId, toolsets, version }: Tui
           const message = error instanceof Error ? error.message : String(error);
           appendMessage("system", `Error: ${message}`);
         } finally {
-          await settleWithTimeout([loop.closeMcp()], 1500);
-          if (activeLoopRef.current === loop) activeLoopRef.current = null;
           finishTurn();
         }
       })();
@@ -1015,6 +1027,7 @@ function MemmyTui({ config, registerCleanup, sessionId, toolsets, version }: Tui
   useInput((value, key) => {
     if (key.ctrl && value === "c") {
       appendMessage("system", busy ? "Interrupted by user." : "Goodbye.");
+      exitTriggerRef.current = "interrupt";
       exit();
       return;
     }

@@ -36,6 +36,18 @@ import type { ZodType } from "zod";
 const ISO = "2026-05-29T10:00:00.000Z";
 
 describe("memory runtime contracts", () => {
+  it("parses Span memories and Span processing jobs", () => {
+    expect(() => MemoryListItemSchema.parse(memoryListItem({ kind: "span" }))).not.toThrow();
+    expect(() => PanelItemsOutputSchema.parse({
+      ...panelItemsOutput(),
+      items: [memoryListItem({ kind: "span" })]
+    })).not.toThrow();
+    expect(() => JobRefSchema.parse({
+      ...jobRef(),
+      jobType: "span_big_turn"
+    })).not.toThrow();
+  });
+
   const outputCases: Array<{ name: string; schema: ZodType<unknown>; valid: unknown; invalid: unknown }> = [
     { name: "InjectedContext", schema: InjectedContextSchema, valid: injectedContext(), invalid: { markdown: "", sections: [{ id: "sec-1", kind: "bad" }] } },
     { name: "RecallHit", schema: RecallHitSchema, valid: recallHit(), invalid: { ...recallHit(), memoryLayer: "L4" } },

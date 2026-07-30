@@ -2,6 +2,7 @@ import type { MemmyConfig } from "../../config/index.js";
 import { isRecord } from "../../utils/json.js";
 import type { StorageBackendCapabilities } from "../../storage/backend.js";
 import type {
+  ApiLogRecord,
   ChangeLogRecord,
   EmbeddingRetryStatus,
   EpisodeRecord,
@@ -9,6 +10,7 @@ import type {
   RawTurnRecord,
   Repositories
 } from "../../storage/repositories.js";
+import { detailSummaryForMemory } from "./memory.js";
 import type {
   HealthResponse,
   MemoryFilter,
@@ -203,13 +205,51 @@ export class PanelReadModel {
       offset
     });
     return {
-      logs: result.logs,
+      logs: result.logs.map((log) => this.withCurrentTraceSummaries(log)),
       total: result.total,
       limit,
       offset,
       nextOffset: offset + result.logs.length < result.total ? offset + result.logs.length : undefined,
       serverTime: this.now()
     };
+  }
+
+  private withCurrentTraceSummaries(log: ApiLogRecord): ApiLogRecord {
+    if (log.toolName !== "memory_add") return log;
+
+    try {
+      const output = JSON.parse(log.outputJson) as unknown;
+      if (!isRecord(output) || !Array.isArray(output.details)) return log;
+
+      let changed = false;
+      const details = output.details.map((detail) => {
+        if (!isRecord(detail) || (detail.role !== "trace" && detail.role !== "span")) return detail;
+        const memoryId = typeof (detail.role === "span" ? detail.spanId : detail.traceId) === "string"
+          ? detail.role === "span" ? detail.spanId : detail.traceId
+          : detail.traceId;
+        if (typeof memoryId !== "string") return detail;
+        const memory = this.deps.repos.memories.get(memoryId);
+        const spanGoal = memory && detail.role === "span"
+          ? this.spanGoalForMemory(memory)
+          : undefined;
+        const summary = memory && detail.role === "trace" ? detailSummaryForMemory(memory) : undefined;
+        const key = detail.role === "span" ? "spanGoal" : "summary";
+        const value = spanGoal ?? summary;
+        if (!value || detail[key] === value) return detail;
+        changed = true;
+        return { ...detail, [key]: value };
+      });
+
+      return changed ? { ...log, outputJson: JSON.stringify({ ...output, details }) } : log;
+    } catch {
+      return log;
+    }
+  }
+
+  private spanGoalForMemory(memory: Parameters<typeof detailSummaryForMemory>[0]): string | undefined {
+    const span = isRecord(memory.properties.internal_info.span) ? memory.properties.internal_info.span : undefined;
+    const goal = span?.span_goal;
+    return typeof goal === "string" && goal.trim() ? goal.trim() : undefined;
   }
 
   serviceMetrics(input: RequestEnvelope & { userId?: string } = {}): {
@@ -605,7 +645,7 @@ function normalizeChangeOp(value: string | undefined): PanelChange["op"] | undef
 }
 
 function normalizeChangeKind(value: string | undefined): PanelChange["kind"] | undefined {
-  return value === "trace" || value === "policy" || value === "world_model" || value === "skill" ||
+  return value === "trace" || value === "span" || value === "policy" || value === "world_model" || value === "skill" ||
     value === "session" || value === "episode" || value === "job" || value === "feedback" ||
     value === "raw_turn" || value === "repair" || value === "skill_trial" || value === "recall" ||
     value === "artifact"

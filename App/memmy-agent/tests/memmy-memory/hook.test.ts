@@ -5,15 +5,20 @@ import { MemmyMemoryHook } from "../../src/memmy-memory/hook.js";
 
 function fakeClient() {
   return {
-    openSession: vi.fn(async (body: any) => ({ sessionId: body.sessionId, userId: "local-user" })),
+    openSession: vi.fn(async (body: any) => ({
+      sessionId: body.sessionId ?? "session-generated-1",
+      userId: "local-user",
+      resumed: false,
+    })),
     startTurn: vi.fn(async (turnId: string, body: any) => ({
       turnId,
       sessionId: body.sessionId,
       episodeId: "ep-1",
+      sourceMemoryIds: ["trace-source"],
       injectedContext: { markdown: "Relevant prior memory." },
     })),
     completeTurn: vi.fn(async () => ({ rawTurnId: "raw-1", l1MemoryId: "l1-1" })),
-    closeSession: vi.fn(async () => ({ ok: true })),
+    closeSession: vi.fn(async (sessionId: string) => ({ ok: true, sessionId, status: "closed" })),
     search: vi.fn(async () => ({ hits: [] })),
     getMemory: vi.fn(async () => ({ id: "trace_1" })),
   };
@@ -77,9 +82,7 @@ describe("MemmyMemoryHook", () => {
     const openSessionBody = (client.openSession as any).mock.calls[0][0];
     const startBody = (client.startTurn as any).mock.calls[0][1];
     expect(client.openSession).toHaveBeenCalledTimes(1);
-    expect(openSessionBody).toMatchObject({
-      sessionId: "memmy-agent::cli:direct",
-    });
+    expect(openSessionBody.sessionId).toBeUndefined();
     expect(openSessionBody.namespace).toMatchObject({
       source: "memmy-agent",
       profileId: "default",
@@ -89,7 +92,7 @@ describe("MemmyMemoryHook", () => {
     });
     expect(openSessionBody.namespace.workspaceId).toHaveLength(16);
     expect(startBody).toMatchObject({
-      sessionId: "memmy-agent::cli:direct",
+      sessionId: "session-generated-1",
       query: "Please continue"
     });
     expect(messages[0].content).toBe("System prompt");
@@ -111,11 +114,115 @@ describe("MemmyMemoryHook", () => {
     expect(client.completeTurn).toHaveBeenCalledTimes(1);
     const completeBody = (client.completeTurn as any).mock.calls[0][1];
     expect(completeBody).toMatchObject({
-      sessionId: "memmy-agent::cli:direct",
+      sessionId: "session-generated-1",
+      episodeId: "ep-1",
       query: "Please continue",
       answer: "Done",
+      sourceMemoryIds: ["trace-source"],
       status: "succeeded"
     });
+    expect(completeBody.requestId).toMatch(/^memmy-agent-complete:/u);
+    expect(hook.currentTurnId("cli:direct")).toBeNull();
+  });
+
+  it("drops a user-cancelled turn even when partial assistant text exists", async () => {
+    const client = fakeClient();
+    const hook = new MemmyMemoryHook(client as any, { workspace: "/tmp/workspace" });
+    const spec = {
+      sessionKey: "cli:cancelled",
+      workspace: "/tmp/workspace",
+      contextWindowTokens: 4096,
+    };
+
+    await hook.beforeRun(new AgentHookContext({
+      spec,
+      messages: [{ role: "user", content: "Start a long task" }],
+    }));
+    await hook.afterRun(new AgentHookContext({ spec }), {
+      finalContent: "Partial answer",
+      stopReason: "cancelledByUser",
+    });
+
+    expect(client.completeTurn).not.toHaveBeenCalled();
+    expect(hook.currentTurnId("cli:cancelled")).toBeNull();
+  });
+
+  it("keeps explicit failures and supplies a stable failure result", async () => {
+    const client = fakeClient();
+    const hook = new MemmyMemoryHook(client as any, { workspace: "/tmp/workspace" });
+    const spec = {
+      sessionKey: "cli:failed",
+      workspace: "/tmp/workspace",
+      contextWindowTokens: 4096,
+    };
+
+    await hook.beforeRun(new AgentHookContext({
+      spec,
+      messages: [{ role: "user", content: "Deploy the service" }],
+    }));
+    await hook.afterRun(new AgentHookContext({ spec }), {
+      error: new Error("connection timed out"),
+      stopReason: "error",
+    });
+
+    expect(client.completeTurn).toHaveBeenCalledTimes(1);
+    expect((client.completeTurn as any).mock.calls[0][1]).toMatchObject({
+      query: "Deploy the service",
+      answer: "connection timed out",
+      status: "failed",
+    });
+  });
+
+  it("skips a nominally completed run without a final assistant response", async () => {
+    const client = fakeClient();
+    const hook = new MemmyMemoryHook(client as any, { workspace: "/tmp/workspace" });
+    const spec = {
+      sessionKey: "cli:incomplete",
+      workspace: "/tmp/workspace",
+      contextWindowTokens: 4096,
+    };
+
+    await hook.beforeRun(new AgentHookContext({
+      spec,
+      messages: [{ role: "user", content: "This turn never receives an answer" }],
+    }));
+    await hook.afterRun(new AgentHookContext({ spec }), {
+      stopReason: "completed",
+    });
+
+    expect(client.completeTurn).not.toHaveBeenCalled();
+    expect(hook.currentTurnId("cli:incomplete")).toBeNull();
+  });
+
+  it("retains the pending turn after a network failure and retries with the same request id", async () => {
+    const client = fakeClient();
+    (client.completeTurn as any)
+      .mockRejectedValueOnce(new Error("network unavailable"))
+      .mockResolvedValueOnce({ rawTurnId: "raw-1", l1MemoryId: "l1-1" });
+    const hook = new MemmyMemoryHook(client as any, { workspace: "/tmp/workspace" });
+    const spec = {
+      sessionKey: "cli:retry",
+      workspace: "/tmp/workspace",
+      contextWindowTokens: 4096,
+    };
+
+    await hook.beforeRun(new AgentHookContext({
+      spec,
+      messages: [{ role: "user", content: "Retry this capture" }],
+    }));
+    const result = { finalContent: "Completed once", stopReason: "completed" };
+    await hook.afterRun(new AgentHookContext({ spec }), result);
+    expect(hook.lastError).toBe("network unavailable");
+    expect(hook.currentTurnId("cli:retry")).not.toBeNull();
+
+    await hook.afterRun(new AgentHookContext({ spec }), result);
+
+    expect(client.completeTurn).toHaveBeenCalledTimes(2);
+    expect((client.completeTurn as any).mock.calls[0][1].requestId).toBe(
+      (client.completeTurn as any).mock.calls[1][1].requestId
+    );
+    expect(hook.lastError).toBeNull();
+    expect(hook.currentTurnId("cli:retry")).toBeNull();
   });
 
   it("strips prior injected memory context before recording the next query", async () => {
@@ -303,6 +410,15 @@ describe("MemmyMemoryHook", () => {
     );
     await hook.sessionEnd(base);
 
-    expect(client.closeSession).toHaveBeenCalledWith("memmy-agent::cli:direct", expect.any(Object));
+    expect(client.closeSession).toHaveBeenCalledWith("session-generated-1", expect.any(Object));
+  });
+
+  it("skips Memory close when this hook never opened a session", async () => {
+    const client = fakeClient();
+    const hook = new MemmyMemoryHook(client as any, { workspace: "/tmp/workspace" });
+
+    await hook.sessionEnd(new AgentHookContext({ sessionKey: "cli:direct", reason: "quit" }));
+
+    expect(client.closeSession).not.toHaveBeenCalled();
   });
 });

@@ -8,9 +8,11 @@ import YAML from "yaml";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AgentGatewaySupervisor,
+  preparePackagedBrowser,
   preparePackagedRuntimeConfig,
   restartExternalMemoryService,
   spawnNodeService,
+  startPackagedBrowserPreparation,
   syncBundledAgentSkills,
   type ManagedChild,
   type PackagedRuntimeConfig,
@@ -372,6 +374,155 @@ describe("packaged desktop runtime config", () => {
     await expect(readFile(join(agentWorkspace, "skills", "example", "references", "guide.md"), "utf8"))
       .resolves.toBe("guide\n");
   });
+
+  it("prepares the packaged browser with the bundled agent runtime before services start", async () => {
+    const root = await makeTempRoot();
+    const agentEntry = join(root, "runtime", "memmy-agent", "dist", "main.js");
+    const logDirectory = join(root, "logs");
+    await mkdir(join(root, "runtime", "memmy-agent", "dist"), { recursive: true });
+    await mkdir(logDirectory, { recursive: true });
+    await writeFile(agentEntry, "// bundled agent\n", "utf8");
+    const child = new EventEmitter() as ChildProcess;
+    (child as any).stdout = Object.assign(new EventEmitter(), {
+      setEncoding: vi.fn(),
+    });
+    (child as any).stderr = Object.assign(new EventEmitter(), {
+      setEncoding: vi.fn(),
+    });
+    const spawnProcess = vi.fn(() => {
+      queueMicrotask(() => child.emit("exit", 0, null));
+      return child;
+    });
+    const runtimeConfig = {
+      configPath: join(root, "config.yaml"),
+      agentWorkspace: join(root, "workspace"),
+    } as PackagedRuntimeConfig;
+
+    await expect(
+      preparePackagedBrowser(
+        { agentEntry, memoryEntry: join(root, "memory.js") },
+        runtimeConfig,
+        {
+          appPath: root,
+          resourcesPath: root,
+          logDirectory,
+          logLevel: "info",
+        },
+        spawnProcess as any,
+      ),
+    ).resolves.toBe(true);
+
+    expect(spawnProcess).toHaveBeenCalledWith(
+      process.execPath,
+      [agentEntry, "internal", "browser-prepare"],
+      expect.objectContaining({
+        shell: false,
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+        env: expect.objectContaining({
+          MEMMY_CONFIG: runtimeConfig.configPath,
+          MEMMY_AGENT_WORKSPACE: runtimeConfig.agentWorkspace,
+          ELECTRON_RUN_AS_NODE: "1",
+        }),
+      }),
+    );
+  });
+
+  it("starts packaged browser preparation without waiting and stops the owned child", async () => {
+    const root = await makeTempRoot();
+    const agentEntry = join(root, "runtime", "memmy-agent", "dist", "main.js");
+    const logDirectory = join(root, "logs");
+    await mkdir(join(root, "runtime", "memmy-agent", "dist"), { recursive: true });
+    await mkdir(logDirectory, { recursive: true });
+    await writeFile(agentEntry, "// bundled agent\n", "utf8");
+    const child = new EventEmitter() as ChildProcess;
+    (child as any).stdout = Object.assign(new EventEmitter(), {
+      setEncoding: vi.fn(),
+    });
+    (child as any).stderr = Object.assign(new EventEmitter(), {
+      setEncoding: vi.fn(),
+    });
+    child.kill = vi.fn(() => true);
+    const spawnProcess = vi.fn(() => child);
+    const runtimeConfig = {
+      configPath: join(root, "config.yaml"),
+      agentWorkspace: join(root, "workspace"),
+    } as PackagedRuntimeConfig;
+
+    const preparation = startPackagedBrowserPreparation(
+      { agentEntry, memoryEntry: join(root, "memory.js") },
+      runtimeConfig,
+      {
+        appPath: root,
+        resourcesPath: root,
+        logDirectory,
+        logLevel: "info",
+      },
+      spawnProcess as any,
+      "test-browser-attempt",
+    );
+    let completed = false;
+    void preparation.completion.then(() => {
+      completed = true;
+    });
+
+    await Promise.resolve();
+    expect(completed).toBe(false);
+    expect(spawnProcess).toHaveBeenCalledOnce();
+    expect(spawnProcess.mock.calls[0]?.[2]?.env).toMatchObject({
+      MEMMY_BROWSER_PREPARATION_ATTEMPT_ID: "test-browser-attempt",
+    });
+    await expect(readFile(
+      join(root, "mcp", "playwright", "browser-preparation-state.json"),
+      "utf8",
+    ).then((content) => JSON.parse(content))).resolves.toMatchObject({
+      status: "preparing",
+      attemptId: "test-browser-attempt",
+      progressPercent: 0,
+    });
+
+    preparation.stop();
+    await expect(preparation.completion).resolves.toBe(false);
+    preparation.stop();
+    expect(child.kill).toHaveBeenCalledOnce();
+  });
+
+  it("publishes an unavailable state when browser preparation cannot start", async () => {
+    const root = await makeTempRoot();
+    const agentEntry = join(root, "runtime", "memmy-agent", "dist", "main.js");
+    const logDirectory = join(root, "logs");
+    await mkdir(join(root, "runtime", "memmy-agent", "dist"), { recursive: true });
+    await mkdir(logDirectory, { recursive: true });
+    await writeFile(agentEntry, "// bundled agent\n", "utf8");
+
+    const preparation = startPackagedBrowserPreparation(
+      { agentEntry, memoryEntry: join(root, "memory.js") },
+      {
+        configPath: join(root, "config.yaml"),
+        agentWorkspace: join(root, "workspace"),
+      } as PackagedRuntimeConfig,
+      {
+        appPath: root,
+        resourcesPath: root,
+        logDirectory,
+        logLevel: "info",
+      },
+      vi.fn(() => {
+        throw new Error("spawn failed");
+      }) as any,
+      "failed-browser-attempt",
+    );
+
+    await expect(preparation.completion).resolves.toBe(false);
+    await expect(readFile(
+      join(root, "mcp", "playwright", "browser-preparation-state.json"),
+      "utf8",
+    ).then((content) => JSON.parse(content))).resolves.toMatchObject({
+      status: "unavailable",
+      attemptId: "failed-browser-attempt",
+      error: expect.stringContaining("spawn failed"),
+    });
+  });
 });
 
 describe("AgentGatewaySupervisor", () => {
@@ -554,6 +705,7 @@ describe("AgentGatewaySupervisor", () => {
     expect(harness.spawn).toHaveBeenCalledTimes(2);
     expect(harness.spawn.mock.calls[1]?.[3]).toMatchObject({
       MEMMY_DESKTOP_MANAGED_GATEWAY: "1",
+      MEMMY_BROWSER_PREPARATION_ATTEMPT_ID: "test-browser-attempt",
       MEMMY_AGENT_RESTART_NOTIFY_CHANNEL: "websocket",
       MEMMY_AGENT_RESTART_NOTIFY_CHAT_ID: "chat-1",
       MEMMY_AGENT_RESTART_STARTED_AT: "123.5",
@@ -692,7 +844,7 @@ function createSupervisorHarness(overrides: {
     spawnNodeService: spawn,
     waitForHttpService: overrides.waitForHttpService ?? vi.fn(async () => undefined),
     stopManagedChild: overrides.stopManagedChild ?? vi.fn(async () => undefined)
-  });
+  }, "test-browser-attempt");
   return { supervisor, children, spawned, spawn };
 }
 

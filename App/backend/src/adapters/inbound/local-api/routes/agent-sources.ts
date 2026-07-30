@@ -4,10 +4,14 @@ import {
   AgentSourceAutoInjectResultSchema,
   AgentSourceIdParamsSchema,
   AgentSourceMemoryPluginConflictsResponseSchema,
+  AgentSourcePluginActionInputSchema,
   AgentSourceScanInputSchema,
   AgentSourceScanJobResponseSchema,
   AgentSourceScanStatusResponseSchema,
   AgentSourceViewSchema,
+  ManagedAgentSourceImportInputSchema,
+  ManagedAgentSourceImportResultSchema,
+  ManagedAgentSourceUpdateInputSchema,
   OkResponseSchema
 } from "@memmy/local-api-contracts";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -226,6 +230,46 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
     return reply.send(response);
   });
 
+  app.post(
+    "/api/agent-sources/:sourceId/managed/import",
+    { preHandler: options.authenticateRuntimeToken },
+    withErrorEnvelope(async (request, reply) => {
+      const params = AgentSourceIdParamsSchema.parse(request.params);
+      const input = ManagedAgentSourceImportInputSchema.parse(request.body);
+      const response = await options.agentSources.importManaged(params.sourceId, input);
+      return reply.send(ManagedAgentSourceImportResultSchema.parse(response));
+    })
+  );
+
+  app.post(
+    "/api/agent-sources/:sourceId/managed/sync",
+    { preHandler: options.authenticateRuntimeToken },
+    withErrorEnvelope(async (request, reply) => {
+      const params = AgentSourceIdParamsSchema.parse(request.params);
+      if (!(await options.permissionManager.canScanAgentSource({ agentSourceId: params.sourceId }))) {
+        return reply.code(403).send({
+          error: {
+            code: "scan_not_permitted",
+            message: "scan not permitted"
+          }
+        });
+      }
+      const response = await options.agentSources.syncManaged(params.sourceId);
+      return reply.send(ManagedAgentSourceImportResultSchema.parse(response));
+    })
+  );
+
+  app.patch(
+    "/api/agent-sources/:sourceId/managed",
+    { preHandler: options.authenticateRuntimeToken },
+    withErrorEnvelope(async (request, reply) => {
+      const params = AgentSourceIdParamsSchema.parse(request.params);
+      const input = ManagedAgentSourceUpdateInputSchema.parse(request.body);
+      const response = await options.agentSources.updateManaged(params.sourceId, input);
+      return reply.send(AgentSourceViewSchema.parse(response));
+    })
+  );
+
   app.delete(
     "/api/agent-sources/:sourceId",
     { preHandler: options.authenticateRuntimeToken },
@@ -251,7 +295,8 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
     { preHandler: options.authenticateRuntimeToken },
     withErrorEnvelope(async (request, reply) => {
       const params = AgentSourceIdParamsSchema.parse(request.params);
-      await options.agentSources.installPlugin(params.sourceId);
+      const action = AgentSourcePluginActionInputSchema.parse(request.body ?? {});
+      await options.agentSources.installPlugin(params.sourceId, action);
       return reply.send(OkResponseSchema.parse({ ok: true }));
     })
   );
@@ -261,7 +306,8 @@ export function registerAgentSourceRoutes(app: FastifyInstance, options: Registe
     { preHandler: options.authenticateRuntimeToken },
     withErrorEnvelope(async (request, reply) => {
       const params = AgentSourceIdParamsSchema.parse(request.params);
-      await options.agentSources.uninstallPlugin(params.sourceId);
+      const action = AgentSourcePluginActionInputSchema.parse(request.body ?? {});
+      await options.agentSources.uninstallPlugin(params.sourceId, action);
       return reply.send(OkResponseSchema.parse({ ok: true }));
     })
   );

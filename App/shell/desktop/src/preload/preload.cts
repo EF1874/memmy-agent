@@ -9,6 +9,7 @@ type DesktopMenuBarIconResult = import("@memmy/desktop-interface").DesktopMenuBa
 type DesktopImageActionRequest = import("@memmy/desktop-interface").DesktopImageActionRequest;
 type DesktopImageSaveResult = import("@memmy/desktop-interface").DesktopImageSaveResult;
 type DesktopMemoryServiceRestartResult = import("@memmy/desktop-interface").DesktopMemoryServiceRestartResult;
+type DesktopProjectDirectorySelection = import("@memmy/desktop-interface").DesktopProjectDirectorySelection;
 type MicrophoneAccessStatus = import("@memmy/desktop-interface").MicrophoneAccessStatus;
 type MainWindowActionRequest = { id: string; action: "close" | "minimize" };
 
@@ -42,6 +43,8 @@ interface MemmyPreloadApi {
   setLogLevel(level: "error" | "warn" | "info" | "debug"): Promise<void>;
   getMicrophoneAccessStatus(): Promise<MicrophoneAccessStatus>;
   requestMicrophoneAccess(): Promise<MicrophoneAccessStatus>;
+  selectProjectDirectory(): Promise<DesktopProjectDirectorySelection>;
+  selectEmptyProjectDirectory(): Promise<DesktopProjectDirectorySelection>;
   notifyTaskDone(payload: { title: string; body: string; silent: boolean }): Promise<void>;
   notifyUpdateAvailable(payload: { title: string; body: string; silent: boolean }): Promise<void>;
   setPetWindow(enabled: boolean, target?: { route?: string; hash?: string; agentChatId?: string; petIntent?: "user" }): Promise<void>;
@@ -56,7 +59,11 @@ interface MemmyPreloadApi {
   startPetWindowDrag(pointer: { clientX: number; clientY: number }): void;
   stopPetWindowDrag(): void;
   syncPetWindowLayout(layout: { width: number; height: number; mascotOffsetX: number; mascotOffsetY: number }): void;
-  sendAnalyticsClientId(payload: { clientId: string; appEnv: "dev" | "prod" }): void;
+  sendAnalyticsClientId(payload: {
+    clientId: string;
+    appEnv: "dev" | "prod";
+    appEdition: "cn" | "intl";
+  }): void;
 }
 
 /**
@@ -195,6 +202,14 @@ const memmyPreloadApi: MemmyPreloadApi = {
     return ipcRenderer.invoke("memmy:request-microphone-access");
   },
 
+  async selectProjectDirectory(): Promise<DesktopProjectDirectorySelection> {
+    return ipcRenderer.invoke("memmy:select-project-directory");
+  },
+
+  async selectEmptyProjectDirectory(): Promise<DesktopProjectDirectorySelection> {
+    return ipcRenderer.invoke("memmy:select-empty-project-directory");
+  },
+
   async setPetWindow(enabled: boolean, target?: { route?: string; hash?: string; agentChatId?: string; petIntent?: "user" }): Promise<void> {
     return ipcRenderer.invoke("memmy:set-pet-window", enabled, target);
   },
@@ -251,7 +266,11 @@ const memmyPreloadApi: MemmyPreloadApi = {
     ipcRenderer.send("memmy:update-pet-window-layout", layout);
   },
 
-  sendAnalyticsClientId(payload: { clientId: string; appEnv: "dev" | "prod" }): void {
+  sendAnalyticsClientId(payload: {
+    clientId: string;
+    appEnv: "dev" | "prod";
+    appEdition: "cn" | "intl";
+  }): void {
     ipcRenderer.send("memmy:analytics-client-id", payload);
   }
 };

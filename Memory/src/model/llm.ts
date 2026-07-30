@@ -1,5 +1,6 @@
 import type { LlmConfig } from "../config/index.js";
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
+import type { MemoryAgentRegion } from "./agent-region.js";
 import { bearer, postJsonWithRetry, trimTrailingSlash } from "./http.js";
 import {
   HttpByokTokenUsageRecorder,
@@ -11,7 +12,13 @@ import type { LlmClient, LlmCompletionOptions, LlmMessage, ModelStatus } from ".
 const logger = createMemoryLogger("llm");
 
 interface OpenAiChatResponse {
-  choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
+  choices?: Array<{
+    message?: {
+      content?: unknown;
+      reasoning_content?: unknown;
+    };
+    finish_reason?: string;
+  }>;
   usage?: Record<string, unknown>;
 }
 
@@ -63,6 +70,7 @@ interface ThinkingControl {
 
 export interface CreateLlmClientOptions {
   modelRole?: MemoryLlmModelRole;
+  agentRegion?: MemoryAgentRegion;
 }
 
 export function createLlmClient(config: LlmConfig, options: CreateLlmClientOptions = {}): LlmClient {
@@ -295,7 +303,10 @@ class HttpLlmClient implements LlmClient {
       operation: options.operation,
       model: this.config.model,
       url,
-      headers: bearer(this.config.apiKey),
+      headers: {
+        ...bearer(this.config.apiKey),
+        ...(this.options.agentRegion ? { "X-Agent-Region": this.options.agentRegion } : {})
+      },
       timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
       maxRetries: options.maxRetries ?? this.config.maxRetries,
       body: {
@@ -311,7 +322,15 @@ class HttpLlmClient implements LlmClient {
     });
     const choice = response.choices?.[0];
     const text = choice?.message?.content;
-    if (typeof text !== "string") {
+    if (typeof text !== "string" || !text.trim()) {
+      const reasoningContent = choice?.message?.reasoning_content;
+      if (
+        options.operation === "capture.summarize" &&
+        typeof reasoningContent === "string" &&
+        reasoningContent.trim()
+      ) {
+        throw new Error("Reasoning exhausted the summary output token budget");
+      }
       throw new Error("openai_compatible response missing choices[0].message.content");
     }
     this.recordTokenUsage(response, options);

@@ -140,6 +140,15 @@ describe("BootstrapService", () => {
         async health() {
           return { status: "ok" as const, checkedAt: "2026-06-05T10:00:00.000Z" };
         },
+        async getPromotions() {
+          return {
+            loginBanner: true,
+            improvementGift: true,
+            improvementGiftRewardTokens: 1_000_000,
+            applyMore: true,
+            agentChatTokenTotal: 2_000_000
+          };
+        },
         async getTokenUsage(input) {
           calls.push({ getTokenUsage: input });
           throw new Error("cloud token usage unavailable");
@@ -149,9 +158,9 @@ describe("BootstrapService", () => {
 
     await expect(service.getBootstrap()).resolves.toMatchObject({
       tokenUsage: {
-        totalTokens: 30000000,
+        totalTokens: 2_000_000,
         usedTokens: 0,
-        remainingTokens: 30000000
+        remainingTokens: 2_000_000
       }
     });
     expect(calls).toEqual([
@@ -275,10 +284,23 @@ describe("BootstrapService", () => {
   });
 
   it("把云端下发的赠送活动开关并入 bootstrap.promotions", async () => {
-    const promotions = { loginBanner: true, improvementGift: false, applyMore: true };
+    const promotions = {
+      loginBanner: true,
+      improvementGift: false,
+      improvementGiftRewardTokens: 300_000,
+      applyMore: true,
+      agentChatTokenTotal: 2_000_000
+    };
     const service = createBootstrapService(createUnauthenticatedOptions({ getPromotions: async () => promotions }));
 
-    await expect(service.getBootstrap()).resolves.toMatchObject({ promotions });
+    await expect(service.getBootstrap()).resolves.toMatchObject({
+      promotions,
+      tokenUsage: {
+        totalTokens: 2_000_000,
+        usedTokens: 0,
+        remainingTokens: 2_000_000
+      }
+    });
   });
 
   it("云端取不到赠送活动开关时 bootstrap.promotions 回退全开", async () => {
@@ -286,7 +308,13 @@ describe("BootstrapService", () => {
 
     const bootstrap = await service.getBootstrap();
 
-    expect(bootstrap.promotions).toEqual({ loginBanner: true, improvementGift: true, applyMore: true });
+    expect(bootstrap.promotions).toEqual({
+      loginBanner: true,
+      improvementGift: false,
+      improvementGiftRewardTokens: 0,
+      applyMore: true,
+      agentChatTokenTotal: 0
+    });
   });
 
   it("云端读取赠送活动开关抛错时 bootstrap.promotions 回退全开且不报错", async () => {
@@ -300,7 +328,13 @@ describe("BootstrapService", () => {
 
     const bootstrap = await service.getBootstrap();
 
-    expect(bootstrap.promotions).toEqual({ loginBanner: true, improvementGift: true, applyMore: true });
+    expect(bootstrap.promotions).toEqual({
+      loginBanner: true,
+      improvementGift: false,
+      improvementGiftRewardTokens: 0,
+      applyMore: true,
+      agentChatTokenTotal: 0
+    });
   });
 });
 

@@ -57,6 +57,8 @@ describe("SessionManager history and previews", () => {
     const manager = new SessionManager(tempRoot());
     const session = manager.getOrCreate("websocket:chat-rename");
     session.metadata.webui = true;
+    session.metadata.webuiProjectId = null;
+    session.metadata.webuiWorkspaceCwd = fs.realpathSync(manager.root);
     session.metadata.title = "自动生成标题";
     session.addMessage("user", "帮我整理 PRD");
     manager.save(session);
@@ -95,6 +97,29 @@ describe("SessionManager history and previews", () => {
       key: "websocket:chat-preview",
       preview: "帮我总结一下 OpenAI 的最新硬件计划",
     });
+  });
+
+  it("listSessions isolates a WebUI Session with a partially invalid binding", () => {
+    const root = tempRoot();
+    const manager = new SessionManager(root, {
+      legacyWebuiWorkspaceCwd: fs.realpathSync(root),
+    });
+    const healthy = manager.getOrCreate("telegram:healthy");
+    healthy.addMessage("user", "keep this Session visible");
+    manager.save(healthy);
+    const invalid = manager.getOrCreate("websocket:invalid");
+    invalid.metadata.webui = true;
+    invalid.metadata.webuiProjectId = null;
+    manager.save(invalid);
+
+    const rows = manager.listSessions();
+
+    expect(rows).toEqual([
+      expect.objectContaining({
+        key: "telegram:healthy",
+        preview: "keep this Session visible",
+      }),
+    ]);
   });
 
   it("listSessions scrubs subagent result announcements in previews", () => {

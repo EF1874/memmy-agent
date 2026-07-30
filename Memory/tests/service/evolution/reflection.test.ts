@@ -62,11 +62,6 @@ function createUnusableReflectionLlm(): LlmClient {
           }))
         } as unknown as T;
       }
-      if (options.operation === "capture.summarize") {
-        return {
-          summary: "unusable reflection summary"
-        } as unknown as T;
-      }
       return {
         summary: "unusable reflection summary",
         reflection: "tautological reflection",
@@ -428,6 +423,15 @@ describe("MemoryService / evolution / reflection", () => {
       call.options.operation === "capture.reflection.batch.v13"
     );
     expect(reflectionCalls).toHaveLength(1);
+    const summaryCalls = calls.filter((call) => call.options.operation === "capture.summarize");
+    expect(summaryCalls).toHaveLength(2);
+    expect(summaryCalls.map((call) => call.messages.find((message) => message.role === "user")?.content))
+      .toEqual(expect.arrayContaining([
+        expect.stringContaining("USER: Hi, thanks"),
+        expect.stringContaining("USER: 为什么黑美人西瓜不常见？")
+      ]));
+    expect(summaryCalls.every((call) => !call.messages.find((message) => message.role === "user")?.content.includes("REFLECTION:"))).toBe(true);
+    expect(calls.some((call) => call.options.operation === "capture.reflected_trace_summary.v1")).toBe(false);
     const payload = JSON.parse(
       reflectionCalls[0]!.messages.find((message) => message.role === "user")?.content ?? "{}"
     ) as { steps: Array<{ idx: number; state: string }> };
@@ -535,7 +539,11 @@ describe("MemoryService / evolution / reflection", () => {
     );
     expect(reflectionCall?.options.thinkingMode).toBe("disabled");
     expect(summaryCalls.some((call) => call.options.operation === "capture.reflection.batch.v13")).toBe(false);
-    expect(summaryCalls.some((call) => call.options.operation === "capture.summarize")).toBe(true);
+    const summaryCall = summaryCalls.find((call) => call.options.operation === "capture.summarize");
+    expect(summaryCall).toBeTruthy();
+    expect(summaryCall!.messages[0]?.content).toContain("single user/agent exchange");
+    expect(summaryCall!.messages[1]?.content).not.toContain("REFLECTION:");
+    expect(summaryCalls.some((call) => call.options.operation === "capture.reflected_trace_summary.v1")).toBe(false);
     const payload = JSON.parse(
       reflectionCall?.messages.find((message) => message.role === "user")?.content ?? "{}"
     ) as { host_context?: { reflectionModel?: string } };
@@ -827,6 +835,10 @@ describe("MemoryService / evolution / reflection", () => {
     const summaryCall = calls.find((call) => call.options.operation === "capture.summarize");
     expect(summaryCall).toBeTruthy();
     expect(summaryCall!.messages[0]?.content).toContain("single user/agent exchange");
+    const summaryPayload = summaryCall!.messages.find((message) => message.role === "user")?.content ?? "";
+    expect(summaryPayload).not.toContain("REFLECTION:");
+    expect(summaryPayload).toContain("TOOLS:");
+    expect(calls.some((call) => call.options.operation === "capture.reflected_trace_summary.v1")).toBe(false);
 
     const rows = complete.l1MemoryIds.map((id) => db.db.prepare(
       `SELECT properties_json
@@ -843,12 +855,14 @@ describe("MemoryService / evolution / reflection", () => {
             reflection_source: string;
             reflection_scored_at?: string;
             summary: string;
+            summary_deferred_until_reflection?: boolean;
           };
         };
       };
       expect(properties.internal_info.trace.reflection).toBe("PIVOTAL");
       expect(properties.internal_info.trace.alpha).toBeCloseTo(1);
       expect(properties.internal_info.trace.summary).toBe("LLM batch summary");
+      expect(properties.internal_info.trace.summary_deferred_until_reflection).toBeUndefined();
       expect(properties.internal_info.trace.usable).toBe(true);
       expect(properties.internal_info.trace.reflection_source).toBe("synth");
       expect(properties.internal_info.trace.reflection_scored_at).toBeTruthy();
@@ -862,7 +876,7 @@ describe("MemoryService / evolution / reflection", () => {
        WHERE job_type = 'embedding'
          AND payload_json LIKE '%reflection.updated%'`
     ).get() as { count: number };
-    expect(queuedEmbedding.count).toBeGreaterThan(0);
+    expect(queuedEmbedding.count).toBe(complete.l1MemoryIds.length);
     db.close();
   });
 });

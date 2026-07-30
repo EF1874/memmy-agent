@@ -104,6 +104,7 @@ describe("LogsSubPage", () => {
           onSourceAgentChange={vi.fn()}
           onPageChange={vi.fn()}
           onRefresh={vi.fn()}
+          onOpenDetail={vi.fn()}
         />
       </I18nProvider>
     );
@@ -131,7 +132,7 @@ describe("LogsSubPage", () => {
     expect(html).not.toContain("bg-text-ink text-white");
   });
 
-  it("memory_add 日志没有摘要时显示 trace id 而不是 empty", () => {
+  it("memory_add trace 没有摘要和 user-text 时不展示内部 trace id", () => {
     const html = renderToString(
       <I18nProvider language="zh-CN">
         <LogsSubPageView
@@ -162,12 +163,13 @@ describe("LogsSubPage", () => {
           onSourceAgentChange={vi.fn()}
           onPageChange={vi.fn()}
           onRefresh={vi.fn()}
+          onOpenDetail={vi.fn()}
         />
       </I18nProvider>
     );
 
-    expect(html).toContain("trace_abc123");
-    expect(html).not.toContain("trace (empty)");
+    expect(html).toContain("memory item");
+    expect(html).not.toContain("trace_abc123");
     expect(html).not.toContain("stored 1 ·");
   });
 
@@ -206,12 +208,106 @@ describe("LogsSubPage", () => {
           onSourceAgentChange={vi.fn()}
           onPageChange={vi.fn()}
           onRefresh={vi.fn()}
+          onOpenDetail={vi.fn()}
         />
       </I18nProvider>
     );
 
     expect(html).toContain("你之前推荐的科幻电影是什么");
     expect(html).not.toContain("摘要排队中");
+  });
+
+  it("trace 和 span 缺少可用摘要时仅临时展示 user-text", () => {
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <LogsSubPageView
+          state={{
+            status: "ready",
+            data: {
+              logs: [
+                {
+                  id: 1,
+                  toolName: "memory_add",
+                  inputJson: JSON.stringify({ query: "trace 的原始 user-text" }),
+                  outputJson: JSON.stringify({
+                    details: [{ role: "trace", summary: "RawTurn: raw_stale", traceId: "trace_stale" }]
+                  }),
+                  durationMs: 12,
+                  success: true,
+                  calledAt: "2026-06-03T10:00:00.000Z"
+                },
+                {
+                  id: 2,
+                  toolName: "memory_add",
+                  inputJson: JSON.stringify({ query: "span 的原始 user-text" }),
+                  outputJson: JSON.stringify({
+                    details: [{ role: "span", traceId: "span_pending" }]
+                  }),
+                  durationMs: 12,
+                  success: true,
+                  calledAt: "2026-06-03T09:59:00.000Z"
+                }
+              ],
+              total: 2,
+              limit: 20,
+              offset: 0,
+              serverTime: "2026-06-03T10:00:00.000Z"
+            }
+          }}
+          tool=""
+          sourceAgent=""
+          onToolChange={vi.fn()}
+          onSourceAgentChange={vi.fn()}
+          onPageChange={vi.fn()}
+          onRefresh={vi.fn()}
+          onOpenDetail={vi.fn()}
+        />
+      </I18nProvider>
+    );
+
+    expect(html).toContain("trace 的原始 user-text");
+    expect(html).toContain("span 的原始 user-text");
+    expect(html).not.toContain("RawTurn: raw_stale");
+    expect(html).not.toContain("trace_stale");
+    expect(html).not.toContain("span_pending");
+  });
+
+  it("trace 日志标题按前 20 个中文字符截断摘要", () => {
+    const summary = "甲".repeat(21);
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <LogsSubPageView
+          state={{
+            status: "ready",
+            data: {
+              logs: [{
+                id: 1,
+                toolName: "memory_add",
+                inputJson: "{}",
+                outputJson: JSON.stringify({ details: [{ role: "trace", summary }] }),
+                durationMs: 12,
+                success: true,
+                calledAt: "2026-06-03T10:00:00.000Z"
+              }],
+              total: 1,
+              limit: 20,
+              offset: 0,
+              serverTime: "2026-06-03T10:00:00.000Z"
+            }
+          }}
+          tool=""
+          sourceAgent=""
+          onToolChange={vi.fn()}
+          onSourceAgentChange={vi.fn()}
+          onPageChange={vi.fn()}
+          onRefresh={vi.fn()}
+          onOpenDetail={vi.fn()}
+        />
+      </I18nProvider>
+    );
+
+    expect(html).toContain(`${"甲".repeat(20)}...`);
+    expect(html).not.toContain(summary);
   });
 
   it("通过顶部下拉框筛选来源 Agent，不再在日志行内展示标签", () => {
@@ -245,6 +341,7 @@ describe("LogsSubPage", () => {
           onSourceAgentChange={vi.fn()}
           onPageChange={vi.fn()}
           onRefresh={vi.fn()}
+          onOpenDetail={vi.fn()}
         />
       </I18nProvider>
     );
@@ -277,6 +374,7 @@ describe("LogsSubPage", () => {
           onSourceAgentChange={vi.fn()}
           onPageChange={vi.fn()}
           onRefresh={vi.fn()}
+          onOpenDetail={vi.fn()}
         />
       </I18nProvider>
     );
@@ -487,7 +585,16 @@ describe("LogsSubPage", () => {
                   id: 2,
                   toolName: "memory_search",
                   inputJson: JSON.stringify({ query: "hermes" }),
-                  outputJson: JSON.stringify({ candidates: [], filtered: [] }),
+                  outputJson: JSON.stringify({
+                    candidates: [],
+                    filtered: [],
+                    stats: {
+                      raw: 14,
+                      ranked: 0,
+                      finalReturned: 0,
+                      llmFilter: { kept: 0, dropped: 0, outcome: "kept" }
+                    }
+                  }),
                   durationMs: 20,
                   success: true,
                   calledAt: "2026-06-03T10:01:00.000Z"
@@ -505,6 +612,7 @@ describe("LogsSubPage", () => {
           onSourceAgentChange={vi.fn()}
           onPageChange={vi.fn()}
           onRefresh={vi.fn()}
+          onOpenDetail={vi.fn()}
         />
       </I18nProvider>
     );
@@ -572,6 +680,7 @@ describe("LogsSubPage", () => {
           onSourceAgentChange={vi.fn()}
           onPageChange={vi.fn()}
           onRefresh={vi.fn()}
+          onOpenDetail={vi.fn()}
         />
       </I18nProvider>
     );
@@ -638,6 +747,7 @@ describe("LogsSubPage", () => {
           onSourceAgentChange={vi.fn()}
           onPageChange={vi.fn()}
           onRefresh={vi.fn()}
+          onOpenDetail={vi.fn()}
         />
       </I18nProvider>
     );
@@ -648,7 +758,7 @@ describe("LogsSubPage", () => {
     expect(html).not.toContain("candidates 7, kept 6");
   });
 
-  it("keeps stats-only memory_search counts visible after long summaries", () => {
+  it("uses the pre-LLM ranked count instead of the raw recall count", () => {
     const html = renderToString(
       <I18nProvider language="zh-CN">
         <LogsSubPageView
@@ -687,13 +797,15 @@ describe("LogsSubPage", () => {
           onSourceAgentChange={vi.fn()}
           onPageChange={vi.fn()}
           onRefresh={vi.fn()}
+          onOpenDetail={vi.fn()}
         />
       </I18nProvider>
     );
 
     expect(html).toContain("用户希望参考腾讯团队实践图");
     expect(html).toContain("memory-log-card__summary-tail");
-    expect(html).toContain("· 保留 2/10");
+    expect(html).toContain("· 保留 2/4");
+    expect(html).not.toContain("· 保留 2/10");
     expect(html).not.toContain("· 保留 0/0");
   });
 
@@ -741,6 +853,7 @@ describe("LogsSubPage", () => {
           onSourceAgentChange={vi.fn()}
           onPageChange={vi.fn()}
           onRefresh={vi.fn()}
+          onOpenDetail={vi.fn()}
         />
       </I18nProvider>
     );
@@ -780,6 +893,7 @@ describe("LogsSubPage", () => {
           onSourceAgentChange={vi.fn()}
           onPageChange={vi.fn()}
           onRefresh={vi.fn()}
+          onOpenDetail={vi.fn()}
         />
       </I18nProvider>
     );

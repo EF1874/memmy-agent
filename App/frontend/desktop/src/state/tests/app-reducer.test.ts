@@ -44,7 +44,9 @@ const bootstrap = AppBootstrapResponseSchema.parse({
   promotions: {
     loginBanner: true,
     improvementGift: true,
-    applyMore: true
+    improvementGiftRewardTokens: 1_000_000,
+    applyMore: true,
+    agentChatTokenTotal: 2_000_000
   }
 });
 
@@ -127,7 +129,8 @@ describe("app reducer", () => {
         usedTokens: 1000000,
         remainingTokens: 34000000,
         expiresAt: null,
-        lastSyncedAt: "2026-06-05T10:00:00.000Z"
+        lastSyncedAt: "2026-06-05T10:00:00.000Z",
+        sceneUsages: []
       })
     );
 
@@ -239,7 +242,9 @@ describe("app reducer", () => {
         {
           key: "websocket:chat-1",
           title: "创建 AI 电商助手",
-          preview: "整理 PRD"
+          preview: "整理 PRD",
+          projectId: null,
+          cwd: "/workspace"
         }
       ])
     );

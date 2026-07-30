@@ -231,6 +231,19 @@ export class EpisodeReadModel {
     const detail = this.deps.detailFromMemory(memory, this.deps.repos.processing.get(memory.id));
     const refs = this.refsForMemory(memory);
     const item = this.deps.memoryDetailWithLayerPayload(detail, memory);
+    if (memory.properties.internal_info.memory_kind === "span") {
+      const span = memory.properties.internal_info.span as {
+        raw_turn_id: string;
+        tool_call_start: number;
+        tool_call_end: number;
+      };
+      const rawTurn = this.deps.repos.runtime.getRawTurn(span.raw_turn_id)!;
+      item.metadata.spanDetail = {
+        toolCallStart: span.tool_call_start,
+        toolCallEnd: span.tool_call_end,
+        toolCalls: rawTurn.toolCalls.slice(span.tool_call_start, span.tool_call_end + 1)
+      };
+    }
     return {
       ...item,
       item,

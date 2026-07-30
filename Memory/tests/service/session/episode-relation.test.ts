@@ -23,8 +23,10 @@ afterEach(cleanup);
 
 function createRelationClassifierLlm(
   calls: string[],
-  optionCalls?: Array<{ operation: string; thinkingMode?: string }>
+  optionCalls?: Array<{ operation: string; thinkingMode?: string }>,
+  relation: "new_task" | "follow_up" | "end_topic" | Array<"new_task" | "follow_up" | "end_topic"> = "new_task"
 ): LlmClient {
+  let relationIndex = 0;
   return {
     config: {
       ...DEFAULT_MEMMY_CONFIG.summary,
@@ -48,10 +50,15 @@ function createRelationClassifierLlm(
       calls.push(options.operation);
       optionCalls?.push({ operation: options.operation, thinkingMode: options.thinkingMode });
       if (options.operation === "relation.classify.v1") {
+        const currentRelation = Array.isArray(relation)
+          ? relation[Math.min(relationIndex++, relation.length - 1)] ?? "follow_up"
+          : relation;
         return {
-          relation: "new_task",
-          confidence: 0.7,
-          reason: "database certificate rotation appears adjacent"
+          relation: currentRelation,
+          confidence: currentRelation === "end_topic" ? 0.98 : 0.7,
+          reason: currentRelation === "end_topic"
+            ? "user explicitly ends the current topic"
+            : "database certificate rotation appears adjacent"
         } as unknown as T;
       }
       return {
@@ -116,6 +123,270 @@ function createFollowUpRelationClassifierLlm(calls: string[]): LlmClient {
 }
 
 describe("MemoryService / session / episode relation", () => {
+  it("closes an explicitly ended topic without capturing the control turn as L1", async () => {
+    const relationCalls: string[] = [];
+    const { service } = createTestService({
+      llm: createRelationClassifierLlm(relationCalls, undefined, "end_topic")
+    });
+    const session = service.openSession({
+      namespace: {
+        source: "codex",
+        profileId: "jiang",
+        userId: "user-end-topic"
+      }
+    });
+    const first = service.completeTurn("turn-end-topic-first", {
+      sessionId: session.sessionId,
+      query: "Configure nginx TLS for the service",
+      answer: "Use port 443 and verify the certificate chain."
+    });
+
+    const prepared = await service.startTurn({
+      turnId: "turn-end-topic-close",
+      sessionId: session.sessionId,
+      query: "结束会话"
+    });
+
+    expect(prepared).toMatchObject({
+      episodeId: first.episodeId,
+      closedEpisodeIds: [],
+      hits: [],
+      sourceMemoryIds: []
+    });
+    expect(prepared.status).toContain("relation:end_topic");
+    expect(relationCalls).toEqual([]);
+    expect(service.getMemory(first.episodeId)).toMatchObject({
+      kind: "episode",
+      status: "open"
+    });
+
+    const completed = service.completeTurn("turn-end-topic-close", {
+      sessionId: session.sessionId,
+      query: "结束会话",
+      answer: "好的，本话题到这里结束。"
+    });
+
+    expect(completed.closedEpisodeIds).toEqual([first.episodeId]);
+    expect(completed.l1MemoryId).toBe("");
+    expect(completed.l1MemoryIds).toEqual([]);
+    expect(completed.jobs.map((job) => job.jobType)).toContain("reflection");
+    expect(completed.jobs.map((job) => job.jobType)).not.toContain("episode_idle_close");
+    const detail = service.getMemory(first.episodeId);
+    expect(detail).toMatchObject({
+      kind: "episode",
+      status: "closed"
+    });
+    if (detail.kind !== "episode") {
+      throw new Error("expected episode detail");
+    }
+    expect(detail.metadata).toMatchObject({
+      episode: {
+        meta: {
+          closeReason: "end_topic",
+          topicState: "ended",
+          endTopicTurnId: "turn-end-topic-close",
+          relationDecision: { relation: "end_topic" }
+        }
+      }
+    });
+    expect(detail.timeline.rawTurns).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        rawTurnId: completed.rawTurnId,
+        userText: "结束会话",
+        assistantText: "好的，本话题到这里结束。"
+      })
+    ]));
+    expect(detail.timeline.items.map((item) => item.id)).toContain(first.l1MemoryId);
+    expect(detail.timeline.items).toHaveLength(1);
+  });
+
+  it("recognizes only standalone explicit end-topic commands", async () => {
+    const { service } = createTestService();
+    const session = service.openSession({
+      namespace: {
+        source: "codex",
+        profileId: "jiang",
+        userId: "user-explicit-end-topic"
+      }
+    });
+    const first = service.completeTurn("turn-explicit-end-topic-first", {
+      sessionId: session.sessionId,
+      query: "Configure nginx TLS",
+      answer: "Use port 443."
+    });
+
+    for (const query of ["结束话题", "如何结束进程？", "不要结束会话，继续说明证书续期", "不聊了吗？"]) {
+      const prepared = await service.startTurn({
+        sessionId: session.sessionId,
+        query
+      });
+      expect(prepared.status).not.toContain("relation:end_topic");
+    }
+
+    const prepared = await service.startTurn({
+      turnId: "turn-explicit-end-topic-close",
+      sessionId: session.sessionId,
+      query: "不聊了！"
+    });
+    expect(prepared.status).toContain("relation:end_topic");
+
+    const completed = service.completeTurn("turn-explicit-end-topic-close", {
+      sessionId: session.sessionId,
+      query: "不聊了！",
+      answer: "好的。"
+    });
+    expect(completed.closedEpisodeIds).toEqual([first.episodeId]);
+    expect(completed.l1MemoryIds).toEqual([]);
+  });
+
+  it("keeps end-topic start and complete retries idempotent", async () => {
+    const relationCalls: string[] = [];
+    const { service } = createTestService({
+      llm: createRelationClassifierLlm(relationCalls, undefined, "end_topic")
+    });
+    const session = service.openSession({
+      namespace: {
+        source: "codex",
+        profileId: "jiang",
+        userId: "user-end-topic-retry"
+      }
+    });
+    service.completeTurn("turn-end-topic-retry-first", {
+      sessionId: session.sessionId,
+      query: "Configure nginx TLS",
+      answer: "Use port 443."
+    });
+    const request = {
+      turnId: "turn-end-topic-retry-close",
+      sessionId: session.sessionId,
+      query: "结束会话"
+    };
+
+    const firstStart = await service.startTurn(request);
+    const secondStart = await service.startTurn(request);
+
+    expect(firstStart.episodeId).toBe(secondStart.episodeId);
+    expect(firstStart.closedEpisodeIds).toEqual([]);
+    expect(secondStart.closedEpisodeIds).toEqual([]);
+    expect(firstStart.status).toContain("relation:end_topic");
+    expect(secondStart.status).toContain("relation:end_topic");
+    expect(relationCalls).toEqual([]);
+
+    const completeRequest = {
+      sessionId: session.sessionId,
+      query: "结束会话",
+      answer: "好的，本话题结束。"
+    };
+    const firstComplete = service.completeTurn(request.turnId, completeRequest);
+    const secondComplete = service.completeTurn(request.turnId, completeRequest);
+
+    expect(secondComplete.closedEpisodeIds).toEqual(firstComplete.closedEpisodeIds);
+    expect(secondComplete.jobs).toEqual([]);
+  });
+
+  it("does not reopen an episode after an explicit end-topic boundary", async () => {
+    const { service } = createTestService({
+      llm: createRelationClassifierLlm([], undefined, ["end_topic", "follow_up"])
+    });
+    const session = service.openSession({
+      namespace: {
+        source: "codex",
+        profileId: "jiang",
+        userId: "user-end-topic-boundary"
+      }
+    });
+    const first = service.completeTurn("turn-end-topic-boundary-first", {
+      sessionId: session.sessionId,
+      query: "Configure nginx TLS",
+      answer: "Use port 443."
+    });
+    await service.startTurn({
+      turnId: "turn-end-topic-boundary-close",
+      sessionId: session.sessionId,
+      query: "结束会话"
+    });
+    service.completeTurn("turn-end-topic-boundary-close", {
+      sessionId: session.sessionId,
+      query: "结束会话",
+      answer: "好的，本话题结束。"
+    });
+
+    const nextStart = await service.startTurn({
+      turnId: "turn-end-topic-boundary-next",
+      sessionId: session.sessionId,
+      query: "继续说明证书续期"
+    });
+    const next = service.completeTurn("turn-end-topic-boundary-next", {
+      sessionId: session.sessionId,
+      query: "继续说明证书续期",
+      answer: "可以使用 certbot 自动续期。"
+    });
+
+    expect(nextStart.episodeId).toBe(next.episodeId);
+    expect(next.episodeId).not.toBe(first.episodeId);
+    expect(service.getMemory(first.episodeId)).toMatchObject({
+      kind: "episode",
+      status: "closed"
+    });
+    expect(service.getMemory(next.episodeId)).toMatchObject({
+      kind: "episode",
+      status: "open"
+    });
+  });
+
+  it("binds a following turn after the explicit end-topic completion", async () => {
+    const relationCalls: string[] = [];
+    const { service } = createTestService({
+      llm: createRelationClassifierLlm(relationCalls, undefined, ["end_topic", "follow_up"])
+    });
+    const session = service.openSession({
+      namespace: {
+        source: "codex",
+        profileId: "jiang",
+        userId: "user-pending-end-topic"
+      }
+    });
+    const first = service.completeTurn("turn-pending-end-topic-first", {
+      sessionId: session.sessionId,
+      query: "Configure nginx TLS",
+      answer: "Use port 443."
+    });
+    await service.startTurn({
+      turnId: "turn-pending-end-topic-close",
+      sessionId: session.sessionId,
+      query: "结束会话"
+    });
+
+    const nextStart = await service.startTurn({
+      turnId: "turn-after-pending-end-topic",
+      sessionId: session.sessionId,
+      query: "继续说明证书续期"
+    });
+
+    expect(nextStart.episodeId).not.toBe(first.episodeId);
+    expect(relationCalls).toEqual(["relation.classify.v1"]);
+
+    service.completeTurn("turn-pending-end-topic-close", {
+      sessionId: session.sessionId,
+      query: "结束会话",
+      answer: "好的，本话题结束。"
+    });
+    const next = service.completeTurn("turn-after-pending-end-topic", {
+      sessionId: session.sessionId,
+      query: "继续说明证书续期",
+      answer: "可以使用 certbot 自动续期。"
+    });
+
+    expect(service.getMemory(first.episodeId)).toMatchObject({
+      kind: "episode",
+      status: "closed"
+    });
+    expect(service.getMemory(next.episodeId)).toMatchObject({
+      kind: "episode",
+      status: "open"
+    });
+  });
+
   it("splits a new-task turn into a fresh episode using the plugin relation heuristic", async () => {
     const { db, service } = createTestService();
     const session = service.openSession({
@@ -137,6 +408,15 @@ describe("MemoryService / session / episode relation", () => {
     });
     expect(prepared.episodeId).not.toBe(first.episodeId);
     expect(prepared.closedEpisodeIds).toEqual([first.episodeId]);
+    expect(db.db.prepare(
+      "SELECT COUNT(*) AS count FROM episodes WHERE session_id = ?"
+    ).get(session.sessionId)).toEqual({ count: 2 });
+    const completed = service.completeTurn("turn-relation-new-task", {
+      sessionId: session.sessionId,
+      query: "new task: summarize the Q4 hiring plan",
+      answer: "The Q4 hiring plan has been summarized."
+    });
+    expect(completed.episodeId).toBe(prepared.episodeId);
 
     const rows = db.db.prepare(
       `SELECT id, status, meta_json
@@ -146,13 +426,13 @@ describe("MemoryService / session / episode relation", () => {
     ).all(session.sessionId) as Array<{ id: string; status: string; meta_json: string }>;
     expect(rows).toHaveLength(2);
     const firstRow = rows.find((row) => row.id === first.episodeId);
-    const preparedRow = rows.find((row) => row.id === prepared.episodeId);
+    const preparedRow = rows.find((row) => row.id === completed.episodeId);
     expect(firstRow).toMatchObject({ id: first.episodeId, status: "closed" });
     expect(JSON.parse(firstRow!.meta_json)).toMatchObject({
       closeReason: "topic_boundary",
       relation: "new_task"
     });
-    expect(preparedRow).toMatchObject({ id: prepared.episodeId, status: "open" });
+    expect(preparedRow).toMatchObject({ id: completed.episodeId, status: "open" });
     expect(JSON.parse(preparedRow!.meta_json)).toMatchObject({
       previousEpisodeId: first.episodeId,
       relation: "new_task"
@@ -200,7 +480,7 @@ describe("MemoryService / session / episode relation", () => {
       query: "那证书自动续期呢",
       answer: "Use systemd timers or certbot renewal hooks and verify nginx reloads cleanly."
     });
-    expect(completed.episodeId).toBe(prepared.episodeId);
+    expect(completed.episodeId).toBe(first.episodeId);
 
     const afterComplete = db.db.prepare(
       `SELECT id, status, turn_count, raw_turn_ids_json
@@ -210,7 +490,7 @@ describe("MemoryService / session / episode relation", () => {
     ).all(session.sessionId) as Array<{ id: string; status: string; turn_count: number; raw_turn_ids_json: string }>;
     expect(afterComplete).toHaveLength(1);
     expect(afterComplete[0]).toMatchObject({
-      id: prepared.episodeId,
+      id: first.episodeId,
       status: "open",
       turn_count: 2
     });
@@ -263,7 +543,7 @@ describe("MemoryService / session / episode relation", () => {
     db.close();
   });
 
-  it("completes turns in the episode reserved by turn start", async () => {
+  it("reserves a started raw turn in the selected episode and completes that same turn", async () => {
     const root = createTestRoot("mindock-memory-turn-bind-");
     const db = new MemoryDb({
       path: join(root, "memory.sqlite")
@@ -293,13 +573,14 @@ describe("MemoryService / session / episode relation", () => {
       query: "青竹项目的部署端口是多少？林浩偏好什么回答风格？"
     });
     expect(prepared.episodeId).toBe(first.episodeId);
-    expect(relationCalls).toContain("relation.classify.v1");
+    expect(relationCalls).toEqual(["relation.classify.v1"]);
     const reserved = db.db.prepare(
       `SELECT id, episode_id, status
        FROM raw_turns
        WHERE session_id = ? AND turn_id = ?`
-    ).get(session.sessionId, "turn-bind-second") as { id: string; episode_id: string; status: string };
-    expect(reserved).toMatchObject({
+    ).get(session.sessionId, "turn-bind-second") as { id: string; episode_id: string; status: string } | undefined;
+    expect(reserved).toEqual({
+      id: expect.stringMatching(/^raw_/u),
       episode_id: prepared.episodeId,
       status: "started"
     });
@@ -310,8 +591,8 @@ describe("MemoryService / session / episode relation", () => {
       answer: "部署端口是 49231；林浩偏好简洁中文回答。"
     });
 
-    expect(completed.episodeId).toBe(prepared.episodeId);
-    expect(completed.rawTurnId).toBe(reserved.id);
+    expect(completed.episodeId).toBe(first.episodeId);
+    expect(completed.rawTurnId).toBe(reserved?.id);
     const episodes = db.db.prepare(
       `SELECT id, turn_count, raw_turn_ids_json
        FROM episodes
@@ -345,13 +626,11 @@ describe("MemoryService / session / episode relation", () => {
       answer: "记住了：你上个月读的是《百年孤独》。"
     });
 
-    const secondStart = await service.startTurn({
+    await service.startTurn({
       turnId: "turn-book-second",
       sessionId: session.sessionId,
       query: "有什么其他书和这本书比较相似的吗"
     });
-    expect(secondStart.episodeId).toBe(first.episodeId);
-    expect(secondStart.closedEpisodeIds).toEqual([]);
     const second = service.completeTurn("turn-book-second", {
       sessionId: session.sessionId,
       query: "有什么其他书和这本书比较相似的吗",
@@ -359,13 +638,11 @@ describe("MemoryService / session / episode relation", () => {
     });
     expect(second.episodeId).toBe(first.episodeId);
 
-    const thirdStart = await service.startTurn({
+    await service.startTurn({
       turnId: "turn-book-third",
       sessionId: session.sessionId,
       query: "有什么中国的书和这些书比较相似的吗"
     });
-    expect(thirdStart.episodeId).toBe(first.episodeId);
-    expect(thirdStart.closedEpisodeIds).toEqual([]);
     const third = service.completeTurn("turn-book-third", {
       sessionId: session.sessionId,
       query: "有什么中国的书和这些书比较相似的吗",
@@ -394,7 +671,7 @@ describe("MemoryService / session / episode relation", () => {
     db.close();
   });
 
-  it("uses the configured relation classifier model during turn.start arbitration", async () => {
+  it("uses the configured relation classifier during turn.start arbitration", async () => {
     const root = createTestRoot("mindock-memory-");
     const db = new MemoryDb({
       path: join(root, "memory.sqlite")
@@ -432,10 +709,12 @@ describe("MemoryService / session / episode relation", () => {
        ORDER BY opened_at ASC`
     ).all(session.sessionId) as Array<{ meta_json: string }>;
     expect(rows).toHaveLength(1);
-    const meta = JSON.parse(rows[0]!.meta_json) as {
-      relationDecision?: { signals?: string[] };
-    };
-    expect(meta.relationDecision?.signals).toContain("arbitration_override");
+    expect(JSON.parse(rows[0]!.meta_json)).toMatchObject({
+      relationDecision: {
+        relation: "follow_up",
+        signals: expect.arrayContaining(["arbitration_override"])
+      }
+    });
     db.close();
   });
 
@@ -503,6 +782,15 @@ describe("MemoryService / session / episode relation", () => {
       query: "wrong, use port 443 instead and verify TLS"
     });
     expect(prepared.episodeId).toBe(first.episodeId);
+    expect(db.db.prepare(
+      "SELECT COUNT(*) AS count FROM feedback WHERE user_id = 'user-relation-revision'"
+    ).get()).toEqual({ count: 1 });
+    const correction = service.completeTurn("turn-relation-revision-fix", {
+      sessionId: session.sessionId,
+      query: "wrong, use port 443 instead and verify TLS",
+      answer: "Corrected: use port 443 and verify TLS."
+    });
+    expect(correction.episodeId).toBe(first.episodeId);
 
     const feedback = db.db.prepare(
       `SELECT id, l1_memory_id, raw_turn_id, polarity, raw_payload_json
@@ -596,6 +884,13 @@ describe("MemoryService / session / episode relation", () => {
       query: "不对，应该用递归实现，这样性能不好。换个任务：实现二叉树层序遍历"
     });
     expect(prepared.episodeId).not.toBe(first.episodeId);
+    expect(prepared.closedEpisodeIds).toEqual([first.episodeId]);
+    const correction = service.completeTurn("turn-implicit-feedback-correction", {
+      sessionId: session.sessionId,
+      query: "不对，应该用递归实现，这样性能不好。换个任务：实现二叉树层序遍历",
+      answer: "已改为递归，并开始实现二叉树层序遍历。"
+    });
+    expect(correction.episodeId).not.toBe(first.episodeId);
 
     const feedback = db.db.prepare(
       `SELECT id, channel, polarity, magnitude, l1_memory_id, raw_turn_id, raw_payload_json

@@ -23,7 +23,7 @@ describe("prototype page structure alignment", () => {
     expect(source("pages/welcome-page.tsx")).toContain('dispatch(appActions.navigate("/token-detail"))');
     expect(source("pages/token-detail-page.tsx")).toContain("h-screen flex flex-col bg-canvas-oat relative overflow-hidden");
     expect(source("pages/token-detail-page.tsx")).toContain("bg-gradient-to-br from-action-sky to-action-sky-hover");
-    expect(source("pages/token-detail-page.tsx")).toContain("30,000,000");
+    expect(source("pages/token-detail-page.tsx")).toContain("formatTokenGiftAmount(agentChatTokenTotal)");
     expect(source("pages/login-page.tsx")).toContain("space-y-3.5");
     expect(source("components/nickname-modal.tsx")).toContain("rounded-card-lg shadow-lg");
   });
@@ -102,7 +102,9 @@ describe("prototype page structure alignment", () => {
     expect(source("pages/memory-sources-page.tsx")).toContain('"memory.installHook"');
     expect(source("pages/memory-sources-page.tsx")).toContain('"memory.installSkill"');
     expect(source("pages/memory-sources-page.tsx")).toContain('"memory.removePlugin"');
-    expect(source("pages/memory-sources-page.tsx")).toContain("clients.agentSources.uninstallPlugin(source.sourceId)");
+    expect(source("pages/memory-sources-page.tsx")).toContain(
+      'clients.agentSources.uninstallPlugin(source.sourceId, { installType: "manual" })'
+    );
     expect(source("pages/memory-sources-page.tsx")).not.toContain('"memory.removeAgent"');
     expect(source("pages/memory-sources-page.tsx")).toContain("formatSourceDataPath(source.dataPath)");
     expect(source("pages/memory-sources-page.tsx")).toContain("formatSourceMemoryCount(source.messageCount, t)");

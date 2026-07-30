@@ -118,6 +118,7 @@ interface LocalEpisodeRow {
 }
 
 interface LocalApiLogRow {
+  source: MemosSqliteSource;
   id: number;
   tool_name: "memory_add" | "memory_search" | "skill_generate" | "skill_evolve";
   source_agent: string | null;
@@ -441,7 +442,7 @@ export function createMemosSqliteMemoryClient(options: CreateMemosSqliteMemoryCl
           toolName: row.tool_name,
           ...(row.source_agent ? { sourceAgent: row.source_agent } : {}),
           inputJson: row.input_json,
-          outputJson: row.output_json,
+          outputJson: apiLogOutputWithCurrentTraceSummary(row),
           durationMs: nonNegativeInt(row.duration_ms, 0),
           success: row.success !== 0,
           calledAt: normalizeIsoTime(row.called_at)
@@ -507,10 +508,48 @@ function listApiLogRows(
            ORDER BY called_at DESC, id DESC
            LIMIT ?`
         )
-        .all(...tools, ...agentFilter.parameters, maxRows) as unknown as LocalApiLogRow[];
+        .all(...tools, ...agentFilter.parameters, maxRows)
+        .map((row) => ({ ...row as unknown as Omit<LocalApiLogRow, "source">, source }));
     }))
     .sort((a, b) => b.called_at.localeCompare(a.called_at) || b.id - a.id)
     .slice(0, maxRows);
+}
+
+function apiLogOutputWithCurrentTraceSummary(row: LocalApiLogRow): string {
+  if (row.tool_name !== "memory_add") return row.output_json;
+
+  try {
+    const output = readJsonObject(row.output_json);
+    const details = output.details;
+    if (!Array.isArray(details)) return row.output_json;
+
+    let changed = false;
+    const nextDetails = details.map((detail) => {
+      const record = objectAt(detail, []);
+      const role = stringValue(record.role);
+      if (role !== "trace" && role !== "span") return detail;
+      const memoryId = stringValue(role === "span" ? record.spanId : record.traceId) ?? stringValue(record.traceId);
+      if (!memoryId) return detail;
+
+      const memory = withDb(row.source, (db) => {
+        if (!tableExists(db, "memories")) return undefined;
+        return db.prepare("SELECT * FROM memories WHERE id = ?").get(memoryId) as LocalMemoryRow | undefined;
+      });
+      const value = memory
+        ? role === "span"
+          ? spanGoalFromParsed(parsedRow(memory))
+          : summaryFromParsed(memory, parsedRow(memory))
+        : undefined;
+      const key = role === "span" ? "spanGoal" : "summary";
+      if (!value || record[key] === value) return detail;
+      changed = true;
+      return { ...record, [key]: value };
+    });
+
+    return changed ? JSON.stringify({ ...output, details: nextDetails }) : row.output_json;
+  } catch {
+    return row.output_json;
+  }
 }
 
 /**
@@ -910,6 +949,7 @@ function appendDeleteChangeLog(db: DatabaseSync, target: MemoryRow, createdAt: s
 function toListItem(row: MemoryRow): MemoryListItem {
   const parsed = parsedRow(row.row);
   const source = sourceLabelForRow(row, parsed);
+  const spanGoal = spanGoalFromParsed(parsed);
   return {
     id: encodeId(row.source, row.row.id),
     kind: kindForRow(row.row),
@@ -919,11 +959,18 @@ function toListItem(row: MemoryRow): MemoryListItem {
     summary: firstNonEmpty(summaryFromParsed(row.row, parsed), row.row.memory_value),
     tags: withSourceTag(source, tagsForRow(row.row, parsed)),
     metrics: metricsForRow(parsed),
-    metadata: { source },
+    metadata: { source, ...(spanGoal ? { spanGoal } : {}) },
     createdAt: normalizeIsoTime(row.row.created_at),
     updatedAt: normalizeIsoTime(row.row.updated_at),
     version: nonNegativeInt(row.row.version, 1)
   };
+}
+
+function spanGoalFromParsed(parsed: ParsedRow): string | undefined {
+  const internalInfo = objectAt(parsed.properties, ["internal_info"]);
+  if (stringValue(internalInfo.memory_kind) !== "span") return undefined;
+  const goal = stringValue(objectAt(internalInfo, ["span"]).span_goal)?.trim();
+  return goal || undefined;
 }
 
 function toDetailItem(row: MemoryRow, sources?: readonly MemosSqliteSource[]): GetMemoryOutput {
@@ -973,7 +1020,13 @@ function itemMatchesQueryAndTags(item: Pick<MemoryListItem, "id" | "title" | "su
 
 function kindForRow(row: LocalMemoryRow): MemoryKind {
   const parsedKind = stringValue(objectAt(readJsonObject(row.properties_json), ["internal_info"]).memory_kind);
-  if (parsedKind === "trace" || parsedKind === "policy" || parsedKind === "world_model" || parsedKind === "skill") {
+  if (
+    parsedKind === "trace" ||
+    parsedKind === "span" ||
+    parsedKind === "policy" ||
+    parsedKind === "world_model" ||
+    parsedKind === "skill"
+  ) {
     return parsedKind;
   }
 
@@ -1120,8 +1173,10 @@ function withSourceTag(sourceLabel: string, tags: string[]): string[] {
 }
 
 function metadataForRow(row: MemoryRow, parsed: ParsedRow, sources?: readonly MemosSqliteSource[]): Record<string, unknown> {
+  const kind = kindForRow(row.row);
   return removeUndefined({
-    traceDetail: kindForRow(row.row) === "trace" ? traceDetailForRow(row, parsed, sources) : undefined,
+    traceDetail: kind === "trace" ? traceDetailForRow(row, parsed, sources) : undefined,
+    spanDetail: kind === "span" ? spanDetailForRow(row, parsed) : undefined,
     source: sourceLabelForRow(row, parsed),
     sourceId: row.source.id,
     dbPath: row.source.dbPath,
@@ -1133,6 +1188,24 @@ function metadataForRow(row: MemoryRow, parsed: ParsedRow, sources?: readonly Me
       info_json: undefined,
       properties_json: undefined
     })
+  });
+}
+
+function spanDetailForRow(row: MemoryRow, parsed: ParsedRow): Record<string, unknown> | undefined {
+  const internalInfo = objectAt(parsed.properties, ["internal_info"]);
+  const span = objectAt(internalInfo, ["span"]);
+  const rawTurnId = stringValue(span.raw_turn_id);
+  const rawTurn = readRawTurn(row.source, rawTurnId, undefined);
+  const toolCallStart = numberValue(span.tool_call_start);
+  const toolCallEnd = numberValue(span.tool_call_end);
+  if (!rawTurn || toolCallStart === undefined || toolCallEnd === undefined) {
+    return undefined;
+  }
+
+  return removeUndefined({
+    toolCallStart,
+    toolCallEnd,
+    toolCalls: readToolCalls(rawTurn.tool_calls_json).slice(toolCallStart, toolCallEnd + 1)
   });
 }
 

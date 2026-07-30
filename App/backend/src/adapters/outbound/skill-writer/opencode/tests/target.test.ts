@@ -188,6 +188,7 @@ describe("opencode skill target", () => {
       expect(requests.find((request) => request.path.endsWith("/complete"))?.body).toMatchObject({
         adapterId: "memmy-opencode-plugin",
         sessionId: "memmy-session-1",
+        episodeId: "episode-1",
         query: "请检查 README",
         answer: "检查完成",
         status: "succeeded",

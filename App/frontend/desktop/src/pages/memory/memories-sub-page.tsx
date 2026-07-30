@@ -1,6 +1,14 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { GetMemoryOutput, MemoryProcessingRecord, PanelItemsInput, PanelItemsOutput } from "@memmy/local-api-contracts";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
+import {
+  buildMemoryUiDeletedEvent,
+  buildMemoryUiDetailOpenedEvent,
+  buildMemoryUiFilterLayer,
+  buildMemoryUiPanelRefreshedEvent,
+  buildMemoryUiSearchSubmittedEvent
+} from "../../analytics/memory-ui-analytics.js";
+import { useAnalytics } from "../../analytics/use-analytics.js";
 import { ApiRequestError } from "../../api/http.js";
 import type { MessageKey } from "../../i18n/messages.js";
 import { useTranslation } from "../../i18n/use-translation.js";
@@ -55,7 +63,7 @@ export interface MemoriesSubPageProps {
 type ProcessingRetryFeedback =
   | { memoryId: string; status: "running" }
   | { memoryId: string; status: "succeeded" }
-  | { memoryId: string; status: "error"; message: string }
+  | { memoryId: string; status: "error"; message: string; failedAt: string }
   | null;
 
 export interface MemorySearchFilters {
@@ -96,6 +104,8 @@ function memoriesCacheKeys(query: string, sourceAgent: string, page: number): st
 
 export function MemoriesSubPage(props: MemoriesSubPageProps) {
   const { t } = useTranslation();
+  const { track } = useAnalytics();
+  const memoriesFilterLayer = (sourceAgent = "") => buildMemoryUiFilterLayer("L1", sourceAgent || undefined);
   const [query, setQuery] = useState("");
   const [sourceAgent, setSourceAgent] = useState("");
   const [page, setPage] = useState(1);
@@ -108,7 +118,7 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
   const retryRequestIdRef = useRef(0);
   const retryResetTimerRef = useRef<number | null>(null);
 
-  function refresh(nextPage = page, nextSourceAgent = sourceAgent, options: { useCache?: boolean } = {}): Promise<void> {
+  function refresh(nextPage = page, nextSourceAgent = sourceAgent, options: { useCache?: boolean } = {}): Promise<PanelItemsOutput | undefined> {
     if (!props.client) {
       const message = t("memory.clientNotReady");
       setState({ status: "error", message });
@@ -130,16 +140,17 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
       .then((data) => {
         writeMemoryPanelCaches(cacheKeys, data);
         if (requestId !== requestIdRef.current) {
-          return;
+          return undefined;
         }
         setState({ status: "ready", data });
         if (data.page !== normalizedPage) {
           setPage(data.page);
         }
+        return data;
       })
       .catch((error) => {
         if (requestId !== requestIdRef.current) {
-          return;
+          return undefined;
         }
         setState({ status: "error", message: toErrorMessage(error) });
         throw error;
@@ -159,7 +170,18 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
     setDetail(null);
     setSelectedMemoryId(null);
     setPage(1);
-    void refresh(1).catch(() => undefined);
+    void refresh(1)
+      .then((data) => {
+        if (!data) {
+          return;
+        }
+        track(buildMemoryUiSearchSubmittedEvent({
+          subPage: "memories",
+          filterLayer: memoriesFilterLayer(sourceAgent),
+          resultCount: data.total
+        }));
+      })
+      .catch(() => undefined);
   }
 
   function changeSourceAgent(value: string) {
@@ -185,6 +207,10 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
   function openDetail(item: PanelItemsOutput["items"][number]) {
     const requestId = ++detailRequestIdRef.current;
     setSelectedMemoryId(item.id);
+    track(buildMemoryUiDetailOpenedEvent({
+      subPage: "memories",
+      filterLayer: memoriesFilterLayer(sourceAgent)
+    }));
 
     if (!props.client) {
       setDetail({ status: "error", message: t("memory.clientNotReady") });
@@ -211,6 +237,10 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
     }
 
     await props.client.deleteMemory(id);
+    track(buildMemoryUiDeletedEvent({
+      subPage: "memories",
+      filterLayer: memoriesFilterLayer(sourceAgent)
+    }));
     detailRequestIdRef.current += 1;
     clearMemoryPanelCache();
     setDetail(null);
@@ -218,9 +248,26 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
     void refresh(page, sourceAgent, { useCache: false }).catch(() => undefined);
   }
 
+  function updateOpenDetailProcessing(memoryId: string, processing: MemoryProcessingRecord) {
+    setDetail((current) => current?.status === "ready" && current.data.item.id === memoryId
+      ? {
+          status: "ready",
+          data: {
+            ...current.data,
+            item: { ...current.data.item, processing }
+          }
+        }
+      : current);
+  }
+
   async function retryMemoryProcessing(memoryId: string) {
     if (!props.client) {
-      setRetryFeedback({ memoryId, status: "error", message: t("memory.clientNotReady") });
+      setRetryFeedback({
+        memoryId,
+        status: "error",
+        message: t("memory.clientNotReady"),
+        failedAt: new Date().toISOString()
+      });
       return;
     }
     const requestId = ++retryRequestIdRef.current;
@@ -230,13 +277,15 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
     }
     setRetryFeedback({ memoryId, status: "running" });
     try {
-      await props.client.retryMemoryProcessing(memoryId);
+      const retry = await props.client.retryMemoryProcessing(memoryId);
+      updateOpenDetailProcessing(memoryId, retry.processing);
       const deadline = Date.now() + 10 * 60_000;
       while (Date.now() < deadline) {
         const status = await props.client.getMemoryProcessingStatus([memoryId]);
         if (requestId !== retryRequestIdRef.current) return;
         const processing = status.items.find((item) => item.memoryId === memoryId);
         if (!processing) throw new Error(t("memory.memories.processing.missing"));
+        updateOpenDetailProcessing(memoryId, processing);
         if (processing.state === "failed") {
           throw new Error(processing.errorMessage || t("memory.memories.processing.retryFailed"));
         }
@@ -265,7 +314,8 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
       setRetryFeedback({
         memoryId,
         status: "error",
-        message: processingRetryErrorMessage(error, t("memory.memories.processing.retryEndpointUnavailable"))
+        message: processingRetryErrorMessage(error, t("memory.memories.processing.retryEndpointUnavailable")),
+        failedAt: new Date().toISOString()
       });
       clearMemoryPanelCache();
       void refresh(page, sourceAgent, { useCache: false }).catch(() => undefined);
@@ -314,7 +364,16 @@ export function MemoriesSubPage(props: MemoriesSubPageProps) {
       onSourceAgentChange={changeSourceAgent}
       onSearch={runSearch}
       onPageChange={changePage}
-      onRefresh={() => refresh(page, sourceAgent, { useCache: false })}
+      onRefresh={async () => {
+        const data = await refresh(page, sourceAgent, { useCache: false });
+        if (data) {
+          track(buildMemoryUiPanelRefreshedEvent({
+            subPage: "memories",
+            filterLayer: memoriesFilterLayer(sourceAgent),
+            resultCount: data.total
+          }));
+        }
+      }}
       onOpenDetail={openDetail}
       onDeleteDetail={deleteMemoryDetail}
       onRetryProcessing={retryMemoryProcessing}
@@ -547,6 +606,34 @@ function MemoryDetailBody(props: {
   const traceDetail = readTraceDetail(detail);
   const summaryText = displayMemorySummaryText(item.summary, t);
 
+  if (item.kind === "span") {
+    const span = recordValue(recordValue(recordValue(item.metadata.properties).internal_info).span);
+    const relatedSteps = readSpanRelatedSteps(detail);
+    return (
+      <>
+        <section className="memory-detail-card">
+          <h5 className="memory-detail-card__label">{t("memory.memories.spanGoal")}</h5>
+          <div className="memory-detail-text">{stringValue(span.span_goal)}</div>
+        </section>
+        <section className="memory-detail-card">
+          <h5 className="memory-detail-card__label">{t("memory.memories.summary")}</h5>
+          <div className="memory-detail-text">{summaryText}</div>
+        </section>
+        <section className="memory-detail-card">
+          <h5 className="memory-detail-card__label">{t("memory.memories.relatedSteps")}</h5>
+          <div className="memory-turn">
+            {relatedSteps.toolCalls.map((call, index) => (
+              <TraceTurnEventBlock
+                key={call.id ?? `${call.name}:${index}`}
+                event={{ kind: "tool", key: `tool:${call.id ?? call.name}:${index}`, call, index: relatedSteps.toolCallStart + index + 1 }}
+              />
+            ))}
+          </div>
+        </section>
+      </>
+    );
+  }
+
   if (traceDetail) {
     return (
       <TraceMemoryDetail
@@ -603,54 +690,92 @@ function MemoryProcessingFailureCard(props: {
   const { t } = useTranslation();
   const processing = props.item.processing;
   const feedback = props.retryFeedback?.memoryId === props.item.id ? props.retryFeedback : null;
-  if (processing?.state !== "failed" && feedback?.status !== "running" && feedback?.status !== "succeeded") {
+  const retryError = feedback?.status === "error" ? feedback : null;
+  const displayedErrorMessage = retryError?.message ?? processing?.errorMessage ?? null;
+  const displayedFailedAt = retryError?.failedAt ?? processing?.failedAt ?? null;
+  const retryErrorMatchesProcessing = Boolean(
+    retryError &&
+    processing?.errorMessage === retryError.message
+  );
+  const processingRetryInProgress = Boolean(
+    processing?.errorMessage &&
+    processing.state !== "failed" &&
+    processing.state !== "ready" &&
+    processing.state !== "ready_text_only"
+  );
+  const retryInProgress = feedback?.status === "running" || processingRetryInProgress;
+  if (
+    processing?.state !== "failed" &&
+    !retryInProgress &&
+    feedback?.status !== "succeeded" &&
+    feedback?.status !== "error"
+  ) {
     return null;
   }
 
-  const retryDisabled = feedback?.status === "running" || feedback?.status === "succeeded";
+  const retryDisabled = retryInProgress || feedback?.status === "succeeded";
+  const showPreviousFailure = Boolean(
+    processing?.errorMessage &&
+    (retryInProgress || processing.state !== "failed")
+  );
+  const showRetryAction = Boolean(
+    props.onRetryProcessing &&
+    ((processing?.state === "failed" && processing.retryAction !== "none") ||
+      retryInProgress ||
+      feedback?.status === "error" ||
+      feedback?.status === "succeeded")
+  );
+  const showFailureStage = !showPreviousFailure && (!retryError || retryErrorMatchesProcessing);
   return (
     <section className={`memory-detail-card memory-processing-failure${feedback?.status === "succeeded" ? " memory-processing-failure--success" : ""}`}>
       <div className="memory-processing-failure__heading">
-        {feedback?.status === "succeeded" ? <CheckCircle2 size={17} /> : <AlertTriangle size={17} />}
+        {feedback?.status === "succeeded"
+          ? <CheckCircle2 size={17} />
+          : retryInProgress
+            ? <Loader2 size={17} className="memory-spin" />
+            : <AlertTriangle size={17} />}
         <h5>{feedback?.status === "succeeded"
           ? t("memory.memories.processing.retrySucceeded")
-          : t("memory.memories.processing.failureTitle")}</h5>
+          : retryInProgress
+            ? t("memory.memories.processing.retrying")
+            : t("memory.memories.processing.failureTitle")}</h5>
       </div>
-      {processing?.state === "failed" && (
-        <dl className="memory-detail-grid">
-          <dt>{t("memory.memories.processing.stage")}</dt>
-          <dd>{processingStageLabel(processing, t)}</dd>
-          <dt>{t("memory.memories.processing.reason")}</dt>
-          <dd>{processing.errorMessage || "-"}</dd>
-          <dt>{t("memory.memories.processing.attempts")}</dt>
-          <dd>{processing.attemptCount}</dd>
-          <dt>{t("memory.memories.processing.failedAt")}</dt>
-          <dd>{processing.failedAt ? formatDateTime(processing.failedAt) : "-"}</dd>
+      {displayedErrorMessage && (
+        <dl className="memory-detail-grid" role={retryError ? "alert" : undefined}>
+          {showFailureStage && processing && (
+            <>
+              <dt>{t("memory.memories.processing.stage")}</dt>
+              <dd>{processingStageLabel(processing, t)}</dd>
+            </>
+          )}
+          <dt>{t(showPreviousFailure
+            ? "memory.memories.processing.previousReason"
+            : "memory.memories.processing.reason")}</dt>
+          <dd>{displayedErrorMessage}</dd>
+          <dt>{t(showPreviousFailure
+            ? "memory.memories.processing.previousFailedAt"
+            : "memory.memories.processing.failedAt")}</dt>
+          <dd>{displayedFailedAt ? formatDateTime(displayedFailedAt) : "-"}</dd>
         </dl>
       )}
-      {feedback?.status === "error" && (
-        <p className="memory-processing-failure__retry-error" role="alert">
-          {t("memory.memories.processing.retryError", { message: feedback.message })}
-        </p>
-      )}
       <div className="memory-processing-failure__actions">
-        {processing?.retryAction === "open_settings" && props.onOpenSettings && !retryDisabled && (
+        {processing?.state === "failed" && processing.retryAction === "open_settings" && props.onOpenSettings && !retryDisabled && (
           <button type="button" className="memory-processing-action" onClick={props.onOpenSettings}>
             <Settings2 size={14} />
             {t("memory.memories.processing.openSettings")}
           </button>
         )}
-        {processing?.retryAction !== "none" && props.onRetryProcessing && (
+        {showRetryAction && (
           <button
             type="button"
             className="memory-processing-action memory-processing-action--primary"
             disabled={retryDisabled}
             onClick={() => void props.onRetryProcessing?.(props.item.id)}
           >
-            {feedback?.status === "running" ? <Loader2 size={14} className="memory-spin" />
+            {retryInProgress ? <Loader2 size={14} className="memory-spin" />
               : feedback?.status === "succeeded" ? <CheckCircle2 size={14} />
                 : <RefreshCw size={14} />}
-            {feedback?.status === "running"
+            {retryInProgress
               ? t("memory.memories.processing.retrying")
               : feedback?.status === "succeeded"
                 ? t("memory.memories.processing.retrySucceeded")
@@ -701,6 +826,11 @@ interface TraceStep {
   alpha?: number;
   priority?: number;
   reflection?: string;
+  toolCalls: TraceToolCall[];
+}
+
+interface SpanRelatedSteps {
+  toolCallStart: number;
   toolCalls: TraceToolCall[];
 }
 
@@ -1018,6 +1148,14 @@ function readTraceDetail(detail: MemoryDetailOutput): TraceDetail | null {
     finalResponse: stringValue(rawTurn.assistantText) ?? stringValue(trace.agent_text) ?? stringValue(trace.agentText),
     toolCalls,
     steps: arrayValue(trace.steps).map(readTraceStep).filter((step): step is TraceStep => Boolean(step))
+  };
+}
+
+function readSpanRelatedSteps(detail: MemoryDetailOutput): SpanRelatedSteps {
+  const spanDetail = recordValue(detail.item.metadata.spanDetail);
+  return {
+    toolCallStart: numberValue(spanDetail.toolCallStart) as number,
+    toolCalls: arrayValue(spanDetail.toolCalls).map(readTraceToolCall).filter((call): call is TraceToolCall => Boolean(call))
   };
 }
 

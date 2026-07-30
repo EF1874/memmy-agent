@@ -308,12 +308,12 @@ describe("SettingsPageView", () => {
     expect(html).not.toContain("注册于");
   });
 
-  it("Token 用量展示参与奖励后的 5,000,000 Token 增量", () => {
+  it("Token 用量展示国际邮箱账号参与改进计划后的 300,000 Token 增量", () => {
     const html = normalizeSsrHtml(renderSettingsPageView(createImprovementBonusState()));
 
     expect(html).toContain("赠送大模型额度已用 0.0M Token");
-    expect(html).toContain("共 35.0M Token");
-    expect(html).toContain("剩余 35.0M Token");
+    expect(html).toContain("共 30.3M Token");
+    expect(html).toContain("剩余 30.3M Token");
     expect(html).not.toContain("共 30.0M Token");
   });
 
@@ -348,7 +348,6 @@ describe("SettingsPageView", () => {
     expect(html).toContain("修改昵称");
     expect(html).toContain("Token 用量");
     expect(html).toContain("平台赠送 Token");
-    expect(html).toContain("赠送 Token 永不过期");
     expect(html).toContain("平台赠送大模型");
     expect(html).toContain("自有 API Key");
     expect(html).toContain("查看用量详情");
@@ -427,6 +426,10 @@ describe("SettingsPageView", () => {
 
     expect(source).toContain("configClient.getTokenUsage()");
     expect(source).toContain("dispatch(appActions.tokenUsageUpdated(tokenUsage))");
+    expect(source).toContain("requestAccountInvitation(accountClient, accountKey)");
+    expect(source).not.toContain("resolveDisplayInviteCode");
+    expect(source).toContain('t("settings.token.invite.title")');
+    expect(source).toContain("mb-6 flex items-center gap-3");
     expect(source).toContain("byokTokenUsageClient.getSummary");
     expect(source).toContain("EMPTY_BYOK_TOKEN_USAGE");
     expect(source).toContain("function ChannelStat");
@@ -847,7 +850,9 @@ function createLowTokenState(applyMore: boolean): AppState {
     promotions: {
       loginBanner: true,
       improvementGift: true,
-      applyMore
+      improvementGiftRewardTokens: 1_000_000,
+      applyMore,
+      agentChatTokenTotal: mockBootstrap.promotions?.agentChatTokenTotal ?? 0
     }
   };
   const bootstrapped = appReducer(createInitialAppState(), appActions.bootstrapLoaded(lowBootstrap, "/settings"));
@@ -934,7 +939,27 @@ function createAccountModeState(): AppState {
     tokenUsage: {
       ...mockBootstrap.tokenUsage,
       usedTokens: 18_420_000,
-      remainingTokens: 11_580_000
+      remainingTokens: 11_580_000,
+      sceneUsages: [
+        {
+          scene: "agent_chat" as const,
+          totalTokens: 5_000_000,
+          usedTokens: 1_420_000,
+          remainingTokens: 3_580_000
+        },
+        {
+          scene: "memory_summary" as const,
+          totalTokens: 20_000_000,
+          usedTokens: 15_000_000,
+          remainingTokens: 5_000_000
+        },
+        {
+          scene: "memory_evolution" as const,
+          totalTokens: 5_000_000,
+          usedTokens: 2_000_000,
+          remainingTokens: 3_000_000
+        }
+      ]
     }
   };
   const bootstrapped = appReducer(createInitialAppState(), appActions.bootstrapLoaded(accountBootstrap, "/settings"));
@@ -992,9 +1017,10 @@ function createAccountModeWithoutIdentifierState(): AppState {
 }
 
 /**
- * Creates an account-mode settings page state that includes a 5,000,000 Token participation-reward increment.
+ * Creates an account-mode settings page state that includes an international
+ * email account's 300,000 Token improvement-program reward.
  *
- * @returns A settings page state with a total of 35,000,000 Tokens.
+ * @returns A settings page state with a total of 30,300,000 Tokens.
  */
 function createImprovementBonusState(): AppState {
   const state = createAccountModeState();
@@ -1003,11 +1029,12 @@ function createImprovementBonusState(): AppState {
     state,
     appActions.tokenUsageUpdated({
       planName: "free",
-      totalTokens: 35_000_000,
+      totalTokens: 30_300_000,
       usedTokens: 0,
-      remainingTokens: 35_000_000,
+      remainingTokens: 30_300_000,
       expiresAt: null,
-      lastSyncedAt: "2026-06-09T06:36:49.417Z"
+      lastSyncedAt: "2026-06-09T06:36:49.417Z",
+      sceneUsages: []
     })
   );
 }

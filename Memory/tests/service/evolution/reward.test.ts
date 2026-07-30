@@ -84,7 +84,7 @@ function createCapturingRewardSummaryLlm(calls: Array<{
       }
     ): Promise<T> {
       calls.push({ messages, options });
-      if (options.operation === "reward.reward.r_human.v6") {
+      if (options.operation === "reward.reward.r_human.v7") {
         return {
           goal_achievement: 1,
           process_quality: 0.5,
@@ -122,7 +122,7 @@ describe("MemoryService / evolution / reward", () => {
       query: "finish the migration scaffold with durable sqlite state and a worker queue",
       answer: "implemented the service scaffold, sqlite schema, raw turn capture, and asynchronous worker queue"
     });
-    expect(complete.jobs.map((job) => job.jobType)).toEqual(["embedding", "episode_idle_close"]);
+    expect(complete.jobs.map((job) => job.jobType)).toEqual(["trace_summary", "episode_idle_close"]);
 
     const rewardBeforeClose = db.db.prepare(
       `SELECT COUNT(*) AS count
@@ -171,7 +171,7 @@ describe("MemoryService / evolution / reward", () => {
       userId: "user-implicit-reward",
       status: "queued"
     }).items.map((job) => job.jobType);
-    expect(queuedOrder.slice(0, 3)).toEqual(["episode_idle_close", "embedding", "reflection"]);
+    expect(queuedOrder.slice(0, 2)).toEqual(["episode_idle_close", "trace_summary"]);
 
     const run = await service.runWorkerOnce(20);
     expect(run.changeSeq).toBeGreaterThan(0);
@@ -241,10 +241,11 @@ describe("MemoryService / evolution / reward", () => {
         userId: "user-reward-before-reflection"
       }
     });
+    const firstQuery = `我喜欢吃的水果是西瓜，${"这是需要保留的较长用户补充说明。".repeat(12)}`;
     const first = service.completeTurn("turn-reward-before-reflection-1", {
       sessionId: session.sessionId,
       episodeId: "episode-reward-before-reflection",
-      query: "我喜欢吃的水果是西瓜",
+      query: firstQuery,
       answer: "记住了，你喜欢吃的水果是西瓜。"
     });
     const second = service.completeTurn("turn-reward-before-reflection-2", {
@@ -269,6 +270,27 @@ describe("MemoryService / evolution / reward", () => {
        WHERE id = ?`
     ).get(first.episodeId) as { r_task: number | null };
     expect(typeof rewarded.r_task).toBe("number");
+    const immediateRewardCall = calls.find((call) =>
+      call.options.operation === "reward.reward.r_human.v7"
+    );
+    expect(immediateRewardCall).toBeTruthy();
+    const immediateRewardInput = JSON.parse(
+      immediateRewardCall!.messages.find((message) => message.role === "user")!.content
+    ) as {
+      turnSummaries: string[];
+      finalExchange: { user: string; assistant: string };
+    };
+    expect(immediateRewardInput.turnSummaries[0]).toBe("LLM batch summary");
+    expect(immediateRewardInput.turnSummaries[0]!.length).toBeLessThanOrEqual(200);
+    expect(immediateRewardInput.turnSummaries[1]).toBe("LLM batch summary");
+    expect(immediateRewardInput.finalExchange).toEqual({
+      user: "水果中和西瓜比较相似有哪些，推荐一个",
+      assistant: "我推荐哈密瓜。"
+    });
+    expect(calls.filter((call) =>
+      call.options.operation === "reward.reward.r_human.v7"
+    )).toHaveLength(1);
+    expect(calls.filter((call) => call.options.operation === "capture.summarize")).toHaveLength(2);
 
     const third = service.completeTurn("turn-reward-before-reflection-3", {
       sessionId: session.sessionId,
@@ -346,7 +368,7 @@ describe("MemoryService / evolution / reward", () => {
     db.close();
   });
 
-  it("skips trivial implicit reward episodes with the plugin reward gate", async () => {
+  it("does not schedule implicit reward for a chitchat-only episode", async () => {
     const { db, service } = createTestService();
     const session = service.openSession({
       namespace: {
@@ -361,6 +383,8 @@ describe("MemoryService / evolution / reward", () => {
       query: "hi",
       answer: "ok"
     });
+    expect(complete.l1MemoryId).toBe("");
+    expect(complete.l1MemoryIds).toEqual([]);
     service.closeSession(session.sessionId);
     await service.runWorkerOnce(20);
 
@@ -388,10 +412,7 @@ describe("MemoryService / evolution / reward", () => {
          AND job_type = 'reward'
          AND status = 'queued'`
     ).get(complete.episodeId) as { payload_json: string } | undefined;
-    expect(JSON.parse(queuedReward!.payload_json)).toMatchObject({
-      trigger: "implicit_fallback",
-      targetKind: "episode"
-    });
+    expect(queuedReward).toBeUndefined();
 
     const rewardUpdates = db.db.prepare(
       `SELECT COUNT(*) AS count
@@ -462,9 +483,12 @@ describe("MemoryService / evolution / reward", () => {
       rationale: "accepted"
     });
 
+    service.closeSession(session.sessionId);
+    await service.runWorkerOnce(50);
+    await service.runWorkerOnce(50);
     await service.runWorkerOnce(50);
 
-    expect(rewardCalls.some((call) => call.options.operation === "reward.reward.r_human.v6")).toBe(true);
+    expect(rewardCalls.some((call) => call.options.operation === "reward.reward.r_human.v7")).toBe(true);
     const memory = db.db.prepare(
       `SELECT properties_json FROM memories WHERE id = ?`
     ).get(complete.l1MemoryId) as { properties_json: string };
@@ -503,6 +527,7 @@ describe("MemoryService / evolution / reward", () => {
       db,
       mode: "dev",
       llm: createCapturingRewardSummaryLlm(rewardCalls),
+      skillLlm: createBatchReflectionLlm([], "reflected reward summary"),
       config: {
         ...DEFAULT_MEMMY_CONFIG,
         algorithm: {
@@ -561,32 +586,72 @@ describe("MemoryService / evolution / reward", () => {
       magnitude: 1,
       rationale: "accepted, but process was only partial"
     });
+    service.closeSession(session.sessionId);
+    await service.runWorkerOnce(50);
+    await service.runWorkerOnce(50);
     await service.runWorkerOnce(50);
 
-    const rewardCall = rewardCalls.find((call) => call.options.operation === "reward.reward.r_human.v6");
+    const rewardCall = rewardCalls.find((call) => call.options.operation === "reward.reward.r_human.v7");
     expect(rewardCall).toBeTruthy();
     expect(rewardCall!.options.thinkingMode).toBe("disabled");
     expect(rewardCall!.options.maxTokens).toBe(700);
-    expect(rewardCall!.messages[0]!.content).toContain("strict grader");
-    expect(rewardCall!.messages[0]!.content).toContain("MISSION ANCHOR RULE");
-    expect(rewardCall!.messages[0]!.content).toContain("EXECUTION RULE");
-    expect(rewardCall!.messages[0]!.content).toContain("HOST_AGENT_CONTEXT");
-    expect(rewardCall!.messages[1]!.content).toContain("HOST_AGENT_CONTEXT");
-    expect(rewardCall!.messages[1]!.content).toContain("TASK_SUMMARY");
-    expect(rewardCall!.messages[1]!.content).toContain("scorerModel: reward-summary-capturing");
-    expect(rewardCall!.messages[1]!.content).toContain("EPISODE_MISSION");
-    expect(rewardCall!.messages[1]!.content).toContain("EXECUTION_OUTCOME");
-    expect(rewardCall!.messages[1]!.content).toContain("USER_ASKS_AND_AGENT_REPLIES (2, in order)");
-    expect(rewardCall!.messages[1]!.content).toContain("verify reward scoring prompt");
-    expect(rewardCall!.messages[1]!.content).toContain("now summarize the final reward result");
-    const stepsBlock = rewardCall!.messages[1]!.content.match(
-      /AGENT_STEPS \(\d+\):\n([\s\S]*?)\n\nMOST_RECENT_USER_ASK/
-    )?.[1];
-    expect(stepsBlock).toContain("web.search");
-    expect(stepsBlock).not.toContain("prepared the requested scoring workflow");
-    expect(rewardCall!.messages[1]!.content).toContain("MOST_RECENT_USER_ASK");
-    expect(rewardCall!.messages[1]!.content).toContain("MOST_RECENT_AGENT_REPLY");
-    expect(rewardCall!.messages[1]!.content).toContain("FEEDBACK");
+    expect(rewardCall!.messages[0]!.content).toContain("REWARD_INPUT JSON");
+    expect(rewardCall!.messages[0]!.content).toContain("turnSummaries");
+    expect(rewardCall!.messages[0]!.content).not.toContain("TASK_SUMMARY");
+    expect(rewardCall!.messages[0]!.content).not.toContain("USER_ASKS_AND_AGENT_REPLIES");
+    const rewardInput = JSON.parse(rewardCall!.messages[1]!.content) as {
+      mission: string;
+      turnSummaries: string[];
+      finalExchange: { user: string; assistant: string };
+      execution: {
+        totalToolCalls: number;
+        successCount: number;
+        errorCount: number;
+        lastResult: string;
+        completedByTool: string;
+        lastTool?: string;
+      };
+      feedback?: Record<string, unknown>;
+      host?: Record<string, unknown>;
+    };
+    expect(rewardInput).toEqual({
+      mission: "verify reward scoring prompt",
+      turnSummaries: [
+        "verify reward scoring prompt",
+        "now summarize the final reward result"
+      ],
+      finalExchange: {
+        user: "now summarize the final reward result",
+        assistant: "summarized the final reward result"
+      },
+      execution: {
+        totalToolCalls: 1,
+        successCount: 1,
+        errorCount: 0,
+        lastResult: "success",
+        completedByTool: "yes",
+        lastTool: "web.search"
+      },
+      feedback: {
+        channel: "explicit",
+        polarity: "positive",
+        magnitude: 1,
+        rationale: "accepted, but process was only partial"
+      },
+      host: {
+        agent: "codex"
+      }
+    });
+    expect(rewardCall!.messages[1]!.content).not.toContain("\"q\":\"reward prompt\"");
+    expect(rewardCall!.messages[1]!.content).not.toContain("\"output\":\"ok\"");
+    expect(rewardCall!.messages[1]!.content).not.toContain("reward-summary-capturing");
+    expect(rewardCall!.messages[1]!.content).not.toContain(complete.l1MemoryId);
+    expect(rewardCall!.messages[1]!.content).not.toContain("feedbackId");
+    expect(rewardCall!.messages[1]!.content).not.toContain("repairId");
+    expect(rewardCall!.messages[1]!.content).not.toContain("targetKind");
+    expect(rewardCall!.messages[1]!.content).not.toContain("runAfter");
+    expect(rewardCall!.messages[1]!.content).not.toContain("downstreamScheduled");
+    expect(rewardCall!.messages[1]!.content).not.toContain("trigger");
 
     const memory = db.db.prepare(
       `SELECT properties_json
