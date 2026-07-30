@@ -424,7 +424,7 @@ update_node optional fields:
 - status
 - importance
 - detail_json
-- source_refs
+- source_refs, only when the existing node kind is "subtask" or "decision"
 summary must preserve the useful answer or conclusion when the turn contains one.
 For question-answer turns, include the answer in summary, not only "answered the question".
 update_node is a partial update. Omitted fields keep their current values.
@@ -454,7 +454,7 @@ Task operation rules:
 - If dag_context.root_task_id is null and this turn has durable task state, add exactly one task as the first meaningful op. Its status must be active or blocked.
 - Adding a task while dag_context.root_task_id exists is a task switch. Emit at most one new task in a patch.
 - If the turn remains within the existing task or topic, keep that task unchanged and add or update only subtask/decision nodes under it.
-- If this turn clearly completes, closes, or replaces the existing task, update that existing task to done or frozen, then add a new task for the new task phase. The old root must connect directly to the new task with continues or supersedes in the same patch.
+- If this turn clearly completes, closes, or replaces the existing task, update that existing task to done or frozen, then add a new task for the new task phase. When updating the old task, revise its title, summary, importance, and detail_json based on the old task's full lifecycle and related task path, whether the old task is completed or replaced, so it accurately reflects its final scope and result. The old root must connect directly to the new task with continues or supersedes in the same patch.
 - For one-turn question-answer turns, keep the task active and store the completed answer/result in a done subtask or decision under that task.
 - Do not add final, closure, or finish nodes.
 
