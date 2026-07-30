@@ -508,12 +508,14 @@ try {
 }
 
 const defaults = config.agents?.defaults ?? {};
-const providerName = defaults.provider;
-const modelName = defaults.model;
+const presetName = defaults.modelPreset;
+const preset = presetName ? config.modelPresets?.[presetName] : null;
+const providerName = preset?.provider;
+const modelName = preset?.model;
 const provider = providerName ? config.providers?.[providerName] : null;
 const apiKey = provider?.apiKey;
 
-if (!providerName || !modelName || !apiKey) process.exit(1);
+if (!presetName || !providerName || !modelName || !apiKey) process.exit(1);
 process.exit(0);
 NODE
 }
