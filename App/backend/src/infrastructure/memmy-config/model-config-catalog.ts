@@ -25,6 +25,20 @@ import YAML from "yaml";
 const ACCOUNT_PROVIDER = "memmy_account";
 const ACCOUNT_PRESET = "memmy-account";
 const ACCOUNT_MODEL = "agent_chat";
+const DESKTOP_TEXT_PROVIDERS = new Set([
+  "openai",
+  "anthropic",
+  "gemini",
+  "google",
+  "deepseek",
+  "zhipu",
+  "qwen",
+  "kimi",
+  "minimax",
+  "baidu",
+  "doubao",
+  ACCOUNT_PROVIDER
+]);
 const API_KEY_OPTIONAL_PROVIDERS = new Set([
   "ollama",
   "lmstudio",
@@ -99,17 +113,34 @@ export function generateDesktopPresetName(provider: string, model: string): stri
 }
 
 function mergeModelConfig(config: ConfigRecord, input: ModelConfigInput): ConfigRecord {
-  validateProviderInputs(input.providers);
-
   const existingProviders = record(config.providers);
   const existingPresets = record(config.modelPresets);
   const inputProviders = input.providers.map(normalizeProviderInput);
+  validateProviderInputs(inputProviders);
   validateAccountProvider(inputProviders, existingProviders, existingPresets);
 
-  const nextProviders: ConfigRecord = {};
-  const nextPresets: ConfigRecord = {};
+  const editableExistingProviders = existingEditableProviderNames(config);
+  const nextProviders = Object.fromEntries(
+    Object.entries(existingProviders).filter(([provider]) => (
+      !DESKTOP_TEXT_PROVIDERS.has(provider) || !editableExistingProviders.has(provider)
+    ))
+  );
+  const nextPresets = Object.fromEntries(
+    Object.entries(existingPresets).filter(([, value]) => (
+      preserveHiddenPreset(record(value))
+    ))
+  );
   const generatedNames = new Map<string, string>();
-  const retainedNames = new Set<string>();
+  const retainedNames = new Set(
+    Object.entries(nextPresets)
+      .filter(([, value]) => presetPair(record(value)) !== null)
+      .map(([name]) => name)
+  );
+  const retainedPairs = new Set(
+    Object.values(nextPresets)
+      .map((value) => presetPair(record(value)))
+      .filter((pair): pair is string => pair !== null)
+  );
   const existingDefaults = record(record(config.agents).defaults);
 
   for (const providerInput of inputProviders) {
@@ -122,6 +153,12 @@ function mergeModelConfig(config: ConfigRecord, input: ModelConfigInput): Config
     }
 
     for (const item of providerInput.models) {
+      const pair = providerModelPair(providerName, item.model);
+      if (retainedPairs.has(pair)) {
+        throw new InvalidModelConfigError(
+          `Duplicate Provider/model: ${providerName} / ${item.model}`
+        );
+      }
       const previousPresetName = item.presetName?.trim();
       const legacyDefault = (
         previousPresetName === "default"
@@ -154,6 +191,7 @@ function mergeModelConfig(config: ConfigRecord, input: ModelConfigInput): Config
         throw new InvalidModelConfigError(`Duplicate preset name: ${presetName}`);
       }
       retainedNames.add(presetName);
+      retainedPairs.add(pair);
       generatedNames.set(previousPresetName ?? `${providerName}\0${item.model}`, presetName);
       nextPresets[presetName] = unchanged
         ? { ...previousPreset, provider: providerName, model: item.model }
@@ -216,6 +254,9 @@ function validateProviderInputs(providers: readonly TextModelProviderInput[]): v
   let modelCount = 0;
   for (const provider of providers) {
     const providerName = provider.provider.trim();
+    if (!DESKTOP_TEXT_PROVIDERS.has(providerName)) {
+      throw new InvalidModelConfigError(`Provider is not supported by desktop settings: ${providerName}`);
+    }
     if (providerNames.has(providerName)) {
       throw new InvalidModelConfigError(`Duplicate Provider: ${providerName}`);
     }
@@ -235,6 +276,41 @@ function validateProviderInputs(providers: readonly TextModelProviderInput[]): v
   if (modelCount === 0) {
     throw new InvalidModelConfigError("At least one text model must remain");
   }
+}
+
+function existingEditableProviderNames(config: ConfigRecord): Set<string> {
+  const names = new Set<string>();
+  const defaults = record(record(config.agents).defaults);
+  const namedDefault = stringValue(defaults.modelPreset);
+  if (!namedDefault || namedDefault === "default") {
+    const provider = stringValue(defaults.provider);
+    const model = stringValue(defaults.model);
+    if (provider && model && DESKTOP_TEXT_PROVIDERS.has(provider)) names.add(provider);
+  }
+  for (const value of Object.values(record(config.modelPresets))) {
+    const preset = record(value);
+    const provider = stringValue(preset.provider);
+    if (provider && stringValue(preset.model) && DESKTOP_TEXT_PROVIDERS.has(provider)) {
+      names.add(provider);
+    }
+  }
+  return names;
+}
+
+function preserveHiddenPreset(preset: ConfigRecord): boolean {
+  const provider = stringValue(preset.provider);
+  const model = stringValue(preset.model);
+  return !provider || !model || !DESKTOP_TEXT_PROVIDERS.has(provider);
+}
+
+function presetPair(preset: ConfigRecord): string | null {
+  const provider = stringValue(preset.provider);
+  const model = stringValue(preset.model);
+  return provider && model ? providerModelPair(provider, model) : null;
+}
+
+function providerModelPair(provider: string, model: string): string {
+  return `${provider}\0${model}`;
 }
 
 function validateAccountProvider(
@@ -410,9 +486,11 @@ function buildModelConfigView(
     if (provider && model) presetRows.push({ name, provider, model });
   }
 
-  const providerOrder = [...Object.keys(providers)];
+  const providerOrder: string[] = [];
   for (const preset of presetRows) {
-    if (!providerOrder.includes(preset.provider)) providerOrder.push(preset.provider);
+    if (!providerOrder.includes(preset.provider)) {
+      providerOrder.push(preset.provider);
+    }
   }
   const defaultName = useLegacyDefault ? "default" : namedDefault;
   const providerViews = providerOrder.map((provider) => {

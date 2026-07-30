@@ -62,8 +62,10 @@ import {
   createMemmyMemoryProviderConfig,
   createModelFormValues,
   createModelProtocolPatch,
+  filterDesktopTextModelProviders,
   hydrateModelConfigForm,
   fromProtocol,
+  textProviderDisplayName,
   testModelConnection,
   type ImageProtocol,
   type PrimaryModelValues,
@@ -332,7 +334,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const initialModelForm = hydrateModelConfigForm(state.modelConfig, isByokMode ? "local" : "cloud");
   const [showApiConfig, setShowApiConfig] = useState(false);
   const [textModelProviders, setTextModelProviders] = useState<TextModelProviderConfig[]>(
-    () => state.modelConfig.providers ?? []
+    () => filterDesktopTextModelProviders(state.modelConfig.providers ?? [])
   );
   const [defaultModelPreset, setDefaultModelPreset] = useState<string | null>(
     state.modelConfig.defaultModelPreset ?? null
@@ -434,10 +436,14 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     .flatMap((provider) => provider.models.map((model) => ({ provider, model })))
     .find(({ model }) => (model.presetName ?? model.draftId) === defaultModelPreset)
     ?? null;
-  const primaryModelId = selectedDefaultModel?.model.model ?? "";
+  const hasHiddenDefaultModel = Boolean(defaultModelPreset && !selectedDefaultModel);
+  const primaryModelSummary = selectedDefaultModel?.model.model
+    ?? (hasHiddenDefaultModel ? t("settings.model.cliDefault") : "");
   const primaryModelDisplay = selectedDefaultModel
-    ? `${selectedDefaultModel.provider.provider} / ${selectedDefaultModel.model.model}`
-    : "";
+    ? `${textProviderDisplayName(selectedDefaultModel.provider.provider, t)} / ${selectedDefaultModel.model.model}`
+    : hasHiddenDefaultModel
+      ? t("settings.model.cliDefault")
+      : "";
   const mainModelTestKey = createModelConfigValidationKey(mainModelFormValues);
   const isMainModelTestStale = Boolean(llmValidation.testedKey && llmValidation.testedKey !== mainModelTestKey);
   const primaryModelValues: PrimaryModelValues = {
@@ -468,8 +474,10 @@ export function SettingsPageView(props: SettingsPageViewProps) {
       && (!provider.editable || Boolean(provider.apiKey.trim() || provider.apiKeyMasked))
     ))
     && Boolean(defaultModelPreset)
-    && textModelProviders.some((provider) => provider.models.some((model) => (
-      (model.presetName ?? model.draftId) === defaultModelPreset
+    && (hasHiddenDefaultModel || textModelProviders.some((provider) => (
+      provider.models.some((model) => (
+        (model.presetName ?? model.draftId) === defaultModelPreset
+      ))
     )))
     && new Set(textModelProviders.flatMap((provider) => (
       provider.models.map((model) => `${provider.provider}\0${model.model.trim()}`)
@@ -549,7 +557,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     setImageGenWarningAcknowledged(false);
     setMemoryModel(hydrated.memoryModel);
     setSkillModel(hydrated.skillModel);
-    setTextModelProviders(state.modelConfig.providers ?? []);
+    setTextModelProviders(filterDesktopTextModelProviders(state.modelConfig.providers ?? []));
     setDefaultModelPreset(state.modelConfig.defaultModelPreset ?? null);
   }, [isByokMode, modelConfigSaving, state.modelConfig, t]);
 
@@ -1632,12 +1640,12 @@ export function SettingsPageView(props: SettingsPageViewProps) {
               <ModuleRow
                 label={t("settings.model.memorySummary")}
                 desc={t("settings.model.memoryDesc")}
-                model={memoryModel.reuse ? (primaryModelId ? t("settings.model.reusePrimary", { model: primaryModelId }) : t("settings.model.notSet")) : memoryModel.modelId || t("settings.model.notSet")}
+                model={memoryModel.reuse ? (primaryModelSummary ? t("settings.model.reusePrimary", { model: primaryModelSummary }) : t("settings.model.notSet")) : memoryModel.modelId || t("settings.model.notSet")}
               />
               <ModuleRow
                 label={t("settings.model.skillEvolution")}
                 desc={t("settings.model.skillDesc")}
-                model={skillModel.reuse ? (primaryModelId ? t("settings.model.reusePrimary", { model: primaryModelId }) : t("settings.model.notSet")) : skillModel.modelId || t("settings.model.notSet")}
+                model={skillModel.reuse ? (primaryModelSummary ? t("settings.model.reusePrimary", { model: primaryModelSummary }) : t("settings.model.notSet")) : skillModel.modelId || t("settings.model.notSet")}
               />
               <ModuleRow
                 label={t("settings.model.embeddingSearch")}
@@ -1670,7 +1678,9 @@ export function SettingsPageView(props: SettingsPageViewProps) {
                   >
                     <div className="flex items-center justify-between gap-3">
                       <div>
-                        <div className="text-sm text-text-ink/75">{provider.provider}</div>
+                        <div className="text-sm text-text-ink/75">
+                          {textProviderDisplayName(provider.provider, t)}
+                        </div>
                         {provider.accountManaged && (
                           <div className="text-[11px] text-text-ink/45">
                             {t("settings.model.accountManaged")}
@@ -1731,7 +1741,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
                         return (
                           <div key={modelKey} className="flex items-center gap-2">
                             <input
-                              aria-label={`${provider.provider} ${t("apiKey.model")}`}
+                              aria-label={`${textProviderDisplayName(provider.provider, t)} ${t("apiKey.model")}`}
                               value={model.model}
                               disabled={!provider.editable}
                               onChange={(event) => updateTextModel(
@@ -1814,12 +1824,17 @@ export function SettingsPageView(props: SettingsPageViewProps) {
                     onChange={(event) => setDefaultModelPreset(event.target.value || null)}
                     className="w-full px-3 py-2.5 border border-border-stone/40 rounded-input bg-background-paper text-sm"
                   >
+                    {hasHiddenDefaultModel && defaultModelPreset && (
+                      <option value={defaultModelPreset} disabled>
+                        {t("settings.model.cliDefault")}
+                      </option>
+                    )}
                     {textModelProviders.flatMap((provider) => provider.models.map((model) => (
                       <option
                         key={model.presetName ?? model.draftId}
                         value={model.presetName ?? model.draftId}
                       >
-                        {provider.provider} / {model.model}
+                        {textProviderDisplayName(provider.provider, t)} / {model.model}
                       </option>
                     )))}
                   </select>

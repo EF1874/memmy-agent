@@ -15,16 +15,49 @@ import {
   createModelFormValues,
   createModelProtocolPatch,
   createTestModelConnectionMessages,
+  filterDesktopTextModelProviders,
   fromProtocol,
   hydrateModelConfigForm,
   hasAsrApiKey,
+  resolveTextProviderOption,
   testModelConnection,
+  textProviderDisplayName,
   toProtocol
 } from "../model-config.js";
+import type { TextModelProviderConfig } from "../../api/config-client.js";
 import { canSaveModelConfig, createModelConfigValidationKey, type ModelConfigValidationState } from "../model-config-validation.js";
 import { zhCNMessages } from "../../i18n/messages.js";
 
 describe("model config helpers", () => {
+  it("严格映射并过滤桌面不支持或没有模型的 Provider", () => {
+    const provider = (
+      name: string,
+      models: TextModelProviderConfig["models"]
+    ): TextModelProviderConfig => ({
+      provider: name,
+      endpoint: "",
+      apiType: "auto",
+      apiKey: "",
+      apiKeyMasked: "",
+      configured: false,
+      accountManaged: name === "memmy_account",
+      editable: name !== "memmy_account",
+      models
+    });
+    const model = [{ presetName: "preset", model: "model", isDefault: false, available: false }];
+
+    expect(filterDesktopTextModelProviders([
+      provider("openai", model),
+      provider("memmy_account", model),
+      provider("openrouter", model),
+      provider("anthropic", [])
+    ]).map((item) => item.provider)).toEqual(["openai", "memmy_account"]);
+    expect(resolveTextProviderOption("google")?.protocol).toBe("gemini");
+    expect(resolveTextProviderOption("kimi")?.protocol).toBe("moonshot");
+    expect(resolveTextProviderOption("openrouter")).toBeNull();
+    expect(textProviderDisplayName("memmy_account", (key) => zhCNMessages[key])).toBe("Memmy");
+  });
+
   it("协议切换时同步默认 API 地址，并清空模型 ID 和 API Key", () => {
     expect(createModelProtocolPatch("moonshot")).toEqual({
       protocol: "moonshot",

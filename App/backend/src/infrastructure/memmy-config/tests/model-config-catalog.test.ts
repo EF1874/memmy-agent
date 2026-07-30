@@ -117,6 +117,81 @@ function input(
 }
 
 describe("model config catalog", () => {
+  it("returns only providers that have at least one configured model", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "memmy-model-catalog-"));
+    temporaryRoots.push(root);
+    const configPath = path.join(root, "config.yaml");
+    await writeFile(configPath, YAML.stringify({
+      providers: {
+        openai: { apiKey: "openai-secret" },
+        anthropic: {},
+        gemini: {},
+        deepseek: {},
+        zhipu: {},
+        qwen: {},
+        kimi: {},
+        minimax: {},
+        baidu: {},
+        doubao: {},
+      },
+      modelPresets: {
+        configured: {
+          provider: "openai",
+          model: "gpt-5",
+        },
+      },
+      agents: {
+        defaults: {
+          modelPreset: "configured",
+        },
+      },
+    }), "utf8");
+
+    const view = await readModelConfigCatalog(configPath);
+
+    expect(view.providers).toHaveLength(1);
+    expect(view.providers[0]).toMatchObject({
+      provider: "openai",
+      models: [{ presetName: "configured", model: "gpt-5" }],
+    });
+  });
+
+  it("returns a configured model even when its provider has no API key", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "memmy-model-catalog-"));
+    temporaryRoots.push(root);
+    const configPath = path.join(root, "config.yaml");
+    await writeFile(configPath, YAML.stringify({
+      providers: {
+        openai: {},
+      },
+      modelPresets: {
+        configured: {
+          provider: "openai",
+          model: "gpt-5",
+        },
+      },
+      agents: {
+        defaults: {
+          modelPreset: "configured",
+        },
+      },
+    }), "utf8");
+
+    const view = await readModelConfigCatalog(configPath);
+
+    expect(view.providers).toHaveLength(1);
+    expect(view.providers[0]).toMatchObject({
+      provider: "openai",
+      configured: false,
+      hasApiKey: false,
+      models: [{
+        presetName: "configured",
+        model: "gpt-5",
+        available: false,
+      }],
+    });
+  });
+
   it("round-trips multiple Providers/models and preserves unchanged advanced fields", async () => {
     const configPath = await fixture();
     const before = await readModelConfigCatalog(configPath);
@@ -187,6 +262,74 @@ describe("model config catalog", () => {
     const after = YAML.parse(await readFile(configPath, "utf8"));
     expect(after.unrelated.value).toBe("changed elsewhere");
     expect(after.providers.openai.apiKey).toBe("newer-secret");
+  });
+
+  it("preserves hidden CLI providers, presets, orphan provider settings, and the hidden default", async () => {
+    const configPath = await fixture();
+    const raw = YAML.parse(await readFile(configPath, "utf8"));
+    raw.providers.openrouter = {
+      apiKey: "router-secret",
+      apiBase: "https://openrouter.ai/api/v1",
+      extraHeaders: { "X-CLI": "keep" },
+    };
+    raw.providers.groq = {
+      apiKey: "orphan-secret",
+    };
+    raw.modelPresets["cli-router"] = {
+      provider: "openrouter",
+      model: "anthropic/claude-sonnet-4",
+      maxTokens: 4444,
+      unknownPresetField: "keep",
+    };
+    raw.agents.defaults.modelPreset = "cli-router";
+    await writeFile(configPath, YAML.stringify(raw), "utf8");
+    const before = await readModelConfigCatalog(configPath);
+
+    await writeModelConfigCatalog(configPath, input(before.configRevision, {
+      defaultModelPreset: "cli-router",
+    }));
+
+    const saved = YAML.parse(await readFile(configPath, "utf8"));
+    expect(saved.providers.openrouter).toEqual(raw.providers.openrouter);
+    expect(saved.providers.groq).toEqual(raw.providers.groq);
+    expect(saved.modelPresets["cli-router"]).toEqual(raw.modelPresets["cli-router"]);
+    expect(saved.agents.defaults.modelPreset).toBe("cli-router");
+  });
+
+  it("rejects desktop writes for unsupported providers", async () => {
+    const configPath = await fixture();
+    const before = await readModelConfigCatalog(configPath);
+
+    await expect(writeModelConfigCatalog(configPath, input(before.configRevision, {
+      providers: [{
+        provider: "openrouter",
+        apiBase: "https://openrouter.ai/api/v1",
+        models: [{ model: "openai/gpt-5" }],
+      }],
+    }))).rejects.toThrow(/not supported by desktop settings/);
+  });
+
+  it("rejects a Provider/model pair that duplicates a hidden CLI preset", async () => {
+    const configPath = await fixture();
+    const raw = YAML.parse(await readFile(configPath, "utf8"));
+    raw.providers.openrouter = {
+      apiKey: "router-secret",
+      apiBase: "https://openrouter.ai/api/v1",
+    };
+    raw.modelPresets["cli-router"] = {
+      provider: "openrouter",
+      model: "shared-model",
+    };
+    await writeFile(configPath, YAML.stringify(raw), "utf8");
+    const before = await readModelConfigCatalog(configPath);
+
+    await expect(writeModelConfigCatalog(configPath, input(before.configRevision, {
+      providers: [{
+        provider: "openrouter",
+        apiBase: "https://openrouter.ai/api/v1",
+        models: [{ model: "shared-model" }],
+      }],
+    }))).rejects.toThrow(/not supported by desktop settings/);
   });
 
   it("uses the agreed deterministic desktop preset name", () => {

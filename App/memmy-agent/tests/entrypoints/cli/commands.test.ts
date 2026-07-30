@@ -299,6 +299,8 @@ describe("CLI command helpers", () => {
     expect(raw.channels.websocket).toEqual(expect.objectContaining({ enabled: true }));
     expect(raw.channels.slack).toEqual(expect.objectContaining({ enabled: false }));
     expect(raw.fileMemory).toEqual({ enabled: false });
+    expect(raw.providers).toEqual({});
+    expect(raw.modelPresets).toEqual({});
     expect(config.fileMemory.enabled).toBe(false);
     expect(fs.existsSync(path.join(workspace, "memory", "history.jsonl"))).toBe(
       true,
@@ -1524,13 +1526,22 @@ describe("CLI command parity with memmy test_commands", () => {
 
   it("onboard existing config refresh", async () => {
     const root = tempRoot();
-    const configPath = writeConfig(root, { agents: { defaults: { model: "openai/test-model" } } });
+    const configPath = writeConfig(root, {
+      agents: { defaults: { model: "openai/test-model" } },
+      providers: {
+        openai: { apiKey: "openai-key" },
+        anthropic: {},
+      },
+    });
     const workspace = path.join(root, "workspace");
     vi.spyOn(console, "log").mockImplementation(() => undefined);
 
     const config = await onboard({ config: configPath, workspace });
+    const raw = YAML.parse(fs.readFileSync(configPath, "utf8"));
 
     expect(config.agents.defaults.model).toBe("openai/test-model");
+    expect(raw.providers.openai.apiKey).toBe("openai-key");
+    expect(raw.providers).not.toHaveProperty("anthropic");
     expect(fs.existsSync(path.join(workspace, "AGENTS.md"))).toBe(true);
   });
 

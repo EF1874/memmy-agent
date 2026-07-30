@@ -363,9 +363,27 @@ describe("SettingsPageView", () => {
     const modelConfigHtml = html.slice(modelConfigStart, tokenUsageStart);
 
     expect(modelConfigHtml).toContain("1 个 Provider");
-    expect(modelConfigHtml).toContain("openai / gpt-4o");
+    expect(modelConfigHtml).toContain("OpenAI 兼容 / gpt-4o");
+    expect(modelConfigHtml).not.toContain("openrouter");
+    expect(modelConfigHtml).not.toContain("anthropic");
     expect(modelConfigHtml).not.toContain("当前模式：");
     expect(modelConfigHtml).not.toContain("平台赠送 Token");
+  });
+
+  it("隐藏的 CLI preset 是默认模型时不把设置页切换到其他模型", () => {
+    const state = createAccountModeWithSavedModelState();
+    const withCliDefault = appReducer(
+      state,
+      appActions.modelConfigUpdated({
+        ...state.modelConfig,
+        defaultModelPreset: "cli-router"
+      })
+    );
+    const html = normalizeSsrHtml(renderSettingsPageView(withCliDefault));
+    const modelConfigHtml = html.slice(html.indexOf("模型配置"), html.indexOf("Token 用量"));
+
+    expect(modelConfigHtml).toContain("当前默认模型由 CLI 配置");
+    expect(modelConfigHtml).not.toContain("openrouter");
   });
 
   it("手机号注册账号区展示手机号，邮箱注册账号区展示邮箱", () => {
@@ -392,7 +410,7 @@ describe("SettingsPageView", () => {
     expect(html).toContain("g***@example.com");
     expect(html).toContain("注册时间：2026-04-12");
     expect(html).toContain("Token 用量");
-    expect(modelConfigHtml).toContain("openai / gpt-4o");
+    expect(modelConfigHtml).toContain("OpenAI 兼容 / gpt-4o");
     expect(modelConfigHtml).toContain("Agent 执行任务");
     expect(modelConfigHtml).not.toContain("切换为自有 API Key");
     expect(modelConfigHtml).not.toContain("切换回平台 Token");
@@ -1040,22 +1058,51 @@ function createAccountModeWithSavedModelState(): AppState {
     accountState,
     appActions.modelConfigUpdated({
       configRevision: "account-model-revision",
-      providers: [{
-        provider: "openai",
-        endpoint: "https://api.openai.com/v1",
-        apiType: "auto",
-        apiKey: "",
-        apiKeyMasked: "sk••••test",
-        configured: true,
-        accountManaged: false,
-        editable: true,
-        models: [{
-          presetName: "desktop-openai-gpt-4o-abcd1234",
-          model: "gpt-4o",
-          isDefault: true,
-          available: true
-        }]
-      }],
+      providers: [
+        {
+          provider: "openai",
+          endpoint: "https://api.openai.com/v1",
+          apiType: "auto",
+          apiKey: "",
+          apiKeyMasked: "sk••••test",
+          configured: true,
+          accountManaged: false,
+          editable: true,
+          models: [{
+            presetName: "desktop-openai-gpt-4o-abcd1234",
+            model: "gpt-4o",
+            isDefault: true,
+            available: true
+          }]
+        },
+        {
+          provider: "anthropic",
+          endpoint: "https://api.anthropic.com",
+          apiType: "auto",
+          apiKey: "",
+          apiKeyMasked: "",
+          configured: false,
+          accountManaged: false,
+          editable: true,
+          models: []
+        },
+        {
+          provider: "openrouter",
+          endpoint: "https://openrouter.ai/api/v1",
+          apiType: "auto",
+          apiKey: "",
+          apiKeyMasked: "sk••••router",
+          configured: true,
+          accountManaged: false,
+          editable: true,
+          models: [{
+            presetName: "cli-router",
+            model: "openai/gpt-5",
+            isDefault: false,
+            available: true
+          }]
+        }
+      ],
       defaultModelPreset: "desktop-openai-gpt-4o-abcd1234",
       provider: "openai",
       endpoint: "https://api.openai.com/v1",
