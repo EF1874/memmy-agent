@@ -168,7 +168,10 @@ function createServer(): FastifyInstance {
         return { ok: true, resendAfterSec: 60 };
       },
       async verifyCode() {
-        return accountSession();
+        return {
+          session: accountSession(),
+          invitationResult: { status: "not_provided" as const }
+        };
       },
       async updateProfile(input) {
         return { ...accountSession().profile, nickname: input.nickname };
