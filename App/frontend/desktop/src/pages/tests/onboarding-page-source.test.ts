@@ -275,7 +275,8 @@ describe("OnboardingPage 赠送活动开关", () => {
     const appFrameSourcePath = fileURLToPath(new URL("../app-frame.tsx", import.meta.url));
     const source = readFileSync(appFrameSourcePath, "utf8");
 
-    expect(source).toContain("showGift={state.bootstrap?.promotions?.improvementGift === true}");
+    expect(source).toContain("state.bootstrap?.promotions?.improvementGift === true");
+    expect(source).toContain("&& (state.bootstrap?.promotions?.improvementGiftRewardTokens ?? 0) > 0");
     expect(source).toContain(
       "giftTokens={state.bootstrap?.promotions?.improvementGiftRewardTokens ?? 0}"
     );

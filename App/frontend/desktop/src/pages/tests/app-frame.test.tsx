@@ -31,7 +31,7 @@ describe("AppFrame", () => {
     expect(html).not.toContain("置顶");
     expect(html).not.toContain("归档");
     expect(html).toContain('aria-label="任务列表操作"');
-    expect(html).toContain('aria-label="项目列表操作"');
+    expect(html).toContain('aria-label="添加项目"');
     expect(html).toContain('role="separator"');
     expect(html).toContain('aria-label="调整主侧边栏宽度"');
     expect(html).toContain("sidebar-resize-handle");
@@ -193,12 +193,12 @@ describe("AppFrame", () => {
 
     expect(html).toContain('data-current-session="true"');
     expect(html).toContain('aria-current="page"');
-    expect(html).toContain("app-frame-nav-button--active");
+    expect(html).toContain("app-frame-task-row--current");
     expect(source).toContain("currentSessionKey={highlightedSessionKey}");
     expect(source).toContain("isCurrent={props.currentSessionKey === task.sessionKey}");
     expect(source).toContain('data-current-session={props.isCurrent ? "true" : undefined}');
     expect(source).toContain('aria-current={props.isCurrent ? "page" : undefined}');
-    expect(source).toContain('"app-frame-nav-button--active"');
+    expect(source).toContain('"app-frame-task-row--current"');
   });
 
   it("labels project tasks whose project record or registry is unavailable", () => {
@@ -307,10 +307,11 @@ describe("AppFrame", () => {
     const source = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
 
     expect(source).toContain("ListChecks");
-    expect(source).toContain('icon={<ListChecks size={12} />} label={props.showPreviews ? t("appFrame.task.hidePreview") : t("appFrame.task.preview")}');
+    expect(source).toContain("icon={<ListChecks size={13} />}");
+    expect(source).toContain('label={props.showPreviews ? t("appFrame.task.hidePreview") : t("appFrame.task.preview")}');
   });
 
-  it("gives the project section its own archive-only overflow menu", () => {
+  it("keeps project archive controls in the unified task-list menu", () => {
     const source = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
     const projectHeaderBlock = source.slice(
       source.indexOf('title={t("appFrame.projects")}'),
@@ -321,38 +322,27 @@ describe("AppFrame", () => {
       source.indexOf("function SidebarMoreMenu")
     );
 
-    expect(projectHeaderBlock).toContain('aria-label={t("appFrame.project.listActions")}');
-    expect(projectHeaderBlock).toContain("toggleProjectListMenu(sidebarMenuAnchorFromRect");
-    expect(projectHeaderBlock).toContain("<ProjectListMoreMenu");
-    expect(projectMenuBlock).toContain('t("appFrame.project.showArchived")');
-    expect(projectMenuBlock).toContain('t("appFrame.project.showAll")');
-    expect(projectMenuBlock).not.toContain("onRefresh");
-    expect(projectMenuBlock).not.toContain("onTogglePreviews");
-    expect(projectMenuBlock).not.toContain("onToggleSortMenu");
+    expect(projectHeaderBlock).toContain('aria-label={t("appFrame.project.add")}');
+    expect(source).toContain('label={t("appFrame.project.showArchived")}');
+    expect(projectMenuBlock).toBe("");
   });
 
   it("keeps top-level sidebar task menus mutually exclusive", () => {
     const source = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
     const toggleTaskListMenuStart = source.indexOf("function toggleTaskListMenu(anchor: SidebarMenuAnchor)");
-    const toggleProjectListMenuStart = source.indexOf("function toggleProjectListMenu(anchor: SidebarMenuAnchor)");
     const openTaskContextMenuStart = source.indexOf("function openTaskContextMenu");
-    const toggleTaskListMenuBlock = source.slice(toggleTaskListMenuStart, toggleProjectListMenuStart);
-    const toggleProjectListMenuBlock = source.slice(toggleProjectListMenuStart, openTaskContextMenuStart);
+    const toggleTaskListMenuBlock = source.slice(toggleTaskListMenuStart, openTaskContextMenuStart);
     const openTaskContextMenuBlock = source.slice(openTaskContextMenuStart, source.indexOf("function requestDeleteArchivedTask", openTaskContextMenuStart));
 
     expect(toggleTaskListMenuBlock).toContain("setTaskContextMenu(null);");
     expect(toggleTaskListMenuBlock).toContain("setArchiveConfirmSessionKey(null);");
-    expect(toggleTaskListMenuBlock).toContain("setProjectListMenuAnchor(null);");
+    expect(toggleTaskListMenuBlock).toContain("setProjectContextMenu(null);");
     expect(toggleTaskListMenuBlock).toContain("setTaskListMenuAnchor((value) => (value ? null : anchor));");
     expect(toggleTaskListMenuBlock).toContain("setSortMenuOpen(false);");
-    expect(toggleProjectListMenuBlock).toContain("setTaskListMenuAnchor(null);");
-    expect(toggleProjectListMenuBlock).toContain("setProjectCreateMenuOpen(false);");
-    expect(toggleProjectListMenuBlock).toContain("setProjectListMenuAnchor((value) => (value ? null : anchor));");
     expect(openTaskContextMenuBlock).toContain("setTaskListMenuAnchor(null);");
-    expect(openTaskContextMenuBlock).toContain("setProjectListMenuAnchor(null);");
     expect(openTaskContextMenuBlock).toContain("setSortMenuOpen(false);");
     expect(source.match(/toggleTaskListMenu\(sidebarMenuAnchorFromRect/g)).toHaveLength(1);
-    expect(source.match(/toggleProjectListMenu\(sidebarMenuAnchorFromRect/g)).toHaveLength(1);
+    expect(source).not.toContain("toggleProjectListMenu");
   });
 
   it("New Agent opens a local blank draft without calling the backend", () => {
@@ -521,19 +511,16 @@ describe("AppFrame", () => {
     expect(renameBlock).not.toContain("{ title: nextTitle }");
   });
 
-  it("collects the new title through an in-app modal instead of window.prompt", () => {
+  it("collects the new title through inline rename instead of window.prompt", () => {
     const source = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
 
     // Handles expect.
     expect(source).not.toContain("window.prompt");
-    expect(source).toContain('import { Modal } from "../components/modal.js";');
-    expect(source).toContain("function openRenameDialog(task: AgentTaskView)");
-    expect(source).toContain("setRenameTarget(task);");
-    expect(source).toContain("onRename={openRenameDialog}");
-    expect(source).toContain("open={renameTarget != null}");
-    expect(source).toContain('title={t("appFrame.renameTaskPrompt")}');
-    expect(source).toContain('backdropClassName="rename-dialog-backdrop"');
-    expect(source).toContain("onClick={submitRenameDialog}");
+    expect(source).toContain("function beginTaskRename(task: AgentTaskView)");
+    expect(source).toContain("setInlineRename({ sessionKey: task.sessionKey, original: task.title });");
+    expect(source).toContain("onRenameTask={beginTaskRename}");
+    expect(source).toContain("<SidebarInlineRenameInput");
+    expect(source).toContain('ariaLabel={t("appFrame.renameTaskPrompt")}');
     expect(source).toContain("isComposingKeyboardEvent(event)");
   });
 
@@ -564,8 +551,8 @@ describe("AppFrame", () => {
     );
 
     expect(projectMenuBlock).toContain("archiveTaskCount: number;");
-    expect(projectMenuBlock).toContain("icon={<Pencil size={12} />}");
-    expect(projectMenuBlock).toContain("icon={<CheckCheck size={12} />}");
+    expect(projectMenuBlock).toContain("icon={<Pin size={13} />}");
+    expect(projectMenuBlock).toContain("icon={<CheckCheck size={13} />}");
     expect(projectMenuBlock).toContain("disabled={props.archiveTaskCount === 0}");
     expect(menuButtonBlock).toContain("disabled?: boolean;");
     expect(menuButtonBlock).toContain("disabled={props.disabled}");
@@ -604,24 +591,18 @@ describe("AppFrame", () => {
     )).toEqual({ left: 1096, top: 560 });
   });
 
-  it("keeps the project rename modal and input open until the mutation commits", () => {
+  it("keeps project mutations pending until the backend commits", () => {
     const source = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
     const updateBlock = source.slice(
       source.indexOf("async function updateProject"),
       source.indexOf("async function revealProject")
     );
-    const renameProjectBlock = source.slice(
-      source.indexOf("open={renameProject != null}"),
-      source.indexOf("open={deleteConfirmTask != null}")
-    );
 
     expect(updateBlock).toContain("): Promise<boolean> {");
     expect(updateBlock).toContain("return false;");
     expect(updateBlock).toContain("return true;");
-    expect(renameProjectBlock).toContain("updateProject(renameProject.id, { name: value }).then((committed) => {");
-    expect(renameProjectBlock).toContain("if (committed) {");
-    expect(renameProjectBlock).toContain("setRenameProjectId(null);");
-    expect(renameProjectBlock).not.toContain("setRenameProjectId(null);\n                void updateProject");
+    expect(updateBlock).toContain("setProjectMutationId(operationId);");
+    expect(updateBlock).toContain("setProjectMutationId((current) => current === operationId ? null : current);");
   });
 
   it("keeps project removal confirmation locked while delete outcome is pending", () => {
@@ -668,10 +649,10 @@ describe("AppFrame", () => {
     )).toEqual(["projects", `project:${pinnedProject.id}`]);
   });
 
-  it("opens the rename modal when a non-archived sidebar session is double-clicked", () => {
+  it("opens inline rename when a non-archived sidebar session is double-clicked", () => {
     const source = readFileSync(resolve(__dirname, "..", "app-frame.tsx"), "utf8");
 
-    expect(source).toContain("onRenameTask={openRenameDialog}");
+    expect(source).toContain("onRenameTask={beginTaskRename}");
     expect(source).toContain("onRename={() => props.onRenameTask(task)}");
     expect(source).toContain("onDoubleClick={(event) => {");
     expect(source).toContain("if (archived || !props.onRename)");
@@ -820,12 +801,11 @@ describe("AppFrame", () => {
     );
 
     expect(runningHtml).toContain('aria-current="page"');
-    expect(runningHtml).toContain("app-frame-nav-button--active");
+    expect(runningHtml).toContain("app-frame-task-row--current");
     expect(runningHtml).toContain('aria-label="正在执行"');
     expect(runningHtml).toContain('data-icon="loader-2"');
     expect(runningHtml).toContain("animate-spin");
-    expect(runningHtml).toContain("relative h-6 w-6");
-    expect(runningHtml).toContain("absolute inset-0 flex items-center justify-center transition-opacity opacity-100");
+    expect(runningHtml).toContain("shrink-0 w-4 h-4 inline-flex");
     expect(runningHtml).not.toContain('aria-label="归档对话"');
     expect(completedHtml).toContain('aria-label="已完成，打开查看"');
     expect(completedHtml).toContain("--color-warning");
@@ -855,7 +835,7 @@ describe("AppFrame", () => {
     expect(archivedHtml).not.toContain('title="删除已归档对话"');
     expect(archivedHtml).not.toContain('data-icon="trash-2"');
     expect(source).toContain('label={t("appFrame.task.deleteArchived")} danger onClick={props.onDeleteArchived}');
-    expect(source).toContain("<Trash2 size={12} />");
+    expect(source).toContain("<Trash2 size={14} />");
   });
 
   it("keeps inline task action icons and confirmation text centered", () => {
@@ -863,14 +843,13 @@ describe("AppFrame", () => {
 
     expect(source).toContain("const [isTaskRowHovered, setIsTaskRowHovered] = useState(false);");
     expect(source).toContain("const hasTaskStatus = props.task.runStartedAt != null || props.task.completedUnseen;");
-    expect(source).toContain("const shouldShowTaskActions = archived ? isTaskRowHovered : props.archiveConfirming || isTaskRowHovered || hasTaskStatus;");
-    expect(source).toContain("app-frame-task-row relative flex items-start gap-1");
+    expect(source).toContain("const showHoverActions = !renaming && (isTaskRowHovered || props.archiveConfirming);");
+    expect(source).toContain('"app-frame-task-row",');
     expect(source).toContain("onMouseEnter={() => setIsTaskRowHovered(true)}");
     expect(source).toContain("onMouseLeave={() => setIsTaskRowHovered(false)}");
-    expect(source).toContain("flex self-center shrink-0 items-center justify-center gap-0.5 pr-1.5");
-    expect(source).toContain("relative h-6 w-6");
-    expect(source).toContain("{shouldShowTaskActions && (");
-    expect(source).toContain(") : isTaskRowHovered ? (");
+    expect(source).toContain('className="app-frame-task-row__trail"');
+    expect(source).toContain('className="shrink-0 w-4 h-4 inline-flex');
+    expect(source).toContain("showHoverActions ? (");
     expect(source).toContain("<TaskStatusIndicator task={props.task} />");
     expect(source).toContain('label={t("appFrame.task.archive")}');
     expect(source).not.toContain("group-hover:hidden");
@@ -880,7 +859,7 @@ describe("AppFrame", () => {
     expect(source).toContain("rounded-input text-center leading-none hover:bg-background-paper/80");
     expect(source).toContain('import { Tooltip } from "../components/tooltip.js";');
     expect(source).toContain("<Tooltip content={props.label}>");
-    expect(source).toContain("text-center text-[11px] font-bold leading-none");
+    expect(source).toContain('className="app-frame-task-confirm"');
   });
 
   it("keeps task list styling aligned with Codex sidebar typography", () => {
@@ -889,7 +868,7 @@ describe("AppFrame", () => {
 
     expect(appFrameSource).toContain("app-frame-task-section-header");
     expect(appFrameSource).toContain('className="space-y-1.5"');
-    expect(appFrameSource).toContain("text-left pl-1 py-2 cursor-pointer");
+    expect(appFrameSource).toContain('className="app-frame-task-row__main"');
     expect(appFrameSource).toContain("app-frame-task-title");
     expect(appFrameSource).toContain("app-frame-task-preview");
     expect(appFrameSource).not.toContain("onToggleCollapsed");
@@ -918,24 +897,23 @@ describe("AppFrame", () => {
       appFrameSource.indexOf("function TaskStatusIndicator")
     );
 
-    expect(treeSectionBlock).toContain("app-frame-task-section-header__title min-w-0 truncate");
+    expect(treeSectionBlock).toContain("app-frame-task-section-header__title min-w-0");
     expect(treeSectionBlock).toContain("app-frame-task-section-header__toggle-icon shrink-0");
     expect(treeSectionBlock.indexOf("app-frame-task-section-header__title"))
       .toBeLessThan(treeSectionBlock.indexOf("app-frame-task-section-header__toggle-icon"));
-    expect(projectRowBlock).toContain("py-1.5 pl-1 text-left");
+    expect(projectRowBlock).toContain('className="app-frame-project-row__main"');
     expect(projectRowBlock).toContain("app-frame-project-title");
-    expect(projectRowBlock).not.toContain("<ChevronRight");
-    expect(projectRowBlock).not.toContain("<ChevronDown");
-    expect(taskRowBlock).toContain("text-left pl-1 py-2 cursor-pointer");
-    expect(treeSectionBlock).toContain('className={nested ? "app-frame-project-task" : undefined}');
-    expect(stylesSource).toContain(".app-frame-project-task {");
-    expect(stylesSource).toContain("margin-left: 18px;");
+    expect(projectRowBlock).toContain("<ChevronRight");
+    expect(projectRowBlock).toContain("<ChevronDown");
+    expect(taskRowBlock).toContain('depth === 1 ? "app-frame-task-row--depth-1" : ""');
+    expect(stylesSource).toContain(".app-frame-task-row--depth-1 .app-frame-task-row__main {");
+    expect(stylesSource).toContain("padding-left: var(--sidebar-title-inset);");
   });
 
   it("uses one font size and hover-only top-level disclosure icons", () => {
     const stylesSource = readFileSync(resolve(__dirname, "..", "..", "styles.css"), "utf8");
     const typographyBlock = stylesSource.slice(
-      stylesSource.indexOf(".app-frame-task-section-header,"),
+      stylesSource.indexOf(".app-frame-project-title,"),
       stylesSource.indexOf(".app-frame-task-section-header__title")
     );
     const toggleBlock = stylesSource.slice(
@@ -947,12 +925,10 @@ describe("AppFrame", () => {
     expect(typographyBlock).toContain(".app-frame-task-title {");
     expect(typographyBlock).toContain("font-size: 13px;");
     expect(typographyBlock).toContain("line-height: 18px;");
-    expect(toggleBlock).toContain("visibility: hidden;");
     expect(toggleBlock).toContain("opacity: 0;");
     expect(toggleBlock).toContain(".app-frame-task-section-header:hover .app-frame-task-section-header__toggle-icon");
-    expect(toggleBlock).not.toContain(".app-frame-task-section-header:focus-within .app-frame-task-section-header__toggle-icon");
-    expect(toggleBlock).toContain("visibility: visible;");
-    expect(toggleBlock).toContain("opacity: 1;");
+    expect(toggleBlock).toContain(".app-frame-task-section-header:focus-within .app-frame-task-section-header__toggle-icon");
+    expect(toggleBlock).toContain("opacity: 0.55;");
   });
 
   it("renders task icon tooltips as light fixed overlays", () => {
