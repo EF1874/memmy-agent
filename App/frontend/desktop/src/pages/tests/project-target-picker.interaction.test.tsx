@@ -63,7 +63,7 @@ describe("ProjectTargetPicker interactions", () => {
 
     act(() => getTrigger().click());
 
-    expect(buttonWithText("不使用项目")).toBeNull();
+    expect(getStandaloneButton()).toBeNull();
   });
 
   it("clamps ArrowUp and ArrowDown while exposing the active option", () => {
@@ -113,7 +113,7 @@ describe("ProjectTargetPicker interactions", () => {
     expect(getTrigger().textContent).not.toContain("C:\\work\\memmy-agent");
     act(() => getTrigger().click());
     expect(document.querySelector('[data-project-id="one"]')?.getAttribute("aria-selected")).toBe("true");
-    expect(buttonWithText("不使用项目")).not.toBeNull();
+    expect(getStandaloneButton()).not.toBeNull();
 
     const search = getSearch();
     for (let index = 0; index < 3; index += 1) pressKey(search, "ArrowDown");
@@ -194,8 +194,8 @@ describe("ProjectTargetPicker interactions", () => {
     act(() => getTrigger().click());
 
     expect(document.querySelector("[data-project-id]")).toBeNull();
-    expect(buttonWithText("打开本地文件夹")).toBeNull();
-    expect(buttonWithText("不使用项目")).not.toBeNull();
+    expect(getNewProjectButton()).toBeNull();
+    expect(getStandaloneButton()).not.toBeNull();
     pressKey(getSearch(), "Enter");
     expect(document.querySelector('[data-testid="picker-target"]')?.textContent).toBe("standalone");
   });
@@ -273,7 +273,7 @@ function getTrigger(): HTMLButtonElement {
 }
 
 function getSearch(): HTMLInputElement {
-  const search = document.querySelector<HTMLInputElement>('input[placeholder="搜索项目"]');
+  const search = document.querySelector<HTMLInputElement>(".home-project-picker__search input");
   if (!search) throw new Error("Missing project picker search");
   return search;
 }
@@ -291,7 +291,7 @@ function pressKey(input: HTMLInputElement, key: string) {
 }
 
 async function clickNewProject() {
-  const button = buttonWithText("打开本地文件夹");
+  const button = getNewProjectButton();
   if (!button) throw new Error("Missing New project button");
   await act(async () => {
     const pointerDown = new PointerEvent("pointerdown", { bubbles: true, cancelable: true });
@@ -312,7 +312,13 @@ function expectPickerOpenAndDismissible() {
   expect(document.querySelector(".home-project-picker__menu")).toBeNull();
 }
 
-function buttonWithText(text: string): HTMLButtonElement | null {
-  return Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
-    .find((button) => button.textContent?.includes(text)) ?? null;
+function getNewProjectButton(): HTMLButtonElement | null {
+  return document.querySelector<HTMLButtonElement>(
+    ".home-project-picker__actions [role='option']:has(.home-project-picker__action-icon)"
+  );
+}
+
+function getStandaloneButton(): HTMLButtonElement | null {
+  return Array.from(document.querySelectorAll<HTMLButtonElement>(".home-project-picker__actions [role='option']"))
+    .find((button) => button.querySelector(".lucide-x")) ?? null;
 }

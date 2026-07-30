@@ -269,9 +269,10 @@ describe("HomePage", () => {
     expect(filterProjectTargetPickerProjects(projects, "project-1")).toEqual([
       projects[11],
       projects[10],
-      projects[9]
+      projects[9],
+      projects[0]
     ]);
-    expect(filterProjectTargetPickerProjects(projects, "project-2")).toEqual([]);
+    expect(filterProjectTargetPickerProjects(projects, "project-2")).toEqual([projects[1]]);
   });
 
   it("sizes the project menu to its content within composer and viewport caps", () => {
@@ -307,12 +308,13 @@ describe("HomePage", () => {
     );
 
     expect(styles).toContain("width: max-content;");
-    expect(styles).toContain(".home-project-picker {\n  position: relative;\n  z-index: 45;\n  width: 100%;\n  max-width: 100%;");
+    expect(styles).toContain(".home-project-picker {\n  position: relative;\n  z-index: 45;\n  width: max-content;");
+    expect(styles).toContain("max-width: min(24rem, calc(100% - 6.5rem));");
     expect(styles).toContain("width: max-content;\n  max-width: 100%;");
-    expect(styles).toContain("max-height: min(24rem, 45dvh);");
+    expect(styles).toContain("max-height: min(18rem, 38dvh);");
     expect(styles).toContain("grid-template-rows: auto minmax(0, 1fr);");
     expect(triggerStyles).toContain("border: 0;");
-    expect(triggerStyles).toContain("border-radius: 999px;");
+    expect(triggerStyles).toContain("border-radius: var(--radius-input);");
     expect(searchInputStyles).toContain("border: 0;");
     expect(searchInputStyles).toContain("outline: 0;");
     expect(searchFocusStyles).not.toContain("border:");
@@ -321,14 +323,14 @@ describe("HomePage", () => {
     expect(listStyles).toContain("grid-template-rows: minmax(0, 1fr) auto auto;");
     expect(projectListStyles).toContain("overflow-y: auto;");
     expect(projectListStyles).toContain("overscroll-behavior: contain;");
-    expect(selectedOptionStyles).toContain("background: var(--color-nav-active-bg);");
-    expect(selectedOptionStyles).toContain("color: var(--color-action-sky-hover);");
+    expect(selectedOptionStyles).toContain("background: transparent;");
+    expect(selectedOptionStyles).toContain("color: var(--color-text-ink);");
     expect(selectedOptionStyles).toContain(".home-project-picker__option--selected > svg:last-child");
     expect(source).toContain('className="home-project-picker__projects"');
     expect(source).toContain('className="home-project-picker__actions"');
-    expect(optionStyles).toContain("min-height: 40px;");
-    expect(styles).toContain(".home-project-picker__option--action {\n  min-height: 36px;");
-    expect(source).not.toContain("<ChevronDown");
+    expect(optionStyles).toContain("min-height: 32px;");
+    expect(styles).toContain(".home-project-picker__option--action {\n  min-height: 30px;");
+    expect(source).toContain("<ChevronDown");
     expect(source).not.toContain("<FolderPlus");
     expect(source).toContain("<LucidePlus");
   });
