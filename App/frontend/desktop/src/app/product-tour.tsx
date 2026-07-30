@@ -1,5 +1,5 @@
 /** Product tour module. */
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Memmy, type MemmyPose } from "../components/mascot/memmy.js";
 import { zhCNMessages, type MessageKey } from "../i18n/messages.js";
 import { useTranslation } from "../i18n/use-translation.js";
@@ -114,10 +114,15 @@ export function ProductTourGuide(props: ProductTourGuideProps) {
   );
   const current = steps[Math.min(step, steps.length - 1)]!;
   const [layout, setLayout] = useState(() => null as ReturnType<typeof resolveProductTourStepLayout>);
+  const onTabChangeRef = useRef(onTabChange);
 
   useEffect(() => {
-    onTabChange(current.tab);
-  }, [current, onTabChange]);
+    onTabChangeRef.current = onTabChange;
+  }, [onTabChange]);
+
+  useEffect(() => {
+    onTabChangeRef.current(current.tab);
+  }, [current.tab]);
 
   useEffect(() => {
     if (typeof document === "undefined" || typeof window === "undefined") {
