@@ -63,7 +63,7 @@ describe("ProjectTargetPicker interactions", () => {
 
     act(() => getTrigger().click());
 
-    expect(buttonWithText("不在项目中工作")).toBeNull();
+    expect(buttonWithText("不使用项目")).toBeNull();
   });
 
   it("clamps ArrowUp and ArrowDown while exposing the active option", () => {
@@ -113,7 +113,7 @@ describe("ProjectTargetPicker interactions", () => {
     expect(getTrigger().textContent).not.toContain("C:\\work\\memmy-agent");
     act(() => getTrigger().click());
     expect(document.querySelector('[data-project-id="one"]')?.getAttribute("aria-selected")).toBe("true");
-    expect(buttonWithText("不在项目中工作")).not.toBeNull();
+    expect(buttonWithText("不使用项目")).not.toBeNull();
 
     const search = getSearch();
     for (let index = 0; index < 3; index += 1) pressKey(search, "ArrowDown");
@@ -194,8 +194,8 @@ describe("ProjectTargetPicker interactions", () => {
     act(() => getTrigger().click());
 
     expect(document.querySelector("[data-project-id]")).toBeNull();
-    expect(buttonWithText("选择新项目")).toBeNull();
-    expect(buttonWithText("不在项目中工作")).not.toBeNull();
+    expect(buttonWithText("打开本地文件夹")).toBeNull();
+    expect(buttonWithText("不使用项目")).not.toBeNull();
     pressKey(getSearch(), "Enter");
     expect(document.querySelector('[data-testid="picker-target"]')?.textContent).toBe("standalone");
   });
@@ -242,7 +242,6 @@ function PickerHarness(props: {
         projects={projects}
         registryState={props.registryState ?? "ready"}
         disabled={false}
-        canChooseOtherFolder
         onToggle={() => setOpen((current) => !current)}
         onClose={() => setOpen(false)}
         onSelect={(nextTarget) => {
@@ -274,7 +273,7 @@ function getTrigger(): HTMLButtonElement {
 }
 
 function getSearch(): HTMLInputElement {
-  const search = document.querySelector<HTMLInputElement>('input[placeholder="搜索项目或路径"]');
+  const search = document.querySelector<HTMLInputElement>('input[placeholder="搜索项目"]');
   if (!search) throw new Error("Missing project picker search");
   return search;
 }
@@ -292,7 +291,7 @@ function pressKey(input: HTMLInputElement, key: string) {
 }
 
 async function clickNewProject() {
-  const button = buttonWithText("选择新项目");
+  const button = buttonWithText("打开本地文件夹");
   if (!button) throw new Error("Missing New project button");
   await act(async () => {
     const pointerDown = new PointerEvent("pointerdown", { bubbles: true, cancelable: true });

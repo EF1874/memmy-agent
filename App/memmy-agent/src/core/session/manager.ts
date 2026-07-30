@@ -21,6 +21,10 @@ type WebuiSessionBindingReservation = {
   rejection: "project_removed" | null;
 };
 
+export type SessionManagerOptions = {
+  legacyWebuiWorkspaceCwd?: string | null;
+};
+
 export class WebuiSessionBindingError extends Error {
   readonly code: string;
 
@@ -341,12 +345,19 @@ export class SessionManager {
   root: string;
   sessionsDir: string;
   sessions = new Map<string, Session>();
+  private readonly legacyWebuiWorkspaceCwd: string | null;
   private readonly webuiBindingReservations = new Map<string, WebuiSessionBindingReservation>();
   private readonly permanentlyDeletedSessionKeys = new Set<string>();
 
-  constructor(root: string) {
+  constructor(root: string, options: SessionManagerOptions = {}) {
     this.root = path.resolve(String(root));
     this.sessionsDir = this.root;
+    this.legacyWebuiWorkspaceCwd = options.legacyWebuiWorkspaceCwd == null
+      ? null
+      : normalizeWebuiSessionBinding({
+          projectId: null,
+          cwd: fs.realpathSync(options.legacyWebuiWorkspaceCwd),
+        }).cwd;
     fs.mkdirSync(this.root, { recursive: true });
   }
 
@@ -489,8 +500,22 @@ export class SessionManager {
       updatedAt?: string;
     },
   ): Session {
+    const sessionKey = storedKey || key;
+    if (
+      this.legacyWebuiWorkspaceCwd !== null
+      && sessionKey.startsWith("websocket:")
+      && metadata[WEBUI_SESSION_METADATA_KEY] === true
+      && !Object.prototype.hasOwnProperty.call(metadata, WEBUI_PROJECT_ID_METADATA_KEY)
+      && !Object.prototype.hasOwnProperty.call(metadata, WEBUI_WORKSPACE_CWD_METADATA_KEY)
+    ) {
+      metadata = {
+        ...metadata,
+        [WEBUI_PROJECT_ID_METADATA_KEY]: null,
+        [WEBUI_WORKSPACE_CWD_METADATA_KEY]: this.legacyWebuiWorkspaceCwd,
+      };
+    }
     return new Session({
-      key: storedKey || key,
+      key: sessionKey,
       messages,
       metadata,
       lastConsolidated,
@@ -710,7 +735,11 @@ export class SessionManager {
       } catch {
         const repaired = this.repairSession(fallbackKey);
         if (!repaired) continue;
-        rows.push(sessionSummary(repaired, fullPath, { repairPreview: true }));
+        try {
+          rows.push(sessionSummary(repaired, fullPath, { repairPreview: true }));
+        } catch {
+          continue;
+        }
       }
     }
     rows.sort((a, b) => String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")));
