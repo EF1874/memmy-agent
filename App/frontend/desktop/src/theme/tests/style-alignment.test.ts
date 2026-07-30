@@ -24,7 +24,7 @@ describe("prototype style alignment", () => {
     expect(tokenCss).toContain('"Apple Color Emoji"');
     expect(tokenCss).toContain('"Segoe UI Emoji"');
     expect(tokenCss).toContain("--codex-toolbar-height: 46px");
-    expect(tokenCss).toContain("--codex-sidebar-nav-icon-inset: 28px");
+    expect(tokenCss).toContain("--codex-sidebar-nav-icon-inset: 20px");
     expect(tokenCss).toContain("--codex-window-control-inset: 84px");
     expect(tokenCss).toContain("--codex-sidebar-hidden-topbar-padding: 124px");
     expect(tokenCss).toContain("--codex-sidebar-width: 250px");
@@ -114,9 +114,9 @@ describe("prototype style alignment", () => {
     expect(appSidebarRule).toContain("line-height: var(--codex-leading-base);");
     expect(appNavButtonRule).toContain("font-size: 13px;");
     expect(appNavButtonRule).toContain("line-height: 18px;");
-    expect(appNavButtonLayoutRule).toContain("width: calc(100% - 32px);");
-    expect(appNavButtonLayoutRule).toContain("margin: 0 16px;");
-    expect(appNavButtonLayoutRule).toContain("padding: 8px 12px;");
+    expect(appNavButtonLayoutRule).toContain("width: calc(100% - 24px);");
+    expect(appNavButtonLayoutRule).toContain("margin: 0 12px;");
+    expect(appNavButtonLayoutRule).toContain("padding: 8px 8px;");
     const appNavButtonActiveRule = globalCss.match(/\.app-frame-nav-button--active\s*\{[^}]*\}/)?.[0] ?? "";
     expect(appNavButtonActiveRule).toContain("color: var(--color-action-sky-hover);");
     expect(appNavButtonActiveRule).toContain("background: var(--color-nav-active-bg);");

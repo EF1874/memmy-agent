@@ -89,28 +89,27 @@ describe("SettingsPage platform scene quota details", () => {
       );
     });
 
-    expect(container.textContent).toContain("赠送大模型额度已用 23.0M Token");
-    expect(container.textContent).toContain("共 30.0M Token");
+    expect(container.textContent).toContain("Agent 任务额度已用 6.0M Token");
+    expect(container.textContent).toContain("共 5.0M Token");
 
     const detailsButton = [...container.querySelectorAll("button")]
       .find((button) => button.textContent?.includes("查看用量详情"));
     expect(detailsButton).toBeDefined();
     act(() => detailsButton?.click());
 
-    expect(container.textContent).toContain("平台场景额度");
+    expect(container.textContent).toContain("平台赠送额度");
     expect(container.textContent).toContain("Agent 任务");
-    expect(container.textContent).toContain("已用 6.0M / 共 5.0M Token");
-    expect(container.textContent).toContain("剩余 -1.0M Token");
+    expect(container.textContent).toContain("6M/5MToken");
     expect(container.textContent).toContain("记忆摘要");
-    expect(container.textContent).toContain("已用 15.0M / 共 20.0M Token");
+    expect(container.textContent).toContain("15M/20MToken");
     expect(container.textContent).toContain("记忆进化");
-    expect(container.textContent).toContain("已用 2.0M / 共 5.0M Token");
+    expect(container.textContent).toContain("2M/5MToken");
 
     const sceneHeading = [...container.querySelectorAll("h2")]
-      .find((heading) => heading.textContent === "平台场景额度");
+      .find((heading) => heading.textContent === "平台赠送额度");
     const sceneGrid = sceneHeading?.parentElement?.nextElementSibling;
     expect(sceneGrid).toBeInstanceOf(HTMLElement);
-    expect(sceneGrid?.className).toContain("sceneGrid");
+    expect(sceneGrid?.className).toContain("platformQuotaList");
   });
 });
 

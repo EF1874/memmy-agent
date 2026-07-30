@@ -303,7 +303,12 @@ describe("desktop route table", () => {
     const zeroTokenAccount = {
       ...baseBootstrap,
       app: { ...baseBootstrap.app, userMode: "account" as const },
-      tokenUsage: { ...baseBootstrap.tokenUsage, usedTokens: 30000000, remainingTokens: 0 }
+      tokenUsage: {
+        ...baseBootstrap.tokenUsage,
+        usedTokens: 30000000,
+        remainingTokens: 0,
+        lastSyncedAt: "2026-07-30T00:00:00.000Z"
+      }
     };
 
     expect(shouldShowTokenExhaustedModal(zeroTokenAccount)).toBe(true);
