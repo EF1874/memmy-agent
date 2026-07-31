@@ -924,7 +924,7 @@ function TraceTurnEventBlock(props: { event: TraceTurnEvent }) {
 
   if (event.kind === "tool") {
     return (
-      <MemoryTurnBlock label={`${t("memory.memories.toolCalls")} · ${event.call.name}`} tone="tool">
+      <MemoryTurnBlock label={t("memory.memories.toolCalls")} tone="tool">
         <div className="memory-tool-list">
           <MemoryToolCallCard call={event.call} index={event.index} />
         </div>
