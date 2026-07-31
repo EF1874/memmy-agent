@@ -858,7 +858,7 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
               type="button"
               onClick={openFullScanConfirm}
               disabled={isScanning}
-              className="flex items-start gap-3 rounded-card border-content-panel bg-status-error-soft/50 p-3 text-left transition-all hover:bg-status-error-soft/60 disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer outline-none focus:outline-none focus-visible:ring-2 focus-visible:ring-status-error/20"
+              className="flex items-start gap-3 rounded-card border-content-panel bg-background-paper/70 p-3 text-left transition-all hover:bg-background-paper disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer outline-none focus:outline-none focus-visible:ring-2 focus-visible:ring-status-error/20"
             >
               <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-btn bg-background-paper/80 text-status-error">
                 <Radar size={14} />
