@@ -19,6 +19,7 @@ import {
 import type { AnalyticsEvent } from "../analytics/analytics-events.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import { Memmy } from "../components/mascot/memmy.js";
+import { Select } from "../components/Select.js";
 import { formatMessage, type MessageKey, type MessageValues, zhCNMessages } from "../i18n/messages.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import {
@@ -2284,7 +2285,7 @@ export function HomePage() {
   );
 }
 
-function ChatModelSelector(props: {
+export function ChatModelSelector(props: {
   presets: AgentState["modelPresets"];
   value: string | null;
   disabled: boolean;
@@ -2293,21 +2294,22 @@ function ChatModelSelector(props: {
 }) {
   const available = props.presets.filter((preset) => preset.available);
   return (
-    <select
-      aria-label={props.label}
-      title={props.label}
+    <Select
+      id="home-chat-model-selector"
+      ariaLabel={props.label}
       value={props.value ?? ""}
+      placeholder={props.label}
+      options={available.map((preset) => ({
+        value: preset.name,
+        label: `${preset.provider} / ${preset.model}`
+      }))}
       disabled={props.disabled || !available.length}
-      onChange={(event) => props.onChange(event.target.value)}
-      className="max-w-48 h-7 px-2 rounded-lg bg-canvas-oat/55 text-[11px] text-text-ink/65 border border-border-stone/35 disabled:opacity-40"
-    >
-      {!props.value && <option value="">{props.label}</option>}
-      {available.map((preset) => (
-        <option key={preset.name} value={preset.name}>
-          {preset.provider} / {preset.model}
-        </option>
-      ))}
-    </select>
+      onValueChange={props.onChange}
+      placement="top"
+      className="chat-model-select"
+      buttonClassName="chat-model-select__button"
+      menuClassName="chat-model-select__menu"
+    />
   );
 }
 

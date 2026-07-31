@@ -16,6 +16,7 @@ export interface SelectProps {
   id?: string;
   name?: string;
   label?: string;
+  ariaLabel?: string;
   placeholder?: string;
   value: string;
   options: SelectOption[];
@@ -25,6 +26,7 @@ export interface SelectProps {
   buttonClassName?: string;
   menuClassName?: string;
   labelClassName?: string;
+  placement?: "top" | "bottom";
 }
 
 /** Handles select. */
@@ -114,7 +116,10 @@ export function Select(props: SelectProps) {
   let previousGroupLabel: string | undefined;
 
   return (
-    <div ref={rootRef} className={`select-control ${props.className ?? ""}`}>
+    <div
+      ref={rootRef}
+      className={`select-control select-control--placement-${props.placement ?? "bottom"} ${props.className ?? ""}`}
+    >
       {props.label && (
         <span id={labelId} className={props.labelClassName ?? "select-control__label"}>
           {props.label}
@@ -129,6 +134,7 @@ export function Select(props: SelectProps) {
         aria-controls={listboxId}
         aria-expanded={open}
         aria-haspopup="listbox"
+        aria-label={props.ariaLabel}
         aria-labelledby={props.label ? `${labelId} ${controlId}` : undefined}
         disabled={props.disabled}
         onClick={() => setOpen((value) => !value)}

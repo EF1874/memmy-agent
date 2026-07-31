@@ -5930,6 +5930,70 @@ input[type="checkbox"].check-sky:checked::after {
   padding: 6px;
 }
 
+.select-control--placement-top .select-control__menu {
+  top: auto;
+  bottom: calc(100% + 8px);
+}
+
+.chat-model-select {
+  width: min(240px, 26vw);
+  min-width: 156px;
+  flex-shrink: 1;
+}
+
+.chat-model-select .chat-model-select__button {
+  min-height: 30px;
+  padding: 6px 32px 6px 10px;
+  border-color: color-mix(in srgb, var(--color-border-stone) 38%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--color-canvas-oat) 52%, var(--color-background-paper));
+  color: color-mix(in srgb, var(--color-text-ink) 68%, transparent);
+  font-size: 11px;
+}
+
+.chat-model-select .chat-model-select__button:hover,
+.chat-model-select .chat-model-select__button[aria-expanded="true"] {
+  border-color: color-mix(in srgb, var(--color-action-sky) 30%, var(--color-border-stone));
+  background: color-mix(in srgb, var(--color-canvas-oat) 68%, var(--color-background-paper));
+}
+
+.chat-model-select .select-control__icon {
+  right: 10px;
+  width: 14px;
+  height: 14px;
+}
+
+.chat-model-select .chat-model-select__menu {
+  right: 0;
+  left: auto;
+  width: max-content;
+  min-width: 100%;
+  max-width: min(320px, calc(100vw - 32px));
+  max-height: min(240px, 40vh);
+  padding: 6px;
+  border-color: color-mix(in srgb, var(--color-border-stone) 46%, transparent);
+  border-radius: 14px;
+  box-shadow: var(--shadow-popover);
+}
+
+.chat-model-select .select-control__option {
+  min-height: 36px;
+  border-radius: 9px;
+  color: color-mix(in srgb, var(--color-text-ink) 72%, transparent);
+  font-size: 12px;
+}
+
+.chat-model-select .select-control__option:hover:not(.select-control__option--selected),
+.chat-model-select .select-control__option--active {
+  background: color-mix(in srgb, var(--color-action-sky) 8%, var(--color-background-paper));
+}
+
+.chat-model-select .select-control__option--selected {
+  background: color-mix(in srgb, var(--color-action-sky) 12%, var(--color-background-paper));
+  color: var(--color-action-sky-hover);
+  font-weight: 600;
+}
+
 .select-control__group-label {
   padding: 7px 9px 4px;
   color: color-mix(in srgb, var(--color-text-ink) 46%, transparent);
