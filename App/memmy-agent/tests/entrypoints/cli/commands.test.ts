@@ -28,6 +28,7 @@ import {
 } from "../../../src/utils/restart.js";
 import {
   agent,
+  app,
   cliRuntimeLogsEnabled,
   deleteOauthFiles,
   gateway,
@@ -217,6 +218,14 @@ describe("CLI command helpers", () => {
     await main(["node", "memmy"]);
 
     expect(runRoot).toHaveBeenCalledOnce();
+  });
+
+  it("shows terminal target options in root help", () => {
+    const help = app.helpInformation();
+
+    expect(help).toContain("-s, --session <sessionId>");
+    expect(help).toContain("--standalone");
+    expect(help).toContain("--project <path>");
   });
 
   it("stops before the root TUI when startup migrations fail", async () => {

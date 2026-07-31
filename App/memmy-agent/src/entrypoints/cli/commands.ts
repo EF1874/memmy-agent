@@ -76,7 +76,10 @@ import {
 import { StreamRenderer, ThinkingSpinner } from "./stream.js";
 import { prepareStartupMigrations } from "./startup-migrations.js";
 
-export const app = new Command("memmy");
+export const app = new Command("memmy")
+  .option("-s, --session <sessionId>", "Resume an existing cli:* terminal session")
+  .option("--standalone", "Create a new standalone terminal session")
+  .option("--project <path>", "Create a terminal session bound to a project path");
 
 export type GatewayRuntime = {
   bus: MessageBus;
