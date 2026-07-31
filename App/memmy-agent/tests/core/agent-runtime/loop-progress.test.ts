@@ -3,10 +3,11 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentHookContext } from "../../../src/core/agent-runtime/hook.js";
-import { AgentLoop } from "../../../src/core/agent-runtime/loop.js";
+import { AgentLoop, TurnContext } from "../../../src/core/agent-runtime/loop.js";
 import { AgentProgressHook } from "../../../src/core/agent-runtime/progress-hook.js";
 import { InboundMessage } from "../../../src/core/runtime-messages/events.js";
 import { MessageBus } from "../../../src/core/runtime-messages/queue.js";
+import { Session } from "../../../src/core/session/manager.js";
 import { Config } from "../../../src/config/schema.js";
 import { LLMResponse, ToolCallRequest } from "../../../src/providers/base.js";
 import { buildToolEventFinishPayloads, buildToolEventStartPayload, invokeFileEditProgress, onProgressAcceptsFileEditEvents, withProgressCapabilities } from "../../../src/utils/progress-events.js";
@@ -434,6 +435,93 @@ describe("AgentLoop progress integration", () => {
     expect(outbound.some((message) => message.metadata?.agentProgress)).toBe(false);
     expect(outbound.some((message) => message.metadata?.streamed)).toBe(false);
     expect((loop.provider as any).chatStreamWithRetry).not.toHaveBeenCalled();
+  });
+
+  it("does not let a GUI mirror enable streaming for a non-streaming channel turn", async () => {
+    const loop = makeLoop();
+    const session = new Session({ key: "weixin:wx-user" });
+    const ctx = new TurnContext({
+      msg: new InboundMessage({
+        channel: "weixin",
+        senderId: "wx-user",
+        chatId: "wx-user",
+        content: "hello",
+      }),
+      sessionKey: session.key,
+      session,
+      turnId: "turn-weixin",
+    });
+    ctx.sessionWorkspace = loop.workspace;
+    ctx.mirrorTurn = {
+      sessionKey: session.key,
+      chatId: "ext-d2VpeGluOnd4LXVzZXI",
+      turnId: ctx.turnId,
+    };
+    loop.guiTranscriptMirror = {
+      user: vi.fn(),
+      progress: vi.fn(),
+      delta: vi.fn(),
+      streamEnd: vi.fn(),
+      retryWait: vi.fn(),
+    } as any;
+
+    await loop.stateBuild(ctx);
+
+    expect(ctx.onStream).toBeNull();
+    expect(ctx.onStreamEnd).toBeNull();
+  });
+
+  it("mirrors an existing channel stream without replacing its downstream delivery", async () => {
+    const loop = makeLoop();
+    const session = new Session({ key: "telegram:chat-1" });
+    const downstreamStream = vi.fn(async () => undefined);
+    const downstreamStreamEnd = vi.fn(async () => undefined);
+    const mirrorDelta = vi.fn();
+    const mirrorStreamEnd = vi.fn();
+    const ctx = new TurnContext({
+      msg: new InboundMessage({
+        channel: "telegram",
+        senderId: "user",
+        chatId: "chat-1",
+        content: "hello",
+        metadata: { wantsStream: true },
+      }),
+      sessionKey: session.key,
+      session,
+      turnId: "turn-telegram",
+    });
+    ctx.sessionWorkspace = loop.workspace;
+    ctx.onStream = downstreamStream;
+    ctx.onStreamEnd = downstreamStreamEnd;
+    ctx.mirrorTurn = {
+      sessionKey: session.key,
+      chatId: "ext-dGVsZWdyYW06Y2hhdC0x",
+      turnId: ctx.turnId,
+    };
+    loop.guiTranscriptMirror = {
+      user: vi.fn(),
+      progress: vi.fn(),
+      delta: mirrorDelta,
+      streamEnd: mirrorStreamEnd,
+      retryWait: vi.fn(),
+    } as any;
+
+    await loop.stateBuild(ctx);
+    await ctx.onStream?.("hello");
+    await ctx.onStreamEnd?.({ resuming: true });
+
+    expect(mirrorDelta).toHaveBeenCalledWith(
+      ctx.mirrorTurn,
+      "hello",
+      `${session.key}:${ctx.turnId}`,
+    );
+    expect(downstreamStream).toHaveBeenCalledWith("hello");
+    expect(mirrorStreamEnd).toHaveBeenCalledWith(
+      ctx.mirrorTurn,
+      `${session.key}:${ctx.turnId}`,
+      true,
+    );
+    expect(downstreamStreamEnd).toHaveBeenCalledWith({ resuming: true });
   });
 
   it("streams provider deltas to websocket channels and marks final response", async () => {

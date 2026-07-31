@@ -202,6 +202,27 @@ describe("Weixin protocol helpers", () => {
 });
 
 describe("Weixin inbound processing", () => {
+  it("always treats WeChat as a non-streaming channel", async () => {
+    const bus = new MessageBus();
+    const channel = new WeixinChannel(
+      { enabled: true, allowFrom: ["*"], streaming: true },
+      bus,
+    );
+
+    expect(channel.supportsStreaming).toBe(false);
+
+    await channel.handleMessage({
+      senderId: "wx-user",
+      chatId: "wx-user",
+      content: "hello",
+      metadata: { message_id: "m-non-streaming" },
+    });
+
+    const inbound = await bus.consumeInbound();
+    expect(inbound.metadata).toEqual({ message_id: "m-non-streaming" });
+    expect(inbound.metadata).not.toHaveProperty("wantsStream");
+  });
+
   it("deduplicates inbound ids and caches context tokens", async () => {
     const { channel, bus } = makeChannel();
     const msg = {

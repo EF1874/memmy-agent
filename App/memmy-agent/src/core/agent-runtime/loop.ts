@@ -2201,16 +2201,18 @@ export class AgentLoop {
         { toolEvents: true, fileEditEvents: true, reasoning: true },
       );
       const downstreamStream = ctx.onStream;
-      const streamId = `${ctx.sessionKey}:${ctx.turnId}`;
-      ctx.onStream = async (delta: string) => {
-        mirror.delta(turn, delta, streamId);
-        await downstreamStream?.(delta);
-      };
       const downstreamStreamEnd = ctx.onStreamEnd;
-      ctx.onStreamEnd = async (options: { resuming?: boolean } = {}) => {
-        mirror.streamEnd(turn, streamId, Boolean(options.resuming));
-        await downstreamStreamEnd?.(options);
-      };
+      if (downstreamStream) {
+        const streamId = `${ctx.sessionKey}:${ctx.turnId}`;
+        ctx.onStream = async (delta: string) => {
+          mirror.delta(turn, delta, streamId);
+          await downstreamStream(delta);
+        };
+        ctx.onStreamEnd = async (options: { resuming?: boolean } = {}) => {
+          mirror.streamEnd(turn, streamId, Boolean(options.resuming));
+          await downstreamStreamEnd?.(options);
+        };
+      }
     }
     ctx.onRetryWait ??= await this.buildRetryWaitCallback(ctx.msg);
     if (ctx.mirrorTurn && this.guiTranscriptMirror) {

@@ -42,12 +42,21 @@ async function nextOutboundBefore(bus: MessageBus, deadline: number) {
 async function nextFinalOutbound(
   bus: MessageBus,
   websocket: WebSocketChannel,
+  observed: Record<string, any>[] = [],
 ): Promise<{ channel: string; chatId: string; content: string }> {
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
     const message = await nextOutboundBefore(bus, deadline);
+    observed.push(message);
     if (message.channel === "websocket") await websocket.send(message);
-    if (message.content && !message.metadata?.agentProgress) return message;
+    if (
+      message.content
+      && !message.metadata?.agentProgress
+      && !message.metadata?.streamDelta
+      && !message.metadata?.streamEnd
+    ) {
+      return message;
+    }
   }
   throw new Error("timed out waiting for final outbound");
 }
@@ -65,6 +74,7 @@ describe.each([
   ["telegram", "chat-telegram"],
   ["feishu", "chat-feishu"],
   ["slack", "chat-slack"],
+  ["weixin", "chat-weixin"],
 ])("%s canonical GUI synchronization", (channelName, chatId) => {
   it("keeps IM A, GUI B, and IM C in one canonical history with route-specific delivery", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-channel-gui-sync-"));
@@ -76,6 +86,7 @@ describe.each([
     const sessions = new SessionManager(path.join(workspace, "sessions"));
     const bus = new MessageBus();
     const modelCalls: string[] = [];
+    const streamedModelCalls: string[] = [];
     const provider = {
       generation: { maxTokens: 256 },
       getDefaultModel: () => "test-model",
@@ -86,6 +97,14 @@ describe.each([
         }
         modelCalls.push(input);
         return new LLMResponse({ content: expectedAnswer(input) });
+      }),
+      chatStreamWithRetry: vi.fn(async (args: any) => {
+        const input = JSON.stringify(args.messages);
+        streamedModelCalls.push(input);
+        const answer = expectedAnswer(input);
+        await args.onContentDelta(answer.slice(0, 4));
+        await args.onContentDelta(answer.slice(4));
+        return new LLMResponse({ content: answer });
       }),
     };
     const loop = new AgentLoop({
@@ -134,7 +153,8 @@ describe.each([
       webui: true,
       client_request_id: "11111111-1111-4111-8111-111111111111",
     });
-    const answerB = await nextFinalOutbound(bus, websocket);
+    const guiTurnOutbound: Record<string, any>[] = [];
+    const answerB = await nextFinalOutbound(bus, websocket, guiTurnOutbound);
     expect(answerB).toMatchObject({
       channel: "websocket",
       chatId: guiChatId,
@@ -162,8 +182,11 @@ describe.each([
       ["user", "IM C"],
       ["assistant", "answer C"],
     ]);
-    expect(modelCalls[2]).toContain("GUI B");
-    expect(modelCalls[2]).toContain("answer B");
+    expect(modelCalls).toHaveLength(2);
+    expect(modelCalls[1]).toContain("GUI B");
+    expect(modelCalls[1]).toContain("answer B");
+    expect(streamedModelCalls).toHaveLength(1);
+    expect(streamedModelCalls[0]).toContain("GUI B");
     expect(new GuiSessionProjection(sessions).resolve(guiChatId).canonicalSessionKey)
       .toBe(canonicalSessionKey);
     expect(sessions.has(`websocket:${guiChatId}`)).toBe(false);
@@ -171,6 +194,13 @@ describe.each([
     const transcript = readTranscriptLines(`websocket:${guiChatId}`);
     expect(transcript.filter((record) => record.event === "user").map((record) => record.text))
       .toEqual(["IM A", "GUI B", "IM C"]);
+    expect(transcript.filter((record) => record.event === "delta").map((record) => record.text))
+      .toEqual([]);
+    expect(
+      guiTurnOutbound
+        .filter((message) => message.metadata?.streamDelta)
+        .map((message) => message.content),
+    ).toEqual(["answ", "er B"]);
     expect(sent.some((event) => event.event === "message_accepted" && event.chat_id === guiChatId))
       .toBe(true);
   });
