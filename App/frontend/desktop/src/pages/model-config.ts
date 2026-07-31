@@ -630,9 +630,26 @@ export function resolveTextProviderOption(provider: string): TextProviderOption 
 export function filterDesktopTextModelProviders(
   providers: readonly TextModelProviderConfig[]
 ): TextModelProviderConfig[] {
-  return providers.filter((provider) => (
-    provider.models.length > 0 && resolveTextProviderOption(provider.provider) !== null
-  ));
+  return providers
+    .filter((provider) => (
+      provider.models.length > 0 && resolveTextProviderOption(provider.provider) !== null
+    ))
+    .map((provider) => ({
+      ...provider,
+      apiType: desktopTextProviderApiType(provider.provider)
+    }));
+}
+
+/**
+ * Resolves the fixed API type used by the desktop text-model form.
+ *
+ * OpenAI-compatible endpoints use Chat Completions. Every other provider keeps
+ * its provider-specific runtime behavior through the automatic API type.
+ */
+export function desktopTextProviderApiType(
+  provider: string
+): TextModelProviderConfig["apiType"] {
+  return provider === "openai" ? "chatCompletions" : "auto";
 }
 
 export function textProviderDisplayName(

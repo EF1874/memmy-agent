@@ -62,6 +62,7 @@ import {
   createMemmyMemoryProviderConfig,
   createModelFormValues,
   createModelProtocolPatch,
+  desktopTextProviderApiType,
   filterDesktopTextModelProviders,
   hydrateModelConfigForm,
   fromProtocol,
@@ -588,7 +589,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     setTextModelProviders((current) => [...current, {
       provider: providerName,
       endpoint: DEFAULT_ENDPOINTS[protocolToAdd],
-      apiType: "auto",
+      apiType: desktopTextProviderApiType(providerName),
       apiKey: "",
       apiKeyMasked: "",
       configured: false,
@@ -1718,23 +1719,6 @@ export function SettingsPageView(props: SettingsPageViewProps) {
                         onToggle={() => setShowKey(!showKey)}
                       />
                     )}
-                    {provider.editable && (
-                      <label className="block">
-                        <span className="block text-xs text-text-ink/55 mb-1.5">API Type</span>
-                        <select
-                          value={provider.apiType}
-                          onChange={(event) => updateTextModelProvider(providerIndex, {
-                            apiType: event.target.value as TextModelProviderConfig["apiType"]
-                          })}
-                          className="w-full px-3 py-2.5 border border-border-stone/40 rounded-input bg-background-paper text-sm"
-                        >
-                          <option value="auto">auto</option>
-                          <option value="chatCompletions">chatCompletions</option>
-                          <option value="responses">responses</option>
-                        </select>
-                      </label>
-                    )}
-
                     <div className="space-y-2">
                       {provider.models.map((model, modelIndex) => {
                         const modelKey = model.presetName ?? model.draftId ?? `${providerIndex}-${modelIndex}`;

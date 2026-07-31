@@ -15,6 +15,7 @@ import {
   createModelFormValues,
   createModelProtocolPatch,
   createTestModelConnectionMessages,
+  desktopTextProviderApiType,
   filterDesktopTextModelProviders,
   fromProtocol,
   hydrateModelConfigForm,
@@ -46,16 +47,25 @@ describe("model config helpers", () => {
     });
     const model = [{ presetName: "preset", model: "model", isDefault: false, available: false }];
 
-    expect(filterDesktopTextModelProviders([
+    const filtered = filterDesktopTextModelProviders([
       provider("openai", model),
       provider("memmy_account", model),
       provider("openrouter", model),
       provider("anthropic", [])
-    ]).map((item) => item.provider)).toEqual(["openai", "memmy_account"]);
+    ]);
+
+    expect(filtered.map((item) => item.provider)).toEqual(["openai", "memmy_account"]);
+    expect(filtered.map((item) => item.apiType)).toEqual(["chatCompletions", "auto"]);
     expect(resolveTextProviderOption("google")?.protocol).toBe("gemini");
     expect(resolveTextProviderOption("kimi")?.protocol).toBe("moonshot");
     expect(resolveTextProviderOption("openrouter")).toBeNull();
     expect(textProviderDisplayName("memmy_account", (key) => zhCNMessages[key])).toBe("Memmy");
+  });
+
+  it("桌面文本模型使用固定 API Type，不向用户暴露协议选择", () => {
+    expect(desktopTextProviderApiType("openai")).toBe("chatCompletions");
+    expect(desktopTextProviderApiType("anthropic")).toBe("auto");
+    expect(desktopTextProviderApiType("gemini")).toBe("auto");
   });
 
   it("协议切换时同步默认 API 地址，并清空模型 ID 和 API Key", () => {

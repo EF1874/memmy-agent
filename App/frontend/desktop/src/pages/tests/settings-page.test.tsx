@@ -436,6 +436,15 @@ describe("SettingsPageView", () => {
     expect(source).not.toContain('navigate("/api-key")');
   });
 
+  it("模型设置不向用户展示 API Type 选择", () => {
+    const source = readFileSync(settingsPageSourcePath, "utf8");
+
+    expect(source).toContain("desktopTextProviderApiType(providerName)");
+    expect(source).not.toContain(">API Type<");
+    expect(source).not.toContain('<option value="responses">');
+    expect(source).not.toContain('<option value="chatCompletions">');
+  });
+
   it("Token 用量按原型包含渠道汇总和详情子页结构", () => {
     const source = readFileSync(settingsPageSourcePath, "utf8");
     const styles = readFileSync(tokenUsageStylesPath, "utf8");
