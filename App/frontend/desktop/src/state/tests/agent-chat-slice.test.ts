@@ -404,6 +404,216 @@ describe("agent chat slice", () => {
     expect(state.messages[4]?.isStreaming).not.toBe(true);
   });
 
+  it("appends live external user events to the current chat with normalized media", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "user",
+        chat_id: "chat-1",
+        turn_id: "turn-external-1",
+        text: "来自 Telegram 的图片",
+        media_urls: [
+          { kind: "image", url: " /api/media/image-1 ", name: " photo.png " },
+          { kind: "file", url: "/api/media/file-1", name: "report.pdf" }
+        ]
+      }
+    });
+
+    expect(state.messages).toHaveLength(1);
+    expect(state.messages[0]).toEqual({
+      id: "user-1",
+      role: "user",
+      content: "来自 Telegram 的图片",
+      turnId: "turn-external-1",
+      media: [
+        { kind: "image", url: "/api/media/image-1", name: "photo.png" },
+        { kind: "file", url: "/api/media/file-1", name: "report.pdf" }
+      ]
+    });
+    expect(state.messagesByChatId["chat-1"]).toEqual(state.messages);
+  });
+
+  it("stores background external user events without changing the current chat", () => {
+    let state = loadHistory(initialAgentState, "websocket:chat-1", [{ role: "user", content: "当前会话" }]);
+    state = {
+      ...state,
+      composerDraftsByScope: {
+        ...state.composerDraftsByScope,
+        "chat:chat-1": "尚未发送的草稿"
+      }
+    };
+    const currentMessages = state.messages;
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "user",
+        chat_id: "chat-2",
+        turn_id: "turn-background",
+        text: "后台会话消息"
+      }
+    });
+
+    expect(state.currentChatId).toBe("chat-1");
+    expect(state.messages).toBe(currentMessages);
+    expect(state.messages.map((message) => message.content)).toEqual(["当前会话"]);
+    expect(state.messagesByChatId["chat-2"]).toEqual([
+      {
+        id: "user-1",
+        role: "user",
+        content: "后台会话消息",
+        turnId: "turn-background"
+      }
+    ]);
+    expect(state.composerDraftsByScope["chat:chat-1"]).toBe("尚未发送的草稿");
+  });
+
+  it("deduplicates external user events by turn id without collapsing repeated text from different turns", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+    const externalUserEvent = {
+      event: "user",
+      chat_id: "chat-1",
+      turn_id: "turn-same",
+      text: "相同内容"
+    };
+
+    state = agentReducer(state, { type: "agent/wsEvent", event: externalUserEvent });
+    state = agentReducer(state, { type: "agent/wsEvent", event: externalUserEvent });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { ...externalUserEvent, turn_id: "turn-next" }
+    });
+
+    expect(state.messages.map((message) => [message.content, message.turnId])).toEqual([
+      ["相同内容", "turn-same"],
+      ["相同内容", "turn-next"]
+    ]);
+  });
+
+  it("allows pure-media and repeated no-turn-id external user messages", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "user",
+        chat_id: "chat-1",
+        media_urls: [{ kind: "video", url: "/api/media/video-1", name: "clip.mp4" }]
+      }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "user", chat_id: "chat-1", content: "重复内容" }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "user", chat_id: "chat-1", content: "重复内容" }
+    });
+
+    expect(state.messages).toHaveLength(3);
+    expect(state.messages[0]).toMatchObject({
+      role: "user",
+      content: "",
+      media: [{ kind: "video", url: "/api/media/video-1", name: "clip.mp4" }]
+    });
+    expect(state.messages.slice(1).map((message) => message.content)).toEqual(["重复内容", "重复内容"]);
+  });
+
+  it("does not change assistant or retry lifecycle state when an external user event arrives", () => {
+    let state = loadHistory(initialAgentState, "websocket:chat-1", [
+      { role: "assistant", content: "仍在输出", isStreaming: true, reasoningStreaming: true }
+    ]);
+    state = {
+      ...state,
+      activeTurnIdByChatId: { "chat-1": "turn-active" },
+      retryWaitStatusByChatId: {
+        "chat-1": {
+          id: "retry-turn-active",
+          chatId: "chat-1",
+          turnId: "turn-active",
+          text: "等待重试",
+          isRunning: true,
+          createdAt: 1,
+          updatedAt: 1
+        }
+      },
+      suppressAssistantStreamUntilTurnEndByChatId: { "chat-1": true }
+    };
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "user",
+        chat_id: "chat-1",
+        turn_id: "turn-external-next",
+        text: "下一条外部消息"
+      }
+    });
+
+    expect(state.messages[0]).toMatchObject({
+      role: "assistant",
+      content: "仍在输出",
+      isStreaming: true,
+      reasoningStreaming: true
+    });
+    expect(state.messages[1]).toMatchObject({
+      role: "user",
+      content: "下一条外部消息",
+      turnId: "turn-external-next"
+    });
+    expect(state.activeTurnIdByChatId["chat-1"]).toBe("turn-active");
+    expect(state.retryWaitStatusByChatId["chat-1"]?.isRunning).toBe(true);
+    expect(state.suppressAssistantStreamUntilTurnEndByChatId["chat-1"]).toBe(true);
+  });
+
+  it("keeps closed-turn protection for late external user events", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+    state = {
+      ...state,
+      closedTurnIdsByChatId: {
+        "chat-1": { "turn-closed": "ended" }
+      }
+    };
+
+    const next = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "user",
+        chat_id: "chat-1",
+        turn_id: "turn-closed",
+        text: "迟到的外部消息"
+      }
+    });
+
+    expect(next).toBe(state);
+    expect(next.messages).toHaveLength(0);
+  });
+
+  it("lets canonical history replace a live external user event without duplication", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "user",
+        chat_id: "chat-1",
+        turn_id: "turn-history",
+        text: "服务端已保存"
+      }
+    });
+
+    state = loadHistory(state, "websocket:chat-1", [
+      { role: "user", content: "服务端已保存" }
+    ], "canonical-history");
+
+    expect(state.messages).toHaveLength(1);
+    expect(state.messages[0]).toMatchObject({
+      role: "user",
+      content: "服务端已保存"
+    });
+  });
+
   it("finalizes pending activity tool and file-edit progress only on turn_end", () => {
     let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
     state = agentReducer(state, {

@@ -2138,6 +2138,8 @@ function reduceChatContentEvent(state: AgentState, event: MemmyAgentWsEvent): Ag
       ? scopedState
       : finishRetryWaitStatusForTurn(scopedState, chatId, turnId);
     switch (event.event) {
+      case "user":
+        return appendExternalUserMessage(scopedState, chatId, event);
       case "retry_wait":
         return upsertRetryWaitStatus(scopedState, event);
       case "delta":
@@ -2179,6 +2181,7 @@ function reduceChatContentEvent(state: AgentState, event: MemmyAgentWsEvent): Ag
 
 function isChatContentEvent(event: string): boolean {
   return [
+    "user",
     "delta",
     "stream_end",
     "reasoning_delta",
@@ -2188,6 +2191,39 @@ function isChatContentEvent(event: string): boolean {
     "context_compaction",
     "retry_wait"
   ].includes(event);
+}
+
+function appendExternalUserMessage(
+  state: AgentState,
+  chatId: string,
+  event: MemmyAgentWsEvent
+): AgentState {
+  const turnId = eventTurnId(event);
+  if (turnId && state.messages.some((message) => message.role === "user" && message.turnId === turnId)) {
+    return state;
+  }
+  const content = typeof event.text === "string"
+    ? event.text
+    : typeof event.content === "string"
+      ? event.content
+      : "";
+  const normalizedMedia = Array.isArray(event.media_urls) ? normalizeMedia(event.media_urls) : [];
+  const message: AgentChatMessage = {
+    id: nextMessageId(state.messages, "user"),
+    role: "user",
+    content,
+    ...(turnId ? { turnId } : {}),
+    ...(normalizedMedia.length ? { media: normalizedMedia } : {})
+  };
+  const messages = [...state.messages, message];
+  return {
+    ...state,
+    messages,
+    messagesByChatId: {
+      ...state.messagesByChatId,
+      [chatId]: messages
+    }
+  };
 }
 
 function withScopedChatMessages(
