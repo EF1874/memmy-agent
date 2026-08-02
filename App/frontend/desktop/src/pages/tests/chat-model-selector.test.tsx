@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { ChatModelSelector } from "../home-page.js";
 
 describe("ChatModelSelector", () => {
-  it("uses the compact upward Select and omits unavailable presets", () => {
+  it("uses provider logos with model-only labels and omits unavailable presets", () => {
     const html = renderToString(
       <ChatModelSelector
         presets={[
@@ -20,7 +20,11 @@ describe("ChatModelSelector", () => {
     expect(html).toContain("select-control--placement-top");
     expect(html).toContain("chat-model-select");
     expect(html).toContain('aria-label="选择模型"');
-    expect(html).toContain("openai / gpt-5.4");
-    expect(html).not.toContain("local / missing");
+    expect(html).toContain("llm-provider-logo");
+    expect(html).toContain("data:image/svg+xml");
+    expect(html).toContain("OpenAI");
+    expect(html).toContain(">gpt-5.4<");
+    expect(html).not.toContain("openai / gpt-5.4");
+    expect(html).not.toContain("missing");
   });
 });

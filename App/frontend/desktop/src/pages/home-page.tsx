@@ -73,6 +73,7 @@ import {
   writePendingFirstEncounterTaskLaunch
 } from "./first-encounter-task-launch.js";
 import { HistoryDagPanel, type HistoryDagPanelState } from "./history-dag-panel.js";
+import { LlmProviderLogo } from "./llm-provider-logo.js";
 import { Mic, Pause, Plus, Send } from "./memory/memory-prototype-icons.js";
 import { ArrowDown, Check, ChevronDown, Folder, Plus as LucidePlus, RotateCw, X } from "lucide-react";
 
@@ -2301,7 +2302,8 @@ export function ChatModelSelector(props: {
       placeholder={props.label}
       options={available.map((preset) => ({
         value: preset.name,
-        label: `${preset.provider} / ${preset.model}`
+        label: preset.model,
+        icon: <LlmProviderLogo provider={preset.provider} />
       }))}
       disabled={props.disabled || !available.length}
       onValueChange={props.onChange}

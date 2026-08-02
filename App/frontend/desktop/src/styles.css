@@ -5936,25 +5936,25 @@ input[type="checkbox"].check-sky:checked::after {
 }
 
 .chat-model-select {
-  width: min(240px, 26vw);
-  min-width: 156px;
-  flex-shrink: 1;
+  width: max-content;
+  min-width: 0;
+  max-width: min(240px, 26vw);
+  flex: 0 1 auto;
 }
 
 .chat-model-select .chat-model-select__button {
   min-height: 30px;
-  padding: 6px 32px 6px 10px;
-  border-color: color-mix(in srgb, var(--color-border-stone) 38%, transparent);
+  padding: 6px 28px 6px 8px;
+  border-color: transparent;
   border-radius: 10px;
-  background: color-mix(in srgb, var(--color-canvas-oat) 52%, var(--color-background-paper));
+  background: transparent;
   color: color-mix(in srgb, var(--color-text-ink) 68%, transparent);
   font-size: 11px;
 }
 
-.chat-model-select .chat-model-select__button:hover,
-.chat-model-select .chat-model-select__button[aria-expanded="true"] {
-  border-color: color-mix(in srgb, var(--color-action-sky) 30%, var(--color-border-stone));
-  background: color-mix(in srgb, var(--color-canvas-oat) 68%, var(--color-background-paper));
+.chat-model-select .chat-model-select__button:hover {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--color-canvas-oat) 62%, var(--color-background-paper));
 }
 
 .chat-model-select .select-control__icon {
@@ -5981,6 +5981,24 @@ input[type="checkbox"].check-sky:checked::after {
   border-radius: 9px;
   color: color-mix(in srgb, var(--color-text-ink) 72%, transparent);
   font-size: 12px;
+}
+
+.chat-model-select .select-control__selection,
+.chat-model-select .select-control__option-content {
+  gap: 7px;
+}
+
+.chat-model-select .select-control__option-icon {
+  width: 17px;
+  height: 17px;
+  flex-basis: 17px;
+}
+
+.llm-provider-logo {
+  display: block;
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
 }
 
 .chat-model-select .select-control__option:hover:not(.select-control__option--selected),
