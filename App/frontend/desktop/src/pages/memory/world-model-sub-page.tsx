@@ -350,6 +350,9 @@ function WorldModelDrawer(props: { detail: WorldModelDetailState; onClose: () =>
 function WorldModelDetail(props: { detail: GetMemoryOutput }) {
   const { t } = useTranslation();
   const worldModel = worldModelFromDetail(props.detail);
+  const hasStructuredCognition = worldModel.structure.environment.length > 0 ||
+    worldModel.structure.inference.length > 0 ||
+    worldModel.structure.constraints.length > 0;
 
   return (
     <>
@@ -370,9 +373,10 @@ function WorldModelDetail(props: { detail: GetMemoryOutput }) {
         )}
       </section>
 
-      <DetailTextSection title={t("memory.memories.summary")} body={worldModel.summary} />
-      <DetailTextSection title={t("memory.memories.body")} body={worldModel.body} />
-      <StructureSection structure={worldModel.structure} />
+      {worldModel.summary && <DetailTextSection title={t("memory.memories.summary")} body={worldModel.summary} />}
+      {hasStructuredCognition
+        ? <StructureSection structure={worldModel.structure} />
+        : <DetailTextSection title={t("memory.memories.body")} body={worldModel.body} />}
       <LinkedIdsSection title={t("memory.worldModel.relatedPolicies")} ids={worldModel.policyIds} empty={t("memory.worldModel.noRelatedPolicies")} />
       <LinkedIdsSection title={t("memory.memories.sourceMemoryIds")} ids={worldModel.sourceMemoryIds} empty={t("memory.worldModel.noSourceMemories")} />
     </>
@@ -491,6 +495,7 @@ function worldModelFromDetail(detail: GetMemoryOutput): WorldModelView {
   const metadata = detail.item.metadata;
   const properties = recordValue(metadata.properties);
   const internalInfo = recordValue(properties.internal_info);
+  const layerWorldModel = recordValue(detail.item.worldModel);
   const worldModel = recordValue(firstDefined(internalInfo.world_model, internalInfo.worldModel, metadata.world_model, metadata.worldModel));
   const structure = readWorldModelStructure(
     firstDefined(worldModel.structure, internalInfo.structure, properties.structure, metadata.structure)
@@ -503,7 +508,7 @@ function worldModelFromDetail(detail: GetMemoryOutput): WorldModelView {
     createdAt: detail.item.createdAt,
     updatedAt: detail.item.updatedAt,
     body: cleanMemoryBody(detail.item.body),
-    summary: displayWorldModelSummary(detail.item),
+    summary: cleanWorldModelText(firstString(layerWorldModel.summary, worldModel.summary, internalInfo.summary)),
     policyIds: stringArray(firstDefined(worldModel.policyIds, worldModel.policy_ids, internalInfo.policyIds, internalInfo.policy_ids)),
     sourceMemoryIds: detail.item.sourceMemoryIds,
     structure
@@ -550,8 +555,14 @@ function structureEntry(value: unknown, key?: string): WorldModelStructureEntry 
   return {
     label: label ?? description,
     description,
-    evidenceIds: stringArray(firstDefined(record.evidenceIds, record.evidence_ids, record.sourceMemoryIds, record.source_memory_ids))
+    evidenceIds: stringArray(
+      firstDefined(record.evidenceIds, record.evidence_ids, record.sourceMemoryIds, record.source_memory_ids)
+    ).filter(isDisplayableWorldModelEvidenceId)
   };
+}
+
+function isDisplayableWorldModelEvidenceId(value: string): boolean {
+  return /^(?:policy_|trace_|memory-(?:policy|trace)-)[a-z0-9_-]+$/i.test(value);
 }
 
 function displayWorldModelTitle(
@@ -564,15 +575,6 @@ function displayWorldModelTitle(
   }
 
   return displayMemoryId(item.id);
-}
-
-function displayWorldModelSummary(item: Pick<MemoryListItem, "title" | "summary"> & { body?: string }): string {
-  for (const value of [item.summary, firstReadableWorldBodyLine(item.body), item.title]) {
-    const text = cleanWorldModelText(value);
-    if (isDisplayableWorldModelText(text)) return text;
-  }
-
-  return "";
 }
 
 function firstReadableWorldBodyLine(body?: string): string | undefined {

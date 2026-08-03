@@ -425,12 +425,15 @@ export const GetMemoryOutputSchema = z.object({
     worldModel: z
       .object({
         sourceMemoryIds: z.array(NonEmptyStringSchema),
-        confidence: z.number().optional()
+        confidence: z.number().optional(),
+        summary: z.string().optional()
       })
       .optional(),
     skill: z
       .object({
         invocationGuide: z.string(),
+        retrievalBlurb: z.string().optional(),
+        triggerContext: z.string().optional(),
         procedure: z.array(z.string()).optional(),
         sourcePolicyIds: z.array(NonEmptyStringSchema),
         sourceWorldModelIds: z.array(NonEmptyStringSchema),

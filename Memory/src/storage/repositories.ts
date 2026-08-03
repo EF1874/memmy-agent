@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { retrievalDocumentForMemory } from "../algorithm/plugin-algorithms.js";
 import type {
   FeedbackRequest,
   JobRef,
@@ -384,7 +385,7 @@ export class MemoryRepository {
       )
       .run(memoryToSql(prepared.memory));
     this.vectors.replace(prepared.memory.id, prepared.vectors, prepared.memory.updatedAt);
-    this.indexFts(prepared.memory);
+    this.reindexFts(prepared.memory);
     return attachMemoryVectors(prepared.memory, prepared.vectors);
   }
 
@@ -442,7 +443,7 @@ export class MemoryRepository {
         this.vectors.upsert(updated.id, vector, updated.updatedAt);
       }
     }
-    this.indexFts(updated);
+    this.reindexFts(updated);
     return attachMemoryVectors(updated, updated.deletedAt || updated.status === "deleted" ? [] : mergedVectors);
   }
 
@@ -940,13 +941,13 @@ export class MemoryRepository {
     };
   }
 
-  private indexFts(memory: MemoryRow): void {
+  reindexFts(memory: MemoryRow): void {
     try {
       this.db.prepare(`DELETE FROM memories_fts WHERE id = ?`).run(memory.id);
       if (!memory.deletedAt && memory.status !== "deleted") {
         this.db
           .prepare(`INSERT INTO memories_fts (id, identifier, memory_value, tags) VALUES (?, ?, ?, ?)`)
-          .run(memory.id, memory.id, memory.memoryValue, memory.tags.join(" "));
+          .run(memory.id, memory.id, retrievalDocumentForMemory(memory), memory.tags.join(" "));
       }
     } catch {
       // The service search path is deterministic JS scoring; FTS is maintained
