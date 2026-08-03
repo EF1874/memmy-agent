@@ -35,7 +35,7 @@
 
 ## 🆓 Sign-up for Free Trial
 
-Get Memmy from [Official Website](https://memmy.bot/) or [GitHub Release](https://github.com/MemTensor/memmy-agent/releases).
+Get Memmy from [Official Website](https://memmy.bot/) or [GitHub Releases](https://github.com/MemTensor/memmy-agent/releases).
 
 Sign up to get free tokens. Model routing is automatic — start exploring the full Memory + Agent Runtime with zero config.
 
@@ -109,7 +109,7 @@ Memmy is not just a chat interface — it is an AI Agent Runtime t
 | 🔌 Integration Layer | Connect external ecosystems        | Messaging channels, third-party tools, OpenAI-compatible API                      |
 | 🖥️ User Interface  | Provide entry points               | Desktop App, CLI/TUI, Web API                                                     |
 
-### Repository Architecture
+### System Architecture
 
 ![Memmy System Architecture](docs/assets/memmy-architecture-en.png)
 
