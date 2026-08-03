@@ -5,6 +5,7 @@ interface DesktopEditionManifest {
   edition?: unknown;
   accountChannel?: unknown;
   signing?: unknown;
+  storeAumid?: unknown;
 }
 
 export function resolveDesktopEdition(rawManifest: string | null | undefined, envAccountChannel?: string): DesktopEdition {
@@ -27,6 +28,13 @@ export function resolveDesktopPackageSigning(rawManifest: string | null | undefi
   }
 
   return envPackageSigning?.trim().toLowerCase() === "unsigned" ? "unsigned" : "signed";
+}
+
+export function resolveDesktopStoreAumid(rawManifest: string | null | undefined): string | null {
+  const value = parseDesktopEditionManifest(rawManifest)?.storeAumid;
+  return typeof value === "string" && /^[A-Za-z0-9._-]{1,64}![A-Za-z0-9._-]{1,64}$/u.test(value)
+    ? value
+    : null;
 }
 
 export function desktopUserDataDirectoryName(edition: DesktopEdition): string {

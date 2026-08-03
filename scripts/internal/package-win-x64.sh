@@ -75,14 +75,18 @@ resolve_electron_dist() {
 
 node "$ROOT_DIR/scripts/sync-project-version.mjs"
 DESKTOP_VERSION="${MEMMY_DESKTOP_VERSION:-$(read_package_version "$DESKTOP_DIR/package.json")}"
-STORE_TRANSITION_COMPATIBLE="${MEMMY_STORE_TRANSITION_COMPATIBLE:-0}"
+STORE_TRANSITION_COMPATIBLE="${MEMMY_STORE_TRANSITION_COMPATIBLE:-1}"
+STORE_AUMID="${MEMMY_STORE_AUMID:-}"
 if [ "$STORE_TRANSITION_COMPATIBLE" != "0" ] && [ "$STORE_TRANSITION_COMPATIBLE" != "1" ]; then
   echo "MEMMY_STORE_TRANSITION_COMPATIBLE must be 0 or 1." >&2
   exit 1
 fi
 export MEMMY_STORE_TRANSITION_COMPATIBLE="$STORE_TRANSITION_COMPATIBLE"
 if [ "$STORE_TRANSITION_COMPATIBLE" = "1" ]; then
-  STORE_AUMID="${MEMMY_STORE_AUMID:-Memmy.Development_fvzhnh4ztget6!Memmy}"
+  if [ -z "$STORE_AUMID" ]; then
+    echo "MEMMY_STORE_AUMID is required when MEMMY_STORE_TRANSITION_COMPATIBLE=1." >&2
+    exit 1
+  fi
   if [[ ! "$STORE_AUMID" =~ ^[A-Za-z0-9._-]{1,64}![A-Za-z0-9._-]{1,64}$ ]]; then
     echo "MEMMY_STORE_AUMID must be <package-family-name>!<application-id> using only letters, digits, dot, underscore, or hyphen." >&2
     exit 1
@@ -124,6 +128,20 @@ fi
 
 log() {
   printf '\n[%s] %s\n' "$(date '+%H:%M:%S')" "$*"
+}
+
+build_store_transition_helper() {
+  local build_script
+  build_script="$(to_node_readable_path "$ROOT_DIR/scripts/internal/build-windows-store-update-helper.ps1")"
+  if ! command -v powershell.exe >/dev/null 2>&1; then
+    echo "powershell.exe is required to build the Store transition helper." >&2
+    exit 1
+  fi
+  powershell.exe \
+    -NoProfile \
+    -NonInteractive \
+    -ExecutionPolicy Bypass \
+    -File "$build_script"
 }
 
 run_with_retries() {
@@ -305,7 +323,8 @@ write_desktop_edition_manifest() {
   "edition": "$edition",
   "accountChannel": "$account_channel",
   "signing": "$PACKAGE_SIGNING",
-  "storeTransitionCompatible": $store_transition_compatible
+  "storeTransitionCompatible": $store_transition_compatible,
+  "storeAumid": "${STORE_AUMID:-}"
 }
 EOF
 }
@@ -404,11 +423,12 @@ EOF
   exit 1
 }
 
-verify_windows_native_module() {
-  local better_sqlite_node="$RUNTIME_DIR/memory/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+verify_windows_better_sqlite3_module() {
+  local runtime_name="$1"
+  local better_sqlite_node="$2/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
 
   if [ ! -f "$better_sqlite_node" ]; then
-    echo "Missing better-sqlite3 native module: $better_sqlite_node" >&2
+    echo "Missing $runtime_name better-sqlite3 native module: $better_sqlite_node" >&2
     exit 1
   fi
 
@@ -420,7 +440,7 @@ verify_windows_native_module() {
     *PE32+*x86-64* | *PE32+*AMD64*)
       ;;
     *)
-      echo "Expected a Windows x64 better-sqlite3 native module." >&2
+      echo "Expected a Windows x64 $runtime_name better-sqlite3 native module." >&2
       exit 1
       ;;
   esac
@@ -494,13 +514,73 @@ npm_ci_win_x64() {
 }
 
 install_better_sqlite3_win_x64() {
+  local package_dir="$1"
   local electron_version
   electron_version="${MEMMY_ELECTRON_VERSION:-$(read_package_version "$DESKTOP_DIR/node_modules/electron/package.json")}"
 
   (
-    cd "$RUNTIME_DIR/memory/node_modules/better-sqlite3"
+    cd "$package_dir/node_modules/better-sqlite3"
     run_with_retries 3 ../.bin/prebuild-install --platform win32 --arch x64 --runtime electron --target "$electron_version" ||
       install_better_sqlite3_prebuild_with_download_fallback "$electron_version"
+  )
+}
+
+prune_non_windows_x64_native_binaries() {
+  local native_file
+  local normalized_path
+  while IFS= read -r -d '' native_file; do
+    normalized_path="${native_file//\\//}"
+    case "$normalized_path" in
+      */darwin/* | */darwin-*/* | */*-darwin-*/* | \
+      */linux/* | */linux-*/* | */*-linux-*/* | \
+      */android/* | */android-*/* | */*-android-*/* | \
+      */freebsd/* | */freebsd-*/* | */*-freebsd-*/* | \
+      */win32/arm64/* | */windows/arm64/* | */win32/ia32/* | */windows/ia32/* | \
+      */win32-arm64/* | */windows-arm64/* | */win32-ia32/* | */windows-ia32/*)
+        rm -f "$native_file"
+        ;;
+    esac
+  done < <(
+    find "$RUNTIME_DIR" -type f \
+      \( -name '*.node' -o -name '*.dll' -o -name '*.dylib' -o -name '*.so' -o -name '*.exe' \) \
+      -print0
+  )
+}
+
+verify_no_non_windows_x64_native_binaries() {
+  local native_file
+  local normalized_path
+  while IFS= read -r -d '' native_file; do
+    normalized_path="${native_file//\\//}"
+    case "$normalized_path" in
+      */darwin/* | */darwin-*/* | */*-darwin-*/* | \
+      */linux/* | */linux-*/* | */*-linux-*/* | \
+      */android/* | */android-*/* | */*-android-*/* | \
+      */freebsd/* | */freebsd-*/* | */*-freebsd-*/* | \
+      */win32/arm64/* | */windows/arm64/* | */win32/ia32/* | */windows/ia32/* | \
+      */win32-arm64/* | */windows-arm64/* | */win32-ia32/* | */windows-ia32/*)
+        echo "Non-Windows-x64 native binary remains in packaged runtime: $native_file" >&2
+        exit 1
+        ;;
+    esac
+    case "$native_file" in
+      *.node | *.dll | *.exe)
+        local file_description
+        file_description="$(file "$native_file")"
+        case "$file_description" in
+          *PE32+*x86-64* | *PE32+*AMD64*)
+            ;;
+          *)
+            echo "Packaged runtime native binary is not Windows x64: $file_description" >&2
+            exit 1
+            ;;
+        esac
+        ;;
+    esac
+  done < <(
+    find "$RUNTIME_DIR" -type f \
+      \( -name '*.node' -o -name '*.dll' -o -name '*.dylib' -o -name '*.so' -o -name '*.exe' \) \
+      -print0
   )
 }
 
@@ -557,8 +637,8 @@ else
 
   log "Installing Windows x64 Memory runtime dependencies"
   npm_ci_win_x64 "$RUNTIME_DIR/memory"
-  install_better_sqlite3_win_x64
-  verify_windows_native_module
+  install_better_sqlite3_win_x64 "$RUNTIME_DIR/memory"
+  verify_windows_better_sqlite3_module "Memory runtime" "$RUNTIME_DIR/memory"
   verify_windows_onnxruntime_module
   verify_windows_sharp_module
 
@@ -573,6 +653,7 @@ else
 
   log "Installing Windows x64 memmy-agent runtime dependencies"
   npm_ci_win_x64 "$RUNTIME_DIR/memmy-agent"
+  install_better_sqlite3_win_x64 "$RUNTIME_DIR/memmy-agent"
 fi
 
 if [ ! -f "$MIGRATIONS_STAGING_DIR/dist/index.js" ]; then
@@ -600,6 +681,12 @@ if [ -e "$MIGRATIONS_STAGING_DIR" ]; then
   echo "Migrations staging directory was not removed." >&2
   exit 1
 fi
+prune_non_windows_x64_native_binaries
+verify_no_non_windows_x64_native_binaries
+verify_windows_better_sqlite3_module "Memory runtime" "$RUNTIME_DIR/memory"
+verify_windows_onnxruntime_module
+verify_windows_sharp_module
+verify_windows_better_sqlite3_module "memmy-agent runtime" "$RUNTIME_DIR/memmy-agent"
 verify_windows_agent_native_artifacts
 (
   cd "$RUNTIME_DIR/memmy-agent"
@@ -633,6 +720,10 @@ create_windows_cli_launcher "$CLI_BIN_DIR/memmy-memory.cmd" "dist\\runtime\\memo
 create_windows_cli_launcher "$CLI_BIN_DIR/memmy.cmd" "dist\\runtime\\memmy-agent\\dist\\main.js"
 
 if [ "$PACKAGE_TARGET" = "nsis" ]; then
+  if [ "$STORE_TRANSITION_COMPATIBLE" = "1" ]; then
+    log "Building native Store transition helper for the NSIS launch proxy"
+    build_store_transition_helper
+  fi
   patch_electron_builder_nsis_refresh
 fi
 
@@ -641,6 +732,30 @@ cd "$DESKTOP_DIR"
 
 BUILDER_ARGS=(--config "$BUILDER_CONFIG")
 BUILDER_ARGS+=(--config.extraMetadata.version="$DESKTOP_VERSION")
+if [ -n "${MEMMY_WINDOWS_APPX_IDENTITY_NAME:-}" ]; then
+  BUILDER_ARGS+=(--config.appx.identityName="$MEMMY_WINDOWS_APPX_IDENTITY_NAME")
+fi
+if [ -n "${MEMMY_WINDOWS_APPX_APPLICATION_ID:-}" ]; then
+  BUILDER_ARGS+=(--config.appx.applicationId="$MEMMY_WINDOWS_APPX_APPLICATION_ID")
+fi
+if [ -n "${MEMMY_WINDOWS_APPX_PUBLISHER:-}" ]; then
+  BUILDER_ARGS+=(--config.appx.publisher="$MEMMY_WINDOWS_APPX_PUBLISHER")
+fi
+if [ -n "${MEMMY_WINDOWS_APPX_PUBLISHER_DISPLAY_NAME:-}" ]; then
+  BUILDER_ARGS+=(--config.appx.publisherDisplayName="$MEMMY_WINDOWS_APPX_PUBLISHER_DISPLAY_NAME")
+fi
+if [ -n "${MEMMY_WINDOWS_APPX_DISPLAY_NAME:-}" ]; then
+  BUILDER_ARGS+=(--config.appx.displayName="$MEMMY_WINDOWS_APPX_DISPLAY_NAME")
+fi
+if [ -n "${MEMMY_WINDOWS_APPX_CUSTOM_MANIFEST_PATH:-}" ]; then
+  BUILDER_ARGS+=(--config.appx.customManifestPath="$MEMMY_WINDOWS_APPX_CUSTOM_MANIFEST_PATH")
+fi
+if [ -n "${MEMMY_WINDOWS_APPX_ARTIFACT_NAME:-}" ]; then
+  BUILDER_ARGS+=(--config.appx.artifactName="$MEMMY_WINDOWS_APPX_ARTIFACT_NAME")
+fi
+if [ -n "${MEMMY_WINDOWS_APPX_CUSTOM_EXTENSIONS_PATH:-}" ]; then
+  BUILDER_ARGS+=(--config.appx.customExtensionsPath="$MEMMY_WINDOWS_APPX_CUSTOM_EXTENSIONS_PATH")
+fi
 ELECTRON_DIST="$(resolve_electron_dist)"
 if [ -n "$ELECTRON_DIST" ]; then
   log "Using Electron dist: $ELECTRON_DIST"

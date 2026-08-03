@@ -3,7 +3,8 @@ import {
   desktopRuntimeHomeDirectoryName,
   desktopUserDataDirectoryName,
   resolveDesktopEdition,
-  resolveDesktopPackageSigning
+  resolveDesktopPackageSigning,
+  resolveDesktopStoreAumid
 } from "../src/main/desktop-edition.js";
 
 describe("desktop edition identity", () => {
@@ -39,5 +40,13 @@ describe("desktop edition identity", () => {
   it("falls back to the build signing identity when the manifest is absent", () => {
     expect(resolveDesktopPackageSigning(null)).toBe("signed");
     expect(resolveDesktopPackageSigning(JSON.stringify({ signing: "unknown" }), "unsigned")).toBe("unsigned");
+  });
+
+  it("accepts only a complete Store AUMID from the packaged edition manifest", () => {
+    expect(resolveDesktopStoreAumid(JSON.stringify({
+      storeAumid: "Memmy.Test_1n2q0jvjmfh7c!Memmy"
+    }))).toBe("Memmy.Test_1n2q0jvjmfh7c!Memmy");
+    expect(resolveDesktopStoreAumid(JSON.stringify({ storeAumid: "Memmy.Test" }))).toBeNull();
+    expect(resolveDesktopStoreAumid(null)).toBeNull();
   });
 });

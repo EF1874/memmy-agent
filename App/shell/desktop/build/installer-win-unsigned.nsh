@@ -104,17 +104,20 @@ Function MemmyInstallLaunchProxy
   File /oname=MemmyUpdatePrompt.ps1 "${BUILD_RESOURCES_DIR}\MemmyUpdatePrompt.ps1"
   !if "${MEMMY_STORE_TRANSITION_COMPATIBLE}" == "1"
   File /oname=MemmyStoreActivate.ps1 "${BUILD_RESOURCES_DIR}\MemmyStoreActivate.ps1"
+  File /oname=MemmyStoreUpdate.exe "${BUILD_RESOURCES_DIR}\..\dist\native\MemmyStoreUpdate.exe"
   !endif
 
   FileOpen $1 "$0\MemmyLauncher.vbs" w
   FileWrite $1 "Set shell = CreateObject($\"WScript.Shell$\")$\r$\n"
   FileWrite $1 "Set fso = CreateObject($\"Scripting.FileSystemObject$\")$\r$\n"
+  FileWrite $1 "shell.CurrentDirectory = shell.ExpandEnvironmentStrings($\"%SystemRoot%$\")$\r$\n"
   FileWrite $1 "appExe = $\"$INSTDIR\${PRODUCT_FILENAME}.exe$\"$\r$\n"
   FileWrite $1 "powerShellPath = shell.ExpandEnvironmentStrings($\"%SystemRoot%$\") & $\"\System32\WindowsPowerShell\v1.0\powershell.exe$\"$\r$\n"
   FileWrite $1 "promptPath = $\"$0\MemmyUpdatePrompt.ps1$\"$\r$\n"
   !if "${MEMMY_STORE_TRANSITION_COMPATIBLE}" == "1"
   FileWrite $1 "storeActivatePath = $\"$0\MemmyStoreActivate.ps1$\"$\r$\n"
   FileWrite $1 "storeAumId = $\"${MEMMY_STORE_AUMID}$\"$\r$\n"
+  FileWrite $1 "migrationMarkerPath = $\"$0\store-migration-in-progress-v1.json$\"$\r$\n"
   !endif
   FileWrite $1 "languagePath = shell.ExpandEnvironmentStrings($\"%APPDATA%$\") & $\"\Memmy\update-prompt-language.txt$\"$\r$\n"
   FileWrite $1 "markerPath = shell.ExpandEnvironmentStrings($\"%APPDATA%$\") & $\"\Memmy\prepared-required-update.json$\"$\r$\n"
@@ -122,10 +125,22 @@ Function MemmyInstallLaunchProxy
   FileWrite $1 "promptMarkerPath = markerPath & $\".prompt$\"$\r$\n"
   !if "${MEMMY_STORE_TRANSITION_COMPATIBLE}" == "1"
   FileWrite $1 "If fso.FileExists(powerShellPath) And fso.FileExists(storeActivatePath) Then$\r$\n"
-  FileWrite $1 "  storeExitCode = shell.Run(Chr(34) & powerShellPath & Chr(34) & $\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File $\" & Chr(34) & storeActivatePath & Chr(34) & $\" -AumId $\" & Chr(34) & storeAumId & Chr(34), 0, True)$\r$\n"
+  FileWrite $1 "  storeExitCode = shell.Run(Chr(34) & powerShellPath & Chr(34) & $\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File $\" & Chr(34) & storeActivatePath & Chr(34) & $\" -AumId $\" & Chr(34) & storeAumId & Chr(34) & $\" -WaitForReadySeconds 180$\", 0, True)$\r$\n"
   FileWrite $1 "  If storeExitCode = 0 Then$\r$\n"
   FileWrite $1 "    WScript.Quit 0$\r$\n"
   FileWrite $1 "  End If$\r$\n"
+  FileWrite $1 "  If storeExitCode = 2 And Not fso.FileExists(appExe) Then$\r$\n"
+  FileWrite $1 "    desktopShortcutPath = shell.SpecialFolders($\"Desktop$\") & $\"\Memmy.lnk$\"$\r$\n"
+  FileWrite $1 "    startMenuShortcutPath = shell.SpecialFolders($\"Programs$\") & $\"\Memmy.lnk$\"$\r$\n"
+  FileWrite $1 "    On Error Resume Next$\r$\n"
+  FileWrite $1 "    fso.DeleteFile desktopShortcutPath, True$\r$\n"
+  FileWrite $1 "    fso.DeleteFile startMenuShortcutPath, True$\r$\n"
+  FileWrite $1 "    On Error GoTo 0$\r$\n"
+  FileWrite $1 "    WScript.Quit 0$\r$\n"
+  FileWrite $1 "  End If$\r$\n"
+  FileWrite $1 "End If$\r$\n"
+  FileWrite $1 "If fso.FileExists(migrationMarkerPath) Then$\r$\n"
+  FileWrite $1 "  WScript.Quit 0$\r$\n"
   FileWrite $1 "End If$\r$\n"
   !endif
   FileWrite $1 "If fso.FolderExists(lockPath) And fso.FileExists(promptMarkerPath) Then$\r$\n"
@@ -171,7 +186,9 @@ FunctionEnd
     Goto memmy_point_new_desktop_shortcut
 
   memmy_point_existing_new_desktop_shortcut:
-    IfFileExists "$newDesktopLink" 0 memmy_point_shortcuts_done
+    ; An older NSIS uninstaller can remove the desktop shortcut before this custom install
+    ; hook runs. Recreate it unless the caller explicitly requested no desktop shortcut.
+    Goto memmy_point_new_desktop_shortcut
 
   memmy_point_new_desktop_shortcut:
     StrCpy $3 "$newDesktopLink"

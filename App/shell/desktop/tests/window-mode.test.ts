@@ -182,8 +182,7 @@ describe("desktop pet window mode", () => {
 
     // The replacement instance started by macOS "Quit & Reopen" retries the lock until the old
     // instance finishes cleanup, instead of quitting immediately or relaunching heuristically.
-    expect(source).toContain("let hasSingleInstanceLock = !shouldExitForWindowsStoreTransition && app.requestSingleInstanceLock();");
-    expect(source).toContain("if (shouldExitForWindowsStoreTransition) {\n  app.quit();\n}");
+    expect(source).toContain("let hasSingleInstanceLock = app.requestSingleInstanceLock();");
     expect(source).toContain("const SINGLE_INSTANCE_LOCK_RETRY_INTERVAL_MS = 500;");
     expect(source).toContain("const SINGLE_INSTANCE_LOCK_WAIT_DEADLINE_MS = 10000;");
     expect(source).toContain("const SECOND_INSTANCE_ACTIVATE_DEBOUNCE_MS = 3000;");
@@ -219,6 +218,19 @@ describe("desktop pet window mode", () => {
     expect(source).toContain("function relaunchAfterQuitCleanupIfRequested(): void");
     expect(source).toContain("relaunchAfterQuitCleanupIfRequested();\n      app.quit();");
     expect(source).toContain("relaunchAfterQuitCleanupIfRequested();\n    app.exit(0);");
+
+    // A Store-packaged splash can disappear while runtime services are still booting. The
+    // transient zero-window state must not terminate the process before the main window exists.
+    const windowAllClosedIndex = source.indexOf('app.on("window-all-closed"');
+    const windowAllClosedBlock = source.slice(
+      windowAllClosedIndex,
+      source.indexOf('app.on("before-quit"', windowAllClosedIndex)
+    );
+    expect(windowAllClosedBlock).toContain("if (!isBootReady)");
+    expect(windowAllClosedBlock).toContain('writePackagedStartupLog("boot:window-all-closed-ignored")');
+    expect(windowAllClosedBlock.indexOf("if (!isBootReady)")).toBeLessThan(
+      windowAllClosedBlock.indexOf("app.quit();")
+    );
 
     // The reopen intent comes only from concrete signals (activate during quit): no marker files.
     expect(source).not.toContain("macos-microphone-relaunch");

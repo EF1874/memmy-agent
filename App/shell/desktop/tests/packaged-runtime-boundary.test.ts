@@ -1,5 +1,15 @@
-import { execFileSync, spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
@@ -49,17 +59,40 @@ const storeElectronBuilderPath = fileURLToPath(new URL("../electron-builder.stor
 const storeUnsignedElectronBuilderPath = fileURLToPath(new URL("../electron-builder.store.unsigned.yml", import.meta.url));
 const storeManifestPath = fileURLToPath(new URL("../build/appx-manifest.xml", import.meta.url));
 const storeExtensionsPath = fileURLToPath(new URL("../build/appx-extensions.xml", import.meta.url));
+const storePublishingProfilesPath = fileURLToPath(
+  new URL("../build/store-publishing-profiles.json", import.meta.url)
+);
+const storeIconTargetSizes = [16, 20, 24, 30, 32, 36, 40, 44, 48, 60, 64, 72, 80, 96, 256] as const;
 const storeAssetPaths = [
   ["StoreLogo.png", 50, 50],
   ["Square44x44Logo.png", 44, 44],
-  ["Square44x44Logo.targetsize-44_altform-unplated.png", 44, 44],
+  ["Square44x44Logo.scale-125.png", 55, 55],
+  ["Square44x44Logo.scale-150.png", 66, 66],
+  ["Square44x44Logo.scale-200.png", 88, 88],
+  ["Square44x44Logo.scale-400.png", 176, 176],
+  ...storeIconTargetSizes.flatMap((size) => [
+    [`Square44x44Logo.targetsize-${size}.png`, size, size] as const,
+    [`Square44x44Logo.targetsize-${size}_altform-unplated.png`, size, size] as const,
+    [`Square44x44Logo.targetsize-${size}_altform-lightunplated.png`, size, size] as const
+  ]),
   ["Square150x150Logo.png", 150, 150],
   ["Wide310x150Logo.png", 310, 150]
 ] as const;
 const packageWindowsStorePath = fileURLToPath(new URL("../../../../scripts/internal/package-windows-store.ps1", import.meta.url));
+const storePublishingProfileResolverPath = fileURLToPath(
+  new URL("../../../../scripts/internal/windows-store-publishing-profile.ps1", import.meta.url)
+);
 const winUpdatePromptScriptPath = fileURLToPath(new URL("../build/MemmyUpdatePrompt.ps1", import.meta.url));
 const winStoreActivateScriptPath = fileURLToPath(new URL("../build/MemmyStoreActivate.ps1", import.meta.url));
-const winLegacyUninstallPath = fileURLToPath(new URL("../src/main/windows-legacy-uninstall.ts", import.meta.url));
+const winStoreCleanupPath = fileURLToPath(new URL("../src/main/windows-store-cleanup.ts", import.meta.url));
+const winStoreUpdatePath = fileURLToPath(new URL("../src/main/windows-store-update.ts", import.meta.url));
+const winStoreUpdateNativePath = fileURLToPath(new URL("../native/windows-store-update/MemmyStoreUpdate.cpp", import.meta.url));
+const winStoreUpdateHelperBuildPath = fileURLToPath(
+  new URL("../../../../scripts/internal/build-windows-store-update-helper.ps1", import.meta.url)
+);
+const winStoreUpdateHelperPath = fileURLToPath(
+  new URL("../dist/native/MemmyStoreUpdate.exe", import.meta.url)
+);
 const legacyApplicationSupportDir = ["Application Support/Memmy", "+"].join("");
 const legacyProductPattern = new RegExp([
   "Memmy\\+",
@@ -303,19 +336,39 @@ describe("desktop packaged runtime boundaries", () => {
     const manifest = readFileSync(storeManifestPath, "utf8");
     const extensions = readFileSync(storeExtensionsPath, "utf8");
     const script = readFileSync(packageWindowsStorePath, "utf8");
+    const helperBuildScript = readFileSync(winStoreUpdateHelperBuildPath, "utf8");
+    const profileResolver = readFileSync(storePublishingProfileResolverPath, "utf8");
+    const publishingProfiles = JSON.parse(readFileSync(storePublishingProfilesPath, "utf8"));
     const winPackageScript = readFileSync(packageWinX64Path, "utf8");
 
     expect(config).toContain("extends: electron-builder.win.yml");
     expect(config).toContain("artifactName: Memmy-${version}-${arch}.msix");
     expect(config).toContain("backgroundColor: transparent");
+    expect(config).toContain("publisherDisplayName: Memmy Development");
+    expect(config).not.toContain("publisherDisplayName: Leason");
+    expect(config).not.toContain("publisherDisplayName: MemTensor");
     expect(config).toContain("customManifestPath: build/appx-manifest.xml");
     expect(config).toContain("customExtensionsPath: build/appx-extensions.xml");
+    expect(config).toContain("minVersion: 10.0.17763.0");
     expect(unsignedConfig).toContain("extends: electron-builder.store.yml");
     expect(manifest).toContain('xmlns:rescap3="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities/3"');
+    expect(manifest).toContain('xmlns:desktop7="http://schemas.microsoft.com/appx/manifest/desktop/windows10/7"');
+    expect(manifest).toContain('IgnorableNamespaces="uap desktop desktop7 rescap rescap3"');
+    expect(manifest).toContain("<DisplayName>${displayName}</DisplayName>");
+    expect(manifest).toContain('DisplayName="__MEMMY_INSTALLED_DISPLAY_NAME__"');
+    expect(manifest).not.toContain("RegistryWriteVirtualization");
+    expect(manifest).not.toContain("virtualization:ExcludedKey");
+    expect(manifest).toContain('EntryPoint="Windows.FullTrustApplication"');
+    expect(manifest).not.toContain('uap10:RuntimeBehavior="win32App"');
+    expect(config).toContain("- runFullTrust");
+    expect(config).not.toContain("unvirtualizedResources");
     expect(extensions).toContain('Category="windows.desktopAppMigration"');
     expect(extensions).toContain('AumId="__MEMMY_STORE_AUMID__"');
+    expect(extensions).toContain('Category="windows.shortcut"');
+    expect(extensions).toContain('File="$(Desktop)\\Memmy.lnk"');
+    expect(extensions).toContain('Icon="$(Package)\\app\\resources\\icon.ico"');
     expect(script).toContain("New-SelfSignedCertificate");
-    expect(script).toContain("Get-WindowsSdkSignTool");
+    expect(script).toContain("Get-WindowsSdkTool");
     expect(script).toContain("verify /pa");
     expect(script).not.toContain("Get-AuthenticodeSignature");
     expect(script).toContain("Add-AppxPackage");
@@ -323,28 +376,116 @@ describe("desktop packaged runtime boundaries", () => {
     expect(script).toContain("Assert-SigningCertificatePublisher");
     expect(script).toContain('Cert:\\LocalMachine\\TrustedPeople');
     expect(script).not.toContain('Cert:\\CurrentUser\\Root');
-    expect(script).toContain('"Memmy-$version-win32-x64-$edition-$packageSigning.msix"');
+    expect(script).toContain('"Memmy-$version-win32-x64-$edition-$publishingEnvironment-$packageSigning.msix"');
+    expect(script).toContain('[ValidateSet("development", "personal", "company")]');
+    expect(script).toContain('[ValidateSet("cn", "intl")]');
+    expect(script).toContain('$env:MEMMY_STORE_PUBLISHING_ENV');
+    expect(script).toContain('$env:MEMMY_STORE_PUBLISHING_CONFIG_PATH');
+    expect(script).toContain("Resolve-MemmyStorePublishingProfile");
+    expect(script).toContain("$originalPackagingEnvironment");
+    expect(script).toContain("[Environment]::SetEnvironmentVariable");
+    expect(script).not.toContain("conflicts with publishing profile");
     expect(script).toContain('$env:MEMMY_ACCOUNT_CHANNEL');
-    expect(script).toContain('$version = if ($env:MEMMY_DESKTOP_VERSION)');
+    expect(script).toContain('$version = if ($Version)');
+    expect(script).toContain('$env:MEMMY_DESKTOP_VERSION = $version');
     expect(script).toContain("MEMMY_DESKTOP_VERSION must be a three-part SemVer");
+    expect(script).toContain("MSIX version segments must be between 0 and 65535");
+    expect(script).toContain("Production Store profiles cannot generate or trust development certificates");
+    expect(script).toContain("Development certificate subject");
+    expect(script).toContain("[switch]$GenerateLocalTestCertificate");
+    expect(script).toContain("[switch]$TrustLocalTestCertificate");
+    expect(script).toContain("New-LocalTestCertificate");
+    expect(script).toContain("Trust-LocalTestCertificate");
+    expect(script).toContain("Trusting the local-test certificate requires an elevated PowerShell");
+    expect(script).toContain('Cert:\\LocalMachine\\TrustedPeople');
+    expect(script).toContain("Local-test certificate trusted for this computer");
+    expect(script).toContain("$localTestCertificateArtifactStem");
+    expect(script).toContain('"release\\$localTestCertificateArtifactStem-Local-Test.cer"');
+    expect(script).toContain("Export-Certificate -Cert $localTestCertificate -FilePath $localTestCertificateArtifactPath -Force");
+    expect(script).toContain("Local-test public certificate:");
+    expect(script).toContain('$unsignedArtifactName = "Memmy-$version-win32-x64-$edition-$publishingEnvironment-unsigned.msix"');
+    expect(script).toContain('$localTestSignedArtifactName = "Memmy-$version-win32-x64-$edition-$publishingEnvironment-local-test-signed.msix"');
+    expect(script).toContain("Copy-Item -LiteralPath $unsignedArtifactPath -Destination $localTestSignedArtifactPath -Force");
+    expect(script).toContain("Assert-MsixPayloadParity");
+    expect(script).toContain("[string]$SigningCertificateThumbprint");
+    expect(script).toContain('[ValidateSet("CurrentUser", "LocalMachine")]');
+    expect(script).toContain("Assert-SigningCertificateStorePublisher");
+    expect(script).toContain("Sign-MsixWithCertificateStore");
+    expect(script).toContain('$effectiveTimestampServer = if ($SigningTimestampServer)');
+    expect(script).toContain('$arguments += @("/tr", $effectiveTimestampServer, "/td", "SHA256")');
+    expect(script).toContain("$env:WIN_CSC_SHA1");
+    expect(script).toContain("$env:WIN_CSC_SUBJECT_NAME = $publisher");
+    expect(script).toContain("$env:WIN_CSC_TIMESTAMP_SERVER");
     expect(script).toContain('$env:MEMMY_STORE_AUMID');
-    expect(script).toContain('Memmy.Development_fvzhnh4ztget6!Memmy');
+    expect(script).toContain('$env:MEMMY_STORE_TRANSITION_COMPATIBLE = "0"');
+    expect(script).toContain('$packageFamilyName = "Memmy.Development_fvzhnh4ztget6"');
+    expect(script).toContain('"$packageFamilyName!$applicationId"');
+    expect(script).toContain('$env:MEMMY_STORE_DISPLAY_NAME');
+    expect(script).toContain('$env:MEMMY_STORE_INSTALLED_DISPLAY_NAME');
+    expect(script).toContain('$env:MEMMY_STORE_PUBLISHER_DISPLAY_NAME');
+    expect(script).toContain('$env:MEMMY_WINDOWS_APPX_DISPLAY_NAME = $storeDisplayName');
+    expect(script).toContain('$env:MEMMY_WINDOWS_APPX_CUSTOM_MANIFEST_PATH = $generatedManifestPath');
+    expect(script).toContain('$env:MEMMY_WINDOWS_APPX_APPLICATION_ID = $applicationId');
+    expect(winPackageScript).toContain('--config.appx.publisher="$MEMMY_WINDOWS_APPX_PUBLISHER"');
+    expect(winPackageScript).toContain('--config.appx.displayName="$MEMMY_WINDOWS_APPX_DISPLAY_NAME"');
+    expect(winPackageScript).toContain('--config.appx.customManifestPath="$MEMMY_WINDOWS_APPX_CUSTOM_MANIFEST_PATH"');
+    expect(winPackageScript).toContain('--config.appx.applicationId="$MEMMY_WINDOWS_APPX_APPLICATION_ID"');
+    expect(profileResolver).toContain("function Resolve-MemmyStorePublishingProfile");
+    expect(profileResolver).toContain("PackageFamilyNameFromId");
+    expect(profileResolver).toContain('"storeProductId"');
+    expect(profileResolver).toContain('"manifestApplicationId"');
+    expect(profileResolver).toContain('-PropertyName "installedDisplayName"');
+    expect(profileResolver).toContain("InstalledDisplayName = $installedDisplayName");
+    expect(profileResolver).toContain("Assert-UniqueStorePublishingIdentities");
+    expect(profileResolver).toContain('-FieldName "storeProductId"');
+    expect(profileResolver).toContain('-FieldName "packageFamilyName"');
+    expect(profileResolver).toContain('-FieldName "AUMID"');
+    expect(profileResolver).toContain('$aumid = "$packageFamilyName!$applicationId"');
+    expect(profileResolver).toContain("is not configured");
+    expect(publishingProfiles.environments.personal.publisher)
+      .toBe("CN=D0FAE30D-03A3-4022-BECC-83DCFCFAC00B");
+    expect(publishingProfiles.environments.personal.publisherDisplayName).toBe("Leason");
+    expect(publishingProfiles.installedDisplayName).toBe("Memmy");
+    expect(publishingProfiles.environments.personal.applications.intl).toEqual({
+      storeProductId: "9P7LQRSNG9SL",
+      identityName: "Leason.MemmyStorePreview",
+      manifestApplicationId: "Memmy",
+      displayName: "Memmy Store Preview",
+      packageFamilyName: "Leason.MemmyStorePreview_49qkyxp1vaee6"
+    });
+    expect(publishingProfiles.environments.personal.applications.cn).toBeNull();
+    expect(publishingProfiles.environments.company.publisherDisplayName).toBe("MemTensor");
+    expect(publishingProfiles.environments.company.applications.cn).toBeNull();
+    expect(publishingProfiles.environments.company.applications.intl).toBeNull();
     expect(script).toContain('[Security.SecurityElement]::Escape($storeAumid)');
+    expect(script).toContain('[Security.SecurityElement]::Escape($installedDisplayName)');
+    expect(script).toContain('appx-manifest.generated.xml');
+    expect(script).toContain('__MEMMY_INSTALLED_DISPLAY_NAME__');
     expect(script).toContain('appx-extensions.generated.xml');
     expect(script).toContain('__MEMMY_STORE_AUMID__');
-    expect(script).toContain('"--config.appx.customExtensionsPath=$generatedExtensionsPath"');
-    expect(script).toContain('"--config.appx.artifactName=$artifactName"');
+    expect(script).toContain('$env:MEMMY_WINDOWS_APPX_CUSTOM_EXTENSIONS_PATH = $generatedExtensionsPath');
+    expect(script).toContain('$env:MEMMY_WINDOWS_APPX_ARTIFACT_NAME = $buildArtifactName');
     expect(script).toContain("Invoke-NpmCommand");
-    expect(script).toContain("Remove-Item -LiteralPath $artifactPath -Force");
+    expect(script).toContain("Remove-Item -LiteralPath $buildArtifactPath -Force");
     expect(script).toContain('$env:MEMMY_WINDOWS_SOURCES_PREBUILT = "1"');
     expect(script).not.toContain('$env:MEMMY_SKIP_RELEASE_GATE = "1"');
-    expect(winPackageScript).toContain('STORE_AUMID="${MEMMY_STORE_AUMID:-Memmy.Development_fvzhnh4ztget6!Memmy}"');
+    expect(winPackageScript).toContain('STORE_AUMID="${MEMMY_STORE_AUMID:-}"');
+    expect(winPackageScript).toContain("MEMMY_STORE_AUMID is required when MEMMY_STORE_TRANSITION_COMPATIBLE=1.");
     expect(winPackageScript).toContain('^[A-Za-z0-9._-]{1,64}![A-Za-z0-9._-]{1,64}$');
-    expect(winPackageScript).toContain('STORE_TRANSITION_COMPATIBLE="${MEMMY_STORE_TRANSITION_COMPATIBLE:-0}"');
+    expect(winPackageScript).toContain('STORE_TRANSITION_COMPATIBLE="${MEMMY_STORE_TRANSITION_COMPATIBLE:-1}"');
     expect(winPackageScript).toContain('if [ "$STORE_TRANSITION_COMPATIBLE" = "1" ]');
     expect(winPackageScript).toContain('"storeTransitionCompatible": $store_transition_compatible');
+    expect(winPackageScript).toContain('"storeAumid": "${STORE_AUMID:-}"');
+    expect(winPackageScript).toContain('verify_windows_better_sqlite3_module "memmy-agent runtime"');
+    expect(winPackageScript).toContain("prune_non_windows_x64_native_binaries");
+    expect(winPackageScript).toContain("verify_no_non_windows_x64_native_binaries");
     expect(winPackageScript).toContain('if [ ! -f "$FINAL_ARTIFACT" ]');
     expect(winPackageScript).toContain('Windows artifact is ready: $FINAL_ARTIFACT');
+    expect(helperBuildScript).toContain("/MT");
+    expect(helperBuildScript).not.toContain("/MD");
+    expect(helperBuildScript).toContain("dumpbin.exe");
+    expect(helperBuildScript).toContain("MSVCP(?:[0-9_]+)?\\.dll");
+    expect(helperBuildScript).toContain("VCRUNTIME(?:[0-9_]+)?\\.dll");
 
     for (const [fileName, expectedWidth, expectedHeight] of storeAssetPaths) {
       const asset = readFileSync(fileURLToPath(new URL(`../build/appx/${fileName}`, import.meta.url)));
@@ -352,9 +493,285 @@ describe("desktop packaged runtime boundaries", () => {
       expect(asset.readUInt32BE(16)).toBe(expectedWidth);
       expect(asset.readUInt32BE(20)).toBe(expectedHeight);
     }
-    expect(readFileSync(fileURLToPath(new URL("../build/appx/Square44x44Logo.targetsize-44_altform-unplated.png", import.meta.url))))
+    for (const size of storeIconTargetSizes) {
+      const defaultAsset = readFileSync(fileURLToPath(new URL(`../build/appx/Square44x44Logo.targetsize-${size}.png`, import.meta.url)));
+      expect(readFileSync(fileURLToPath(new URL(`../build/appx/Square44x44Logo.targetsize-${size}_altform-unplated.png`, import.meta.url))))
+        .toEqual(defaultAsset);
+      expect(readFileSync(fileURLToPath(new URL(`../build/appx/Square44x44Logo.targetsize-${size}_altform-lightunplated.png`, import.meta.url))))
+        .toEqual(defaultAsset);
+    }
+    expect(readFileSync(fileURLToPath(new URL("../build/appx/Square44x44Logo.targetsize-44.png", import.meta.url))))
       .toEqual(readFileSync(fileURLToPath(new URL("../build/appx/Square44x44Logo.png", import.meta.url))));
   });
+
+  it("resolves only configured Store publishing environment and channel pairs", () => {
+    if (process.platform !== "win32") {
+      return;
+    }
+
+    const quotePowerShellLiteral = (value: string) => `'${value.replaceAll("'", "''")}'`;
+    const resolver = quotePowerShellLiteral(storePublishingProfileResolverPath);
+    const config = quotePowerShellLiteral(storePublishingProfilesPath);
+    const resolved = execFileSync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        `. ${resolver}; Resolve-MemmyStorePublishingProfile -ConfigPath ${config} -Environment personal -Channel intl | ConvertTo-Json -Compress`
+      ],
+      { encoding: "utf8" }
+    );
+    expect(JSON.parse(resolved)).toMatchObject({
+      Environment: "personal",
+      Channel: "intl",
+      Publisher: "CN=D0FAE30D-03A3-4022-BECC-83DCFCFAC00B",
+      StoreProductId: "9P7LQRSNG9SL",
+      IdentityName: "Leason.MemmyStorePreview",
+      ApplicationId: "Memmy",
+      PackageFamilyName: "Leason.MemmyStorePreview_49qkyxp1vaee6",
+      Aumid: "Leason.MemmyStorePreview_49qkyxp1vaee6!Memmy"
+    });
+
+    for (const [environment, channel] of [
+      ["personal", "cn"],
+      ["company", "cn"],
+      ["company", "intl"]
+    ]) {
+      const unavailable = spawnSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-Command",
+          `. ${resolver}; Resolve-MemmyStorePublishingProfile -ConfigPath ${config} -Environment ${environment} -Channel ${channel}`
+        ],
+        { encoding: "utf8" }
+      );
+      expect(unavailable.status).not.toBe(0);
+      expect(`${unavailable.stdout}\n${unavailable.stderr}`).toContain(
+        `Windows Store publishing profile '${environment}/${channel}' is not configured.`
+      );
+    }
+
+    const invalidConfigDirectory = mkdtempSync(join(tmpdir(), "memmy-store-profile-"));
+    try {
+      const invalidConfigPath = join(invalidConfigDirectory, "profiles.json");
+      const invalidConfig = JSON.parse(readFileSync(storePublishingProfilesPath, "utf8"));
+      invalidConfig.environments.personal.publisher = "CN=Wrong Publisher";
+      writeFileSync(invalidConfigPath, JSON.stringify(invalidConfig), "utf8");
+      const invalidPublisher = spawnSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-Command",
+          `. ${resolver}; Resolve-MemmyStorePublishingProfile -ConfigPath ${quotePowerShellLiteral(invalidConfigPath)} -Environment personal -Channel intl`
+        ],
+        { encoding: "utf8" }
+      );
+      expect(invalidPublisher.status).not.toBe(0);
+      expect(`${invalidPublisher.stdout}\n${invalidPublisher.stderr}`).toContain(
+        "packageFamilyName does not match identityName and publisher"
+      );
+
+      invalidConfig.environments.personal.publisher =
+        "CN=D0FAE30D-03A3-4022-BECC-83DCFCFAC00B";
+      invalidConfig.environments.personal.applications.intl.storeProductId =
+        "339e3382-1f43-4b44-be24-ae4e2b1d7b7a";
+      writeFileSync(invalidConfigPath, JSON.stringify(invalidConfig), "utf8");
+      const invalidStoreProductId = spawnSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-Command",
+          `. ${resolver}; Resolve-MemmyStorePublishingProfile -ConfigPath ${quotePowerShellLiteral(invalidConfigPath)} -Environment personal -Channel intl`
+        ],
+        { encoding: "utf8" }
+      );
+      expect(invalidStoreProductId.status).not.toBe(0);
+      expect(`${invalidStoreProductId.stdout}\n${invalidStoreProductId.stderr}`).toContain(
+        "invalid storeProductId"
+      );
+
+      invalidConfig.environments.personal.applications.intl.storeProductId =
+        "9P7LQRSNG9SL";
+      invalidConfig.environments.personal.applications.intl.manifestApplicationId = "_Bad";
+      writeFileSync(invalidConfigPath, JSON.stringify(invalidConfig), "utf8");
+      const invalidApplicationId = spawnSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-Command",
+          `. ${resolver}; Resolve-MemmyStorePublishingProfile -ConfigPath ${quotePowerShellLiteral(invalidConfigPath)} -Environment personal -Channel intl`
+        ],
+        { encoding: "utf8" }
+      );
+      expect(invalidApplicationId.status).not.toBe(0);
+      expect(`${invalidApplicationId.stdout}\n${invalidApplicationId.stderr}`).toContain(
+        "invalid manifestApplicationId"
+      );
+
+      const duplicateIdentityConfig = JSON.parse(
+        readFileSync(storePublishingProfilesPath, "utf8")
+      );
+      duplicateIdentityConfig.environments.personal.applications.cn = {
+        ...duplicateIdentityConfig.environments.personal.applications.intl
+      };
+      writeFileSync(invalidConfigPath, JSON.stringify(duplicateIdentityConfig), "utf8");
+      const duplicateStoreProductId = spawnSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-Command",
+          `. ${resolver}; Resolve-MemmyStorePublishingProfile -ConfigPath ${quotePowerShellLiteral(invalidConfigPath)} -Environment personal -Channel intl`
+        ],
+        { encoding: "utf8" }
+      );
+      expect(duplicateStoreProductId.status).not.toBe(0);
+      expect(`${duplicateStoreProductId.stdout}\n${duplicateStoreProductId.stderr}`).toContain(
+        "reuse storeProductId '9P7LQRSNG9SL'"
+      );
+
+      duplicateIdentityConfig.environments.personal.applications.cn.storeProductId =
+        "9P7LQRSNG9SM";
+      writeFileSync(invalidConfigPath, JSON.stringify(duplicateIdentityConfig), "utf8");
+      const duplicateAumid = spawnSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-Command",
+          `. ${resolver}; Resolve-MemmyStorePublishingProfile -ConfigPath ${quotePowerShellLiteral(invalidConfigPath)} -Environment personal -Channel intl`
+        ],
+        { encoding: "utf8" }
+      );
+      expect(duplicateAumid.status).not.toBe(0);
+      expect(`${duplicateAumid.stdout}\n${duplicateAumid.stderr}`).toContain(
+        "reuse AUMID"
+      );
+
+      duplicateIdentityConfig.environments.personal.applications.cn.manifestApplicationId =
+        "MemmyCn";
+      writeFileSync(invalidConfigPath, JSON.stringify(duplicateIdentityConfig), "utf8");
+      const duplicatePackageFamilyName = spawnSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-Command",
+          `. ${resolver}; Resolve-MemmyStorePublishingProfile -ConfigPath ${quotePowerShellLiteral(invalidConfigPath)} -Environment personal -Channel intl`
+        ],
+        { encoding: "utf8" }
+      );
+      expect(duplicatePackageFamilyName.status).not.toBe(0);
+      expect(`${duplicatePackageFamilyName.stdout}\n${duplicatePackageFamilyName.stderr}`).toContain(
+        "reuse packageFamilyName"
+      );
+    } finally {
+      rmSync(invalidConfigDirectory, { recursive: true, force: true });
+    }
+
+    for (const [invalidVersion, expectedMessage] of [
+      ["01.0.9", "MEMMY_DESKTOP_VERSION must be a three-part SemVer"],
+      ["1.70000.0", "MSIX version segments must be between 0 and 65535"]
+    ]) {
+      const invalidVersionResult = spawnSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          packageWindowsStorePath,
+          "-Unsigned",
+          "-PublishingEnvironment",
+          "personal",
+          "-Channel",
+          "intl",
+          "-Version",
+          invalidVersion
+        ],
+        { encoding: "utf8" }
+      );
+      expect(invalidVersionResult.status).not.toBe(0);
+      expect(`${invalidVersionResult.stdout}\n${invalidVersionResult.stderr}`).toContain(
+        expectedMessage
+      );
+    }
+
+    const productionCertificate = spawnSync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        packageWindowsStorePath,
+        "-PublishingEnvironment",
+        "personal",
+        "-Channel",
+        "intl",
+        "-GenerateDevelopmentCertificate"
+      ],
+      { encoding: "utf8" }
+    );
+    expect(productionCertificate.status).not.toBe(0);
+    expect(`${productionCertificate.stdout}\n${productionCertificate.stderr}`).toContain(
+      "Production Store profiles cannot generate or trust development certificates"
+    );
+
+    const packageScript = quotePowerShellLiteral(packageWindowsStorePath);
+    const environmentRestoration = spawnSync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        `$env:MEMMY_WINDOWS_TARGET='sentinel-target'; $env:MEMMY_DESKTOP_VERSION='7.7.7'; $env:MEMMY_ACCOUNT_CHANNEL='phone'; try { & ${packageScript} -PublishingEnvironment development -Channel intl -Version 1.0.9 -SigningCertificatePath 'D:\\definitely-missing\\memmy.pfx' } catch { if ($_.Exception.Message -notlike 'Signing certificate PFX not found:*') { throw } }; if ($env:MEMMY_WINDOWS_TARGET -ne 'sentinel-target' -or $env:MEMMY_DESKTOP_VERSION -ne '7.7.7' -or $env:MEMMY_ACCOUNT_CHANNEL -ne 'phone') { throw 'Packaging environment was not restored.' }; exit 0`
+      ],
+      { encoding: "utf8" }
+    );
+    expect(environmentRestoration.status).toBe(0);
+
+    const conflictingSigningMethods = spawnSync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        packageWindowsStorePath,
+        "-PublishingEnvironment",
+        "development",
+        "-Channel",
+        "intl",
+        "-Version",
+        "1.0.9",
+        "-SigningCertificatePath",
+        "D:\\missing\\memmy.pfx",
+        "-SigningCertificateThumbprint",
+        "0123456789ABCDEF0123456789ABCDEF01234567"
+      ],
+      { encoding: "utf8" }
+    );
+    expect(conflictingSigningMethods.status).not.toBe(0);
+    expect(`${conflictingSigningMethods.stdout}\n${conflictingSigningMethods.stderr}`).toContain(
+      "Choose either a PFX signing certificate or a Windows certificate store thumbprint"
+    );
+  }, 15_000);
 
   it("keeps the desktop main process on the shared Memmy identity and config path", () => {
     const source = readFileSync(mainSourcePath, "utf8");
@@ -373,27 +790,445 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain("persistSharedAnalyticsClientId(clientId)");
   });
 
-  it("isolates Store migration and disables the legacy updater only for Store packages", () => {
+  it("uses fresh Store data, native Store updates, and boot-ready legacy cleanup", () => {
     const source = readFileSync(mainSourcePath, "utf8");
+    const bootSource = extractFunctionSource(source, "async function boot");
+    const openStoreInstallerSource = extractFunctionSource(
+      source,
+      "async function openMicrosoftStoreWebInstaller"
+    );
+    const cleanupSource = readFileSync(winStoreCleanupPath, "utf8");
+    const storeUpdateSource = readFileSync(winStoreUpdatePath, "utf8");
+    const storeUpdateNativeSource = readFileSync(winStoreUpdateNativePath, "utf8");
+    const storeActivateSource = readFileSync(winStoreActivateScriptPath, "utf8");
+    const storeConfig = readFileSync(storeElectronBuilderPath, "utf8");
 
     expect(source).toContain('process.platform === "win32" && process.windowsStore === true');
-    expect(source).toContain("migrateWindowsStoreData(pendingWindowsStoreMigration)");
+    expect(source).toContain('? join(storeUserDataPath, "runtime")');
     expect(source).toContain("await runWindowsStoreLegacyCleanup()");
-    expect(source).toContain('await import("./windows-legacy-uninstall.js")');
+    expect(bootSource.indexOf("await runWindowsStoreLegacyCleanup()"))
+      .toBeLessThan(bootSource.indexOf("await startPackagedRendererServerIfNeeded()"));
+    expect(bootSource.indexOf("await runWindowsStoreLegacyCleanup()"))
+      .toBeLessThan(bootSource.indexOf("await startPackagedRuntimeServices("));
+    expect(bootSource.indexOf("await runWindowsStoreLegacyCleanup()"))
+      .toBeLessThan(bootSource.indexOf("await startLocalApi(runtimeServices)"));
+    expect(source).toContain('await import("./windows-store-cleanup.js")');
     expect(source).toContain('storeUserDataPath: app.getPath("userData")');
-    expect(source).toContain("claimLegacyWindowsInstance(legacyUserDataPath).blocked");
-    expect(source).toContain("isCurrentDesktopStoreTransitionCompatible()");
-    expect(source).toContain("if (shouldExitForWindowsStoreTransition)");
+    expect(source).not.toContain("migrateWindowsStoreData");
+    expect(source).not.toContain("claimLegacyWindowsInstance");
     expect(source).toContain("if (isWindowsStoreApp())");
     expect(source).toContain("if (!isWindowsStoreApp() && await installPreparedRequiredUpdateBeforeBoot())");
     expect(source).toContain('throw new Error("The legacy installer updater is unavailable in a Windows Store package")');
-    expect(source).toContain("return process.platform === \"win32\" && !isWindowsStoreApp();");
-
-    const uninstallSource = readFileSync(winLegacyUninstallPath, "utf8");
-    expect(uninstallSource).toContain('"/reg:64"');
-    expect(uninstallSource).toContain("886615f7-a04c-57ec-a2dd-9161dbe1a7c4");
-    expect(uninstallSource).not.toContain('rmSync(options.legacyUserDataPath');
+    expect(source).toContain('provider: "microsoft-store"');
+    expect(source).toContain('command: isUserInitiated ? "download-user" : "download-silent"');
+    expect(source).toContain('command: "install-user"');
+    expect(source).toContain('command: "install-silent"');
+    expect(source).toContain("isMicrosoftStoreWebInstallerUrl(downloadUrl)");
+    expect(source).toContain("openMicrosoftStoreWebInstaller");
+    expect(source).toContain("startLegacyWindowsStoreMigrationWatcher({");
+    expect(openStoreInstallerSource).not.toContain("shell.openPath(filePath)");
+    expect(openStoreInstallerSource.indexOf("startLegacyWindowsStoreMigrationWatcher"))
+      .toBeLessThan(openStoreInstallerSource.indexOf("scheduleQuitForManualUpdateInstall"));
+    expect(source).toContain("installerPath: filePath");
+    expect(source).toContain("legacyProcessId: process.pid");
+    expect(source).toContain("legacyExecutablePath: process.execPath");
+    expect(source).toContain("resolveDesktopStoreAumid");
+    expect(source).toContain('"-WaitForPackageSeconds"');
+    expect(source).toContain('"900"');
+    expect(source).toContain('"-WaitForReadySeconds"');
+    expect(source).toContain('"180"');
+    expect(storeUpdateSource).toContain('"download-user"');
+    expect(storeUpdateSource).toContain('"install-user"');
+    expect(cleanupSource).toContain("cleanupWindowsStoreLegacyInstallation");
+    expect(cleanupSource).toContain('["prepare-legacy-takeover", "--legacy-install-directory", legacyInstallDirectory]');
+    expect(cleanupSource.indexOf("await prepareLegacyTakeover"))
+      .toBeLessThan(cleanupSource.indexOf("await hasCompletedCleanup"));
+    expect(cleanupSource).toContain("existsSync(legacyInstallDirectory)");
+    expect(cleanupSource).toContain("store-migration-in-progress-v1.json");
+    expect(cleanupSource).toContain('source: "store-startup"');
+    expect(cleanupSource).not.toContain("launchLegacyUninstaller");
+    expect(cleanupSource).not.toContain("Uninstall Memmy.exe");
+    expect(cleanupSource).toContain("Removing validated legacy files and data");
+    expect(cleanupSource).not.toContain("legacyRuntimeHomePath");
+    expect(cleanupSource).not.toContain('join(options.homePath, ".memmy")');
+    expect(source).not.toContain("legacyRuntimeHomePath:");
+    expect(cleanupSource).toContain("maxRetries: 6");
+    expect(cleanupSource).toContain('const args = ["finalize-legacy-cleanup"]');
+    expect(cleanupSource).not.toContain("for (const path of [\n    legacyInstallDirectory,");
+    expect(cleanupSource).toContain("retryDelay: 500");
+    expect(cleanupSource).not.toContain("powershell");
+    expect(storeUpdateNativeSource).toContain("RegDeleteTreeW(HKEY_CURRENT_USER");
+    expect(storeUpdateNativeSource).toContain("PROC_THREAD_ATTRIBUTE_DESKTOP_APP_POLICY");
+    expect(storeUpdateNativeSource).toContain(
+      "PROCESS_CREATION_DESKTOP_APP_BREAKAWAY_ENABLE_PROCESS_TREE"
+    );
+    expect(storeUpdateNativeSource).toContain(
+      "PROCESS_CREATION_DESKTOP_APP_BREAKAWAY_OVERRIDE"
+    );
+    expect(storeUpdateNativeSource).toContain("finalize-legacy-cleanup-breakaway-launcher");
+    expect(storeUpdateNativeSource).toContain("finalize-legacy-cleanup-unpackaged");
+    expect(cleanupSource).toContain('args.push("--unpackaged-helper-path", legacyTakeoverHelperPath)');
+    expect(storeUpdateNativeSource).toContain('argument == L"--unpackaged-helper-path"');
+    expect(storeUpdateNativeSource).toContain("validate_unpacked_cleanup_helper_path");
+    expect(storeUpdateNativeSource).toContain("GetCurrentPackageFullName");
+    expect(storeUpdateNativeSource).toContain(
+      "Refusing to mutate the real legacy registry from a packaged process"
+    );
+    expect(storeUpdateNativeSource).toContain(
+      "Legacy uninstall registration is still present after cleanup"
+    );
+    expect(storeUpdateNativeSource).toContain("CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS");
+    expect(storeUpdateNativeSource).toContain("QueryFullProcessImageNameW");
+    expect(storeUpdateNativeSource).toContain("process.creation_time < parent_process.creation_time");
+    expect(storeUpdateNativeSource).toContain("target.image_path");
+    expect(storeUpdateNativeSource).toContain("GetWindowThreadProcessId");
+    expect(storeUpdateNativeSource).toContain("WM_CLOSE");
+    expect(storeUpdateNativeSource).toContain("TerminateProcess");
+    expect(storeUpdateNativeSource).toContain("is_path_within_directory");
+    expect(storeUpdateNativeSource).toContain("is_windows_apps_path");
+    expect(storeUpdateNativeSource).toContain("prepare_legacy_takeover");
+    expect(storeUpdateNativeSource).toContain('value == L"prepare-legacy-takeover"');
+    const terminateLegacyTreeSource = storeUpdateNativeSource.slice(
+      storeUpdateNativeSource.indexOf("void terminate_legacy_process_tree"),
+      storeUpdateNativeSource.indexOf("void prepare_legacy_takeover")
+    );
+    expect(terminateLegacyTreeSource).toContain(
+      "WaitForSingleObject(process, 0) != WAIT_TIMEOUT"
+    );
+    const finalizeCleanupSource = storeUpdateNativeSource.slice(
+      storeUpdateNativeSource.indexOf("void finalize_legacy_cleanup"),
+      storeUpdateNativeSource.indexOf("IVector<StorePackageUpdate> copy_updates")
+    );
+    expect(finalizeCleanupSource).toContain("prepare_legacy_takeover");
+    expect(storeUpdateNativeSource).toContain("remove_legacy_cli_from_user_path()");
+    expect(storeUpdateNativeSource).toContain("remove_legacy_install_directory()");
+    expect(storeUpdateNativeSource).toContain("delete_directory_tree_once");
+    expect(storeUpdateNativeSource).toContain("maximum_attempts = 20");
+    expect(storeUpdateNativeSource).toContain('delete_registry_value_if_present(run_key, L"Memmy")');
+    expect(storeUpdateNativeSource).toContain("WM_SETTINGCHANGE");
+    expect(storeUpdateNativeSource).toContain("FOLDERID_AppsFolder");
+    expect(storeUpdateNativeSource).toContain("SHCreateItemFromRelativeName");
+    expect(storeUpdateNativeSource).toContain("SHCreateDataObject");
+    expect(storeUpdateNativeSource).toContain("shortcut_targets_aumid(shortcut, aumid)");
+    expect(storeUpdateNativeSource).toContain("if (!shortcut_targets_aumid(shortcut, aumid))");
+    expect(storeUpdateNativeSource).toContain("create_apps_folder_shortcut(shortcut, aumid)");
+    expect(storeActivateSource).toContain("[string]$InstallerPath");
+    expect(storeActivateSource).toContain("[int]$LegacyProcessId");
+    expect(storeActivateSource).toContain("[string]$LegacyExecutablePath");
+    expect(storeActivateSource).toContain("store-migration-in-progress-v1.json");
+    expect(storeActivateSource).toContain("Test-MemmyLegacyExecutablePath");
+    expect(storeActivateSource).toContain("Stop-MemmyLegacyProcessTree");
+    expect(storeActivateSource).toContain("Watch-MemmyLegacyRelaunch");
+    expect(storeActivateSource).toContain("Test-MemmyLegacyLaunchProxyHandoff");
+    expect(storeActivateSource).toContain("Remove-MemmyLegacyLauncherDirectory");
+    expect(storeActivateSource).toContain('Join-Path $PSScriptRoot "MemmyStoreUpdate.exe"');
+    expect(storeActivateSource).toContain('"prepare-legacy-takeover"');
+    expect(storeActivateSource).not.toContain("Stop-Process -Id");
+    const migrationWatcherEntrySource = storeActivateSource.slice(
+      storeActivateSource.indexOf('if ($MyInvocation.InvocationName -ne ".")')
+    );
+    expect(migrationWatcherEntrySource.indexOf("Wait-MemmyLegacyProcessExit"))
+      .toBeLessThan(migrationWatcherEntrySource.indexOf("Start-Process -FilePath $InstallerPath"));
+    expect(migrationWatcherEntrySource.indexOf("Start-Process -FilePath $InstallerPath"))
+      .toBeLessThan(migrationWatcherEntrySource.indexOf("Wait-MemmyStorePackage"));
+    expect(storeConfig).not.toContain("MemmyStoreCleanup.ps1");
   });
+
+  it.skipIf(process.platform !== "win32")(
+    "terminates only the validated legacy process tree during native takeover",
+    async () => {
+      execFileSync("powershell.exe", [
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        winStoreUpdateHelperBuildPath
+      ], { windowsHide: true });
+
+      const testRoot = mkdtempSync(join(tmpdir(), "memmy-native-takeover-"));
+      const legacyInstallDirectory = join(testRoot, "Programs", "Memmy");
+      const controlDirectory = join(testRoot, "Other");
+      const legacyExecutablePath = join(legacyInstallDirectory, "Memmy.exe");
+      const controlExecutablePath = join(controlDirectory, "Memmy.exe");
+      mkdirSync(legacyInstallDirectory, { recursive: true });
+      mkdirSync(controlDirectory, { recursive: true });
+      copyFileSync(process.execPath, legacyExecutablePath);
+      copyFileSync(process.execPath, controlExecutablePath);
+
+      const nodeProgram = [
+        "const{spawn}=require('node:child_process');",
+        "const child=spawn(process.env.SystemRoot+'\\\\System32\\\\ping.exe',['127.0.0.1','-n','120']);",
+        "process.stdout.write(String(child.pid)+'\\n');",
+        "setInterval(()=>{},1000)"
+      ].join("");
+      const startTree = async (executablePath: string) => {
+        const rootProcess = spawn(executablePath, ["-e", nodeProgram], {
+          stdio: ["ignore", "pipe", "ignore"],
+          windowsHide: true
+        });
+        const closed = new Promise<void>((resolvePromise) => {
+          rootProcess.once("close", () => resolvePromise());
+        });
+        const childProcessId = await new Promise<number>((resolvePromise, reject) => {
+          let output = "";
+          const timeout = setTimeout(
+            () => reject(new Error("Timed out waiting for the test child process")),
+            5000
+          );
+          rootProcess.once("error", reject);
+          rootProcess.stdout?.on("data", (chunk: Buffer) => {
+            output += chunk.toString("utf8");
+            const line = output.split(/\r?\n/u)[0]?.trim();
+            if (!line) {
+              return;
+            }
+            clearTimeout(timeout);
+            resolvePromise(Number.parseInt(line, 10));
+          });
+        });
+        return { rootProcess, childProcessId, closed };
+      };
+      const isRunning = (processId: number) => {
+        try {
+          process.kill(processId, 0);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      const stopIfRunning = (processId: number | undefined) => {
+        if (!processId || !isRunning(processId)) {
+          return;
+        }
+        try {
+          process.kill(processId, "SIGKILL");
+        } catch {
+          // The process may exit between the liveness check and termination.
+        }
+      };
+      const waitUntilStopped = async (processId: number | undefined) => {
+        if (!processId) {
+          return;
+        }
+        const deadline = Date.now() + 5000;
+        while (isRunning(processId) && Date.now() < deadline) {
+          await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+        }
+      };
+
+      let legacyTree: Awaited<ReturnType<typeof startTree>> | null = null;
+      let controlTree: Awaited<ReturnType<typeof startTree>> | null = null;
+      try {
+        legacyTree = await startTree(legacyExecutablePath);
+        controlTree = await startTree(controlExecutablePath);
+        const helperEnvironment = { ...process.env, LOCALAPPDATA: testRoot };
+        const invalidTarget = spawnSync(
+          winStoreUpdateHelperPath,
+          ["prepare-legacy-takeover", "--legacy-install-directory", controlDirectory],
+          { env: helperEnvironment, windowsHide: true }
+        );
+        expect(invalidTarget.status).toBe(2);
+        expect(isRunning(controlTree.rootProcess.pid!)).toBe(true);
+
+        execFileSync(
+          winStoreUpdateHelperPath,
+          ["prepare-legacy-takeover", "--legacy-install-directory", legacyInstallDirectory],
+          { env: helperEnvironment, windowsHide: true }
+        );
+        expect(isRunning(legacyTree.rootProcess.pid!)).toBe(false);
+        expect(isRunning(legacyTree.childProcessId)).toBe(false);
+        expect(isRunning(controlTree.rootProcess.pid!)).toBe(true);
+        expect(isRunning(controlTree.childProcessId)).toBe(true);
+      } finally {
+        stopIfRunning(legacyTree?.childProcessId);
+        stopIfRunning(legacyTree?.rootProcess.pid);
+        stopIfRunning(controlTree?.childProcessId);
+        stopIfRunning(controlTree?.rootProcess.pid);
+        await Promise.all([
+          waitUntilStopped(legacyTree?.childProcessId),
+          waitUntilStopped(legacyTree?.rootProcess.pid),
+          waitUntilStopped(controlTree?.childProcessId),
+          waitUntilStopped(controlTree?.rootProcess.pid),
+          legacyTree?.closed,
+          controlTree?.closed
+        ]);
+        legacyTree?.rootProcess.stdout?.destroy();
+        controlTree?.rootProcess.stdout?.destroy();
+        rmSync(testRoot, {
+          recursive: true,
+          force: true,
+          maxRetries: 10,
+          retryDelay: 100
+        });
+      }
+    },
+    30_000
+  );
+
+  it.skipIf(process.platform !== "win32")(
+    "starts the Store installer only after legacy exit and blocks a relaunch while waiting",
+    async () => {
+      execFileSync("powershell.exe", [
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        winStoreUpdateHelperBuildPath
+      ], { windowsHide: true });
+
+      const testRoot = mkdtempSync(join(tmpdir(), "memmy-store-watcher-"));
+      const legacyInstallDirectory = join(testRoot, "Programs", "Memmy");
+      const launcherDirectory = join(testRoot, "Memmy", "launcher");
+      const legacyExecutablePath = join(legacyInstallDirectory, "Memmy.exe");
+      const installerPath = join(testRoot, "fake.store-web-installer.exe");
+      const activationScriptPath = join(launcherDirectory, "MemmyStoreActivate.ps1");
+      const launcherPath = join(launcherDirectory, "MemmyLauncher.vbs");
+      const installerMarkerPath = join(testRoot, "installer-order.txt");
+      const relaunchProcessIdPath = join(testRoot, "relaunch-pid.txt");
+      const migrationMarkerPath = join(
+        launcherDirectory,
+        "store-migration-in-progress-v1.json"
+      );
+      const compilerPath = join(
+        process.env.WINDIR ?? "C:\\Windows",
+        "Microsoft.NET",
+        "Framework64",
+        "v4.0.30319",
+        "csc.exe"
+      );
+      const legacySourcePath = join(testRoot, "Legacy.cs");
+      const installerSourcePath = join(testRoot, "Installer.cs");
+      mkdirSync(legacyInstallDirectory, { recursive: true });
+      mkdirSync(launcherDirectory, { recursive: true });
+      writeFileSync(legacySourcePath, [
+        "using System.Threading;",
+        "public static class Legacy {",
+        "  public static void Main() { Thread.Sleep(60000); }",
+        "}"
+      ].join("\n"), "utf8");
+      writeFileSync(installerSourcePath, [
+        "using System;",
+        "using System.Diagnostics;",
+        "using System.IO;",
+        "using System.Threading;",
+        "public static class Installer {",
+        "  public static void Main() {",
+        "    var oldPid = int.Parse(Environment.GetEnvironmentVariable(\"MEMMY_TEST_OLD_PID\"));",
+        "    var oldRunning = true;",
+        "    try { oldRunning = !Process.GetProcessById(oldPid).HasExited; } catch { oldRunning = false; }",
+        "    File.WriteAllText(Environment.GetEnvironmentVariable(\"MEMMY_TEST_INSTALLER_MARKER\"), oldRunning ? \"old-running\" : \"old-exited\");",
+        "    var relaunch = Process.Start(new ProcessStartInfo {",
+        "      FileName = Environment.GetEnvironmentVariable(\"MEMMY_TEST_LEGACY_EXE\"),",
+        "      UseShellExecute = false,",
+        "      CreateNoWindow = true",
+        "    });",
+        "    File.WriteAllText(Environment.GetEnvironmentVariable(\"MEMMY_TEST_RELAUNCH_PID\"), relaunch.Id.ToString());",
+        "    Thread.Sleep(500);",
+        "  }",
+        "}"
+      ].join("\n"), "utf8");
+      execFileSync(compilerPath, [
+        "/nologo",
+        `/out:${legacyExecutablePath}`,
+        legacySourcePath
+      ], { windowsHide: true });
+      execFileSync(compilerPath, [
+        "/nologo",
+        `/out:${installerPath}`,
+        installerSourcePath
+      ], { windowsHide: true });
+      copyFileSync(winStoreActivateScriptPath, activationScriptPath);
+      copyFileSync(winStoreUpdateHelperPath, join(launcherDirectory, "MemmyStoreUpdate.exe"));
+      writeFileSync(launcherPath, "legacy recovery launcher", "utf8");
+
+      const legacyProcess = spawn(legacyExecutablePath, [], {
+        stdio: "ignore",
+        windowsHide: true
+      });
+      const isRunning = (processId: number) => {
+        try {
+          process.kill(processId, 0);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      const stopIfRunning = (processId: number | undefined) => {
+        if (!processId || !isRunning(processId)) {
+          return;
+        }
+        try {
+          process.kill(processId, "SIGKILL");
+        } catch {
+          // The process may exit between the liveness check and termination.
+        }
+      };
+      let relaunchProcessId: number | undefined;
+      try {
+        const watcher = spawn("powershell.exe", [
+          "-NoProfile",
+          "-NonInteractive",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          activationScriptPath,
+          "-AumId",
+          "Missing.Package_0000000000000!Memmy",
+          "-InstallerPath",
+          installerPath,
+          "-LegacyProcessId",
+          String(legacyProcess.pid),
+          "-LegacyExecutablePath",
+          legacyExecutablePath,
+          "-LegacyExitTimeoutSeconds",
+          "1",
+          "-WaitForPackageSeconds",
+          "4"
+        ], {
+          env: {
+            ...process.env,
+            LOCALAPPDATA: testRoot,
+            MEMMY_TEST_OLD_PID: String(legacyProcess.pid),
+            MEMMY_TEST_INSTALLER_MARKER: installerMarkerPath,
+            MEMMY_TEST_LEGACY_EXE: legacyExecutablePath,
+            MEMMY_TEST_RELAUNCH_PID: relaunchProcessIdPath
+          },
+          stdio: "ignore",
+          windowsHide: true
+        });
+        const watcherExitCode = await new Promise<number | null>((resolvePromise, reject) => {
+          const timeout = setTimeout(
+            () => reject(new Error("Timed out waiting for the Store migration watcher")),
+            30_000
+          );
+          watcher.once("error", reject);
+          watcher.once("close", (code) => {
+            clearTimeout(timeout);
+            resolvePromise(code);
+          });
+        });
+        expect(watcherExitCode).toBe(2);
+        expect(readFileSync(installerMarkerPath, "utf8")).toBe("old-exited");
+        relaunchProcessId = Number.parseInt(readFileSync(relaunchProcessIdPath, "utf8"), 10);
+        expect(isRunning(legacyProcess.pid!)).toBe(false);
+        expect(isRunning(relaunchProcessId)).toBe(false);
+        expect(existsSync(migrationMarkerPath)).toBe(false);
+        expect(readFileSync(launcherPath, "utf8")).toBe("legacy recovery launcher");
+      } finally {
+        stopIfRunning(legacyProcess.pid);
+        stopIfRunning(relaunchProcessId);
+        rmSync(testRoot, {
+          recursive: true,
+          force: true,
+          maxRetries: 10,
+          retryDelay: 100
+        });
+      }
+    },
+    45_000
+  );
 
   it("omits empty agent gateway bootstrap secrets in development runtime config", () => {
     const mainSource = readFileSync(mainSourcePath, "utf8");
@@ -503,11 +1338,22 @@ describe("desktop packaged runtime boundaries", () => {
     expect(includeSource).toContain('File /oname=Memmy.ico "${BUILD_RESOURCES_DIR}\\icon.ico"');
     expect(includeSource).toContain('File /oname=MemmyUpdatePrompt.ps1 "${BUILD_RESOURCES_DIR}\\MemmyUpdatePrompt.ps1"');
     expect(includeSource).toContain('File /oname=MemmyStoreActivate.ps1 "${BUILD_RESOURCES_DIR}\\MemmyStoreActivate.ps1"');
+    expect(includeSource).toContain(
+      'File /oname=MemmyStoreUpdate.exe "${BUILD_RESOURCES_DIR}\\..\\dist\\native\\MemmyStoreUpdate.exe"'
+    );
     expect(includeSource).toContain('FileOpen $1 "$0\\MemmyLauncher.vbs" w');
+    expect(includeSource).toContain("shell.CurrentDirectory = shell.ExpandEnvironmentStrings");
     expect(includeSource).toContain('promptPath = $\\"$0\\MemmyUpdatePrompt.ps1$\\"');
     expect(includeSource).toContain('storeActivatePath = $\\"$0\\MemmyStoreActivate.ps1$\\"');
+    expect(includeSource).toContain('migrationMarkerPath = $\\"$0\\store-migration-in-progress-v1.json$\\"');
     expect(includeSource).toContain("storeExitCode = shell.Run");
+    expect(includeSource).toContain("-WaitForReadySeconds 180");
     expect(includeSource).toContain("If storeExitCode = 0 Then");
+    expect(includeSource).toContain("If storeExitCode = 2 And Not fso.FileExists(appExe) Then");
+    expect(includeSource).toContain("fso.DeleteFile desktopShortcutPath, True");
+    expect(includeSource).toContain("fso.DeleteFile startMenuShortcutPath, True");
+    expect(includeSource).toContain("If fso.FileExists(migrationMarkerPath) Then");
+    expect(includeSource).toContain("WScript.Quit 0");
     expect(includeSource).toContain("WindowsPowerShell\\v1.0\\powershell.exe");
     expect(includeSource).toContain('promptMarkerPath = markerPath & $\\".prompt$\\"');
     expect(includeSource).toContain("If fso.FolderExists(lockPath) And fso.FileExists(promptMarkerPath) Then");
@@ -531,7 +1377,8 @@ describe("desktop packaged runtime boundaries", () => {
     expect(includeSource).toContain("StrCmp $oldDesktopLink $newDesktopLink memmy_point_existing_new_desktop_shortcut");
     expect(includeSource).toContain('Rename "$oldDesktopLink" "$newDesktopLink"');
     expect(includeSource).toContain('StrCpy $3 "$newDesktopLink"');
-    expect(includeSource).toContain('IfFileExists "$newDesktopLink" 0 memmy_point_shortcuts_done');
+    expect(includeSource).not.toContain('IfFileExists "$newDesktopLink" 0 memmy_point_shortcuts_done');
+    expect(includeSource).toContain("An older NSIS uninstaller can remove the desktop shortcut");
     expect(includeSource).toContain('!if "${MEMMY_STORE_TRANSITION_COMPATIBLE}" == "1"');
     expect(includeSource).toContain('$%MEMMY_STORE_TRANSITION_COMPATIBLE%');
     expect(includeSource).toContain('$%MEMMY_STORE_AUMID%');
@@ -540,9 +1387,10 @@ describe("desktop packaged runtime boundaries", () => {
       includeSource.indexOf("memmy_point_desktop_shortcut:"),
       includeSource.indexOf("memmy_point_shortcuts_done:")
     );
-    expect(desktopShortcutBlock.indexOf('IfFileExists "$newDesktopLink" 0 memmy_point_shortcuts_done'))
-      .toBeLessThan(desktopShortcutBlock.indexOf('CreateShortCut "$3" "$SYSDIR\\wscript.exe"'));
-    expect(desktopShortcutBlock.match(/Goto memmy_point_new_desktop_shortcut/g)).toHaveLength(1);
+    expect(desktopShortcutBlock).toContain(
+      "An older NSIS uninstaller can remove the desktop shortcut"
+    );
+    expect(desktopShortcutBlock.match(/Goto memmy_point_new_desktop_shortcut/g)).toHaveLength(2);
     expect(includeSource).toContain('StrCpy $4 "1"');
     expect(includeSource).toContain('StrCmp $4 "1" 0 memmy_point_no_shortcut_refresh');
     expect(includeSource).toContain("Shell32::SHChangeNotify");
@@ -567,6 +1415,9 @@ describe("desktop packaged runtime boundaries", () => {
     );
     expect(includeSource).not.toContain("MsgBox");
     expect(includeSource).not.toContain("MessageBox MB_OK|MB_ICONINFORMATION");
+    expect(readFileSync(packageWinX64Path, "utf8")).toContain(
+      "build-windows-store-update-helper.ps1"
+    );
     expect(includeSource).not.toContain("Memmy 将安装到当前用户目录");
     expect(updatePromptSource).toContain("function Resolve-MemmyPromptLanguage");
     expect(updatePromptSource).toContain("function Test-MemmyUpdatePromptDone");
@@ -591,11 +1442,27 @@ describe("desktop packaged runtime boundaries", () => {
 
   it.skipIf(process.platform !== "win32")("keeps Store activation fallback deterministic", () => {
     const source = readFileSync(winStoreActivateScriptPath, "utf8");
+    expect(source).toContain("Remove-MemmyLegacyRegistration");
+    expect(source).toContain("Test-MemmyLegacyLaunchProxyHandoff");
+    expect(source).toContain("if (Test-MemmyLegacyLaunchProxyHandoff)");
+    expect(source).toContain("886615f7-a04c-57ec-a2dd-9161dbe1a7c4");
+    expect(source).toContain("Remove-Item -LiteralPath $legacyRegistryKey -Recurse -Force");
+    expect(source).toContain('foreach ($valueName in @("Memmy", "memmy"))');
+    expect(source).toContain("Remove-ItemProperty -LiteralPath $runKey");
     expect(source).toContain("IApplicationActivationManager");
     expect(source).toContain("ActivateApplication");
-    expect(source).toContain("$result.HResult -ge 0 -and $result.ProcessId -gt 0");
+    expect(source).toContain("Test-MemmyStoreActivationResult -HResult $result.HResult -ProcessId $result.ProcessId");
+    expect(source.indexOf("Invoke-MemmyStoreActivation -TargetAumId $AumId"))
+      .toBeLessThan(source.indexOf("Remove-MemmyLegacyRegistration", source.indexOf("if ($MyInvocation.InvocationName")));
     expect(source).not.toContain("Get-Process");
-    expect(source).not.toContain("Start-Sleep");
+    expect(source).toContain("Wait-MemmyStorePackage");
+    expect(source).toContain("Wait-MemmyStoreReadyMarker");
+    expect(source).toContain("legacy-cleanup-completed-v1.json");
+    expect(source).toContain("Threading.Mutex");
+    expect(source).toContain('Local\\MemmyStoreMigration_v1');
+    expect(source).toContain("Start-Sleep -Seconds 2");
+    expect(source).toContain("Start-Sleep -Milliseconds 500");
+    expect(source).toContain("Remove-MemmyLegacyRegistration");
 
     const escapedPath = winStoreActivateScriptPath.replace(/'/g, "''");
     execFileSync("powershell.exe", [
@@ -605,6 +1472,14 @@ describe("desktop packaged runtime boundaries", () => {
       "Bypass",
       "-Command",
       `. '${escapedPath}'; if ((Test-MemmyStorePackageStatus $null) -or (Test-MemmyStorePackageStatus ([pscustomobject]@{ Status = 'Error' })) -or -not (Test-MemmyStorePackageStatus ([pscustomobject]@{ Status = 'Ok' })) -or (Test-MemmyStoreActivationResult -HResult -1 -ProcessId 42) -or (Test-MemmyStoreActivationResult -HResult 0 -ProcessId 0) -or -not (Test-MemmyStoreActivationResult -HResult 0 -ProcessId 42)) { exit 1 }`
+    ]);
+    execFileSync("powershell.exe", [
+      "-NoProfile",
+      "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-Command",
+      `. '${escapedPath}'; $expected = Join-Path $env:LOCALAPPDATA 'Programs\\Memmy\\Memmy.exe'; $sameNameElsewhere = Join-Path $env:LOCALAPPDATA 'Other\\Memmy.exe'; $storePath = Join-Path $env:ProgramFiles 'WindowsApps\\Memmy.exe'; if (-not (Test-MemmyLegacyExecutablePath -Path $expected) -or (Test-MemmyLegacyExecutablePath -Path $sameNameElsewhere) -or (Test-MemmyLegacyExecutablePath -Path $storePath)) { exit 1 }`
     ]);
 
     const baseArguments = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", winStoreActivateScriptPath, "-AumId"];
@@ -965,11 +1840,20 @@ describe("desktop packaged runtime boundaries", () => {
     expect(unsignedWinBuilderSource).toContain("from: build/icon.ico");
     expect(unsignedWinBuilderSource).toContain("to: icon.ico");
     expect(mainSource).toContain('const WINDOWS_APP_USER_MODEL_ID = "cn.memtensor.memmy";');
-    expect(mainSource).toContain("app.setAppUserModelId(WINDOWS_APP_USER_MODEL_ID);");
+    expect(mainSource).toContain("resolveWindowsStoreAumid");
+    expect(mainSource).toContain("app.setAppUserModelId(storeAumid ?? WINDOWS_APP_USER_MODEL_ID);");
+    expect(mainSource).toContain("process.chdir(dirname(process.execPath));");
     expect(mainSource).toContain('join(process.resourcesPath, "icon.ico")');
     expect(mainSource).toContain("resolveWindowsTaskbarIconPath()");
+    expect(mainSource).toContain('process.platform !== "win32" || isWindowsStoreApp()');
     expect(mainSource).toContain("function resolveWindowsTrayImage()");
-    expect(mainSource).toContain('resolve(import.meta.dirname, "../../build/icon.ico")');
+    const windowsTrayResolverSource = mainSource.slice(
+      mainSource.indexOf("function resolveWindowsTrayImage()"),
+      mainSource.indexOf("function setDevelopmentDockIcon()")
+    );
+    expect(windowsTrayResolverSource).toContain('join(process.resourcesPath, "icon.ico")');
+    expect(windowsTrayResolverSource).toContain('resolve(import.meta.dirname, "../../build/icon.ico")');
+    expect(windowsTrayResolverSource).not.toContain("resolveWindowsTaskbarIconPath()");
     expect(mainSource).toContain("syncMenuBarTray(true);");
   });
 

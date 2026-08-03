@@ -8,11 +8,37 @@ interface WindowsStorePathOptions {
 }
 
 export function resolveWindowsStoreUserDataPath(options: WindowsStorePathOptions): string | null {
-  if (!options.isWindowsStore) {
+  const identity = resolveWindowsStoreIdentity(options);
+  if (!identity) {
     return null;
   }
   if (!options.localAppDataPath) {
     throw new Error("LOCALAPPDATA is unavailable for the Windows Store package");
+  }
+
+  return join(
+    options.localAppDataPath,
+    "Packages",
+    `${identity.identityName}_${identity.publisherId}`,
+    "LocalState",
+    "Memmy"
+  );
+}
+
+export function resolveWindowsStoreAumid(options: WindowsStorePathOptions): string | null {
+  const identity = resolveWindowsStoreIdentity(options);
+  return identity
+    ? `${identity.identityName}_${identity.publisherId}!${identity.applicationId}`
+    : null;
+}
+
+function resolveWindowsStoreIdentity(options: WindowsStorePathOptions): {
+  identityName: string;
+  publisherId: string;
+  applicationId: string;
+} | null {
+  if (!options.isWindowsStore) {
+    return null;
   }
 
   const packageRoot = findPackageRoot(options.resourcesPath);
@@ -21,13 +47,17 @@ export function resolveWindowsStoreUserDataPath(options: WindowsStorePathOptions
   if (!identityName) {
     throw new Error("Windows Store AppxManifest.xml is missing Identity Name");
   }
+  const applicationId = /<Application\b[^>]*\bId=["']([^"']+)["']/i.exec(manifest)?.[1];
+  if (!applicationId) {
+    throw new Error("Windows Store AppxManifest.xml is missing Application Id");
+  }
 
   const publisherId = basename(packageRoot).split("_").at(-1);
   if (!publisherId || publisherId === basename(packageRoot)) {
     throw new Error("Windows Store package full name is missing its publisher ID");
   }
 
-  return join(options.localAppDataPath, "Packages", `${identityName}_${publisherId}`, "LocalState", "Memmy");
+  return { identityName, publisherId, applicationId };
 }
 
 function findPackageRoot(resourcesPath: string): string {

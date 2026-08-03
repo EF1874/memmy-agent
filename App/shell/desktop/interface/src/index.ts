@@ -19,6 +19,7 @@ export interface DesktopAppInfo {
   version: string;
   platform: string;
   arch: string;
+  updateProvider?: DesktopUpdateProvider;
   updateManifestUrl?: string;
 }
 
@@ -26,13 +27,18 @@ export type DesktopUpdateCheckStatus = "not-configured" | "latest" | "available"
 
 export type DesktopUpdateMode = "manual" | "silent" | "force";
 
+export type DesktopUpdateProvider = "legacy-installer" | "microsoft-store";
+
 export interface DesktopUpdateCheckResult {
   status: DesktopUpdateCheckStatus;
   currentVersion: string;
+  provider?: DesktopUpdateProvider;
   latestVersion?: string;
   minSupportedVersion?: string;
   updateMode?: DesktopUpdateMode;
   force?: boolean;
+  canSilentlyDownload?: boolean;
+  storeUpdateCount?: number;
   downloadUrl?: string;
   preparedUpdatePath?: string;
   releaseNotes?: string;

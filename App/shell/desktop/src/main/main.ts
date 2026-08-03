@@ -77,6 +77,7 @@ import {
   desktopUserDataDirectoryName,
   resolveDesktopEdition,
   resolveDesktopPackageSigning,
+  resolveDesktopStoreAumid,
   type DesktopEdition,
   type DesktopPackageSigning
 } from "./desktop-edition.js";
@@ -88,8 +89,7 @@ import {
 } from "./logger.js";
 import { persistSharedAnalyticsClientId } from "./analytics-client-id-store.js";
 import { backupSqliteDatabase } from "./sqlite-backup.js";
-import { resolveWindowsStoreUserDataPath } from "./windows-store-paths.js";
-import { claimLegacyWindowsInstance } from "./windows-store-transition-barrier.js";
+import { resolveWindowsStoreAumid, resolveWindowsStoreUserDataPath } from "./windows-store-paths.js";
 
 let mainWindow: BrowserWindow | null = null;
 let petWindow: BrowserWindow | null = null;
@@ -129,8 +129,6 @@ let preparedManagedBackgroundUpdateVersion: string | null = null;
 let updateInstallForceExitTimer: ReturnType<typeof setTimeout> | null = null;
 let isManagedUpdateInstallerRunning = false;
 let shouldSuppressActivateAfterPetWindowClose = false;
-let pendingWindowsStoreMigration: { legacyUserDataPath: string; targetUserDataPath: string } | null = null;
-let shouldExitForWindowsStoreTransition = false;
 const programmaticPetWindowCloses = new WeakSet<BrowserWindow>();
 
 type MainWindowUserAction = "close" | "minimize";
@@ -159,6 +157,8 @@ const MACOS_STALE_REOPEN_QUIT_GRACE_MS = 20000;
 const MAIN_WINDOW_ROUTE_TARGET_CHANNEL = "memmy:route-target-request";
 const UPDATE_DOWNLOAD_PROGRESS_CHANNEL = "memmy:update-download-progress";
 const PREPARED_REQUIRED_UPDATE_FILE = "prepared-required-update.json";
+const WINDOWS_STORE_UPDATE_URL = "microsoft-store://update";
+const WINDOWS_STORE_PREPARED_UPDATE_PATH = "microsoft-store://prepared";
 const WINDOWS_UPDATE_PROMPT_LANGUAGE_FILE = "update-prompt-language.txt";
 const WINDOWS_APP_USER_MODEL_ID = "cn.memtensor.memmy";
 const REQUIRED_UPDATE_BACKGROUND_FIRST_CHECK_DELAY_MS = 60 * 1000;
@@ -202,6 +202,7 @@ interface PendingMainWindowAction {
 interface PreparedRequiredUpdate {
   filePath: string;
   preparedAt: string;
+  provider?: "legacy-installer" | "microsoft-store";
   downloadUrl?: string;
   latestVersion?: string;
   showUpdatePrompt?: boolean;
@@ -212,6 +213,12 @@ interface BackgroundUpdateInstallOptions {
   openAfterInstall: boolean;
   expectedVersion?: string;
   showUpdatePrompt?: boolean;
+}
+
+interface LegacyWindowsStoreMigrationWatcherOptions {
+  installerPath: string;
+  legacyProcessId: number;
+  legacyExecutablePath: string;
 }
 
 type WindowsUpdatePromptLanguage = "zh-CN" | "en-US";
@@ -290,7 +297,6 @@ async function stopPackagedRendererServer(): Promise<void> {
 async function boot(): Promise<void> {
   try {
     process.env.MEMMY_APP_EDITION = resolveCurrentDesktopEdition();
-    await runPendingWindowsStoreMigration();
     initLogger();
     forceLightWindowChrome();
     await writePackagedStartupLog("boot:start");
@@ -298,6 +304,7 @@ async function boot(): Promise<void> {
       await writePackagedStartupLog("boot:prepared-required-update-started");
       return;
     }
+    await runWindowsStoreLegacyCleanup();
 
     showSplashWindow(); // Only show the splash on a normal boot (the update-handoff exit branch already returned above)
     registerIpcHandlers();
@@ -320,7 +327,6 @@ async function boot(): Promise<void> {
     }
     setDevelopmentDockIcon();
     await writePackagedStartupLog("boot:ready");
-    await runWindowsStoreLegacyCleanup();
     startRequiredUpdateBackgroundChecks();
     // Fallback cleanup of leftover packages in the updates directory: deferred and async, to avoid
     // the startup peak and not block the window from showing.
@@ -338,27 +344,30 @@ async function boot(): Promise<void> {
  */
 function configureAppIdentity(): void {
   const edition = resolveCurrentDesktopEdition();
-  const memmyHome = join(homedir(), desktopRuntimeHomeDirectoryName(edition));
+  const legacyMemmyHome = join(homedir(), desktopRuntimeHomeDirectoryName(edition));
   const legacyUserDataPath = join(app.getPath("appData"), desktopUserDataDirectoryName(edition));
   const storeUserDataPath = resolveWindowsStoreUserDataPath({
     isWindowsStore: isWindowsStoreApp(),
     resourcesPath: process.resourcesPath,
     localAppDataPath: process.env.LOCALAPPDATA
   });
-  if (process.platform === "win32" && app.isPackaged && !isWindowsStoreApp() &&
-      isCurrentDesktopStoreTransitionCompatible()) {
-    shouldExitForWindowsStoreTransition = claimLegacyWindowsInstance(legacyUserDataPath).blocked;
-  }
+  const storeAumid = resolveWindowsStoreAumid({
+    isWindowsStore: isWindowsStoreApp(),
+    resourcesPath: process.resourcesPath,
+    localAppDataPath: process.env.LOCALAPPDATA
+  });
+  const memmyHome = storeUserDataPath
+    ? join(storeUserDataPath, "runtime")
+    : legacyMemmyHome;
   app.setName("Memmy");
-  if (process.platform === "win32" && !isWindowsStoreApp()) {
-    app.setAppUserModelId(WINDOWS_APP_USER_MODEL_ID);
+  if (process.platform === "win32") {
+    app.setAppUserModelId(storeAumid ?? WINDOWS_APP_USER_MODEL_ID);
   }
   if (storeUserDataPath) {
+    // Store activation can inherit the legacy shortcut's working directory. Move away from it
+    // before cleanup so Windows does not keep the old install directory locked as this process CWD.
+    process.chdir(dirname(process.execPath));
     mkdirSync(storeUserDataPath, { recursive: true });
-    pendingWindowsStoreMigration = {
-      legacyUserDataPath,
-      targetUserDataPath: storeUserDataPath
-    };
   }
   app.setPath("userData", storeUserDataPath ?? legacyUserDataPath);
   if (app.isPackaged) {
@@ -374,33 +383,30 @@ function isWindowsStoreApp(): boolean {
   return process.platform === "win32" && process.windowsStore === true;
 }
 
-async function runPendingWindowsStoreMigration(): Promise<void> {
-  if (!pendingWindowsStoreMigration) {
-    return;
-  }
-  const { migrateWindowsStoreData } = await import("./windows-store-migration.js");
-  migrateWindowsStoreData(pendingWindowsStoreMigration);
-  pendingWindowsStoreMigration = null;
-}
-
 async function runWindowsStoreLegacyCleanup(): Promise<void> {
   if (!isWindowsStoreApp() || !process.env.LOCALAPPDATA) {
     return;
   }
-  const edition = resolveCurrentDesktopEdition();
-  const roamingAppDataPath = app.getPath("appData");
-  const legacyUserDataPath = join(roamingAppDataPath, desktopUserDataDirectoryName(edition));
   try {
-    const { uninstallLegacyWindowsApp } = await import("./windows-legacy-uninstall.js");
-    const result = await uninstallLegacyWindowsApp({
-      legacyUserDataPath,
+    const { cleanupWindowsStoreLegacyInstallation } = await import("./windows-store-cleanup.js");
+    const result = await cleanupWindowsStoreLegacyInstallation({
+      resourcesPath: process.resourcesPath,
       storeUserDataPath: app.getPath("userData"),
       localAppDataPath: process.env.LOCALAPPDATA,
-      roamingAppDataPath
+      roamingAppDataPath: app.getPath("appData"),
+      desktopPath: app.getPath("desktop")
     });
-    await writePackagedStartupLog(`boot:legacy-uninstall:${result}`);
+    if (result === "not-available") {
+      throw new Error("the packaged Store takeover helper is unavailable");
+    }
+    await writePackagedStartupLog(`boot:legacy-cleanup:${result}`);
   } catch (error) {
-    await writePackagedStartupLog(`boot:legacy-uninstall:failed:${error instanceof Error ? error.message : String(error)}`);
+    const message = error instanceof Error ? error.message : String(error);
+    await writePackagedStartupLog(`boot:legacy-cleanup:failed:${message}`);
+    throw new Error(
+      `Microsoft Store migration could not take over the legacy Memmy installation: ${message}`,
+      { cause: error }
+    );
   }
 }
 
@@ -427,18 +433,6 @@ function resolveCurrentDesktopPlatformType(): string {
 function readCurrentDesktopEditionManifest(): string | null {
   const manifestPath = join(import.meta.dirname, "desktop-edition.json");
   return existsSync(manifestPath) ? readFileSync(manifestPath, "utf8") : null;
-}
-
-function isCurrentDesktopStoreTransitionCompatible(): boolean {
-  const source = readCurrentDesktopEditionManifest();
-  if (!source) {
-    return false;
-  }
-  try {
-    return (JSON.parse(source) as { storeTransitionCompatible?: unknown }).storeTransitionCompatible === true;
-  } catch {
-    return false;
-  }
 }
 
 /**
@@ -818,7 +812,9 @@ function registerIpcHandlers(): void {
   ipcMain.handle("memmy:check-for-updates", async () => checkForUpdates());
 
   ipcMain.handle("memmy:download-update", async (event, update: DesktopUpdateCheckResult, options?: DesktopUpdateDownloadOptions) => downloadUpdate(update, options, event.sender));
-  ipcMain.handle("memmy:open-update-installer", async (_event, filePath: string) => openUpdateInstaller(filePath));
+  ipcMain.handle("memmy:open-update-installer", async (event, filePath: string) => (
+    openUpdateInstaller(filePath, BrowserWindow.fromWebContents(event.sender))
+  ));
 
   ipcMain.handle("memmy:openExternal", async (_event, url: string) => {
     await openExternalUrl(url);
@@ -936,6 +932,7 @@ function getDesktopAppInfo(): DesktopAppInfo {
     version: resolveDesktopAppVersion(),
     platform: process.platform,
     arch: process.arch,
+    updateProvider: isWindowsStoreApp() ? "microsoft-store" : "legacy-installer",
     ...(updateManifestUrl ? { updateManifestUrl } : {})
   };
 }
@@ -1014,6 +1011,9 @@ function resolveDesktopPackageVersion(): string | null {
  */
 async function checkForUpdates(): Promise<DesktopUpdateCheckResult> {
   const currentVersion = resolveDesktopAppVersion();
+  if (isWindowsStoreApp()) {
+    return checkForWindowsStoreUpdates(currentVersion);
+  }
   const manifestUrl = resolveUpdateManifestUrl();
   if (!manifestUrl) {
     return { status: "not-configured", currentVersion };
@@ -1044,6 +1044,7 @@ async function checkForUpdates(): Promise<DesktopUpdateCheckResult> {
   return {
     status: "available",
     currentVersion,
+    provider: "legacy-installer",
     latestVersion,
     ...(minSupportedVersion ? { minSupportedVersion } : {}),
     ...(updateMode ? { updateMode } : {}),
@@ -1052,6 +1053,45 @@ async function checkForUpdates(): Promise<DesktopUpdateCheckResult> {
     ...(preparedUpdatePath ? { preparedUpdatePath } : {}),
     ...(releaseNotes ? { releaseNotes } : {}),
     ...(publishedAt ? { publishedAt } : {})
+  };
+}
+
+async function checkForWindowsStoreUpdates(currentVersion: string): Promise<DesktopUpdateCheckResult> {
+  const { runWindowsStoreUpdate } = await import("./windows-store-update.js");
+  const result = await runWindowsStoreUpdate({
+    resourcesPath: process.resourcesPath,
+    command: "check"
+  });
+  if (result.type !== "check") {
+    throw new Error("Microsoft Store update helper did not return a check result");
+  }
+  if (!result.available) {
+    await clearPreparedRequiredUpdate().catch(() => undefined);
+    return {
+      status: "latest",
+      currentVersion,
+      latestVersion: currentVersion,
+      provider: "microsoft-store",
+      canSilentlyDownload: result.canSilentlyDownload,
+      storeUpdateCount: 0
+    };
+  }
+
+  const latestVersion = result.latestVersion ?? currentVersion;
+  const preparedUpdate = await readPreparedRequiredUpdate();
+  const prepared = preparedUpdate?.provider === "microsoft-store" &&
+    preparedUpdate.latestVersion === latestVersion;
+  return {
+    status: "available",
+    currentVersion,
+    latestVersion,
+    provider: "microsoft-store",
+    updateMode: "silent",
+    force: result.mandatory,
+    canSilentlyDownload: result.canSilentlyDownload,
+    storeUpdateCount: result.updateCount,
+    downloadUrl: WINDOWS_STORE_UPDATE_URL,
+    ...(prepared ? { preparedUpdatePath: WINDOWS_STORE_PREPARED_UPDATE_PATH } : {})
   };
 }
 
@@ -1399,6 +1439,13 @@ async function prepareRequiredUpdateAfterBoot(): Promise<void> {
     if (update.status !== "available" || !update.downloadUrl || !isManagedBackgroundUpdate(update)) {
       return;
     }
+    if (update.provider === "microsoft-store" &&
+        (!isAutomaticUpdateEnabled() || update.canSilentlyDownload !== true)) {
+      await writePackagedStartupLog(
+        `boot:managed-store-update prompt-only auto=${isAutomaticUpdateEnabled()} silent=${update.canSilentlyDownload === true}`
+      );
+      return;
+    }
 
     const targetVersion = update.latestVersion ?? update.currentVersion;
     if (preparedManagedBackgroundUpdateVersion === targetVersion) {
@@ -1447,6 +1494,10 @@ async function installPreparedRequiredUpdateOnQuit(): Promise<void> {
   try {
     const preparedUpdate = await readPreparedRequiredUpdate();
     if (!preparedUpdate) {
+      return;
+    }
+    if (preparedUpdate.provider === "microsoft-store") {
+      await installPreparedWindowsStoreUpdateOnQuit(preparedUpdate);
       return;
     }
 
@@ -1499,7 +1550,36 @@ function shouldManageRequiredUpdates(): boolean {
     return isInstalledApplicationsApp();
   }
 
-  return process.platform === "win32" && !isWindowsStoreApp();
+  return process.platform === "win32";
+}
+
+function isAutomaticUpdateEnabled(): boolean {
+  try {
+    return localBackend?.getAppSettings().autoUpdateEnabled ?? true;
+  } catch {
+    return true;
+  }
+}
+
+async function installPreparedWindowsStoreUpdateOnQuit(
+  preparedUpdate: PreparedRequiredUpdate
+): Promise<void> {
+  const { runWindowsStoreUpdate } = await import("./windows-store-update.js");
+  await writePackagedStartupLog(
+    `quit:prepared-store-update ${preparedUpdate.latestVersion ?? "unknown"}`
+  );
+  const result = await runWindowsStoreUpdate({
+    resourcesPath: process.resourcesPath,
+    command: "install-silent"
+  });
+  if (result.type !== "result") {
+    throw new Error("Microsoft Store update helper did not return an install result");
+  }
+  if (result.state === "completed") {
+    await clearPreparedRequiredUpdate();
+    return;
+  }
+  await writePackagedStartupLog(`quit:prepared-store-update deferred ${result.state}`);
 }
 
 /**
@@ -1516,6 +1596,9 @@ async function hasPreparedRequiredUpdate(update: DesktopUpdateCheckResult): Prom
 
   if (preparedUpdate.latestVersion !== update.latestVersion || preparedUpdate.downloadUrl !== update.downloadUrl) {
     return false;
+  }
+  if (update.provider === "microsoft-store") {
+    return preparedUpdate.provider === "microsoft-store";
   }
 
   try {
@@ -1554,10 +1637,13 @@ async function readPreparedRequiredUpdate(): Promise<PreparedRequiredUpdate | nu
  * @returns Resolves once the write completes.
  */
 async function writePreparedRequiredUpdate(update: DesktopUpdateCheckResult, filePath: string): Promise<void> {
-  const safeFilePath = resolveDownloadedUpdatePath(filePath);
+  const safeFilePath = update.provider === "microsoft-store"
+    ? WINDOWS_STORE_PREPARED_UPDATE_PATH
+    : resolveDownloadedUpdatePath(filePath);
   const preparedUpdate: PreparedRequiredUpdate = {
     filePath: safeFilePath,
     preparedAt: new Date().toISOString(),
+    provider: update.provider ?? "legacy-installer",
     showUpdatePrompt: shouldShowWindowsUpdatePromptForPreparedUpdate(update),
     ...(update.downloadUrl ? { downloadUrl: update.downloadUrl } : {}),
     ...(update.latestVersion ? { latestVersion: update.latestVersion } : {})
@@ -1659,6 +1745,7 @@ function isPreparedRequiredUpdate(value: unknown): value is PreparedRequiredUpda
     && value.filePath.trim().length > 0
     && typeof value.preparedAt === "string"
     && value.preparedAt.trim().length > 0
+    && (value.provider === undefined || value.provider === "legacy-installer" || value.provider === "microsoft-store")
     && (value.downloadUrl === undefined || typeof value.downloadUrl === "string")
     && (value.latestVersion === undefined || typeof value.latestVersion === "string")
     && (value.showUpdatePrompt === undefined || typeof value.showUpdatePrompt === "boolean");
@@ -1864,10 +1951,13 @@ async function downloadUpdate(
   options: DesktopUpdateDownloadOptions = {},
   progressTarget?: WebContents
 ): Promise<DesktopUpdateInstallResult> {
-  assertLegacyInstallerUpdaterAvailable();
   if (update.status !== "available" || !update.downloadUrl) {
     throw new Error("no update package is available");
   }
+  if (update.provider === "microsoft-store") {
+    return downloadWindowsStoreUpdate(update, progressTarget);
+  }
+  assertLegacyInstallerUpdaterAvailable();
 
   const downloadUrl = normalizeHttpUrl(update.downloadUrl);
   const response = await fetch(downloadUrl, { cache: "no-store" });
@@ -1892,7 +1982,55 @@ async function downloadUpdate(
     return openBackgroundUpdateInstaller(filePath);
   }
 
-  return openUpdateInstaller(filePath);
+  return openUpdateInstaller(filePath, progressTarget ? BrowserWindow.fromWebContents(progressTarget) : null);
+}
+
+async function downloadWindowsStoreUpdate(
+  update: DesktopUpdateCheckResult,
+  progressTarget?: WebContents
+): Promise<DesktopUpdateInstallResult> {
+  if (!isWindowsStoreApp()) {
+    throw new Error("Microsoft Store updates are only available inside the Store package");
+  }
+
+  const { nativeWindowHandleToDecimal, runWindowsStoreUpdate } = await import("./windows-store-update.js");
+  const ownerWindow = progressTarget ? BrowserWindow.fromWebContents(progressTarget) : null;
+  const isUserInitiated = Boolean(progressTarget);
+  if (isUserInitiated && (!ownerWindow || ownerWindow.isDestroyed())) {
+    throw new Error("Microsoft Store update requires an active application window");
+  }
+
+  const result = await runWindowsStoreUpdate({
+    resourcesPath: process.resourcesPath,
+    command: isUserInitiated ? "download-user" : "download-silent",
+    ...(ownerWindow ? {
+      ownerWindowHandle: nativeWindowHandleToDecimal(ownerWindow.getNativeWindowHandle())
+    } : {}),
+    onProgress: (progress) => {
+      emitUpdateDownloadProgress(progressTarget, {
+        downloadUrl: WINDOWS_STORE_UPDATE_URL,
+        filePath: WINDOWS_STORE_PREPARED_UPDATE_PATH,
+        transferredBytes: Math.max(0, Math.round(progress.transferredBytes)),
+        totalBytes: progress.totalBytes > 0 ? Math.round(progress.totalBytes) : null,
+        percent: Number.isFinite(progress.percent)
+          ? Math.min(100, Math.max(0, Math.round(progress.percent)))
+          : null
+      });
+    }
+  });
+  if (result.type !== "result") {
+    throw new Error("Microsoft Store update helper did not return a download result");
+  }
+  if (result.state !== "completed") {
+    throw new Error(resolveWindowsStoreUpdateFailureMessage("download", result.state));
+  }
+
+  await writePreparedRequiredUpdate(update, WINDOWS_STORE_PREPARED_UPDATE_PATH);
+  return {
+    filePath: WINDOWS_STORE_PREPARED_UPDATE_PATH,
+    opened: false,
+    background: !isUserInitiated
+  };
 }
 
 async function downloadUpdatePackageToFile(
@@ -2014,9 +2152,18 @@ async function removeFileIfExists(filePath: string): Promise<void> {
  * @param filePath The installer package path returned by the main process download.
  * @returns The installer package's local path and open state.
  */
-async function openUpdateInstaller(filePath: string): Promise<DesktopUpdateInstallResult> {
+async function openUpdateInstaller(
+  filePath: string,
+  ownerWindow: BrowserWindow | null = null
+): Promise<DesktopUpdateInstallResult> {
+  if (filePath === WINDOWS_STORE_PREPARED_UPDATE_PATH) {
+    return installWindowsStoreUpdateForUser(ownerWindow);
+  }
   assertLegacyInstallerUpdaterAvailable();
   const safeFilePath = resolveDownloadedUpdatePath(filePath);
+  if (isMicrosoftStoreWebInstallerPath(safeFilePath)) {
+    return openMicrosoftStoreWebInstaller(safeFilePath, true);
+  }
   if (shouldInstallMacDmgUpdateInBackground(safeFilePath)) {
     const result = await installMacDmgUpdateInBackground(safeFilePath);
     if (!result.background) {
@@ -2047,6 +2194,59 @@ async function openUpdateInstaller(filePath: string): Promise<DesktopUpdateInsta
   return { filePath: safeFilePath, opened: true, willQuit };
 }
 
+async function installWindowsStoreUpdateForUser(
+  ownerWindow: BrowserWindow | null
+): Promise<DesktopUpdateInstallResult> {
+  if (!isWindowsStoreApp()) {
+    throw new Error("Microsoft Store updates are only available inside the Store package");
+  }
+  if (!ownerWindow || ownerWindow.isDestroyed()) {
+    throw new Error("Microsoft Store update installation requires an active application window");
+  }
+
+  const { nativeWindowHandleToDecimal, runWindowsStoreUpdate } = await import("./windows-store-update.js");
+  const result = await runWindowsStoreUpdate({
+    resourcesPath: process.resourcesPath,
+    command: "install-user",
+    ownerWindowHandle: nativeWindowHandleToDecimal(ownerWindow.getNativeWindowHandle())
+  });
+  if (result.type !== "result") {
+    throw new Error("Microsoft Store update helper did not return an install result");
+  }
+  if (result.state !== "completed") {
+    throw new Error(resolveWindowsStoreUpdateFailureMessage("install", result.state));
+  }
+
+  await clearPreparedRequiredUpdate().catch(() => undefined);
+  scheduleQuitForManualUpdateInstall();
+  return {
+    filePath: WINDOWS_STORE_PREPARED_UPDATE_PATH,
+    opened: true,
+    willQuit: true,
+    background: true
+  };
+}
+
+function resolveWindowsStoreUpdateFailureMessage(
+  action: "download" | "install",
+  state: string
+): string {
+  const operation = action === "download" ? "download" : "installation";
+  if (state === "canceled") {
+    return `Microsoft Store update ${operation} was canceled`;
+  }
+  if (state === "not-allowed") {
+    return `Microsoft Store update ${operation} is not allowed by the current Store or network settings`;
+  }
+  if (state === "error-low-battery") {
+    return `Microsoft Store update ${operation} is unavailable while the battery is low`;
+  }
+  if (state === "error-wifi-recommended" || state === "error-wifi-required") {
+    return `Microsoft Store update ${operation} requires an allowed Wi-Fi connection`;
+  }
+  return `Microsoft Store update ${operation} failed: ${state}`;
+}
+
 /**
  * Opens the background update installer during the boot phase.
  *
@@ -2058,6 +2258,9 @@ async function openBackgroundUpdateInstaller(
   options: BackgroundUpdateInstallOptions = { quitCurrentApp: true, openAfterInstall: true }
 ): Promise<DesktopUpdateInstallResult> {
   const safeFilePath = resolveDownloadedUpdatePath(filePath);
+  if (isMicrosoftStoreWebInstallerPath(safeFilePath)) {
+    return openMicrosoftStoreWebInstaller(safeFilePath, options.quitCurrentApp);
+  }
   if (shouldInstallMacDmgUpdateInBackground(safeFilePath)) {
     return installMacDmgUpdateInBackground(safeFilePath, options);
   }
@@ -2067,6 +2270,134 @@ async function openBackgroundUpdateInstaller(
   }
 
   return openUpdateInstaller(safeFilePath);
+}
+
+async function openMicrosoftStoreWebInstaller(
+  filePath: string,
+  quitCurrentApp: boolean
+): Promise<DesktopUpdateInstallResult> {
+  await startLegacyWindowsStoreMigrationWatcher({
+    installerPath: filePath,
+    legacyProcessId: process.pid,
+    legacyExecutablePath: process.execPath
+  });
+
+  await clearPreparedRequiredUpdate().catch(() => undefined);
+  if (quitCurrentApp) {
+    scheduleQuitForManualUpdateInstall();
+  }
+  return {
+    filePath,
+    opened: true,
+    willQuit: quitCurrentApp,
+    background: true
+  };
+}
+
+async function startLegacyWindowsStoreMigrationWatcher(
+  options: LegacyWindowsStoreMigrationWatcherOptions
+): Promise<void> {
+  if (process.platform !== "win32" || isWindowsStoreApp() || !process.env.LOCALAPPDATA) {
+    throw new Error("The Microsoft Store migration watcher is only available in a legacy Windows installation");
+  }
+
+  const storeAumid = resolveDesktopStoreAumid(readCurrentDesktopEditionManifest());
+  if (!storeAumid) {
+    throw new Error("The legacy package does not contain a Microsoft Store application identity");
+  }
+  const legacyInstallDirectory = resolve(process.env.LOCALAPPDATA, "Programs", "Memmy");
+  const legacyExecutablePath = resolve(options.legacyExecutablePath);
+  const executableRelativePath = relative(legacyInstallDirectory, legacyExecutablePath);
+  if (
+    !executableRelativePath ||
+    executableRelativePath === ".." ||
+    executableRelativePath.startsWith(`..${sep}`) ||
+    resolve(legacyInstallDirectory, executableRelativePath).toLocaleLowerCase("en-US") !==
+      legacyExecutablePath.toLocaleLowerCase("en-US")
+  ) {
+    throw new Error("Refusing to migrate an executable outside the legacy Memmy install directory");
+  }
+  if (!existsSync(options.installerPath)) {
+    throw new Error("The Microsoft Store Web Installer is no longer available");
+  }
+
+  const watcherPath = join(
+    process.env.LOCALAPPDATA,
+    "Memmy",
+    "launcher",
+    "MemmyStoreActivate.ps1"
+  );
+  const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
+  if (!systemRoot || !existsSync(watcherPath)) {
+    throw new Error("The installed Microsoft Store migration watcher is unavailable");
+  }
+
+  const powerShellPath = join(
+    systemRoot,
+    "System32",
+    "WindowsPowerShell",
+    "v1.0",
+    "powershell.exe"
+  );
+  const migrationMarkerPath = join(
+    process.env.LOCALAPPDATA,
+    "Memmy",
+    "launcher",
+    "store-migration-in-progress-v1.json"
+  );
+  if (existsSync(migrationMarkerPath)) {
+    throw new Error("A Microsoft Store migration is already in progress");
+  }
+  const watcher = spawn(powerShellPath, [
+    "-NoProfile",
+    "-NonInteractive",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-WindowStyle",
+    "Hidden",
+    "-File",
+    watcherPath,
+    "-AumId",
+    storeAumid,
+    "-InstallerPath",
+    options.installerPath,
+    "-LegacyProcessId",
+    String(options.legacyProcessId),
+    "-LegacyExecutablePath",
+    legacyExecutablePath,
+    "-WaitForPackageSeconds",
+    "900",
+    "-WaitForReadySeconds",
+    "180"
+  ], {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true
+  });
+
+  let watcherSpawnError: Error | null = null;
+  watcher.once("error", (error) => {
+    watcherSpawnError = error;
+  });
+  const markerDeadline = Date.now() + 5000;
+  while (!existsSync(migrationMarkerPath)) {
+    if (watcherSpawnError) {
+      throw watcherSpawnError;
+    }
+    if (watcher.exitCode !== null) {
+      throw new Error(`The Microsoft Store migration watcher exited with code ${watcher.exitCode}`);
+    }
+    if (Date.now() >= markerDeadline) {
+      watcher.kill();
+      throw new Error("The Microsoft Store migration watcher did not establish its restart barrier");
+    }
+    await delay(50);
+  }
+  watcher.unref();
+}
+
+function isMicrosoftStoreWebInstallerPath(filePath: string): boolean {
+  return basename(filePath).toLowerCase().endsWith(".store-web-installer.exe");
 }
 
 /**
@@ -2938,14 +3269,25 @@ function resolveUpdateDownloadUrl(manifest: unknown): string | null {
  * @returns A safe local file name.
  */
 function resolveUpdatePackageFileName(downloadUrl: string, latestVersion: string | undefined): string {
+  const version = (latestVersion ?? resolveDesktopAppVersion()).replace(/[^a-zA-Z0-9._+-]/gu, "");
+  if (isMicrosoftStoreWebInstallerUrl(downloadUrl)) {
+    return `Memmy-${version}-store-web-installer.exe`;
+  }
+
   const urlPathName = new URL(downloadUrl).pathname;
   const urlFileName = basename(urlPathName);
   if (/^[a-zA-Z0-9._+-]+$/u.test(urlFileName) && urlFileName.includes(".")) {
     return urlFileName;
   }
 
-  const version = (latestVersion ?? resolveDesktopAppVersion()).replace(/[^a-zA-Z0-9._+-]/gu, "");
   return `Memmy-${version}-${process.platform}-${process.arch}${resolveUpdatePackageExtension()}`;
+}
+
+function isMicrosoftStoreWebInstallerUrl(downloadUrl: string): boolean {
+  const url = new URL(downloadUrl);
+  return url.protocol === "https:" &&
+    (url.hostname.toLowerCase() === "get.microsoft.com" ||
+      url.hostname.toLowerCase().endsWith(".get.microsoft.com"));
 }
 
 /**
@@ -3338,7 +3680,9 @@ function resolveMenuBarTrayImage() {
  * @returns The Electron tray icon.
  */
 function resolveWindowsTrayImage() {
-  const iconPath = resolveWindowsTaskbarIconPath() ?? resolve(import.meta.dirname, "../../build/icon.ico");
+  const iconPath = app.isPackaged
+    ? join(process.resourcesPath, "icon.ico")
+    : resolve(import.meta.dirname, "../../build/icon.ico");
   return nativeImage.createFromPath(iconPath);
 }
 
@@ -3427,7 +3771,7 @@ function hideInWindowMenuBar(targetWindow: BrowserWindow): void {
 }
 
 function resolveWindowsTaskbarIconPath(): string | undefined {
-  if (process.platform !== "win32") {
+  if (process.platform !== "win32" || isWindowsStoreApp()) {
     return undefined;
   }
 
@@ -4518,16 +4862,12 @@ async function sendAppExitEventBeforeQuit(): Promise<void> {
   await Promise.race([exitEvent, delay(APP_QUIT_ANALYTICS_GRACE_MS)]);
 }
 
-let hasSingleInstanceLock = !shouldExitForWindowsStoreTransition && app.requestSingleInstanceLock();
+let hasSingleInstanceLock = app.requestSingleInstanceLock();
 let lastSecondInstanceActivateAt = 0;
 let didWaitForSingleInstanceLock = false;
 let hasIgnoredStaleReopenQuit = false;
 let shouldRelaunchAfterQuitCleanup = false;
 const appProcessStartedAt = Date.now();
-
-if (shouldExitForWindowsStoreTransition) {
-  app.quit();
-}
 
 /**
  * Waits for the single-instance lock while a previous instance finishes exiting.
@@ -4590,10 +4930,6 @@ app.on("second-instance", () => {
 });
 
 app.whenReady().then(async () => {
-  if (shouldExitForWindowsStoreTransition) {
-    return;
-  }
-
   if (!(await waitForSingleInstanceLock())) {
     // An instance is already running: this instance exits directly, to avoid a second instance
     // contending for the fixed ports (memory 18960 / agent gateway) and causing a startup failure.
@@ -4630,6 +4966,13 @@ app.on("activate", () => {
 });
 
 app.on("window-all-closed", () => {
+  // The packaged startup splash can be torn down by Windows before the runtime services finish
+  // booting. Do not let that transient zero-window state terminate the main process; boot() will
+  // either create the initial window or surface the startup error itself.
+  if (!isBootReady) {
+    void writePackagedStartupLog("boot:window-all-closed-ignored");
+    return;
+  }
   if (process.platform !== "darwin") {
     app.quit();
   }

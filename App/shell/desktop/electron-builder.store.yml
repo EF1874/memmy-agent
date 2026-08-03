@@ -1,5 +1,17 @@
 extends: electron-builder.win.yml
 
+extraResources:
+  - from: dist/runtime/bin
+    to: cli
+    filter:
+      - "**/*"
+  - from: build/icon.ico
+    to: icon.ico
+  - from: dist/native
+    to: native
+    filter:
+      - "MemmyStoreUpdate.exe"
+
 win:
   target:
     - target: appx
@@ -8,11 +20,13 @@ win:
 
 appx:
   artifactName: Memmy-${version}-${arch}.msix
+  capabilities:
+    - runFullTrust
   backgroundColor: transparent
   identityName: Memmy.Development
   applicationId: Memmy
   publisher: CN=Memmy Development
-  publisherDisplayName: MemTensor
+  publisherDisplayName: Memmy Development
   displayName: Memmy
   languages:
     - zh-CN

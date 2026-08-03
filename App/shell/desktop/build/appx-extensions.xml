@@ -5,3 +5,9 @@
     <rescap3:DesktopApp ShortcutPath="%APPDATA%\Microsoft\Windows\Start Menu\Programs\Memmy.lnk" />
   </rescap3:DesktopAppMigration>
 </rescap3:Extension>
+<desktop7:Extension Category="windows.shortcut">
+  <desktop7:Shortcut
+    File="$(Desktop)\Memmy.lnk"
+    Icon="$(Package)\app\resources\icon.ico"
+    Description="Memmy" />
+</desktop7:Extension>

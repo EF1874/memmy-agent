@@ -177,6 +177,9 @@ describe("SettingsPageView", () => {
     const source = readFileSync(settingsPageSourcePath, "utf8");
 
     expect(source).toContain('t("settings.about.terms")');
+    expect(source).toContain('t("settings.about.reportAiContent")');
+    expect(source).toContain("buildAiContentReportMailto(language)");
+    expect(source).toContain("window.memmy.openMailto(mailtoUrl)");
     expect(source).toContain('openExternalUrl(getLegalLinkUrl("terms", language, bootstrap?.legal))');
     expect(source).not.toContain('appActions.navigate("/terms")');
     expect(source).not.toContain('<LinkButton label={t("settings.about.terms")} href="#" />');

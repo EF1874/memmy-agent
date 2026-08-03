@@ -920,11 +920,13 @@ export function spawnNodeService(
     ...process.env,
     ...env,
     MEMMY_LOG_LEVEL: logOptions.logLevel,
-    ELECTRON_RUN_AS_NODE: "1",
     NODE_ENV: process.env.NODE_ENV ?? "production"
   };
   const child = spawn(process.execPath, [entry, ...args], {
-    env: childEnv,
+    env: {
+      ...childEnv,
+      ELECTRON_RUN_AS_NODE: "1"
+    },
     stdio: logOptions.ipc ? ["ignore", "pipe", "pipe", "ipc"] : ["ignore", "pipe", "pipe"],
     windowsHide: true
   });

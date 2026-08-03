@@ -19,6 +19,7 @@ import {
 } from "../app/pet-guide.js";
 import { consumeTokenExhaustedApplyMoreRequest, TOKEN_EXHAUSTED_APPLY_MORE_EVENT } from "../app/token-exhausted-apply-more.js";
 import { getLegalLinkUrl } from "../legal/legal-links.js";
+import { communityLinks } from "../community/community-links.js";
 import { maskAccountIdentifier } from "../utils/mask-account-identifier.js";
 import { isComposingKeyboardEvent } from "../utils/keyboard.js";
 import { openExternalUrl } from "../utils/open-url.js";
@@ -71,7 +72,7 @@ import {
 } from "./model-config.js";
 import { ValidationMessage } from "./api-key-form-fields.js";
 import { OverflowTooltipText } from "../components/overflow-tooltip-text.js";
-import type { MessageKey, MessageValues } from "../i18n/messages.js";
+import { messageCatalogs, resolveLanguage, type MessageKey, type MessageValues } from "../i18n/messages.js";
 
 type LogLevel = "error" | "warn" | "info" | "debug";
 type ModelMode = "platform" | "custom";
@@ -1918,6 +1919,10 @@ export function SettingsPageView(props: SettingsPageViewProps) {
                 {resolveUpdateButtonLabel(update.phase, t)}
               </button>
               <LinkButton label={t("settings.about.terms")} onClick={() => void openExternalUrl(getLegalLinkUrl("terms", language, bootstrap?.legal))} />
+              <LinkButton
+                label={t("settings.about.reportAiContent")}
+                onClick={() => void openAiContentReport(language)}
+              />
             </div>
             {update.feedback && (
               <div className={`text-xs ${update.phase === "error" ? "text-status-error" : "text-text-ink/45"}`}>
@@ -3245,6 +3250,32 @@ function resolveAccountInitials(value: string): string {
  * @param value An ISO 8601 time string.
  * @returns A settings-page-readable registration time.
  */
+export function buildAiContentReportMailto(language: Language): string {
+  const messages = messageCatalogs[resolveLanguage(language)];
+  const subject = messages["settings.about.reportAiContentSubject"];
+  const body = [
+    messages["settings.about.reportAiContentPrompt"],
+    "",
+    messages["settings.about.reportAiContentTime"],
+    messages["settings.about.reportAiContentProvider"],
+    messages["settings.about.reportAiContentExcerpt"],
+    "",
+    messages["settings.about.reportAiContentSecretsWarning"]
+  ].join("\n");
+  return `mailto:${communityLinks.email}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+}
+
+async function openAiContentReport(language: Language): Promise<void> {
+  const mailtoUrl = buildAiContentReportMailto(language);
+  if (typeof window !== "undefined" && typeof window.memmy?.openMailto === "function") {
+    await window.memmy.openMailto(mailtoUrl);
+    return;
+  }
+  if (typeof window !== "undefined") {
+    window.location.assign(mailtoUrl);
+  }
+}
+
 function formatRegisteredAt(value: string | null, t: SettingsTranslate): string {
   if (!value) {
     return t("settings.registeredUnknown");

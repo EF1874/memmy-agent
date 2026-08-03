@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "installedDisplayName": "Memmy",
+  "environments": {
+    "personal": {
+      "publisher": "CN=D0FAE30D-03A3-4022-BECC-83DCFCFAC00B",
+      "publisherDisplayName": "Leason",
+      "applications": {
+        "cn": null,
+        "intl": {
+          "storeProductId": "9P7LQRSNG9SL",
+          "identityName": "Leason.MemmyStorePreview",
+          "manifestApplicationId": "Memmy",
+          "displayName": "Memmy Store Preview",
+          "packageFamilyName": "Leason.MemmyStorePreview_49qkyxp1vaee6"
+        }
+      }
+    },
+    "company": {
+      "publisher": null,
+      "publisherDisplayName": "MemTensor",
+      "applications": {
+        "cn": null,
+        "intl": null
+      }
+    }
+  }
+}

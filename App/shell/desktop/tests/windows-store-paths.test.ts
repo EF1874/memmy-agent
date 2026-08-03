@@ -2,7 +2,10 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { resolveWindowsStoreUserDataPath } from "../src/main/windows-store-paths.js";
+import {
+  resolveWindowsStoreAumid,
+  resolveWindowsStoreUserDataPath
+} from "../src/main/windows-store-paths.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -19,6 +22,11 @@ describe("Windows Store paths", () => {
       resourcesPath: "",
       localAppDataPath: ""
     })).toBeNull();
+    expect(resolveWindowsStoreAumid({
+      isWindowsStore: false,
+      resourcesPath: "",
+      localAppDataPath: ""
+    })).toBeNull();
   });
 
   it("resolves LocalState from the installed package identity", () => {
@@ -29,7 +37,7 @@ describe("Windows Store paths", () => {
     mkdirSync(resourcesPath, { recursive: true });
     writeFileSync(
       join(packageRoot, "AppxManifest.xml"),
-      '<Package><Identity Publisher="CN=Memmy Development" Name="Memmy.Development" Version="0.0.2.0" /></Package>',
+      '<Package><Identity Publisher="CN=Memmy Development" Name="Memmy.Development" Version="0.0.2.0" /><Applications><Application Id="Memmy" /></Applications></Package>',
       "utf8"
     );
 
@@ -38,6 +46,11 @@ describe("Windows Store paths", () => {
       resourcesPath,
       localAppDataPath
     })).toBe(join(localAppDataPath, "Packages", "Memmy.Development_abc123", "LocalState", "Memmy"));
+    expect(resolveWindowsStoreAumid({
+      isWindowsStore: true,
+      resourcesPath,
+      localAppDataPath
+    })).toBe("Memmy.Development_abc123!Memmy");
   });
 
   it("rejects an installed package without an Identity name", () => {
