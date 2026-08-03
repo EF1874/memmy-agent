@@ -201,6 +201,54 @@ describe("AppFrame", () => {
     expect(source).toContain('"app-frame-task-row--current"');
   });
 
+  it("renders supported IM task rows as channel icon followed by the plain title", () => {
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <TaskRow
+          task={task("wechat", { title: "微信用户询问助手身份 · 微信" })}
+          isCurrent={false}
+          showPreview={false}
+          onOpen={() => undefined}
+          onContextMenu={() => undefined}
+          onPin={() => undefined}
+          archiveConfirming={false}
+          onRequestArchive={() => undefined}
+          onConfirmArchive={() => undefined}
+          onUnarchive={() => undefined}
+          onDeleteArchived={() => undefined}
+        />
+      </I18nProvider>
+    );
+
+    expect(html).toContain('aria-label="微信 logo"');
+    expect(html).toContain("微信用户询问助手身份");
+    expect(html).not.toContain("微信用户询问助手身份 · 微信");
+    expect(html.indexOf('aria-label="微信 logo"')).toBeLessThan(html.indexOf("微信用户询问助手身份"));
+  });
+
+  it("keeps unsupported channel task titles unchanged", () => {
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <TaskRow
+          task={task("slack", { title: "团队消息 · Slack" })}
+          isCurrent={false}
+          showPreview={false}
+          onOpen={() => undefined}
+          onContextMenu={() => undefined}
+          onPin={() => undefined}
+          archiveConfirming={false}
+          onRequestArchive={() => undefined}
+          onConfirmArchive={() => undefined}
+          onUnarchive={() => undefined}
+          onDeleteArchived={() => undefined}
+        />
+      </I18nProvider>
+    );
+
+    expect(html).toContain("团队消息 · Slack");
+    expect(html).not.toContain("im-channel-title-icon");
+  });
+
   it("labels project tasks whose project record or registry is unavailable", () => {
     const unavailableTask = task("unavailable", {
       projectId: "project-a",

@@ -95,6 +95,38 @@ const channelLogoBySlug: Record<string, string> = {
   wechat: wechatLogoUrl
 };
 
+const taskChannelByTitleSuffix = [
+  { slug: "telegram", name: "Telegram", suffixes: ["Telegram"] },
+  { slug: "wechat", name: "\u5fae\u4fe1", suffixes: ["\u5fae\u4fe1", "WeChat"] },
+  { slug: "discord", name: "Discord", suffixes: ["Discord"] },
+  { slug: "imessage", name: "iMessage", suffixes: ["iMessage"] },
+  { slug: "feishu", name: "\u98de\u4e66", suffixes: ["\u98de\u4e66", "Feishu"] },
+  { slug: "dingtalk", name: "\u9489\u9489", suffixes: ["\u9489\u9489", "DingTalk"] }
+] as const;
+
+export interface ImChannelTitleDisplay {
+  title: string;
+  slug: string;
+  channelName: string;
+}
+
+/** Split the six desktop-supported IM channel suffixes from projected task titles. */
+export function imChannelTitleDisplay(title: string): ImChannelTitleDisplay | null {
+  for (const channel of taskChannelByTitleSuffix) {
+    for (const suffixName of channel.suffixes) {
+      const suffix = ` · ${suffixName}`;
+      if (title.endsWith(suffix)) {
+        return {
+          title: title.slice(0, -suffix.length).trimEnd(),
+          slug: channel.slug,
+          channelName: channel.name
+        };
+      }
+    }
+  }
+  return null;
+}
+
 export function composioLogoUrl(slug: string): string {
   return `https://logos.composio.dev/api/${slug}`;
 }
@@ -191,6 +223,15 @@ export function IntegrationLogoBadge(props: { slug: string; name: string; surfac
           onError={() => setFailed(true)}
         />
       </span>
+    </span>
+  );
+}
+
+/** Compact channel mark used beside IM task titles. */
+export function ImChannelTitleIcon(props: { slug: string; name: string }) {
+  return (
+    <span className="im-channel-title-icon" aria-label={`${props.name} logo`}>
+      <IntegrationLogoBadge slug={props.slug} name={props.name} surface="channel" sizeClassName="h-4 w-4" />
     </span>
   );
 }

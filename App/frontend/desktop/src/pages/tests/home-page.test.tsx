@@ -153,9 +153,12 @@ describe("HomePage", () => {
 
     expect(source).toContain('className="agent-conversation-panel flex flex-col h-full"');
     expect(source).toContain("const activeConversationTitle = state.agent.currentSessionKey");
-    expect(source).toContain("const activeConversationTitleDisplay = formatConversationTitleForDisplay(activeConversationTitle);");
+    expect(source).toContain("const activeImTitleDisplay = imChannelTitleDisplay(activeConversationTitle);");
+    expect(source).toContain("formatConversationTitleForDisplay(activeImTitleDisplay?.title ?? activeConversationTitle)");
     expect(source).toContain("topBar={hasActiveConversation ? (");
     expect(source).toContain('<h1 className="agent-conversation-title" title={activeConversationTitle}>');
+    expect(source).toContain('<span className="agent-conversation-title__text">{activeConversationTitleDisplay}</span>');
+    expect(source).toContain('<ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} />');
     expect(source).toContain("{activeConversationTitleDisplay}");
     expect(source).toContain("topBarBorder={hasActiveConversation}");
     expect(source).not.toContain("agent-conversation-titlebar");

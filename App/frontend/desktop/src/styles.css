@@ -960,6 +960,7 @@ body:has(.memory-drawer) .window-drag-region {
 }
 
 .agent-conversation-title {
+  display: flex;
   flex: 1 1 auto;
   min-width: 0;
   max-width: 100%;
@@ -974,6 +975,17 @@ body:has(.memory-drawer) .window-drag-region {
   user-select: none;
   white-space: nowrap;
   -webkit-user-select: none;
+}
+
+.agent-conversation-title__text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-conversation-title > .im-channel-title-icon {
+  margin-left: 6px;
 }
 
 .agent-conversation-scroll {
@@ -6453,6 +6465,32 @@ input[type="checkbox"].check-sky:checked::after {
   max-height: 40px;
   object-fit: contain;
   padding: 4px;
+}
+
+.im-channel-title-icon {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  align-items: center;
+  justify-content: center;
+}
+
+.im-channel-title-icon :is(.integration-logo-badge, .channel-integration-icon-badge, .generic-integration-icon-badge) {
+  width: 16px;
+  height: 16px;
+  border-radius: 5px;
+  box-shadow: none;
+  outline: none;
+}
+
+.im-channel-title-icon .integration-logo-image {
+  padding: 1px;
+}
+
+.im-channel-title-icon .channel-integration-icon-badge svg {
+  width: 12px;
+  height: 12px;
 }
 
 .generic-integration-icon-badge svg {

@@ -32,6 +32,7 @@ import {
 } from "../lib/agent-attachment.js";
 import { encodeAgentImage, type AgentImageMime } from "../lib/agent-image-encode.js";
 import { formatConversationTitleForDisplay } from "../lib/format-conversation-title.js";
+import { ImChannelTitleIcon, imChannelTitleDisplay } from "../integrations/integration-meta.js";
 import { useTaskBus, type TaskBusAgentMessage } from "../lib/task-bus.js";
 import type { AppAction } from "../state/app-actions.js";
 import { agentActions, appActions, createAgentOperationError } from "../state/app-actions.js";
@@ -756,7 +757,8 @@ export function HomePage() {
   const activeConversationTitle = state.agent.currentSessionKey
     ? state.agent.tasks.find((task) => task.sessionKey === state.agent.currentSessionKey)?.title.trim() || t("home.title")
     : t("home.title");
-  const activeConversationTitleDisplay = formatConversationTitleForDisplay(activeConversationTitle);
+  const activeImTitleDisplay = imChannelTitleDisplay(activeConversationTitle);
+  const activeConversationTitleDisplay = formatConversationTitleForDisplay(activeImTitleDisplay?.title ?? activeConversationTitle);
   const sessionArtifactClient = useMemo(() => {
     const client = clients?.memmyAgent;
     const sessionKey = state.agent.currentSessionKey;
@@ -2011,7 +2013,8 @@ export function HomePage() {
       title={t("home.title")}
       topBar={hasActiveConversation ? (
         <h1 className="agent-conversation-title" title={activeConversationTitle}>
-          {activeConversationTitleDisplay}
+          <span className="agent-conversation-title__text">{activeConversationTitleDisplay}</span>
+          {activeImTitleDisplay ? <ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} /> : null}
         </h1>
       ) : null}
       topBarBorder={hasActiveConversation}

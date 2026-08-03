@@ -3,11 +3,13 @@ import { describe, expect, it } from "vitest";
 import {
   CATEGORY_TABS,
   GenericIntegrationIcon,
+  ImChannelTitleIcon,
   IntegrationLogoBadge,
   composioLogoUrl,
   getAllIntegrationMeta,
   getIntegrationMeta,
-  guessIntegrationCategory
+  guessIntegrationCategory,
+  imChannelTitleDisplay
 } from "../integration-meta.js";
 import { CHANNELS, MANAGED_INTEGRATION_TOOLKITS } from "../toolkit-catalog.js";
 
@@ -72,6 +74,35 @@ describe("integrationMeta", () => {
       expect(html).not.toContain("channel-integration-icon-badge");
       expect(html).not.toContain("generic-integration-icon-badge");
     }
+  });
+
+  it("只拆分桌面端支持的 6 个 IM 渠道标题后缀", () => {
+    expect([
+      "安排发布 · Telegram",
+      "安排发布 · 微信",
+      "安排发布 · Discord",
+      "安排发布 · iMessage",
+      "安排发布 · 飞书",
+      "安排发布 · DingTalk"
+    ].map((title) => imChannelTitleDisplay(title)?.slug)).toEqual([
+      "telegram",
+      "wechat",
+      "discord",
+      "imessage",
+      "feishu",
+      "dingtalk"
+    ]);
+    expect(imChannelTitleDisplay("安排发布 · Slack")).toBeNull();
+    expect(imChannelTitleDisplay("普通 GUI 任务")).toBeNull();
+  });
+
+  it("IM 标题图标复用渠道 logo，并使用紧凑尺寸", () => {
+    const html = renderToString(<ImChannelTitleIcon slug="wechat" name="微信" />);
+
+    expect(html).toContain("im-channel-title-icon");
+    expect(html).toContain('aria-label="微信 logo"');
+    expect(html).toContain("h-4 w-4");
+    expect(html).toContain("integration-logo-image");
   });
 
   it("按类别组织方式映射代表 slug", () => {
