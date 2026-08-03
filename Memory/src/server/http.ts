@@ -210,9 +210,7 @@ function createAutoWorkerDrain(
   let startupTimer: ReturnType<typeof setTimeout> | undefined;
   let delayedTimer: ReturnType<typeof setTimeout> | undefined;
   const maxCycles = 40;
-  const priorityJobLimit = 100;
-  const priorityBatchSize = 20;
-  const standardBatchSize = 100;
+  const workerBatchSize = 4;
 
   async function drain(): Promise<void> {
     if (disposed) {
@@ -235,16 +233,13 @@ function createAutoWorkerDrain(
       }
       do {
         requested = false;
-        let prioritySummariesDuringDrain = 0;
         for (let cycle = 0; cycle < maxCycles; cycle += 1) {
-          const limit = prioritySummariesDuringDrain < priorityJobLimit ? priorityBatchSize : standardBatchSize;
-          const result = await service.runWorkerOnce(limit, {});
+          const result = await service.runWorkerOnce(workerBatchSize, {
+            priorityCohortOnly: true
+          });
           if (result.leased === 0 && result.embeddingRetries.leased === 0) {
             break;
           }
-          prioritySummariesDuringDrain += result.jobs.filter((job) =>
-            job.jobType === "trace_summary" || job.jobType === "import_summary"
-          ).length;
           if (cycle === maxCycles - 1) {
             continueSoon = true;
           }
@@ -578,12 +573,14 @@ async function routeRequest(
     const request = envelopeWithPrincipal(asObject(body, "worker.run"), principal) as RequestEnvelope & {
       limit?: unknown;
       targetMemoryIds?: unknown;
+      priorityCohortOnly?: unknown;
     };
     return service.runWorkerOnce(
       parseNumberValue(request.limit) ?? parseNumber(url.searchParams.get("limit")) ?? 20,
       {
         ...request,
-        targetMemoryIds: parseOptionalStringArray(request.targetMemoryIds, "worker.run.targetMemoryIds")
+        targetMemoryIds: parseOptionalStringArray(request.targetMemoryIds, "worker.run.targetMemoryIds"),
+        priorityCohortOnly: request.priorityCohortOnly === true
       }
     );
   }

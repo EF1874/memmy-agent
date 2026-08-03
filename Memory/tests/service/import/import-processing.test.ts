@@ -1033,14 +1033,28 @@ describe("MemoryService / import / processing", () => {
       userId: "user-import-order"
     };
 
-    const older = addAgentSourceImport(service, namespace, "older memory query", "order-old");
-    const newer = addAgentSourceImport(service, namespace, "newer memory query", "order-new");
-    db.db.prepare(`UPDATE memories SET updated_at = ? WHERE id = ?`).run("2026-06-10T10:00:00.000Z", older.id);
+    const older = addAgentSourceImport(
+      service,
+      namespace,
+      "older memory query",
+      "order-old",
+      "2026-06-10T10:00:00.000Z"
+    );
+    const newer = addAgentSourceImport(
+      service,
+      namespace,
+      "newer memory query",
+      "order-new",
+      "2026-06-10T12:00:00.000Z"
+    );
+    db.db.prepare(`UPDATE memories SET updated_at = ? WHERE id = ?`).run("2026-06-10T13:00:00.000Z", older.id);
     db.db.prepare(`UPDATE memories SET updated_at = ? WHERE id = ?`).run("2026-06-10T12:00:00.000Z", newer.id);
 
-    const run = await service.runWorkerOnce(10);
+    const summaryRun = await service.runWorkerOnce(10);
+    const embeddingRun = await service.runWorkerOnce(10);
 
-    expect(run.jobs.map((job) => job.targetMemoryId)).toEqual([newer.id, older.id]);
+    expect(summaryRun.jobs.map((job) => job.targetMemoryId)).toEqual([newer.id, older.id]);
+    expect(embeddingRun.jobs.map((job) => job.targetMemoryId)).toEqual([newer.id, older.id]);
     expect(llmCalls[0]?.messages.find((message) => message.role === "user")?.content).toContain("newer memory query");
 
     db.close();
@@ -1069,7 +1083,13 @@ describe("MemoryService / import / processing", () => {
     };
 
     for (let index = 0; index < 25; index += 1) {
-      addAgentSourceImport(service, namespace, `imported query ${index}`, `interleave-${index}`);
+      addAgentSourceImport(
+        service,
+        namespace,
+        `imported query ${index}`,
+        `interleave-${index}`,
+        new Date(Date.UTC(2026, 5, 10, 10, index)).toISOString()
+      );
     }
 
     const summaryRun = await service.runWorkerOnce(20);
@@ -1165,8 +1185,20 @@ describe("MemoryService / import / processing", () => {
       userId: "user-import-placeholder-order"
     };
 
-    const older = addAgentSourceImport(service, namespace, "older user query", "placeholder-old");
-    const newer = addAgentSourceImport(service, namespace, "newer assistant placeholder query", "placeholder-new");
+    const older = addAgentSourceImport(
+      service,
+      namespace,
+      "older user query",
+      "placeholder-old",
+      "2026-06-10T10:00:00.000Z"
+    );
+    const newer = addAgentSourceImport(
+      service,
+      namespace,
+      "newer assistant placeholder query",
+      "placeholder-new",
+      "2026-06-10T12:00:00.000Z"
+    );
     db.db.prepare(`DELETE FROM evolution_jobs WHERE target_memory_id IN (?, ?)`).run(older.id, newer.id);
     db.db.prepare(`UPDATE memories SET updated_at = ?, info_json = json_set(info_json, '$.summary', ?) WHERE id = ?`)
       .run("2026-06-10T10:00:00.000Z", "## user", older.id);
@@ -1200,6 +1232,68 @@ describe("MemoryService / import / processing", () => {
        WHERE target_memory_id = ? AND job_type = 'import_summary'`
     ).all(newer.id) as Array<{ job_type: string; status: string }>;
     expect(queuedSummary).toEqual([{ job_type: "import_summary", status: "queued" }]);
+
+    db.close();
+  });
+
+  it("finishes a new Memmy chat memory before draining scanned-memory backlog", async () => {
+    const root = createTestRoot("mindock-memory-live-priority-");
+    const db = new MemoryDb({
+      path: join(root, "memory.sqlite")
+    });
+    const llmCalls: Array<{
+      messages: Array<{ role: string; content: string }>;
+      options: { operation: string };
+    }> = [];
+    const embeddingTexts: string[] = [];
+    const service = createTestMemoryService({
+      db,
+      mode: "dev",
+      llm: createBatchReflectionLlm(llmCalls),
+      embedder: createCapturingEmbedder(embeddingTexts)
+    });
+    const namespace = {
+      source: "memmy",
+      profileId: "jiang",
+      userId: "user-live-priority"
+    };
+
+    const oldImport = addAgentSourceImport(
+      service,
+      namespace,
+      "old scanned memory",
+      "live-priority-old",
+      "2026-06-10T10:00:00.000Z"
+    );
+    const recentImport = addAgentSourceImport(
+      service,
+      namespace,
+      "recent scanned memory",
+      "live-priority-recent",
+      "2026-06-10T12:00:00.000Z"
+    );
+    const session = service.openSession({ namespace });
+    const live = service.completeTurn("turn-live-priority", {
+      sessionId: session.sessionId,
+      query: "Remember the new interactive preference.",
+      answer: "The new interactive preference is dark mode."
+    });
+
+    const summaryRun = await service.runWorkerOnce(4, { priorityCohortOnly: true });
+    const embeddingRun = await service.runWorkerOnce(4, { priorityCohortOnly: true });
+    const scanRun = await service.runWorkerOnce(4, { priorityCohortOnly: true });
+
+    expect(summaryRun.jobs).toEqual([
+      expect.objectContaining({ jobType: "trace_summary", targetMemoryId: live.l1MemoryId })
+    ]);
+    expect(embeddingRun.jobs).toEqual([
+      expect.objectContaining({ jobType: "embedding", targetMemoryId: live.l1MemoryId })
+    ]);
+    expect(scanRun.jobs.map((job) => job.targetMemoryId)).toEqual([recentImport.id, oldImport.id]);
+    expect(scanRun.jobs.every((job) => job.jobType === "import_summary")).toBe(true);
+    expect(llmCalls[0]?.messages.find((message) => message.role === "user")?.content)
+      .toContain("new interactive preference");
+    expect(embeddingTexts).toHaveLength(1);
 
     db.close();
   });

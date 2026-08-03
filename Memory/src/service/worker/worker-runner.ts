@@ -302,7 +302,10 @@ export class WorkerRunner {
 
   async runWorkerOnce(
     limit = 100,
-    request: RequestEnvelope & { targetMemoryIds?: string[] } = {}
+    request: RequestEnvelope & {
+      targetMemoryIds?: string[];
+      priorityCohortOnly?: boolean;
+    } = {}
   ): Promise<WorkerRunSummary> {
     if (!this.deps.memoryAddEnabled()) {
       return this.deps.runWorkerNoWrite(request);
@@ -317,11 +320,13 @@ export class WorkerRunner {
     for (const { before, after } of requeuedJobs) {
       this.deps.appendJobChange(after, "queued", before);
     }
-    const jobs = this.deps.repos.runtime.leaseQueuedJobs(normalizedLimit, 60, targetMemoryIds);
+    const jobs = this.deps.repos.runtime.leaseQueuedJobs(
+      normalizedLimit,
+      60,
+      targetMemoryIds,
+      request.priorityCohortOnly
+    );
     const retryCapacity = Math.max(0, normalizedLimit - jobs.length);
-    const embeddingRetries = retryCapacity > 0
-      ? await this.runEmbeddingRetryOnce(retryCapacity, targetMemoryIds)
-      : { leased: 0, succeeded: 0, failed: 0, items: [] };
     const results: WorkerJobRunResult[] = [];
     for (let index = 0; index < jobs.length;) {
       const job = jobs[index]!;
@@ -347,6 +352,9 @@ export class WorkerRunner {
       results.push(await this.runLeasedWorkerJob(job));
       index += 1;
     }
+    const embeddingRetries = retryCapacity > 0
+      ? await this.runEmbeddingRetryOnce(retryCapacity, targetMemoryIds)
+      : { leased: 0, succeeded: 0, failed: 0, items: [] };
 
     const succeeded = results.reduce((sum, result) => sum + result.succeeded, 0);
     const failed = results.reduce((sum, result) => sum + result.failed, 0);

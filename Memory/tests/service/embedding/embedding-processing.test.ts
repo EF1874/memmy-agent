@@ -266,11 +266,13 @@ describe("MemoryService / embedding / processing", () => {
       layers: ["L1"]
     });
     expect(recall.hits.some((hit) => hit.id === complete.l1MemoryId)).toBe(true);
-    const openEpisodeRun = await service.runWorkerOnce(10);
-    expect(openEpisodeRun.jobs.map((job) => job.jobType)).toEqual(["episode_idle_close", "trace_summary"]);
+    const openEpisodeRun = await service.runWorkerOnce(10, { priorityCohortOnly: true });
+    expect(openEpisodeRun.jobs.map((job) => job.jobType)).toEqual(["trace_summary"]);
     expect(llmCalls.filter((call) => call.options.operation === "capture.summarize")).toHaveLength(1);
-    const embeddingRun = await service.runWorkerOnce(10);
+    const embeddingRun = await service.runWorkerOnce(10, { priorityCohortOnly: true });
     expect(embeddingRun.jobs.map((job) => job.jobType)).toEqual(["embedding"]);
+    const episodeRun = await service.runWorkerOnce(10, { priorityCohortOnly: true });
+    expect(episodeRun.jobs.map((job) => job.jobType)).toEqual(["episode_idle_close"]);
     expect(embeddingTexts).toHaveLength(1);
     expect(db.db.prepare(
       `SELECT COUNT(*) AS count FROM evolution_jobs

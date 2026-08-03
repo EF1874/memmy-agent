@@ -427,7 +427,10 @@ function detectFeedbackPreference(
     };
   }
   if (/(prefer|instead|should use|下次用|改用|而不是)/.test(normalized)) {
-    return { shape: "preference", confidence: 0.55 };
+    return {
+      shape: "preference",
+      confidence: feedbackMatchesAny(normalized, FEEDBACK_NEGATIVE_PATTERNS) ? 0.75 : 0.55
+    };
   }
   return null;
 }
@@ -1049,7 +1052,8 @@ Fields:
 - turnSummaries: chronological L1 summaries of the episode.
 - finalExchange: exact trailing user and assistant text.
 - execution: authoritative aggregate tool outcome.
-- feedback: explicit or implicit user signal; implicit feedback is weaker.
+- feedback: the latest explicit or implicit user signal; implicit feedback is weaker.
+- feedbackHistory: all captured user signals in chronological order.
 - host: authoritative host-agent identity/model context. Do not project your
   own identity, provider, policies, or capabilities onto the host agent.
 
@@ -1059,7 +1063,8 @@ Score three independent axes in [-1, 1]:
 - user_satisfaction: -1 correction/frustration, 0 no signal, +1 acceptance.
 
 Rules:
-- Judge goal achievement against mission, using turnSummaries in order.
+- Judge goal achievement against the active goal, using turnSummaries in order. If later user turns revise or replace the initial mission within the same episode, grade the latest active goal.
+- Treat feedback chronologically. A negative correction followed by demonstrated recovery or explicit acceptance is not a permanent failure.
 - If execution.completedByTool is "no", goal_achievement must not exceed 0
   unless a later summary shows a successful recovery.
 - Explicit negative feedback without later recovery means goal_achievement <= 0.
@@ -3259,6 +3264,26 @@ export function policyMetaFromMemory(memory: MemoryRow): PolicyMemoryMeta | null
   };
 }
 
+export function failureAvoidancePolicyIsRetrievalEligible(policy: PolicyMemoryMeta): boolean {
+  if (policy.experienceType !== "failure_avoidance" && policy.evidencePolarity !== "negative") {
+    return true;
+  }
+  if (policy.confidence < 0.6 || !policy.trigger.trim()) return false;
+  const preferences = new Set(policy.decisionGuidance.preference.map(normalizeGuidanceForComparison).filter(Boolean));
+  const antiPatterns = new Set(policy.decisionGuidance.antiPattern.map(normalizeGuidanceForComparison).filter(Boolean));
+  if (preferences.size === 0 || antiPatterns.size === 0) return false;
+  return [...preferences].some((item) => !antiPatterns.has(item));
+}
+
+function normalizeGuidanceForComparison(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/^(?:avoid|prefer|safer behavior)\s*:\s*/i, "")
+    .replace(/[\s.。!！?？,，;；:：]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export function skillMetaFromMemory(memory: MemoryRow): SkillMemoryMeta | null {
   if (memory.memoryLayer !== "Skill") return null;
   const skill = getInternal<Record<string, unknown>>(memory, "skill");
@@ -4983,6 +5008,9 @@ function candidateFromMemory(
     if (skill.eta < options.config.minSkillEta) return null;
   }
   if (memory.memoryLayer === "L2" && policy?.status === "archived") {
+    return null;
+  }
+  if (memory.memoryLayer === "L2" && policy && !failureAvoidancePolicyIsRetrievalEligible(policy)) {
     return null;
   }
   if (memory.memoryLayer === "L3" && (world?.confidence ?? 0) < options.config.minWorldModelConfidence) {
