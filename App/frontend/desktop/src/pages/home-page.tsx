@@ -63,6 +63,7 @@ import { AppFrame } from "./app-frame.js";
 import { mergeVoiceTranscript, useAsrRecorder } from "./asr-recorder.js";
 import { FirstEncounterRelayChallenge, FirstEncounterRelayOptIn, firstEncounterFollowUpMode, hasDetectedRelayAgents, relayAgentOptions } from "./first-encounter-relay-challenge.js";
 import {
+  armFirstEncounterRelayChat,
   consumeFirstEncounterRelayArm,
   consumePendingFirstEncounterTaskLaunch,
   readFirstEncounterRelayChat,
@@ -95,6 +96,8 @@ const SLASH_COMMAND_RETRY_DELAYS_MS = [300, 1000, 2500];
  * immediately, regardless of what triggered that scroll event.
  */
 const AGENT_CONVERSATION_USER_SCROLL_INTENT_MS = 600;
+const FIRST_ENCOUNTER_MEMORY_VERIFY_TIMEOUT_MS = 60_000;
+const FIRST_ENCOUNTER_MEMORY_VERIFY_INTERVAL_MS = 2_000;
 /** Definition for stop confirmation grace ms. */
 export const STOP_CONFIRMATION_GRACE_MS = 8000;
 const TRANSLATABLE_AGENT_ERROR_KEYS = new Set<MessageKey>([
@@ -764,6 +767,8 @@ export function HomePage() {
     sourceId: source.sourceId,
     displayName: source.displayName,
     available: source.available,
+    builtin: source.builtin,
+    messageCount: source.messageCount,
     status: source.status
   }));
   const relayAgents = relayAgentOptions(agentSourceOptions);
@@ -797,6 +802,17 @@ export function HomePage() {
         firstEncounterRelayChatId
       );
       setFirstEncounterRelayReadyChatId(firstEncounterRelayChatId);
+      const completedAt = state.bootstrap?.onboarding.completedAt
+        ? Date.parse(state.bootstrap.onboarding.completedAt)
+        : Number.NaN;
+      track({
+        name: "onboarding_first_task_completed",
+        params: {
+          page_path: "/main",
+          ...(Number.isFinite(completedAt) ? { duration_ms: Math.max(0, Date.now() - completedAt) } : {})
+        },
+        consentTier: "basic"
+      });
     }
   }, [
     firstEncounterRelayAnswerMessageId,
@@ -805,7 +821,9 @@ export function HomePage() {
     isCurrentAgentRunning,
     isFirstEncounterFollowUpChat,
     state.agent.lastTaskCompletion?.chatId,
-    state.agent.messages
+    state.agent.messages,
+    state.bootstrap?.onboarding.completedAt,
+    track
   ]);
 
   const openFirstEncounterRelayAgent = useCallback(async (sourceId: string, prompt: string): Promise<boolean> => {
@@ -817,13 +835,65 @@ export function HomePage() {
     }
   }, []);
 
+  const verifyFirstEncounterRelayMemory = useCallback(async (sourceId: string, startedAt: string): Promise<boolean> => {
+    const client = clients?.memoryRuntime;
+    if (!client) {
+      return false;
+    }
+    const startedAtMs = Date.parse(startedAt);
+    const deadline = Date.now() + FIRST_ENCOUNTER_MEMORY_VERIFY_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      try {
+        const output = await client.listMemoryLogs({
+          tools: ["memory_search"],
+          sourceAgent: sourceId,
+          limit: 20,
+          offset: 0
+        });
+        if (output.logs.some((log) => log.success && Date.parse(log.calledAt) >= startedAtMs)) {
+          return true;
+        }
+      } catch {
+        // The logs route may be unavailable while the local Memory service is starting.
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, FIRST_ENCOUNTER_MEMORY_VERIFY_INTERVAL_MS));
+    }
+    return false;
+  }, [clients?.memoryRuntime]);
+
+  const trackFirstEncounterRelayLifecycle = useCallback((
+    event: "relay_clicked" | "memory_verified",
+    sourceId: string,
+    action: string
+  ) => {
+    track({
+      name: event === "memory_verified"
+        ? "onboarding_external_memory_verified"
+        : "onboarding_relay_clicked",
+      params: {
+        page_path: "/main",
+        action,
+        ...(sourceId ? { source_id: sourceId } : {})
+      },
+      consentTier: "basic"
+    });
+  }, [track]);
+
   const openFirstEncounterRelayConnections = useCallback(() => {
     dispatch(appActions.navigate("/memory-sources"));
   }, [dispatch]);
 
-  const firstEncounterRelayContent = firstEncounterRelayAnchorMessageId && hasDetectedAgents
-    ? firstEncounterFollowUp === "relay"
-      ? <FirstEncounterRelayChallenge agents={relayAgents} onOpenAgent={openFirstEncounterRelayAgent} />
+  // scan_and_write_skill → relay list; scan_only → opt-in install card.
+  const firstEncounterRelayContent = firstEncounterRelayAnchorMessageId
+    ? firstEncounterFollowUp === "relay" && hasDetectedAgents
+      ? (
+          <FirstEncounterRelayChallenge
+            agents={relayAgents}
+            onOpenAgent={openFirstEncounterRelayAgent}
+            onVerifyMemory={verifyFirstEncounterRelayMemory}
+            onLifecycle={trackFirstEncounterRelayLifecycle}
+          />
+        )
       : firstEncounterFollowUp === "connect"
         ? <FirstEncounterRelayOptIn onOpenConnections={openFirstEncounterRelayConnections} />
         : null
@@ -972,7 +1042,8 @@ export function HomePage() {
     }
 
     const memmyAgent = clients.memmyAgent;
-    const pendingPrompt = consumePendingFirstEncounterTaskLaunch(typeof window === "undefined" ? undefined : window.sessionStorage);
+    const storage = typeof window === "undefined" ? undefined : window.sessionStorage;
+    const pendingPrompt = consumePendingFirstEncounterTaskLaunch(storage);
     if (!pendingPrompt) {
       return;
     }
@@ -1003,10 +1074,7 @@ export function HomePage() {
       }
     }).then((sent) => {
       if (!sent) {
-        writePendingFirstEncounterTaskLaunch(
-          typeof window === "undefined" ? undefined : window.sessionStorage,
-          pendingPrompt
-        );
+        writePendingFirstEncounterTaskLaunch(storage, pendingPrompt);
       }
     });
   }, [
@@ -1492,7 +1560,6 @@ export function HomePage() {
       loadSlashCommands({ resetAttempts: true });
     }
   }
-
 
   /**
    * Automatically shrinks or expands the input box height.

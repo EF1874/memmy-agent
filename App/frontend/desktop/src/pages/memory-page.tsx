@@ -2,7 +2,12 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { buildMemorySubPageViewEvent } from "../analytics/page-view.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import { useApiClients } from "../app/providers.js";
-import { PRODUCT_TOUR_MEMORY_NAV_ANCHOR } from "../app/product-tour-layout.js";
+import {
+  PRODUCT_TOUR_MEMORY_LOGS_NAV_ANCHOR,
+  PRODUCT_TOUR_MEMORY_NAV_ANCHOR,
+  PRODUCT_TOUR_MEMORY_OVERVIEW_NAV_ANCHOR,
+  PRODUCT_TOUR_MEMORY_SOURCES_NAV_ANCHOR
+} from "../app/product-tour-layout.js";
 import type { MessageKey } from "../i18n/messages.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { appActions } from "../state/app-actions.js";
@@ -130,6 +135,11 @@ export function MemoryPage(props: MemoryPageProps) {
   useEffect(() => {
     if (props.initialSubPage) {
       setActivePage(props.initialSubPage);
+      return;
+    }
+    const stored = typeof window === "undefined" ? null : readMemorySubPage(window.sessionStorage);
+    if (stored) {
+      setActivePage(stored);
     }
   }, [props.initialSubPage]);
 
@@ -167,6 +177,19 @@ export function readMemorySubPage(storage: Storage | undefined): MemorySubPageId
 
 export function writeMemorySubPage(storage: Storage | undefined, page: MemorySubPageId): void {
   storage?.setItem(MEMORY_SUB_PAGE_STORAGE_KEY, page);
+}
+
+function resolveMemoryNavTourAnchor(page: MemorySubPageId): string | undefined {
+  switch (page) {
+    case "logs":
+      return PRODUCT_TOUR_MEMORY_LOGS_NAV_ANCHOR;
+    case "overview":
+      return PRODUCT_TOUR_MEMORY_OVERVIEW_NAV_ANCHOR;
+    case "sources":
+      return PRODUCT_TOUR_MEMORY_SOURCES_NAV_ANCHOR;
+    default:
+      return undefined;
+  }
 }
 
 export interface MemoryPageViewProps {
@@ -230,6 +253,7 @@ export function MemoryPageView(props: MemoryPageViewProps) {
                   <div key={item.id}>
                     <button
                       type="button"
+                      data-tour-anchor={resolveMemoryNavTourAnchor(item.id)}
                       onClick={() => props.onActivePageChange(item.id)}
                       className={`app-frame-nav-button relative flex items-center gap-2.5 px-3 py-2 transition-all cursor-pointer ${
                         active

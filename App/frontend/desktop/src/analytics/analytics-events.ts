@@ -89,6 +89,23 @@ export interface OnboardingCompletedEvent {
   consentTier: "basic";
 }
 
+export interface OnboardingActivationEvent {
+  name:
+    | "onboarding_report_viewed"
+    | "onboarding_report_action_clicked"
+    | "onboarding_first_task_completed"
+    | "onboarding_relay_clicked"
+    | "onboarding_external_memory_verified";
+  params: {
+    page_path: string;
+    action?: string;
+    source_id?: string;
+    empty_history?: boolean;
+    duration_ms?: number;
+  };
+  consentTier: "basic";
+}
+
 export interface FirstEntryEvent {
   name: "first_entry";
   params: { page_location: string };
@@ -185,6 +202,7 @@ export type AnalyticsEvent =
   | ByokCompletedEvent
   | OnboardingStepCompletedEvent
   | OnboardingCompletedEvent
+  | OnboardingActivationEvent
   | TokenUsageSnapshotEvent
   | ImprovementLogEvent
   | MemoryUiAnalyticsEvent;

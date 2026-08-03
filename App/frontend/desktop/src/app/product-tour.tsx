@@ -1,12 +1,19 @@
 /** Product tour module. */
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { FileText, PlugZap, Settings2 } from "lucide-react";
 import { Memmy, type MemmyPose } from "../components/mascot/memmy.js";
 import { zhCNMessages, type MessageKey } from "../i18n/messages.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { BrainCircuit, Link2 } from "../pages/memory/memory-prototype-icons.js";
 import {
   createDomProductTourAnchorLookup,
-  PRODUCT_TOUR_MEMORY_NAV_ANCHOR,
+  PRODUCT_TOUR_MEMORY_AGENTS_LIST_ANCHOR,
+  PRODUCT_TOUR_MEMORY_LOGS_LIST_ANCHOR,
+  PRODUCT_TOUR_MEMORY_LOGS_NAV_ANCHOR,
+  PRODUCT_TOUR_MEMORY_OVERVIEW_COUNTS_ANCHOR,
+  PRODUCT_TOUR_MEMORY_OVERVIEW_NAV_ANCHOR,
+  PRODUCT_TOUR_MEMORY_SCAN_PREFERENCES_ANCHOR,
+  PRODUCT_TOUR_MEMORY_SOURCES_NAV_ANCHOR,
   PRODUCT_TOUR_TOOLS_CONTENT_ANCHOR,
   PRODUCT_TOUR_TOOLS_NAV_ANCHOR,
   resolveProductTourStepLayout,
@@ -16,7 +23,7 @@ import {
 import { readProductTourStep, writeProductTourStep, type AppRoutePath } from "./routes.js";
 
 /** Type definition for product tour tab. */
-export type ProductTourTab = "chat" | "tools" | "memory" | "settings";
+export type ProductTourTab = "logs" | "agents" | "agentsScan" | "overview" | "tools" | "chat" | "settings";
 
 /** Handles product tour tab route. */
 export function productTourTabRoute(tab: ProductTourTab): AppRoutePath {
@@ -25,10 +32,30 @@ export function productTourTabRoute(tab: ProductTourTab): AppRoutePath {
       return "/tools";
     case "settings":
       return "/settings";
-    case "memory":
+    case "agents":
+    case "agentsScan":
+      return "/memory-sources";
+    case "logs":
+    case "overview":
+      return "/memory";
     case "chat":
     default:
       return "/main";
+  }
+}
+
+/** Memory sub-page keyed by tour tab, when the route is /memory. */
+export function productTourMemorySubPage(tab: ProductTourTab): "logs" | "overview" | "sources" | null {
+  switch (tab) {
+    case "logs":
+      return "logs";
+    case "overview":
+      return "overview";
+    case "agents":
+    case "agentsScan":
+      return "sources";
+    default:
+      return null;
   }
 }
 
@@ -47,29 +74,96 @@ export interface ProductTourStep {
   extraHighlights?: ProductTourHighlightSpec[];
 }
 
-const PRODUCT_TOUR_BUBBLE_GAP_PX = 16;
-
 export const productTourSteps: ProductTourStep[] = createProductTourSteps((key) => zhCNMessages[key]);
 
 /** Creates create product tour steps. */
 export function createProductTourSteps(t: (key: MessageKey) => string): ProductTourStep[] {
   return [
     {
-      tab: "memory",
-      title: t("productTour.memory.title"),
-      icon: <BrainCircuit size={15} className="text-action-sky" />,
+      tab: "logs",
+      title: t("onboarding.featureDig.logs.title"),
+      icon: <FileText size={15} className="text-action-sky" />,
       pose: "brain",
-      description: t("productTour.memory.description"),
-      arrow: "left",
+      description: t("onboarding.featureDig.logs.description"),
+      arrow: "top",
       bubblePlacement: {
-        anchorId: PRODUCT_TOUR_MEMORY_NAV_ANCHOR,
-        side: "right",
-        align: "center",
-        gap: PRODUCT_TOUR_BUBBLE_GAP_PX
+        // Sit just under the lit log rows and point up at them.
+        anchorId: PRODUCT_TOUR_MEMORY_LOGS_LIST_ANCHOR,
+        side: "below",
+        align: "start",
+        gap: 12
       },
       highlight: {
-        anchorId: PRODUCT_TOUR_MEMORY_NAV_ANCHOR
-      }
+        anchorId: PRODUCT_TOUR_MEMORY_LOGS_LIST_ANCHOR,
+        padding: { top: 4, right: 6, bottom: 4, left: 6 }
+      },
+      extraHighlights: [
+        { anchorId: PRODUCT_TOUR_MEMORY_LOGS_NAV_ANCHOR, padding: { top: 4, right: 4, bottom: 4, left: 4 } }
+      ]
+    },
+    {
+      tab: "agents",
+      title: t("onboarding.featureDig.agents.title"),
+      icon: <PlugZap size={15} className="text-action-sky" />,
+      pose: "chat",
+      description: t("onboarding.featureDig.agents.description"),
+      arrow: "left",
+      bubblePlacement: {
+        anchorId: PRODUCT_TOUR_MEMORY_SOURCES_NAV_ANCHOR,
+        side: "right",
+        align: "center",
+        gap: 12
+      },
+      highlight: {
+        anchorId: PRODUCT_TOUR_MEMORY_AGENTS_LIST_ANCHOR,
+        padding: { top: 8, right: 8, bottom: 8, left: 8 },
+        viewportBottom: 24
+      },
+      extraHighlights: [
+        { anchorId: PRODUCT_TOUR_MEMORY_SOURCES_NAV_ANCHOR, padding: { top: 4, right: 4, bottom: 4, left: 4 } }
+      ]
+    },
+    {
+      tab: "agentsScan",
+      title: t("onboarding.featureDig.agentsScan.title"),
+      icon: <Settings2 size={15} className="text-action-sky" />,
+      pose: "chat",
+      description: t("onboarding.featureDig.agentsScan.description"),
+      arrow: "left",
+      bubblePlacement: {
+        anchorId: PRODUCT_TOUR_MEMORY_SOURCES_NAV_ANCHOR,
+        side: "right",
+        align: "center",
+        gap: 12
+      },
+      highlight: {
+        anchorId: PRODUCT_TOUR_MEMORY_SCAN_PREFERENCES_ANCHOR,
+        padding: { top: 8, right: 8, bottom: 8, left: 8 }
+      },
+      extraHighlights: [
+        { anchorId: PRODUCT_TOUR_MEMORY_SOURCES_NAV_ANCHOR, padding: { top: 4, right: 4, bottom: 4, left: 4 } }
+      ]
+    },
+    {
+      tab: "overview",
+      title: t("onboarding.featureDig.memory.title"),
+      icon: <BrainCircuit size={15} className="text-action-sky" />,
+      pose: "brain",
+      description: t("onboarding.featureDig.memory.description"),
+      arrow: "left",
+      bubblePlacement: {
+        anchorId: PRODUCT_TOUR_MEMORY_OVERVIEW_NAV_ANCHOR,
+        side: "right",
+        align: "center",
+        gap: 12
+      },
+      highlight: {
+        anchorId: PRODUCT_TOUR_MEMORY_OVERVIEW_COUNTS_ANCHOR,
+        padding: { top: 8, right: 8, bottom: 8, left: 8 }
+      },
+      extraHighlights: [
+        { anchorId: PRODUCT_TOUR_MEMORY_OVERVIEW_NAV_ANCHOR, padding: { top: 4, right: 4, bottom: 4, left: 4 } }
+      ]
     },
     {
       tab: "tools",
@@ -77,14 +171,14 @@ export function createProductTourSteps(t: (key: MessageKey) => string): ProductT
       icon: <Link2 size={15} className="text-action-sky" />,
       pose: "chat",
       description: t("productTour.tools.description"),
-      arrow: "bottom",
+      arrow: "left",
       bubblePlacement: {
         anchorId: PRODUCT_TOUR_TOOLS_CONTENT_ANCHOR,
         side: "inside",
         blockAlign: "start",
         inlineAlign: "end",
-        offsetX: 4,
-        offsetY: 4
+        offsetX: 16,
+        offsetY: 16
       },
       highlight: {
         anchorId: PRODUCT_TOUR_TOOLS_CONTENT_ANCHOR,
@@ -92,7 +186,7 @@ export function createProductTourSteps(t: (key: MessageKey) => string): ProductT
         viewportBottom: 16
       },
       extraHighlights: [
-        { anchorId: PRODUCT_TOUR_TOOLS_NAV_ANCHOR }
+        { anchorId: PRODUCT_TOUR_TOOLS_NAV_ANCHOR, padding: { top: 4, right: 4, bottom: 4, left: 4 } }
       ]
     }
   ];
@@ -115,9 +209,12 @@ export function ProductTourGuide(props: ProductTourGuideProps) {
   const current = steps[Math.min(step, steps.length - 1)]!;
   const [layout, setLayout] = useState(() => null as ReturnType<typeof resolveProductTourStepLayout>);
 
+  const onTabChangeRef = useRef(onTabChange);
+  onTabChangeRef.current = onTabChange;
+
   useEffect(() => {
-    onTabChange(current.tab);
-  }, [current, onTabChange]);
+    onTabChangeRef.current(current.tab);
+  }, [current.tab]);
 
   useEffect(() => {
     if (typeof document === "undefined" || typeof window === "undefined") {
@@ -162,6 +259,9 @@ export function ProductTourGuide(props: ProductTourGuideProps) {
       subtree: true
     });
 
+    const highlightElement = document.querySelector<HTMLElement>(`[data-tour-anchor="${current.highlight.anchorId}"]`);
+    highlightElement?.scrollIntoView({ block: "center", behavior: "smooth" });
+
     setLayout(null);
     scheduleMeasurement();
     window.addEventListener("resize", scheduleMeasurement);
@@ -185,7 +285,8 @@ export function ProductTourGuide(props: ProductTourGuideProps) {
   /** Handles go next. */
   function goNext() {
     if (isLast) {
-      onTabChange("chat");
+      // Dismiss owns navigation to /main; calling onTabChange("chat") first races
+      // with the still-mounted tools step and can bounce back to /tools.
       onDismiss();
       return;
     }
@@ -199,14 +300,14 @@ export function ProductTourGuide(props: ProductTourGuideProps) {
 
   /** Handles handle dismiss. */
   function handleDismiss() {
-    onTabChange("chat");
     onDismiss();
   }
 
+  const arrow = layout.arrow;
   const animationClass =
-    current.arrow === "left" || current.arrow === "right"
+    arrow === "left" || arrow === "right"
       ? "animate-in fade-in slide-in-from-left-2"
-      : current.arrow === "bottom"
+      : arrow === "bottom"
         ? "animate-in fade-in slide-in-from-bottom-2"
         : "animate-in fade-in slide-in-from-top-2";
 
@@ -272,34 +373,34 @@ export function ProductTourGuide(props: ProductTourGuideProps) {
               onClick={goNext}
               className="px-4 py-1.5 text-xs font-normal text-white bg-action-sky rounded-btn hover:bg-action-sky-hover cursor-pointer transition-all shadow-sm"
             >
-              {isLast ? t("productTour.start") : t("productTour.next")}
+              {isLast ? t("onboarding.featureDig.startChat") : t("productTour.next")}
             </button>
           </div>
 
-          {current.arrow === "left" && (
+          {arrow === "left" && (
             <div
-              className="absolute w-3 h-3 bg-background-paper border-l border-b border-border-stone/30 transform -rotate-45"
-              style={{ left: "-6px", top: "22px" }}
+              className="absolute w-3 h-3 bg-background-paper border-l border-b border-border-stone/30 -rotate-45"
+              style={{ left: "-6px", top: "50%", marginTop: "-6px" }}
             />
           )}
 
-          {current.arrow === "right" && (
+          {arrow === "right" && (
             <div
-              className="absolute w-3 h-3 bg-background-paper border-r border-b border-border-stone/30 transform rotate-45"
-              style={{ right: "-6px", top: "22px" }}
+              className="absolute w-3 h-3 bg-background-paper border-r border-b border-border-stone/30 rotate-45"
+              style={{ right: "-6px", top: "50%", marginTop: "-6px" }}
             />
           )}
 
-          {current.arrow === "top" && (
+          {arrow === "top" && (
             <div
-              className="absolute w-3 h-3 bg-background-paper border-l border-t border-border-stone/30 transform rotate-45"
+              className="absolute w-3 h-3 bg-background-paper border-l border-t border-border-stone/30 rotate-45"
               style={{ top: "-6px", left: "28px" }}
             />
           )}
 
-          {current.arrow === "bottom" && (
+          {arrow === "bottom" && (
             <div
-              className="absolute w-3 h-3 bg-background-paper border-r border-b border-border-stone/30 transform rotate-45"
+              className="absolute w-3 h-3 bg-background-paper border-r border-b border-border-stone/30 rotate-45"
               style={{ bottom: "-6px", left: "28px" }}
             />
           )}
