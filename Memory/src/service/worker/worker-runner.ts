@@ -5,6 +5,10 @@
  * injected explicitly so this module has no service-class dependency.
  */
 import type { Embedder } from "../../model/types.js";
+import {
+  retrievalDocumentIsCurrent,
+  retrievalDocumentSourceHash
+} from "../../algorithm/plugin-algorithms.js";
 import { createMemoryLogger, memoryErrorFields } from "../../logging/logger.js";
 import {
   jobToRef,
@@ -20,6 +24,7 @@ import type {
   PreparedEmbeddingJob
 } from "../embedding/embedding-job-processor.js";
 import {
+  embeddingTextForMemory,
   embeddingRetryBackoffMs,
   embeddingRetryToRunItem
 } from "../embedding/embedding-pipeline.js";
@@ -76,6 +81,7 @@ export interface WorkerStartupReconciliation {
   restartedFailedProcessing: number;
   enqueuedImportSummaries: number;
   enqueuedEmbeddingRepairs: number;
+  enqueuedRetrievalReindexes: number;
 }
 
 export interface EmbeddingRetryClaim {
@@ -151,7 +157,8 @@ export class WorkerRunner {
         requeuedEmbeddingRetries: 0,
         restartedFailedProcessing: 0,
         enqueuedImportSummaries: 0,
-        enqueuedEmbeddingRepairs: 0
+        enqueuedEmbeddingRepairs: 0,
+        enqueuedRetrievalReindexes: 0
       };
     }
 
@@ -170,6 +177,7 @@ export class WorkerRunner {
 
     let enqueuedImportSummaries = 0;
     let enqueuedEmbeddingRepairs = 0;
+    let enqueuedRetrievalReindexes = 0;
     const activeProcessing = this.deps.repos.processing.listByStates([
       "summary_pending",
       "summarizing",
@@ -257,12 +265,38 @@ export class WorkerRunner {
       }, ["embedding_pending", "embedding"]);
     }
 
+    const retrievalMemories = this.deps.repos.memories.list({
+      memoryLayer: ["Skill", "L3"],
+      status: ["activated", "resolving"]
+    }, limit);
+    for (const memory of retrievalMemories) {
+      this.deps.repos.memories.reindexFts(memory);
+      if (!this.deps.capture.embedAfterCapture || retrievalDocumentIsCurrent(memory)) continue;
+      if (this.deps.repos.runtime.hasPendingJob(memory.id, "embedding")) continue;
+      const sourceHash = retrievalDocumentSourceHash(memory);
+      this.deps.enqueueJob({
+        jobType: "embedding",
+        userId: memory.userId,
+        sessionId: memory.sessionId,
+        targetMemoryId: memory.id,
+        dedupeKey: `embedding:retrieval-v2:${memory.id}:${sourceHash}`,
+        payload: {
+          reason: "startup.retrieval_document_v2",
+          retrievalSourceHash: sourceHash
+        },
+        maxAttempts: 6,
+        createdAt: at
+      });
+      enqueuedRetrievalReindexes += 1;
+    }
+
     return {
       requeuedJobs: interruptedJobs.length + failedJobs.length,
       requeuedEmbeddingRetries: embeddingRetries.length,
       restartedFailedProcessing,
       enqueuedImportSummaries,
-      enqueuedEmbeddingRepairs
+      enqueuedEmbeddingRepairs,
+      enqueuedRetrievalReindexes
     };
   }
 
@@ -555,6 +589,21 @@ export class WorkerRunner {
     if (!memory) {
       throw new Error(`embedding retry target not found: ${retry.targetKind}:${retry.targetId}`);
     }
+    if ((memory.memoryLayer === "Skill" || memory.memoryLayer === "L3") && embeddingTextForMemory(memory) !== retry.sourceText) {
+      const completed = this.deps.repos.runtime.markEmbeddingRetrySucceededClaimed(retry.id, {
+        ...claim,
+        now: this.nowMs()
+      });
+      if (completed) this.deps.appendEmbeddingRetryChange(completed, "succeeded", retry);
+      const replacement = this.deps.enqueueEmbeddingRetry(
+        memory,
+        embeddingTextForMemory(memory),
+        this.deps.nowIso(),
+        retry.vectorField
+      );
+      this.deps.appendEmbeddingRetryChange(replacement, "queued");
+      return { succeeded: 0, failed: 0, item: completed ? embeddingRetryToRunItem(completed) : null };
+    }
     let completed: EmbeddingRetryRecord | undefined;
     this.deps.embeddingJobs.persistEmbeddingVector({
       memoryId: memory.id,
@@ -562,6 +611,9 @@ export class WorkerRunner {
       vector,
       attemptCount: retry.attempts + 1,
       source: "worker.embedding_retry",
+      sourceHash: memory.memoryLayer === "Skill" || memory.memoryLayer === "L3"
+        ? retrievalDocumentSourceHash(memory)
+        : undefined,
       allowedProcessingStates: ["embedding_pending", "embedding"],
       finalize: () => {
         completed = this.deps.repos.runtime.markEmbeddingRetrySucceededClaimed(retry.id, {

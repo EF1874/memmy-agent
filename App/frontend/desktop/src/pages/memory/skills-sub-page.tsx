@@ -60,8 +60,7 @@ interface SkillView {
   createdAt: string;
   updatedAt: string;
   body: string;
-  summary: string;
-  invocationGuide: string;
+  usageGuide: string;
   decisionGuidance: SkillDecisionGuidance;
   evidenceAnchors: string[];
   sourcePolicyIds: string[];
@@ -443,7 +442,7 @@ function SkillDetail(props: { detail: GetMemoryOutput; timeline: SkillTimelineEn
       </section>
 
       <SkillTimelineSection entries={props.timeline} />
-      <DetailTextSection title={t("memory.skills.invocationGuide")} body={skill.invocationGuide || skill.summary} />
+      {skill.usageGuide && <DetailTextSection title={t("memory.skills.invocationGuide")} body={skill.usageGuide} />}
       <DetailTextSection title={t("memory.skills.body")} body={skill.body} />
 
       {hasDecisionGuidance && (
@@ -676,10 +675,28 @@ function skillFromDetail(detail: GetMemoryOutput): SkillView {
   const properties = recordValue(metadata.properties);
   const info = recordValue(metadata.info);
   const internalInfo = recordValue(properties.internal_info);
+  const layerSkill = recordValue(detail.item.skill);
   const skill = recordValue(firstDefined(internalInfo.skill, metadata.skill, properties.skill));
+  const procedure = recordValue(firstDefined(skill.procedureJson, skill.procedure_json, internalInfo.procedureJson, internalInfo.procedure_json));
   const decisionGuidance = readDecisionGuidance(
     firstDefined(skill.decisionGuidance, skill.decision_guidance, internalInfo.decisionGuidance, internalInfo.decision_guidance)
   );
+  const body = cleanMemoryBody(detail.item.body);
+  const shortUsageGuide = uniqueStrings([
+    firstString(layerSkill.retrievalBlurb, layerSkill.retrieval_blurb, procedure.retrievalBlurb, procedure.retrieval_blurb) ?? "",
+    firstString(layerSkill.triggerContext, layerSkill.trigger_context, procedure.triggerContext, procedure.trigger_context) ?? ""
+  ]).join("\n\n");
+  const parsedUsageGuide = parseMarkdownSection(detail.item.body, ["When to use", "\u9002\u7528\u573a\u666f", "\u8c03\u7528\u65f6\u673a"]);
+  const legacyInvocationGuide = firstString(
+    layerSkill.invocationGuide,
+    skill.invocationGuide,
+    skill.invocation_guide,
+    internalInfo.invocationGuide,
+    internalInfo.invocation_guide
+  );
+  const distinctLegacyGuide = legacyInvocationGuide && cleanMemoryBody(legacyInvocationGuide) !== body
+    ? legacyInvocationGuide
+    : "";
 
   return {
     title: displaySkillTitle(detail.item, firstString(skill.title, internalInfo.title)),
@@ -687,15 +704,8 @@ function skillFromDetail(detail: GetMemoryOutput): SkillView {
     source: firstString(metadata.source, internalInfo.source),
     createdAt: detail.item.createdAt,
     updatedAt: detail.item.updatedAt,
-    body: cleanMemoryBody(detail.item.body),
-    summary: cleanMemoryText(detail.item.summary),
-    invocationGuide: firstString(
-      skill.invocationGuide,
-      skill.invocation_guide,
-      internalInfo.invocationGuide,
-      internalInfo.invocation_guide,
-      parseMarkdownSection(detail.item.body, ["Invocation", "\u8c03\u7528\u6307\u5357", "\u8c03\u7528"])
-    ) ?? "",
+    body,
+    usageGuide: shortUsageGuide || parsedUsageGuide || distinctLegacyGuide,
     decisionGuidance,
     evidenceAnchors: readEvidenceAnchors(firstDefined(skill.evidenceAnchors, skill.evidence_anchors, internalInfo.evidenceAnchors, internalInfo.evidence_anchors)),
     sourcePolicyIds: stringArray(firstDefined(skill.sourcePolicyIds, skill.source_policy_ids, internalInfo.sourcePolicyIds, internalInfo.source_policy_ids)),

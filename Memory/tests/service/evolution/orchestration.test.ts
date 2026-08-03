@@ -984,14 +984,14 @@ describe("MemoryService / evolution / orchestration", () => {
     for (let i = 0; i < 16; i += 1) {
       await service.runWorkerOnce(100);
       if (
-        calls.some((call) => call.options.operation === "l3.abstraction.v2") &&
+        calls.some((call) => call.options.operation === "l3.abstraction.v3") &&
         calls.some((call) => call.options.operation === "skill.crystallize")
       ) {
         break;
       }
     }
 
-    const l3Call = calls.find((call) => call.options.operation === "l3.abstraction.v2");
+    const l3Call = calls.find((call) => call.options.operation === "l3.abstraction.v3");
     if (l3Call) {
       expect(l3Call.options.thinkingMode).toBe("enabled");
       expect(l3Call.messages[0]!.content).toContain("declarative");
