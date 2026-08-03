@@ -300,7 +300,6 @@ export const StartTurnOutputSchema = z.object({
   turnId: NonEmptyStringSchema,
   contextPacketId: NonEmptyStringSchema,
   sessionId: NonEmptyStringSchema,
-  episodeId: NonEmptyStringSchema,
   injectedContext: InjectedContextSchema,
   searchEventId: NonEmptyStringSchema,
   sourceMemoryIds: z.array(NonEmptyStringSchema),
@@ -333,11 +332,14 @@ export const CompleteTurnOutputSchema = z.object({
   sessionId: NonEmptyStringSchema,
   episodeId: NonEmptyStringSchema,
   rawTurnId: NonEmptyStringSchema,
-  l1MemoryId: NonEmptyStringSchema,
+  l1MemoryId: z.string(),
+  l1MemoryIds: z.array(NonEmptyStringSchema),
+  closedEpisodeIds: z.array(NonEmptyStringSchema),
   scheduledEvolution: z.boolean(),
   jobs: z.array(JobRefSchema),
   changeSeq: z.number().int().nonnegative(),
-  serverTime: IsoTimeSchema
+  serverTime: IsoTimeSchema,
+  duplicate: z.boolean().optional()
 });
 export type CompleteTurnOutput = z.infer<typeof CompleteTurnOutputSchema>;
 

@@ -71,6 +71,8 @@ type InternalMemorySearchRequest = MemorySearchRequest & {
   targetSkillId?: string;
   contextHints?: Record<string, unknown>;
   injectedContextQuery?: string;
+  turnIntentDecision?: unknown;
+  routeProposal?: unknown;
   recordEvent?: boolean;
 };
 
