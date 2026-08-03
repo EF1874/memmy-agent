@@ -5,6 +5,7 @@ import {
   MemoryDb,
   type LlmClient
 } from "../../../src/index.js";
+import { Repositories } from "../../../src/storage/repositories.js";
 import {
   accountRuntimeConfig,
   createCapturingEmbedder,
@@ -955,7 +956,7 @@ describe("MemoryService / session / episode relation", () => {
     db.close();
   });
 
-  it("turns revision relation messages into structured feedback and reward backprop", async () => {
+  it("records revision feedback immediately but defers reward backprop until episode close", async () => {
     const { db, service } = createTestService();
     const session = service.openSession({
       namespace: {
@@ -1039,8 +1040,28 @@ describe("MemoryService / session / episode relation", () => {
       change_type: "decision_repair_created"
     });
 
-    await service.runWorkerOnce(50);
+    const openMemory = db.db.prepare(
+      `SELECT properties_json
+       FROM memories
+       WHERE id = ?`
+    ).get(first.l1MemoryId) as { properties_json: string };
+    const openTrace = (JSON.parse(openMemory.properties_json) as {
+      internal_info: {
+        trace: {
+          r_human?: number;
+          source_feedback_ids?: string[];
+        };
+      };
+    }).internal_info.trace;
+    expect(openTrace.r_human).toBeUndefined();
+    expect(db.db.prepare(
+      `SELECT COUNT(*) AS count
+       FROM evolution_jobs
+       WHERE episode_id = ? AND job_type = 'reward'`
+    ).get(first.episodeId)).toEqual({ count: 0 });
 
+    service.closeSession(session.sessionId);
+    await runWorkerRounds(service, 2, 50);
     const memory = db.db.prepare(
       `SELECT properties_json
        FROM memories
@@ -1057,6 +1078,59 @@ describe("MemoryService / session / episode relation", () => {
     expect(trace.r_human).toBeCloseTo(-1);
     expect(trace.source_feedback_ids).toContain(feedback.id);
 
+    db.close();
+  });
+
+  it("clears a stale final reward when a closed episode is reopened", async () => {
+    const { db, service } = createTestService();
+    const session = service.openSession({
+      namespace: {
+        source: "codex",
+        profileId: "jiang",
+        userId: "user-reopen-stale-reward"
+      }
+    });
+    const first = service.completeTurn("turn-reopen-stale-reward-first", {
+      sessionId: session.sessionId,
+      query: "Configure nginx TLS for the service",
+      answer: "Use port 80 and skip certificate verification."
+    });
+    const repos = new Repositories(db.db);
+    const rewardDetail = {
+      phase: "final",
+      rHuman: -0.25,
+      traceIds: [first.l1MemoryId]
+    };
+    repos.runtime.updateEpisodeReward(first.episodeId, {
+      rTask: -0.25,
+      rewardDetail,
+      metaPatch: { reward: rewardDetail }
+    });
+    repos.runtime.closeEpisode(first.episodeId, { closeReason: "idle_timeout" });
+
+    await service.startTurn({
+      turnId: "turn-reopen-stale-reward-fix",
+      sessionId: session.sessionId,
+      query: "wrong, use port 443 instead and verify TLS"
+    });
+    const correction = service.completeTurn("turn-reopen-stale-reward-fix", {
+      sessionId: session.sessionId,
+      query: "wrong, use port 443 instead and verify TLS",
+      answer: "Corrected: use port 443 and verify TLS."
+    });
+
+    expect(correction.episodeId).toBe(first.episodeId);
+    expect(repos.runtime.getEpisode(first.episodeId)).toMatchObject({
+      status: "open",
+      rTask: undefined,
+      rewardDetail: {},
+      meta: {
+        rewardDirty: {
+          reason: "episode_reopened"
+        }
+      }
+    });
+    expect(repos.runtime.getEpisode(first.episodeId)?.meta).not.toHaveProperty("reward");
     db.close();
   });
 
@@ -1121,6 +1195,15 @@ describe("MemoryService / session / episode relation", () => {
       classifierPolarity: "negative"
     });
 
+    const rewardBeforeReflection = db.db.prepare(
+      `SELECT COUNT(*) AS count
+       FROM evolution_jobs
+       WHERE job_type = 'reward'
+         AND json_extract(payload_json, '$.feedbackId') = ?`
+    ).get(feedback.id) as { count: number };
+    expect(rewardBeforeReflection.count).toBe(0);
+
+    await service.runWorkerOnce(20);
     const queuedReward = db.db.prepare(
       `SELECT payload_json
        FROM evolution_jobs
@@ -1130,7 +1213,8 @@ describe("MemoryService / session / episode relation", () => {
     expect(JSON.parse(queuedReward!.payload_json)).toMatchObject({
       feedbackId: feedback.id,
       l1MemoryId: first.l1MemoryId,
-      trigger: "implicit_turn_feedback"
+      phase: "final",
+      trigger: "implicit_fallback"
     });
 
     await runWorkerRounds(service, 2, 20);

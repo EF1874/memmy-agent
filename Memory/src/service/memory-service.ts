@@ -1646,7 +1646,10 @@ export class MemoryService {
 
   runWorkerOnce(
     limit = 100,
-    request: RequestEnvelope & { targetMemoryIds?: string[] } = {}
+    request: RequestEnvelope & {
+      targetMemoryIds?: string[];
+      priorityCohortOnly?: boolean;
+    } = {}
   ): ReturnType<WorkerRunner["runWorkerOnce"]> {
     return this.workerRunner.runWorkerOnce(limit, request);
   }

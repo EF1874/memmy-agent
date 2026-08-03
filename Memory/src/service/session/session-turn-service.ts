@@ -2488,22 +2488,6 @@ export class SessionTurnService {
     });
     this.deps.repos.runtime.appendEpisodeFeedback(episode.id, feedback.id, at);
     this.deps.maybeCreateDecisionRepair(feedbackRequest, feedback, contextHash, this.deps.namespaceIdFromSession(session));
-    this.deps.enqueueJob({
-      jobType: "reward",
-      userId: session.userId,
-      sessionId: session.id,
-      episodeId: episode.id,
-      payload: {
-        feedbackId: feedback.id,
-        l1MemoryId: target.id,
-        channel: feedback.channel,
-        polarity: feedback.polarity,
-        magnitude: feedback.magnitude,
-        rationale: feedback.rationale,
-        trigger: "implicit_turn_feedback"
-      },
-      createdAt: at
-    });
     for (const trial of this.deps.pendingTrialsForFeedback(feedback)) {
       this.deps.enqueueJob({
         jobType: "skill_trial_resolve",
@@ -2594,22 +2578,6 @@ export class SessionTurnService {
     });
     this.deps.repos.runtime.appendEpisodeFeedback(episode.id, feedback.id, at);
     this.deps.maybeCreateDecisionRepair(feedbackRequest, feedback, contextHash, this.deps.namespaceIdFromSession(session));
-    this.deps.enqueueJob({
-      jobType: "reward",
-      userId: session.userId,
-      sessionId: session.id,
-      episodeId: episode.id,
-      payload: {
-        feedbackId: feedback.id,
-        l1MemoryId: target.id,
-        channel: feedback.channel,
-        polarity: feedback.polarity,
-        magnitude: feedback.magnitude,
-        rationale: feedback.rationale,
-        trigger: "revision_feedback"
-      },
-      createdAt: at
-    });
     for (const trial of this.deps.pendingTrialsForFeedback(feedback)) {
       this.deps.enqueueJob({
         jobType: "skill_trial_resolve",
