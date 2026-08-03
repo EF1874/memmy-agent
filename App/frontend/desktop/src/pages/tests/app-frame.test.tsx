@@ -226,6 +226,26 @@ describe("AppFrame", () => {
     expect(html.indexOf('aria-label="微信 logo"')).toBeLessThan(html.indexOf("微信用户询问助手身份"));
   });
 
+  it("aligns IM channel icons to the full text line height", () => {
+    const stylesSource = readFileSync(resolve(__dirname, "..", "..", "styles.css"), "utf8");
+    const iconBlock = stylesSource.slice(
+      stylesSource.indexOf(".im-channel-title-icon {"),
+      stylesSource.indexOf(".generic-integration-icon-badge svg")
+    );
+    const conversationIconBlock = stylesSource.slice(
+      stylesSource.indexOf(".agent-conversation-title > .im-channel-title-icon"),
+      stylesSource.indexOf(".agent-conversation-scroll")
+    );
+
+    expect(iconBlock).toContain("--im-channel-title-icon-size: 18px;");
+    expect(iconBlock).toContain("width: var(--im-channel-title-icon-size);");
+    expect(iconBlock).toContain("height: var(--im-channel-title-icon-size);");
+    expect(iconBlock).toContain(":is(.integration-logo-slot, .channel-integration-icon)");
+    expect(iconBlock).toContain("width: 100%;");
+    expect(iconBlock).toContain("height: 100%;");
+    expect(conversationIconBlock).toContain("--im-channel-title-icon-size: var(--codex-leading-base);");
+  });
+
   it("keeps unsupported channel task titles unchanged", () => {
     const html = renderToString(
       <I18nProvider language="zh-CN">

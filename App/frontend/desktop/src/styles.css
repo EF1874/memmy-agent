@@ -985,6 +985,7 @@ body:has(.memory-drawer) .window-drag-region {
 }
 
 .agent-conversation-title > .im-channel-title-icon {
+  --im-channel-title-icon-size: var(--codex-leading-base);
   margin-left: 6px;
 }
 
@@ -6468,29 +6469,35 @@ input[type="checkbox"].check-sky:checked::after {
 }
 
 .im-channel-title-icon {
+  --im-channel-title-icon-size: 18px;
   display: inline-flex;
-  width: 16px;
-  height: 16px;
-  flex: 0 0 16px;
+  width: var(--im-channel-title-icon-size);
+  height: var(--im-channel-title-icon-size);
+  flex: 0 0 var(--im-channel-title-icon-size);
   align-items: center;
   justify-content: center;
 }
 
+.im-channel-title-icon :is(.integration-logo-slot, .channel-integration-icon) {
+  width: 100%;
+  height: 100%;
+}
+
 .im-channel-title-icon :is(.integration-logo-badge, .channel-integration-icon-badge, .generic-integration-icon-badge) {
-  width: 16px;
-  height: 16px;
+  width: 100%;
+  height: 100%;
   border-radius: 5px;
   box-shadow: none;
   outline: none;
 }
 
 .im-channel-title-icon .integration-logo-image {
-  padding: 1px;
+  padding: 0;
 }
 
 .im-channel-title-icon .channel-integration-icon-badge svg {
-  width: 12px;
-  height: 12px;
+  width: 100%;
+  height: 100%;
 }
 
 .generic-integration-icon-badge svg {
