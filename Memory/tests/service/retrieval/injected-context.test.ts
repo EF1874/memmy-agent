@@ -375,7 +375,8 @@ describe("MemoryService / retrieval / injected context", () => {
       query: "fix sqlite budget migration",
       answer: "The sqlite budget migration is fixed."
     });
-    expect(completed.episodeId).toBe(prepared.episodeId);
+    expect(prepared).not.toHaveProperty("episodeId");
+    expect(completed.episodeId).toMatch(/^episode_/u);
     const rawTurn = db.db.prepare(
       "SELECT source_memory_ids_json, message_payload_json FROM raw_turns WHERE id = ?"
     ).get(completed.rawTurnId) as {
@@ -787,7 +788,7 @@ describe("MemoryService / retrieval / injected context", () => {
     });
 
     expect(unknown.status).not.toContain("intent:chitchat:retrieval_skipped");
-    expect(db.db.prepare("SELECT COUNT(*) AS count FROM episodes").get()).toEqual({ count: 3 });
+    expect(db.db.prepare("SELECT COUNT(*) AS count FROM episodes").get()).toEqual({ count: 0 });
     expect(db.db.prepare("SELECT COUNT(*) AS count FROM recall_events").get()).toEqual({ count: 3 });
     expect(db.db.prepare(
       "SELECT tool_name, COUNT(*) AS count FROM api_logs GROUP BY tool_name"

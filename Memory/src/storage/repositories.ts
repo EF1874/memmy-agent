@@ -1559,6 +1559,32 @@ export class RuntimeRepository {
     };
   }
 
+  rebindRawTurnEpisode(
+    rawTurnId: string,
+    fromEpisodeId: string,
+    toEpisodeId: string,
+    at = nowIso()
+  ): void {
+    if (fromEpisodeId === toEpisodeId) return;
+    const fromEpisode = this.getEpisode(fromEpisodeId);
+    if (!fromEpisode || !this.getEpisode(toEpisodeId)) {
+      throw new Error("cannot rebind a raw turn to a missing episode");
+    }
+    const remainingRawTurnIds = fromEpisode.rawTurnIds.filter((id) => id !== rawTurnId);
+    this.db
+      .prepare(
+        `UPDATE episodes
+         SET raw_turn_ids_json = ?,
+             turn_count = ?,
+             updated_at = ?
+         WHERE id = ?`
+      )
+      .run(toJson(remainingRawTurnIds), remainingRawTurnIds.length, at, fromEpisodeId);
+    this.db.prepare("UPDATE raw_turns SET episode_id = ? WHERE id = ?").run(toEpisodeId, rawTurnId);
+    this.db.prepare("UPDATE artifacts SET episode_id = ? WHERE raw_turn_id = ?").run(toEpisodeId, rawTurnId);
+    this.appendEpisodeRawTurn(toEpisodeId, rawTurnId, at);
+  }
+
   appendEpisodeFeedback(episodeId: string, feedbackId: string, at = nowIso()): EpisodeRecord | undefined {
     return this.appendEpisodeArrayValue(episodeId, "feedbackIds", "feedback_ids_json", feedbackId, at);
   }
@@ -1680,7 +1706,8 @@ export class RuntimeRepository {
     this.db
       .prepare(
         `UPDATE raw_turns
-         SET user_text = @userText,
+         SET episode_id = @episodeId,
+             user_text = @userText,
              assistant_text = @assistantText,
              reasoning_summary = @reasoningSummary,
              tool_calls_json = @toolCallsJson,
@@ -1695,6 +1722,7 @@ export class RuntimeRepository {
       )
       .run({
         id: rawTurn.id,
+        episodeId: rawTurn.episodeId,
         userText: rawTurn.userText ?? null,
         assistantText: rawTurn.assistantText ?? null,
         reasoningSummary: rawTurn.reasoningSummary ?? null,

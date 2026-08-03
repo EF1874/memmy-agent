@@ -744,10 +744,13 @@ function publicCompleteTurnResponse(result: unknown): Record<string, unknown> {
     episodeId: record.episodeId,
     rawTurnId: record.rawTurnId,
     l1MemoryId: record.l1MemoryId,
+    l1MemoryIds: record.l1MemoryIds,
+    closedEpisodeIds: record.closedEpisodeIds,
     scheduledEvolution: record.scheduledEvolution,
     jobs: record.jobs,
     changeSeq: record.changeSeq,
-    serverTime: record.serverTime
+    serverTime: record.serverTime,
+    ...(record.duplicate === true ? { duplicate: true } : {})
   };
 }
 
@@ -757,7 +760,6 @@ function publicStartTurnResponse(result: unknown): Record<string, unknown> {
     turnId: record.turnId,
     contextPacketId: record.contextPacketId,
     sessionId: record.sessionId,
-    episodeId: record.episodeId,
     searchEventId: record.searchEventId,
     injectedContext: record.injectedContext,
     sourceMemoryIds: record.sourceMemoryIds,
