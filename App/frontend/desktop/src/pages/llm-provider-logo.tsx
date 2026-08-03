@@ -3,7 +3,7 @@ import baiduLogoUrl from "../assets/llm-provider-logo/baidu.svg";
 import deepseekLogoUrl from "../assets/llm-provider-logo/deepseek.svg";
 import doubaoLogoUrl from "../assets/llm-provider-logo/doubao.svg";
 import geminiLogoUrl from "../assets/llm-provider-logo/gemini.svg";
-import memmyAccountLogoUrl from "../assets/llm-provider-logo/memmy-account.svg";
+import memmyAccountLogoUrl from "../assets/llm-provider-logo/memmy-account.png";
 import minimaxLogoUrl from "../assets/llm-provider-logo/minimax.svg";
 import moonshotLogoUrl from "../assets/llm-provider-logo/moonshot.svg";
 import openaiLogoUrl from "../assets/llm-provider-logo/openai.svg";

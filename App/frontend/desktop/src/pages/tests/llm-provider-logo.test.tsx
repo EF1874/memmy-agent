@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { llmProviderLogoUrl } from "../llm-provider-logo.js";
 
@@ -13,14 +15,21 @@ describe("llmProviderLogoUrl", () => {
       "moonshot",
       "minimax",
       "baidu",
-      "doubao",
-      "memmy_account"
+      "doubao"
     ]) {
       expect(llmProviderLogoUrl(provider)).toMatch(/^data:image\/svg\+xml/);
     }
 
+    expect(llmProviderLogoUrl("memmy_account")).toMatch(/memmy-account\.png$/);
     expect(llmProviderLogoUrl("google")).toBe(llmProviderLogoUrl("gemini"));
     expect(llmProviderLogoUrl("kimi")).toBe(llmProviderLogoUrl("moonshot"));
     expect(llmProviderLogoUrl("openrouter")).toBeNull();
+  });
+
+  it("uses an exact frontend copy of the desktop app icon for account mode", () => {
+    const frontendIcon = readFileSync(fileURLToPath(new URL("../../assets/llm-provider-logo/memmy-account.png", import.meta.url)));
+    const desktopIcon = readFileSync(fileURLToPath(new URL("../../../../../shell/desktop/build/icon.png", import.meta.url)));
+
+    expect(frontendIcon).toEqual(desktopIcon);
   });
 });
