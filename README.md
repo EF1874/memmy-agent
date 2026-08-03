@@ -35,7 +35,7 @@
 
 ## 🆓 Sign-up for Free Trial
 
-Get Memmy from [Official Website](https://memmy.bot/) or [GitHub Releases](https://github.com/MemTensor/memmy-agent/releases).
+Get Memmy from [Official Website](https://memmy.bot/) or [GitHub Release](https://github.com/MemTensor/memmy-agent/releases).
 
 Sign up to get free tokens. Model routing is automatic — start exploring the full Memory + Agent Runtime with zero config.
 
