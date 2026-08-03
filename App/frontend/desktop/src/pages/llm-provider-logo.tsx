@@ -33,6 +33,7 @@ export function llmProviderLogoUrl(provider: string): string | null {
 
 /** Renders a decorative text-model provider logo when the desktop UI supports it. */
 export function LlmProviderLogo(props: { provider: string }) {
-  const logoUrl = llmProviderLogoUrl(props.provider);
-  return logoUrl ? <img className="llm-provider-logo" src={logoUrl} alt="" aria-hidden="true" /> : null;
+  const provider = props.provider.trim().toLowerCase();
+  const logoUrl = llmProviderLogoUrl(provider);
+  return logoUrl ? <img className="llm-provider-logo" data-provider={provider} src={logoUrl} alt="" aria-hidden="true" /> : null;
 }

@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { ChatModelSelector } from "../home-page.js";
@@ -26,5 +28,19 @@ describe("ChatModelSelector", () => {
     expect(html).toContain(">gpt-5.4<");
     expect(html).not.toContain("openai / gpt-5.4");
     expect(html).not.toContain("missing");
+  });
+
+  it("sizes every provider icon to the following model label line height", () => {
+    const styles = readFileSync(resolve(__dirname, "..", "..", "styles.css"), "utf8");
+    const iconStyles = styles.slice(
+      styles.indexOf(".chat-model-select .select-control__option-icon"),
+      styles.indexOf(".chat-model-select .select-control__option:hover")
+    );
+
+    expect(iconStyles).toContain("width: 1.25em;");
+    expect(iconStyles).toContain("height: 1.25em;");
+    expect(iconStyles).toContain("flex-basis: 1.25em;");
+    expect(iconStyles).toContain(".llm-provider-logo[data-provider=\"memmy_account\"]");
+    expect(iconStyles).toContain("transform: scale(1.133);");
   });
 });

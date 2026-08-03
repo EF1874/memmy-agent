@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { llmProviderLogoUrl } from "../llm-provider-logo.js";
+import { LlmProviderLogo, llmProviderLogoUrl } from "../llm-provider-logo.js";
 
 describe("llmProviderLogoUrl", () => {
   it("maps only desktop-supported providers and their frontend aliases", () => {
@@ -31,5 +32,9 @@ describe("llmProviderLogoUrl", () => {
     const desktopIcon = readFileSync(fileURLToPath(new URL("../../../../../shell/desktop/build/icon.png", import.meta.url)));
 
     expect(frontendIcon).toEqual(desktopIcon);
+  });
+
+  it("marks provider images so account-mode transparent padding can be normalized", () => {
+    expect(renderToString(<LlmProviderLogo provider=" Memmy_Account " />)).toContain('data-provider="memmy_account"');
   });
 });
