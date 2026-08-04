@@ -980,22 +980,11 @@ export class MemoryRepository {
       ...filter,
       status: filter.status ?? ["activated", "resolving"]
     });
-    const clauses = normalized.map(() => {
-      const columns = [
-        "lower(memories.id) LIKE ? ESCAPE '\\'",
-        "lower(COALESCE(memories.memory_key, '')) LIKE ? ESCAPE '\\'",
-        "lower(memories.memory_value) LIKE ? ESCAPE '\\'",
-        "lower(memories.properties_json) LIKE ? ESCAPE '\\'",
-        "lower(memories.info_json) LIKE ? ESCAPE '\\'"
-      ];
-      if (includeTags) columns.push("lower(memories.tags_json) LIKE ? ESCAPE '\\'");
-      return `(${columns.join(" OR ")})`;
-    });
-    const params = normalized.flatMap((term) => {
+    const termColumns = normalized.map((term) => likeColumnsForTerm(term, includeTags));
+    const clauses = termColumns.map((columns) => `(${columns.join(" OR ")})`);
+    const params = normalized.flatMap((term, index) => {
       const pattern = `%${escapeLikePattern(term)}%`;
-      return includeTags
-        ? [pattern, pattern, pattern, pattern, pattern, pattern]
-        : [pattern, pattern, pattern, pattern, pattern];
+      return termColumns[index]!.map(() => pattern);
     });
     const rows = this.db
       .prepare(
@@ -3853,6 +3842,30 @@ function buildMemorySearchWhere(query: string, includeTags: boolean): { where: s
 
 function escapeLikePattern(value: string): string {
   return value.replace(/[\\%_]/g, (match) => `\\${match}`);
+}
+
+function likeColumnsForTerm(term: string, includeTags: boolean): string[] {
+  const columns = [
+    "lower(memories.id) LIKE ? ESCAPE '\\'",
+    "lower(COALESCE(memories.memory_key, '')) LIKE ? ESCAPE '\\'",
+    "lower(memories.memory_value) LIKE ? ESCAPE '\\'"
+  ];
+  // Short ASCII terms ("ts", "id", ...) are substrings of JSON keys present in
+  // every row's metadata blobs, so matching them there ranks unrelated recent
+  // memories above real hits. Longer terms and CJK bigrams cannot collide with
+  // JSON structure and keep their reach into metadata values.
+  if (!isShortAsciiTerm(term)) {
+    columns.push(
+      "lower(memories.properties_json) LIKE ? ESCAPE '\\'",
+      "lower(memories.info_json) LIKE ? ESCAPE '\\'"
+    );
+  }
+  if (includeTags) columns.push("lower(memories.tags_json) LIKE ? ESCAPE '\\'");
+  return columns;
+}
+
+function isShortAsciiTerm(term: string): boolean {
+  return /^[\x20-\x7e]{1,2}$/.test(term);
 }
 
 function normalizeAgentIdKey(value: string): string {
