@@ -1,4 +1,5 @@
 import { imagePlaceholderText } from "../utils/helpers.js";
+import type { ProviderErrorCategory } from "./provider-error-classifier.js";
 
 export class ToolCallRequest {
   id: string;
@@ -58,6 +59,7 @@ export class LLMResponse {
   errorShouldRetry?: boolean | null;
   actualProvider?: string | null;
   actualModel?: string | null;
+  errorCategory?: ProviderErrorCategory | null;
 
   constructor(init: {
     content: string | null;
@@ -75,6 +77,7 @@ export class LLMResponse {
     errorShouldRetry?: boolean | null;
     actualProvider?: string | null;
     actualModel?: string | null;
+    errorCategory?: ProviderErrorCategory | null;
   }) {
     this.content = init.content;
     this.toolCalls = init.toolCalls ?? [];
@@ -91,6 +94,7 @@ export class LLMResponse {
     this.errorShouldRetry = init.errorShouldRetry ?? null;
     this.actualProvider = init.actualProvider ?? null;
     this.actualModel = init.actualModel ?? null;
+    this.errorCategory = init.errorCategory ?? null;
   }
 
   get hasToolCalls(): boolean {
@@ -146,16 +150,6 @@ export abstract class LLMProvider {
   ];
   protected static RETRYABLE_STATUS_CODES = new Set([408, 409, 429]);
   protected static TRANSIENT_ERROR_KINDS = new Set(["timeout", "connection"]);
-  protected static NON_RETRYABLE_429_ERROR_TOKENS = new Set([
-    "insufficient_quota",
-    "quota_exceeded",
-    "quota_exhausted",
-    "billing_hard_limit_reached",
-    "insufficient_balance",
-    "credit_balance_too_low",
-    "billing_not_active",
-    "payment_required",
-  ]);
   protected static RETRYABLE_429_ERROR_TOKENS = new Set([
     "rate_limit_exceeded",
     "rate_limit_error",
@@ -164,22 +158,6 @@ export abstract class LLMProvider {
     "requests_limit_exceeded",
     "overloaded_error",
   ]);
-  protected static NON_RETRYABLE_429_TEXT_MARKERS = [
-    "insufficient_quota",
-    "insufficient quota",
-    "quota exceeded",
-    "quota exhausted",
-    "billing hard limit",
-    "billing_hard_limit_reached",
-    "billing not active",
-    "insufficient balance",
-    "insufficient_balance",
-    "credit balance too low",
-    "payment required",
-    "out of credits",
-    "out of quota",
-    "exceeded your current quota",
-  ];
   protected static RETRYABLE_429_TEXT_MARKERS = [
     "rate limit",
     "rate_limit",
@@ -318,15 +296,14 @@ export abstract class LLMProvider {
     const tokens = [response.errorType, response.errorCode]
       .map((x) => this.normalizeErrorToken(x))
       .filter((x): x is string => Boolean(x));
-    if (tokens.some((token) => this.NON_RETRYABLE_429_ERROR_TOKENS.has(token))) return false;
     const content = (response.content ?? "").toLowerCase();
-    if (this.NON_RETRYABLE_429_TEXT_MARKERS.some((marker) => content.includes(marker))) return false;
     if (tokens.some((token) => this.RETRYABLE_429_ERROR_TOKENS.has(token))) return true;
     if (this.RETRYABLE_429_TEXT_MARKERS.some((marker) => content.includes(marker))) return true;
     return true;
   }
 
   static isTransientResponse(response: LLMResponse): boolean {
+    if (response.errorCategory === "quota_exhausted") return false;
     if (response.errorShouldRetry != null) return Boolean(response.errorShouldRetry);
     if (response.errorStatusCode != null) {
       const status = response.errorStatusCode;
@@ -549,6 +526,7 @@ export abstract class LLMProvider {
       const response = await operation(requestArgs);
 
       if (response.finishReason !== "error") return response;
+      if (response.errorCategory === "quota_exhausted") return response;
 
       const strippedMessages = !imageFallbackTried ? LLMProvider.stripImageContent(requestArgs.messages) : null;
       if (strippedMessages) {

@@ -12,6 +12,7 @@ import {
   resolveModelSelection,
   type ResolvedModelSelection,
 } from "../../providers/model-catalog.js";
+import type { ProviderErrorCategory } from "../../providers/provider-error-classifier.js";
 import { makeReloadingProviderSnapshotLoader, makeReloadingToolsSnapshotLoader } from "../../providers/snapshot-loader.js";
 import {
   readWebuiSessionBinding,
@@ -97,6 +98,18 @@ type GuiTranscriptMirrorLike = {
   ended: (turn: GuiMirrorTurn, latencyMs?: number | null) => void;
 };
 
+type AgentLoopResult = [
+  finalContent: string,
+  toolsUsed: string[],
+  allMessages: Record<string, any>[],
+  stopReason: string,
+  hadInjections: boolean,
+  finalContentStreamed: boolean,
+  actualModelProvider: string | null,
+  actualModel: string | null,
+  errorCategory: ProviderErrorCategory | null,
+];
+
 export enum TurnState {
   RESTORE = "restore",
   COMPACT = "compact",
@@ -134,6 +147,7 @@ export class TurnContext {
   initialMessages: Record<string, any>[] = [];
   finalContent: string | null = null;
   finalContentStreamed = false;
+  errorCategory: ProviderErrorCategory | null = null;
   toolsUsed: string[] = [];
   allMessages: Record<string, any>[] = [];
   stopReason = "";
@@ -239,26 +253,13 @@ function platformApiErrorFallback(language: any): string {
     : PLATFORM_API_ERROR_FALLBACK_EN;
 }
 
-const QUOTA_API_ERROR_FALLBACK_ZH = "当前账号的模型 Token 额度已用完，请充值或更换模型后重试。";
-const QUOTA_API_ERROR_FALLBACK_EN = "Your model token quota has been used up. Please top up or switch models, then try again.";
-const QUOTA_API_ERROR_PATTERNS = [
-  /quota[\s_]*(exceeded|exhausted)/i,
-  /insufficient[\s_]*quota/i,
-  /REQUEST_TOKEN_QUOTA_EXCEEDED/i,
-  /out of quota/i,
-  /额度.*(用完|不足|超限)/,
-];
+const QUOTA_API_ERROR_FALLBACK_ZH = "当前模型额度已用完";
+const QUOTA_API_ERROR_FALLBACK_EN = "This model's quota has been used up.";
 
-function isQuotaApiError(content: string | null | undefined): boolean {
-  const text = String(content ?? "");
-  return QUOTA_API_ERROR_PATTERNS.some((pattern) => pattern.test(text));
-}
-
-function userFacingApiErrorFallback(language: any, content: string | null | undefined): string {
-  if (isQuotaApiError(content)) {
-    return usesChineseWebuiLanguage(language) ? QUOTA_API_ERROR_FALLBACK_ZH : QUOTA_API_ERROR_FALLBACK_EN;
-  }
-  return platformApiErrorFallback(language);
+function quotaApiErrorFallback(language: any): string {
+  return usesChineseWebuiLanguage(language)
+    ? QUOTA_API_ERROR_FALLBACK_ZH
+    : QUOTA_API_ERROR_FALLBACK_EN;
 }
 
 function isUserFacingApiError(content: string | null | undefined, stopReason: string): boolean {
@@ -1522,10 +1523,15 @@ export class AgentLoop {
     session: Session | null | undefined,
     content: string | null | undefined,
     stopReason: string,
+    errorCategory: ProviderErrorCategory | null = null,
   ): string | null {
-    if (!isWebuiVisible(channel, metadata) || !isUserFacingApiError(content, stopReason)) return content ?? null;
+    if (!isWebuiVisible(channel, metadata)) return content ?? null;
     const language = metadata?.[WEBUI_LANGUAGE_METADATA_KEY] ?? session?.metadata?.[WEBUI_LANGUAGE_METADATA_KEY] ?? null;
-    return userFacingApiErrorFallback(language, content);
+    if (stopReason === "error" && errorCategory === "quota_exhausted") {
+      return quotaApiErrorFallback(language);
+    }
+    if (!isUserFacingApiError(content, stopReason)) return content ?? null;
+    return platformApiErrorFallback(language);
   }
 
   buildInitialMessages(
@@ -1855,16 +1861,7 @@ export class AgentLoop {
       sessionWorkspace?: string;
       modelSelection?: ResolvedModelSelection | null;
     } = {},
-  ): Promise<[
-    string,
-    string[],
-    Record<string, any>[],
-    string,
-    boolean,
-    boolean,
-    string | null,
-    string | null,
-  ]> {
+  ): Promise<AgentLoopResult> {
     if (!modelSelection) this.refreshProviderSnapshot();
     this.syncSubagentRuntimeLimits();
     const activeProvider = modelSelection?.snapshot.provider ?? this.provider;
@@ -1941,6 +1938,7 @@ export class AgentLoop {
       Boolean(result.finalContentStreamed),
       firstString(result.response?.actualProvider, activeProvider?.spec?.name),
       firstString(result.response?.actualModel, activeModel),
+      result.response?.errorCategory ?? null,
     ];
   }
 
@@ -1950,10 +1948,11 @@ export class AgentLoop {
     allMessages: Record<string, any>[],
     stopReason: string,
     hadInjections: boolean,
-    { turnLatencyMs = null, tools = null, finalContentStreamed = false }: {
+    { turnLatencyMs = null, tools = null, finalContentStreamed = false, errorCategory = null }: {
       turnLatencyMs?: number | null;
       tools?: ToolRegistryInstance | null;
       finalContentStreamed?: boolean;
+      errorCategory?: ProviderErrorCategory | null;
     } = {},
   ): OutboundMessage | null {
     void allMessages;
@@ -1969,6 +1968,7 @@ export class AgentLoop {
         ...(msg.metadata ?? {}),
         ...(finalContentStreamed && !["error", "toolError"].includes(stopReason) ? { streamed: true } : {}),
         ...(turnLatencyMs != null ? { latencyMs: Math.trunc(turnLatencyMs) } : {}),
+        ...(errorCategory === "quota_exhausted" ? { modelErrorCategory: errorCategory } : {}),
       },
     });
   }
@@ -2237,6 +2237,7 @@ export class AgentLoop {
       finalContentStreamed,
       actualModelProvider,
       actualModel,
+      errorCategory,
     ] = await this.runAgentLoop(ctx.initialMessages, {
       onProgress: ctx.onProgress,
       onStream: ctx.onStream,
@@ -2259,7 +2260,14 @@ export class AgentLoop {
     if (ctx.abortSignal?.aborted || stopReason === "cancelled") {
       throw createTaskCancelledError();
     }
-    ctx.finalContent = this.localizeUserFacingApiError(ctx.msg.channel, ctx.msg.metadata, ctx.session, finalContent, stopReason);
+    ctx.finalContent = this.localizeUserFacingApiError(
+      ctx.msg.channel,
+      ctx.msg.metadata,
+      ctx.session,
+      finalContent,
+      stopReason,
+      errorCategory,
+    );
     ctx.toolsUsed = toolsUsed;
     ctx.allMessages = allMessages;
     ctx.stopReason = stopReason;
@@ -2267,6 +2275,7 @@ export class AgentLoop {
     ctx.finalContentStreamed = finalContentStreamed;
     ctx.actualModelProvider = actualModelProvider;
     ctx.actualModel = actualModel;
+    ctx.errorCategory = errorCategory;
     return "ok";
   }
 
@@ -2328,6 +2337,7 @@ export class AgentLoop {
       turnLatencyMs: ctx.turnLatencyMs,
       tools: ctx.tools,
       finalContentStreamed: ctx.finalContentStreamed,
+      errorCategory: ctx.errorCategory,
     });
     return "ok";
   }
@@ -2484,6 +2494,7 @@ export class AgentLoop {
       ,
       actualModelProvider,
       actualModel,
+      errorCategory,
     ] = await this.runAgentLoop(messages, {
       onProgress,
       onStream,
@@ -2503,7 +2514,14 @@ export class AgentLoop {
     if (abortSignal?.aborted || stopReason === "cancelled") {
       throw createTaskCancelledError();
     }
-    const finalContent = this.localizeUserFacingApiError(channel, msg.metadata, session, rawFinalContent, stopReason);
+    const finalContent = this.localizeUserFacingApiError(
+      channel,
+      msg.metadata,
+      session,
+      rawFinalContent,
+      stopReason,
+      errorCategory,
+    );
     const latencyMs = Math.max(0, Date.now() - started);
     const dagMessageStart = session.messages.length;
     this.saveTurn(session, allMessages, 1 + history.length, {
@@ -2534,6 +2552,7 @@ export class AgentLoop {
     }
     const originMessageId = msg.metadata?.originMessageId;
     if (originMessageId) metadata.originMessageId = originMessageId;
+    if (errorCategory === "quota_exhausted") metadata.modelErrorCategory = errorCategory;
     return new OutboundMessage({
       channel,
       chatId,
