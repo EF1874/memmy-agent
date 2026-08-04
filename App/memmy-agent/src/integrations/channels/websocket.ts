@@ -2760,14 +2760,20 @@ export class WebSocketChannel extends BaseChannel {
     const targets = message.chatId === "*" ? [...this.connectionChats.keys()] : [...(this.subscriptions.get(message.chatId) ?? [])];
     const wireText = this.rewriteLocalMarkdownImages(message.content, `websocket:${message.chatId}`);
     const turnId = this.turnIdFromMetadata(message.metadata);
+    const publicMetadata = { ...(message.metadata ?? {}) };
+    const modelErrorCategory = publicMetadata.modelErrorCategory;
+    delete publicMetadata.modelErrorCategory;
     const payload: Record<string, any> = {
       event: "message",
       chat_id: message.chatId,
       text: wireText,
       content: wireText,
-      metadata: message.metadata ?? {},
+      metadata: publicMetadata,
       media: message.media ?? [],
       ...(turnId ? { turn_id: turnId } : {}),
+      ...(modelErrorCategory === "quota_exhausted"
+        ? { model_error: { category: "quota_exhausted" } }
+        : {}),
     };
     const mediaUrls = (message.media ?? [])
       .map((entry) => this.webuiMediaAttachmentForPath(entry, `websocket:${message.chatId}`))
