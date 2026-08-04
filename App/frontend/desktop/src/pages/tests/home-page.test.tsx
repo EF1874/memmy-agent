@@ -13,6 +13,7 @@ import { buildAgentDisplayUnits } from "../agent-thread-messages.js";
 import {
   AGENT_RESTART_STATE_STORAGE_KEY,
   AGENT_MEDIA_ACCEPT,
+  ComposerCommandChip,
   ComposerMediaPreviewStrip,
   ComposerSubmitButton,
   HomePage,
@@ -21,6 +22,7 @@ import {
   agentStatusText,
   agentChatScopeKey,
   attachmentFilesFromDataTransfer,
+  buildComposerCommandDraft,
   clipboardImageFilesFromDataTransfer,
   dataTransferHasAttachmentFiles,
   hasActiveAgentConversation,
@@ -29,6 +31,7 @@ import {
   isComposingKeyboardEvent,
   isSingleLineComposerInput,
   parseStoredAgentRestartState,
+  parseComposerCommandDraft,
   readFocusedAgentChatId,
   requestNewSessionReset,
   requestAgentRestart,
@@ -90,6 +93,37 @@ describe("HomePage", () => {
     expect(html).toContain("内容由 AI 生成，请仔细甄别");
     expect(html).toContain("text-center text-[11px] text-text-ink/40 mt-4");
     expect(html).not.toContain("未选择任何文件");
+  });
+
+  it("renders Goal as a removable composer token without changing its wire-format command", () => {
+    const html = renderToString(
+      <ComposerCommandChip command="/goal" removeLabel="移除" onRemove={() => undefined} />
+    );
+    const source = readFileSync(homePageSourcePath, "utf8");
+    const styles = readFileSync(stylesSourcePath, "utf8");
+    const chipStyles = styles.slice(
+      styles.indexOf(".composer-command-chip-slot {"),
+      styles.indexOf(".home-project-picker {")
+    );
+
+    expect(parseComposerCommandDraft("/goal ")).toEqual({ command: "/goal", text: "" });
+    expect(parseComposerCommandDraft("/goal 完成目标")).toEqual({ command: "/goal", text: "完成目标" });
+    expect(parseComposerCommandDraft("/goalkeeper")).toEqual({ command: null, text: "/goalkeeper" });
+    expect(buildComposerCommandDraft("/goal", "完成目标")).toBe("/goal 完成目标");
+    expect(buildComposerCommandDraft(null, "普通消息")).toBe("普通消息");
+    expect(html).toContain('class="composer-command-chip"');
+    expect(html).toContain(">goal</span>");
+    expect(html).toContain('aria-label="移除 goal"');
+    expect(html).toContain("lucide-circle-x");
+    expect(chipStyles).toContain("height: 30px;");
+    expect(chipStyles).toContain("border-radius: 10px;");
+    expect(chipStyles).toContain(".composer-command-chip:hover");
+    expect(chipStyles).toContain("opacity: 0;");
+    expect(chipStyles).toContain("opacity: 1;");
+    expect(source.match(/<ComposerCommandChip/g)).toHaveLength(2);
+    expect(source.match(/value=\{composerInput\}/g)).toHaveLength(2);
+    expect(source).toContain("setCurrentComposerDraft(buildComposerCommandDraft(selectedComposerCommand, value));");
+    expect(styles).toContain(".agent-composer-shell textarea.agent-composer-input--command-selected");
   });
 
   it("hides the agent status line after the websocket is connected", () => {
@@ -452,7 +486,7 @@ describe("HomePage", () => {
   it("centers the composer controls only while the session composer is one line", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
 
-    expect(source).toContain('${isComposerSingleLine ? "agent-composer-input--single " : ""}block w-full pl-4 pr-20 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40');
+    expect(source).toContain('${isComposerSingleLine ? "agent-composer-input--single " : ""}${selectedComposerCommand ? "agent-composer-input--command-selected " : ""}block w-full pl-4 pr-20 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40');
     expect(source).toContain('centerComposerControls ? "top-1/2 -translate-y-1/2" : "bottom-2"');
     expect(source).toContain("COMPOSER_SINGLE_LINE_HEIGHT_PX = 52");
   });

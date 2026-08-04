@@ -336,6 +336,68 @@ body.memmy-window-fullscreen {
   background: transparent;
 }
 
+.composer-command-chip-slot {
+  position: absolute;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+}
+
+.composer-command-chip-slot--home {
+  bottom: 12px;
+  left: 16px;
+}
+
+.composer-command-chip-slot--conversation {
+  left: 10px;
+}
+
+.composer-command-chip {
+  display: inline-flex;
+  height: 30px;
+  align-items: center;
+  gap: 5px;
+  padding: 0 7px;
+  border-radius: 10px;
+  background: transparent;
+  color: color-mix(in srgb, var(--color-text-ink) 68%, transparent);
+  font-size: 11px;
+  line-height: 1;
+  transition: background 140ms ease, color 140ms ease;
+}
+
+.composer-command-chip:hover,
+.composer-command-chip:focus-within {
+  background: color-mix(in srgb, var(--color-canvas-oat) 62%, var(--color-background-paper));
+  color: var(--color-text-ink);
+}
+
+.composer-command-chip__label {
+  white-space: nowrap;
+}
+
+.composer-command-chip__remove {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: currentColor;
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity 140ms ease;
+}
+
+.composer-command-chip:hover .composer-command-chip__remove,
+.composer-command-chip:focus-within .composer-command-chip__remove {
+  opacity: 1;
+}
+
 .home-project-picker {
   position: relative;
   z-index: 45;
@@ -2237,6 +2299,10 @@ button {
   padding-bottom: 14px;
   overflow: hidden;
   line-height: 24px;
+}
+
+.agent-composer-shell textarea.agent-composer-input--command-selected {
+  padding-left: 86px;
 }
 
 .agent-attachment-card {

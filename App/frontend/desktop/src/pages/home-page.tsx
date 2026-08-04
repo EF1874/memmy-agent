@@ -78,7 +78,7 @@ import {
 import { HistoryDagPanel, type HistoryDagPanelState } from "./history-dag-panel.js";
 import { LlmProviderLogo } from "./llm-provider-logo.js";
 import { Mic, Pause, Plus, Send } from "./memory/memory-prototype-icons.js";
-import { ArrowDown, Check, ChevronDown, Folder, Plus as LucidePlus, RotateCw, X } from "lucide-react";
+import { ArrowDown, Check, ChevronDown, CircleX, Folder, Plus as LucidePlus, RotateCw, X } from "lucide-react";
 
 export { agentChatScopeKey, updateComposerDraftForScope };
 export { hydrateAgentThreadInBackground };
@@ -89,6 +89,7 @@ const COMPOSER_MEDIA_STRIP_STYLE = { maxHeight: "min(7.5rem, 28vh)" } satisfies 
 const AGENT_WS_SAFE_FRAME_BYTES = 1024 * 1024;
 const COMPOSER_HEIGHT_EPSILON = 2;
 const COMPOSER_SINGLE_LINE_HEIGHT_PX = 52;
+const COMPOSER_GOAL_COMMAND = "/goal" as const;
 const AGENT_CONVERSATION_BOTTOM_EPSILON_PX = 4;
 const SLASH_COMMAND_RETRY_DELAYS_MS = [300, 1000, 2500];
 /**
@@ -102,6 +103,31 @@ const SLASH_COMMAND_RETRY_DELAYS_MS = [300, 1000, 2500];
 const AGENT_CONVERSATION_USER_SCROLL_INTENT_MS = 600;
 /** Definition for stop confirmation grace ms. */
 export const STOP_CONFIRMATION_GRACE_MS = 8000;
+
+export interface ComposerCommandDraft {
+  command: typeof COMPOSER_GOAL_COMMAND | null;
+  text: string;
+}
+
+/** Splits the visual Goal command token from the underlying composer draft. */
+export function parseComposerCommandDraft(draft: string): ComposerCommandDraft {
+  if (draft === COMPOSER_GOAL_COMMAND) {
+    return { command: COMPOSER_GOAL_COMMAND, text: "" };
+  }
+  const prefix = `${COMPOSER_GOAL_COMMAND} `;
+  if (draft.startsWith(prefix)) {
+    return { command: COMPOSER_GOAL_COMMAND, text: draft.slice(prefix.length) };
+  }
+  return { command: null, text: draft };
+}
+
+/** Rebuilds the wire-format draft while keeping the command token outside the textarea. */
+export function buildComposerCommandDraft(command: string | null, text: string): string {
+  if (!command) {
+    return text;
+  }
+  return `${command} ${text}`;
+}
 const TRANSLATABLE_AGENT_ERROR_KEYS = new Set<MessageKey>([
   "home.media.error.sendUnsupported",
   "home.media.error.sendSize",
@@ -423,6 +449,29 @@ export function ComposerSubmitButton(props: ComposerSubmitButtonProps) {
   );
 }
 
+/** Displays the selected slash command as a removable composer token. */
+export function ComposerCommandChip(props: {
+  command: string;
+  removeLabel: string;
+  onRemove: () => void;
+}) {
+  const label = props.command.replace(/^\//, "");
+  return (
+    <div className="composer-command-chip">
+      <span className="composer-command-chip__label">{label}</span>
+      <button
+        type="button"
+        className="composer-command-chip__remove"
+        aria-label={`${props.removeLabel} ${label}`}
+        title={`${props.removeLabel} ${label}`}
+        onClick={props.onRemove}
+      >
+        <CircleX size={14} aria-hidden="true" />
+      </button>
+    </div>
+  );
+}
+
 export function AgentStatusPanel(props: { state: StatusPanelState; closeLabel: string; loadingLabel: string; onClose: () => void }) {
   if (!props.state.open) {
     return null;
@@ -740,6 +789,9 @@ export function HomePage() {
     (preset) => preset.name === selectedModelPreset && preset.available
   ) ?? null;
   const input = composerDrafts[chatScopeKey] ?? "";
+  const composerCommandDraft = parseComposerCommandDraft(input);
+  const selectedComposerCommand = composerCommandDraft.command;
+  const composerInput = composerCommandDraft.text;
   const pendingAttachments = pendingAttachmentsByScope[chatScopeKey] ?? [];
   const draftTarget = state.agent.draftTargetsByScope[chatScopeKey] ?? { kind: "standalone" as const };
   const selectedDraftProject = draftTarget.kind === "project"
@@ -1198,7 +1250,9 @@ export function HomePage() {
     argHint: "",
     synthetic: true
   };
-  const slashQuery = slashMenuDismissed ? null : slashQueryFromInput(input);
+  const slashQuery = slashMenuDismissed || selectedComposerCommand
+    ? null
+    : slashQueryFromInput(composerInput);
   const localizedSlashCommands = localizeSlashCommands(slashCommands, language, t);
   const slashCommandsWithLocal = [
     lastCompactionSlashCommand,
@@ -1575,10 +1629,11 @@ export function HomePage() {
    * @param value The latest input box content.
    */
   function updateComposerInput(value: string) {
-    setCurrentComposerDraft(value);
+    setCurrentComposerDraft(buildComposerCommandDraft(selectedComposerCommand, value));
     setSlashMenuDismissed(false);
     setSelectedCommandIndex(0);
     if (
+      !selectedComposerCommand &&
       slashQueryFromInput(value) != null &&
       clients?.memmyAgent &&
       slashCommandsRef.current.length === 0 &&
@@ -1586,6 +1641,14 @@ export function HomePage() {
     ) {
       loadSlashCommands({ resetAttempts: true });
     }
+  }
+
+  /** Removes the selected command token while preserving the typed message. */
+  function clearSelectedComposerCommand() {
+    setCurrentComposerDraft(composerInput);
+    setSlashMenuDismissed(true);
+    setSelectedCommandIndex(0);
+    inputRef.current?.focus();
   }
 
 
@@ -2115,9 +2178,18 @@ export function HomePage() {
                   selectedLabel={t("home.media.addPhotoFile")}
                   t={t}
                 />
+                {selectedComposerCommand ? (
+                  <div className="composer-command-chip-slot composer-command-chip-slot--home">
+                    <ComposerCommandChip
+                      command={selectedComposerCommand}
+                      removeLabel={t("common.remove")}
+                      onRemove={clearSelectedComposerCommand}
+                    />
+                  </div>
+                ) : null}
                 <textarea
                   ref={inputRef}
-                  value={input}
+                  value={composerInput}
                   placeholder={t("home.input")}
                   rows={3}
                   onChange={(event) => {
@@ -2298,9 +2370,18 @@ export function HomePage() {
                   selectedLabel={t("home.media.addPhotoFile")}
                   t={t}
                 />
+                {selectedComposerCommand ? (
+                  <div className={`composer-command-chip-slot composer-command-chip-slot--conversation ${centerComposerControls ? "top-1/2 -translate-y-1/2" : "bottom-2"}`}>
+                    <ComposerCommandChip
+                      command={selectedComposerCommand}
+                      removeLabel={t("common.remove")}
+                      onRemove={clearSelectedComposerCommand}
+                    />
+                  </div>
+                ) : null}
                 <textarea
                   ref={inputRef}
-                  value={input}
+                  value={composerInput}
                   placeholder={t("home.input")}
                   rows={1}
                   onChange={(event) => {
@@ -2309,7 +2390,7 @@ export function HomePage() {
                   }}
                   onKeyDown={handleComposerKeyDown}
                   onPaste={handleComposerPaste}
-                  className={`${isComposerSingleLine ? "agent-composer-input--single " : ""}block w-full pl-4 pr-20 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40`}
+                  className={`${isComposerSingleLine ? "agent-composer-input--single " : ""}${selectedComposerCommand ? "agent-composer-input--command-selected " : ""}block w-full pl-4 pr-20 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40`}
                 />
                 <div className={`absolute right-2.5 flex items-center gap-1 z-10 ${centerComposerControls ? "top-1/2 -translate-y-1/2" : "bottom-2"}`}>
                   <ChatModelSelector
