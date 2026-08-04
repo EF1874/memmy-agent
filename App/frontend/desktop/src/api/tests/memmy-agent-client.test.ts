@@ -235,7 +235,7 @@ describe("memmy-agent client", () => {
     expect(paths).toEqual(["/webui/bootstrap"]);
   });
 
-  it("lists slash commands with bearer token, camelCase mapping, and control-command filtering", async () => {
+  it("lists slash commands with bearer token, camelCase mapping, goal exposure, and control-command filtering", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input));
       if (url.pathname === "/webui/bootstrap") {
@@ -265,6 +265,7 @@ describe("memmy-agent client", () => {
     const client = createMemmyAgentClient({ baseUrl: "http://127.0.0.1:18980", clientId: "frontend-test", fetchFn: fetchMock as typeof fetch });
 
     await expect(client.listSlashCommands()).resolves.toEqual([
+      { command: "/goal", title: "Goal", description: "Start goal", icon: "activity", argHint: "<goal>" },
       { command: "/status", title: "Status", description: "Show status", icon: "activity", argHint: "" },
       { command: "/new", title: "New", description: "New chat", icon: "square-pen", argHint: "" }
     ]);

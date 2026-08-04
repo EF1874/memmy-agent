@@ -158,7 +158,6 @@ const WEBUI_HIDDEN_SLASH_COMMANDS = new Set([
   "/dream-log",
   "/dream-restore",
   "/history",
-  "/goal",
   "/pairing",
   "/help",
   "/model"
