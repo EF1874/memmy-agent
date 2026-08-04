@@ -102,6 +102,12 @@ const BROWSER_PREPARATION_ATTEMPT_ID_ENV = "MEMMY_BROWSER_PREPARATION_ATTEMPT_ID
 const MANAGED_RESTART_IPC_TYPE = "memmy-agent:restart";
 const MIGRATIONS_READY_CONFIG_ENV = "MEMMY_MIGRATIONS_READY_CONFIG";
 const MIGRATIONS_READY_WORKSPACE_ENV = "MEMMY_MIGRATIONS_READY_WORKSPACE";
+const MIGRATIONS_READY_SESSION_DAG_ENV = "MEMMY_MIGRATIONS_READY_SESSION_DAG";
+
+function sessionDagMigrationTarget(env: NodeJS.ProcessEnv = process.env): string {
+  const override = env.MEMMY_AGENT_SESSION_DAG_DIR;
+  return resolve(override && override.trim() ? override : join(homedir(), ".memmy", "session-dag"));
+}
 
 interface DesktopManagedRestartNotice {
   type: typeof MANAGED_RESTART_IPC_TYPE;
@@ -358,6 +364,7 @@ export async function runPackagedMigrationCommand(options: {
   };
   delete env[MIGRATIONS_READY_CONFIG_ENV];
   delete env[MIGRATIONS_READY_WORKSPACE_ENV];
+  delete env[MIGRATIONS_READY_SESSION_DAG_ENV];
 
   let child: ChildProcess;
   try {
@@ -871,6 +878,7 @@ export class AgentGatewaySupervisor {
       MEMORY_SERVICE_TOKEN: this.runtimeConfig.memoryToken,
       [MIGRATIONS_READY_CONFIG_ENV]: this.runtimeConfig.configPath,
       [MIGRATIONS_READY_WORKSPACE_ENV]: this.runtimeConfig.agentWorkspace,
+      [MIGRATIONS_READY_SESSION_DAG_ENV]: sessionDagMigrationTarget(),
       [DESKTOP_MANAGED_GATEWAY_ENV]: "1",
       ...(this.browserPreparationAttemptId
         ? { [BROWSER_PREPARATION_ATTEMPT_ID_ENV]: this.browserPreparationAttemptId }

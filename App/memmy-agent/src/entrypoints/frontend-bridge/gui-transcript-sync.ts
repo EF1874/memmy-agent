@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { InboundMessage } from "../../core/runtime-messages/events.js";
+import type { GoalStatus } from "../../core/session/goal-state.js";
+import type { ProviderErrorCategory } from "../../providers/provider-error-classifier.js";
 import {
   readWebuiSessionBinding,
   type Session,
@@ -113,7 +115,7 @@ export class GuiTranscriptMirror {
 
   running(turn: MirrorTurn, startedAt: number): void {
     this.append(turn.sessionKey, {
-      event: "goal_status",
+      event: "run_status",
       chat_id: turn.chatId,
       status: "running",
       started_at: startedAt,
@@ -227,6 +229,7 @@ export class GuiTranscriptMirror {
     text: string,
     latencyMs: number | null = null,
     agentUi: unknown = null,
+    errorCategory: ProviderErrorCategory | null = null,
   ): void {
     this.append(turn.sessionKey, {
       event: "message",
@@ -236,18 +239,27 @@ export class GuiTranscriptMirror {
       turn_id: turn.turnId,
       ...(latencyMs == null ? {} : { latency_ms: latencyMs }),
       ...(agentUi != null ? { agent_ui: agentUi } : {}),
+      ...(errorCategory === "quota_exhausted"
+        ? { model_error: { category: errorCategory } }
+        : {}),
     });
   }
 
-  ended(turn: MirrorTurn, latencyMs: number | null = null): void {
+  ended(
+    turn: MirrorTurn,
+    latencyMs: number | null = null,
+    goalId: string | null = null,
+    goalOutcome: GoalStatus | null = null,
+  ): void {
     this.append(turn.sessionKey, {
       event: "turn_end",
       chat_id: turn.chatId,
       turn_id: turn.turnId,
       ...(latencyMs == null ? {} : { latency_ms: latencyMs }),
+      ...(goalId && goalOutcome ? { goal_id: goalId, goal_outcome: goalOutcome } : {}),
     });
     this.append(turn.sessionKey, {
-      event: "goal_status",
+      event: "run_status",
       chat_id: turn.chatId,
       status: "idle",
       turn_id: turn.turnId,

@@ -106,7 +106,7 @@ describe("GUI transcript synchronization", () => {
         "retry_wait",
         "message",
         "turn_end",
-        "goal_status",
+        "run_status",
         "session_updated",
       ]);
     expect(transcript[2]).toMatchObject({

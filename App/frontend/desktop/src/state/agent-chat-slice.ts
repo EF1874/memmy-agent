@@ -15,10 +15,16 @@ import type {
   MemmyAgentSidebarState,
   MemmyAgentWebuiThread,
   MemmyAgentWsEvent,
+  AgentGoalState,
+  AgentGoalControlAction,
   WebuiSessionTarget,
   ChatModelPreset
 } from "../api/memmy-agent-client.js";
-import { chatIdToSessionKey } from "../api/memmy-agent-client.js";
+import {
+  chatIdToSessionKey,
+  isAgentGoalState,
+  isAgentGoalStatus
+} from "../api/memmy-agent-client.js";
 import type { PendingAttachment } from "./agent-composer-state.js";
 import {
   mergeFileEdits,
@@ -72,7 +78,7 @@ export type AgentChatMediaAttachment = {
   name?: string;
   path?: string;
 };
-export type AgentGoalState = Record<string, unknown>;
+export type { AgentGoalState } from "../api/memmy-agent-client.js";
 
 export interface AgentTaskView {
   sessionKey: string;
@@ -184,6 +190,11 @@ export interface AgentState {
   lastTaskCompletion: { chatId: string; at: number } | null;
   goalStatesByChatId: Record<string, AgentGoalState>;
   goalState: AgentGoalState | null;
+  goalMutationPendingByChatId: Record<string, {
+    requestId: string;
+    goalId: string;
+    action: AgentGoalControlAction;
+  }>;
   composerDraftsByScope: Record<string, string>;
   composerPendingAttachmentsByScope: Record<string, PendingAttachment[]>;
   draftTargetsByScope: Record<string, WebuiSessionTarget>;
@@ -246,6 +257,8 @@ export type AgentAction =
   | { type: "agent/composerScopeCleared"; scopeKey: string }
   | { type: "agent/stopRequested"; chatId: string }
   | { type: "agent/stopUnconfirmed"; chatId: string }
+  | { type: "agent/goalMutationStarted"; chatId: string; requestId: string; goalId: string; action: AgentGoalControlAction }
+  | { type: "agent/goalMutationSettled"; chatId: string; requestId: string }
   | { type: "agent/restartRequested"; startedAt: number }
   | { type: "agent/restartRestored"; chatId: string; startedAt: number; sawDisconnect: boolean }
   | { type: "agent/restartFailed"; message: string }
@@ -323,6 +336,7 @@ export const initialAgentState: AgentState = {
   lastTaskCompletion: null,
   goalStatesByChatId: {},
   goalState: null,
+  goalMutationPendingByChatId: {},
   composerDraftsByScope: {},
   composerPendingAttachmentsByScope: {},
   draftTargetsByScope: {},
@@ -529,6 +543,26 @@ export function agentReducer(state: AgentState, action: AgentAction): AgentState
       return stopCurrentTurn(state, action.chatId);
     case "agent/stopUnconfirmed":
       return releaseUnconfirmedStop(state, action.chatId);
+    case "agent/goalMutationStarted":
+      return {
+        ...state,
+        goalMutationPendingByChatId: {
+          ...state.goalMutationPendingByChatId,
+          [action.chatId]: {
+            requestId: action.requestId,
+            goalId: action.goalId,
+            action: action.action
+          }
+        }
+      };
+    case "agent/goalMutationSettled": {
+      const pending = state.goalMutationPendingByChatId[action.chatId];
+      if (!pending || pending.requestId !== action.requestId) return state;
+      return {
+        ...state,
+        goalMutationPendingByChatId: clearChatMapValue(state.goalMutationPendingByChatId, action.chatId)
+      };
+    }
     case "agent/restartRequested":
       return {
         ...state,
@@ -1475,7 +1509,7 @@ function chatMessagesForId(state: AgentState, chatId: string): AgentChatMessage[
 
 /**
  * An open inbound stream is hard evidence the turn is still running. Status
- * signals (goal_status, session list refreshes) can race behind the content
+ * signals (run_status, session list refreshes) can race behind the content
  * stream mid-turn; they must never flip the stop button back to send while
  * text is still flowing. Real turn closure (turn_end / hydrate of a closed
  * thread / user stop) clears the streaming flags first, so this guard never
@@ -1494,7 +1528,7 @@ function shouldLiveEventKeepChatBusy(state: AgentState): boolean {
     return true;
   }
   // An open inbound stream is itself proof the turn is running: status
-  // signals (goal_status / session refresh) can race behind the content
+  // signals (run_status / session refresh) can race behind the content
   // stream, and they must never flip the stop button back to send while
   // text is still flowing. Only an explicit user stop or a real turn close
   // (which clears the streaming flags first) ends the busy state.
@@ -2090,13 +2124,13 @@ function reduceWsEvent(state: AgentState, event: MemmyAgentWsEvent): AgentState 
         return state;
       }
       return reconcileRunStatusSnapshot(state, event);
-    case "goal_status":
-      return updateGoalStatus(state, event);
+    case "run_status":
+      return updateRunStatus(state, event);
     case "goal_state":
       return updateGoalState(state, event.chat_id, event.goal_state);
     case "turn_end":
       return event.chat_id
-        ? endTurn(updateGoalState(state, event.chat_id, event.goal_state), event.chat_id, event.latency_ms, eventTurnId(event))
+        ? endTurn(state, event.chat_id, event.latency_ms, eventTurnId(event), event)
         : state;
     case "stop_result":
       return event.chat_id ? markChatIdle(state, event.chat_id, { source: "stop_result", turnId: eventTurnId(event) }) : state;
@@ -3314,7 +3348,7 @@ function markChatRunning(state: AgentState, chatId: string, startedAt: number, t
   };
 }
 
-type MarkChatIdleSource = "turn_end" | "goal_status_idle" | "stop_result" | "session_hydrate" | "run_status_snapshot";
+type MarkChatIdleSource = "turn_end" | "run_status_idle" | "stop_result" | "session_hydrate" | "run_status_snapshot";
 
 function shouldClearStreamingFlags(source: MarkChatIdleSource): boolean {
   return source === "turn_end" || source === "session_hydrate" || source === "run_status_snapshot";
@@ -3324,12 +3358,28 @@ function latencyForSource(source: MarkChatIdleSource, latencyMs: number | undefi
   return source === "turn_end" ? latencyMs : undefined;
 }
 
-function shouldMarkCompletedUnseen(source: MarkChatIdleSource, wasBusy: boolean): boolean {
-  return wasBusy && (source === "turn_end" || source === "session_hydrate");
+function shouldMarkCompletedUnseen(
+  source: MarkChatIdleSource,
+  wasBusy: boolean,
+  countsAsCompletion: boolean,
+): boolean {
+  return wasBusy && countsAsCompletion && (source === "turn_end" || source === "session_hydrate");
 }
 
-function markChatIdle(state: AgentState, chatId: string, options: { source: MarkChatIdleSource; latencyMs?: number; turnId?: string | null }): AgentState {
+function markChatIdle(state: AgentState, chatId: string, options: {
+  source: MarkChatIdleSource;
+  latencyMs?: number;
+  turnId?: string | null;
+  countsAsCompletion?: boolean;
+}): AgentState {
+  const activeTurnId = state.activeTurnIdByChatId[chatId] ?? null;
+  if (
+    options.source !== "session_hydrate"
+    && activeTurnId
+    && (!options.turnId || options.turnId !== activeTurnId)
+  ) return state;
   const wasBusy = isChatBusy(state, chatId) || Boolean(state.stopInFlightByChatId[chatId]);
+  const countsAsCompletion = options.countsAsCompletion ?? true;
   const finishedState = shouldClearStreamingFlags(options.source)
     ? finishChatStreaming(state, chatId, latencyForSource(options.source, options.latencyMs))
     : state;
@@ -3344,26 +3394,27 @@ function markChatIdle(state: AgentState, chatId: string, options: { source: Mark
   let completedUnseenByChatId = retryFinishedState.completedUnseenByChatId;
   if (isChatVisible(state, chatId)) {
     completedUnseenByChatId = clearChatMapValue(completedUnseenByChatId, chatId);
-  } else if (shouldMarkCompletedUnseen(options.source, wasBusy)) {
+  } else if (shouldMarkCompletedUnseen(options.source, wasBusy, countsAsCompletion)) {
     completedUnseenByChatId = { ...completedUnseenByChatId, [chatId]: Date.now() };
   }
 
   // Only record a completion signal (consumed by the system-notification side effect) on a genuine task end (turn_end) that was preceded by a busy state;
   // session_hydrate / stop_result do not count as "task completed", to avoid firing a spurious notification on reconnect or manual stop.
-  const lastTaskCompletion = options.source === "turn_end" && wasBusy
+  const lastTaskCompletion = options.source === "turn_end" && wasBusy && countsAsCompletion
     ? { chatId, at: Date.now() }
     : retryFinishedState.lastTaskCompletion;
 
   const closedReason = options.source === "stop_result"
     ? "stopped"
-    : options.source === "turn_end" || options.source === "goal_status_idle" || options.source === "run_status_snapshot"
+    : options.source === "turn_end" || options.source === "run_status_idle" || options.source === "run_status_snapshot"
       ? "ended"
       : null;
   const closedState = closedReason ? markClosedTurn(retryFinishedState, chatId, options.turnId ?? null, closedReason) : retryFinishedState;
   const suppressionClearedState = clearSuppressAssistantStreamUntilTurnEnd(closedState, chatId);
-  const activeTurnIdByChatId = options.source === "session_hydrate"
-    ? { ...suppressionClearedState.activeTurnIdByChatId, [chatId]: null }
-    : suppressionClearedState.activeTurnIdByChatId;
+  const activeTurnIdByChatId = {
+    ...suppressionClearedState.activeTurnIdByChatId,
+    [chatId]: null,
+  };
   const nextState = deriveTasks({
     ...suppressionClearedState,
     runStartedAtByChatId: { ...suppressionClearedState.runStartedAtByChatId, [chatId]: null },
@@ -3407,7 +3458,7 @@ function reconcileRunStatusSnapshot(state: AgentState, event: MemmyAgentWsEvent)
   });
 }
 
-function updateGoalStatus(state: AgentState, event: MemmyAgentWsEvent): AgentState {
+function updateRunStatus(state: AgentState, event: MemmyAgentWsEvent): AgentState {
   const chatId = event.chat_id;
   if (!chatId) {
     return state;
@@ -3429,7 +3480,7 @@ function updateGoalStatus(state: AgentState, event: MemmyAgentWsEvent): AgentSta
     return state;
   }
 
-  const nextState = markChatIdle(state, chatId, { source: "goal_status_idle", turnId: eventTurnId(event) });
+  const nextState = markChatIdle(state, chatId, { source: "run_status_idle", turnId: eventTurnId(event) });
   return deriveTasks({
     ...nextState,
     isSending: chatId === state.currentChatId ? isChatBusy(nextState, chatId) : state.isSending
@@ -3501,11 +3552,11 @@ function hasLoadedMessagePayload(message: AgentChatMessage): boolean {
 }
 
 function updateGoalState(state: AgentState, chatId: string | null | undefined, rawGoalState: unknown): AgentState {
-  if (!chatId || !isRecord(rawGoalState)) {
+  if (!chatId || !isAgentGoalState(rawGoalState)) {
     return state;
   }
 
-  const goalState: AgentGoalState = { ...rawGoalState };
+  const goalState: AgentGoalState = rawGoalState;
   return {
     ...state,
     goalStatesByChatId: { ...state.goalStatesByChatId, [chatId]: goalState },
@@ -3513,12 +3564,30 @@ function updateGoalState(state: AgentState, chatId: string | null | undefined, r
   };
 }
 
-function endTurn(state: AgentState, chatId: string | null | undefined, latencyMs: number | undefined, turnId: string | null = null): AgentState {
+function endTurn(
+  state: AgentState,
+  chatId: string | null | undefined,
+  latencyMs: number | undefined,
+  turnId: string | null = null,
+  event: MemmyAgentWsEvent | null = null,
+): AgentState {
   const effectiveChatId = chatId ?? state.currentChatId;
   if (!effectiveChatId) {
     return state;
   }
-  return markChatIdle(state, effectiveChatId, { source: "turn_end", latencyMs, turnId });
+  const hasGoalId = typeof event?.goal_id === "string";
+  const hasGoalOutcome = isAgentGoalStatus(event?.goal_outcome);
+  const validPair = hasGoalId && hasGoalOutcome;
+  const malformedPair = hasGoalId !== hasGoalOutcome;
+  const countsAsCompletion = malformedPair
+    ? false
+    : !validPair || event?.goal_outcome === "completed";
+  return markChatIdle(state, effectiveChatId, {
+    source: "turn_end",
+    latencyMs,
+    turnId,
+    countsAsCompletion,
+  });
 }
 
 function normalizeThreadMessages(messages: Array<Record<string, unknown>>): AgentChatMessage[] {

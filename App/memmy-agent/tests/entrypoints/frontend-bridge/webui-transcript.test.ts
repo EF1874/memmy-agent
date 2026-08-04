@@ -448,6 +448,61 @@ describe("webui transcript replay", () => {
     expect(buildWebuiThreadResponse(key)).toMatchObject({ last_turn_closed: false });
   });
 
+  it("keeps automatic Goal continuation turns out of the visible user transcript", () => {
+    useDataDir();
+    const key = "websocket:t-goal-continuation";
+    appendAll(key, [
+      { event: "user", chat_id: "t-goal-continuation", text: "完成目标" },
+      { event: "message", chat_id: "t-goal-continuation", text: "第一轮" },
+      {
+        event: "turn_end",
+        chat_id: "t-goal-continuation",
+        goal_id: "goal-1",
+        goal_outcome: "active",
+      },
+      { event: "message", chat_id: "t-goal-continuation", text: "第二轮" },
+      {
+        event: "turn_end",
+        chat_id: "t-goal-continuation",
+        goal_id: "goal-1",
+        goal_outcome: "completed",
+      },
+    ]);
+
+    const response = buildWebuiThreadResponse(key);
+    expect(response).toMatchObject({
+      last_turn_goal_id: "goal-1",
+      last_turn_goal_outcome: "completed",
+    });
+    expect(response?.messages.filter((message: Record<string, any>) => message.role === "user"))
+      .toEqual([expect.objectContaining({ content: "完成目标" })]);
+    expect(response?.messages.filter((message: Record<string, any>) => message.role === "assistant"))
+      .toEqual([
+        expect.objectContaining({ content: "第一轮" }),
+        expect.objectContaining({ content: "第二轮" }),
+      ]);
+  });
+
+  it("projects Goal outcome only from the final turn_end record", () => {
+    useDataDir();
+    const key = "websocket:t-latest-goal-outcome";
+    appendAll(key, [
+      { event: "user", chat_id: "t-latest-goal-outcome", text: "goal turn" },
+      {
+        event: "turn_end",
+        chat_id: "t-latest-goal-outcome",
+        goal_id: "goal-old",
+        goal_outcome: "completed",
+      },
+      { event: "user", chat_id: "t-latest-goal-outcome", text: "ordinary turn" },
+      { event: "turn_end", chat_id: "t-latest-goal-outcome" },
+    ]);
+
+    const response = buildWebuiThreadResponse(key);
+    expect(response).not.toHaveProperty("last_turn_goal_id");
+    expect(response).not.toHaveProperty("last_turn_goal_outcome");
+  });
+
   it("replays stream-end text followed by revised complete message by replacing content", () => {
     const messages = replayTranscriptToUiMessages([
       { event: "user", chat_id: "t-revised", text: "q" },

@@ -5,6 +5,7 @@ import { useApiClients } from "../app/providers.js";
 import { FOCUSED_AGENT_CHAT_STORAGE_KEY, clearFocusedAgentTarget, normalizeAgentChatId, readLaunchAgentChatId, removeLaunchAgentChatIdFromUrl } from "../app/routes.js";
 import {
   MemmyAgentRequestError,
+  MemmyAgentGoalControlError,
   MemmyAgentMessageRejectedError,
   type MemmyAgentClient,
   type MemmyAgentProject,
@@ -60,6 +61,7 @@ import {
   type SlashCommandStorageLike
 } from "./agent-command-palette.js";
 import { AgentAttachmentCard, splitAgentAttachmentName } from "./agent-file-attachment-chip.js";
+import { AgentGoalBar, type AgentGoalControlRequest } from "./agent-goal-bar.js";
 import { AgentThreadMessages, ChatImageLightbox } from "./agent-thread-messages.js";
 import { AppFrame } from "./app-frame.js";
 import { mergeVoiceTranscript, useAsrRecorder } from "./asr-recorder.js";
@@ -112,6 +114,7 @@ const TRANSLATABLE_AGENT_ERROR_KEYS = new Set<MessageKey>([
   "home.agent.messageNotRecorded",
   "home.agent.executionInterrupted",
   "home.agent.recoveryTimeout",
+  "home.goal.controlUnknown",
   "home.project.desktopRequired"
 ]);
 export const AGENT_ATTACHMENT_ACCEPT = agentAttachmentAccept();
@@ -726,6 +729,7 @@ export function HomePage() {
   const composerDraftsRef = useRef<Record<string, string>>(composerDrafts);
   const pendingAttachmentsRef = useRef<Record<string, PendingAttachment[]>>(pendingAttachmentsByScope);
   const stopRequestLocksRef = useRef<Set<string>>(new Set());
+  const goalMutationLocksRef = useRef<Set<string>>(new Set());
   const messageSendLocksRef = useRef<Set<string>>(new Set());
   const draftTargetRevisionRef = useRef(state.agent.draftTargetRevisionByScope);
   draftTargetRevisionRef.current = state.agent.draftTargetRevisionByScope;
@@ -778,6 +782,11 @@ export function HomePage() {
       state.agent.optimisticSendingByChatId[state.agent.currentChatId]
     )
   );
+  const currentGoal = state.agent.goalState?.goal_id ? state.agent.goalState : null;
+  const isCurrentGoalActive = currentGoal?.status === "active";
+  const goalMutationPending = state.agent.currentChatId
+    ? state.agent.goalMutationPendingByChatId[state.agent.currentChatId] ?? null
+    : null;
   const firstEncounterFollowUp = firstEncounterFollowUpMode(state.bootstrap?.onboarding.scanPermission ?? "unset");
   const isFirstEncounterFollowUpChat = Boolean(
     firstEncounterRelayChatId
@@ -885,9 +894,9 @@ export function HomePage() {
     syncAgentConversation({
       sessionIds,
       messages,
-      isRunning: isCurrentAgentRunning
+      isRunning: isCurrentAgentRunning || isCurrentGoalActive
     });
-  }, [isCurrentAgentRunning, state.agent.currentChatId, state.agent.currentSessionKey, state.agent.messages, syncAgentConversation]);
+  }, [isCurrentAgentRunning, isCurrentGoalActive, state.agent.currentChatId, state.agent.currentSessionKey, state.agent.messages, syncAgentConversation]);
 
   const setSlashCommandsSnapshot = useCallback((commands: MemmyAgentSlashCommand[]) => {
     slashCommandsRef.current = commands;
@@ -1217,19 +1226,21 @@ export function HomePage() {
   const hasBlockedPendingMedia = pendingAttachments.some((item) => item.status !== "ready");
   const hasComposerPayload = Boolean(input.trim() || pendingAttachments.some((item) => item.status === "ready"));
   const stopInFlight = state.agent.currentChatId ? Boolean(state.agent.stopInFlightByChatId[state.agent.currentChatId]) : false;
-  const composerSubmitDisabled = isCurrentAgentRunning
-    ? stopInFlight
-    : stopInFlight
-      || !hasComposerPayload
-      || hasBlockedPendingMedia
-      || !connection
-      || isCreatingChat
-      || messageSendInFlight
-      || currentSessionProjectBlocked
-      || draftProjectBlocked
-      || state.agent.connectionStatus !== "connected"
-      || state.agent.recoveringGeneration !== null
-      || selectedChatModel === null;
+  const composerSendDisabled = stopInFlight
+    || !hasComposerPayload
+    || hasBlockedPendingMedia
+    || !connection
+    || isCreatingChat
+    || messageSendInFlight
+    || currentSessionProjectBlocked
+    || draftProjectBlocked
+    || state.agent.connectionStatus !== "connected"
+    || state.agent.recoveringGeneration !== null
+    || selectedChatModel === null;
+  const composerStopDisabled = stopInFlight || Boolean(isCurrentGoalActive && goalMutationPending);
+  const composerSubmitDisabled = isCurrentAgentRunning && !isCurrentGoalActive
+    ? composerStopDisabled
+    : composerSendDisabled;
   const centerComposerControls = isComposerSingleLine && pendingAttachments.length === 0;
 
   useEffect(() => {
@@ -1433,14 +1444,66 @@ export function HomePage() {
    * Stops the current Agent turn.
    */
   function stopCurrentTurn() {
+    const goal = state.agent.goalState;
+    const chatId = state.agent.currentChatId;
+    if (chatId && goal?.goal_id && goal.status === "active") {
+      void controlGoal({ chatId, goalId: goal.goal_id, action: "pause" });
+      return;
+    }
     requestAgentStop({
-      chatId: state.agent.currentChatId,
+      chatId,
       connection,
       stopInFlightByChatId: state.agent.stopInFlightByChatId,
       stopRequestLocks: stopRequestLocksRef.current,
       dispatch,
       track
     });
+  }
+
+  async function controlGoal(request: AgentGoalControlRequest): Promise<void> {
+    if (goalMutationLocksRef.current.has(request.chatId)) return;
+    const expectedGeneration = connection?.getReadyGeneration() ?? null;
+    if (!connection || expectedGeneration === null) {
+      dispatch(agentActions.operationFailed("chat", createAgentOperationError({
+        source: "gateway-command",
+        message: "network_unavailable",
+        chatId: request.chatId
+      })));
+      return;
+    }
+
+    const requestId = crypto.randomUUID();
+    goalMutationLocksRef.current.add(request.chatId);
+    dispatch(agentActions.goalMutationStarted({
+      chatId: request.chatId,
+      requestId,
+      goalId: request.goalId,
+      action: request.action
+    }));
+    ensureChatSubscription?.(request.chatId);
+    try {
+      await connection.controlGoal({
+        chatId: request.chatId,
+        goalId: request.goalId,
+        action: request.action,
+        requestId,
+        ...(request.objective === undefined ? {} : { objective: request.objective }),
+        ...(request.tokenBudget === undefined ? {} : { tokenBudget: request.tokenBudget })
+      }, expectedGeneration);
+    } catch (error) {
+      dispatch(agentActions.operationFailed("chat", createAgentOperationError({
+        source: "gateway-command",
+        message: error instanceof MemmyAgentGoalControlError && error.unknownResult
+          ? "home.goal.controlUnknown"
+          : error instanceof MemmyAgentGoalControlError
+            ? error.code
+            : readableError(error),
+        chatId: request.chatId
+      })));
+    } finally {
+      goalMutationLocksRef.current.delete(request.chatId);
+      dispatch(agentActions.goalMutationSettled(request.chatId, requestId));
+    }
   }
 
   /**
@@ -1860,7 +1923,7 @@ export function HomePage() {
       return;
     }
     event.preventDefault();
-    if (!state.agent.isSending && !composerSubmitDisabled) {
+    if ((!isCurrentAgentRunning || isCurrentGoalActive) && !composerSendDisabled) {
       void sendMessage();
     }
   }
@@ -2177,6 +2240,14 @@ export function HomePage() {
                   {t("home.project.registryUnavailable")}
                 </p>
               ) : null}
+              {state.agent.currentChatId && currentGoal ? (
+                <AgentGoalBar
+                  chatId={state.agent.currentChatId}
+                  goal={currentGoal}
+                  pending={Boolean(goalMutationPending)}
+                  onControl={(request) => void controlGoal(request)}
+                />
+              ) : null}
               <AgentOperationErrorSlot message={agentError} />
               <div
                 className="relative agent-composer-shell rounded-card-lg"
@@ -2269,14 +2340,35 @@ export function HomePage() {
                   >
                     {asrRecorder.isRecording ? <Pause size={15} /> : <Mic size={15} />}
                   </button>
-                  <ComposerSubmitButton
-                    isSending={isCurrentAgentRunning}
-                    disabled={composerSubmitDisabled}
-                    sendLabel={t("home.send")}
-                    stopLabel={t("home.stop")}
-                    variant="compact"
-                    onClick={isCurrentAgentRunning ? stopCurrentTurn : () => void sendMessage()}
-                  />
+                  {isCurrentAgentRunning && isCurrentGoalActive ? (
+                    <>
+                      <ComposerSubmitButton
+                        isSending={false}
+                        disabled={composerSendDisabled}
+                        sendLabel={t("home.send")}
+                        stopLabel={t("home.stop")}
+                        variant="compact"
+                        onClick={() => void sendMessage()}
+                      />
+                      <ComposerSubmitButton
+                        isSending
+                        disabled={composerStopDisabled}
+                        sendLabel={t("home.send")}
+                        stopLabel={t("home.stop")}
+                        variant="compact"
+                        onClick={stopCurrentTurn}
+                      />
+                    </>
+                  ) : (
+                    <ComposerSubmitButton
+                      isSending={isCurrentAgentRunning}
+                      disabled={composerSubmitDisabled}
+                      sendLabel={t("home.send")}
+                      stopLabel={t("home.stop")}
+                      variant="compact"
+                      onClick={isCurrentAgentRunning ? stopCurrentTurn : () => void sendMessage()}
+                    />
+                  )}
                 </div>
               </div>
               <p className="text-center text-[11px] text-text-ink/40 mt-2">{t("home.notice")}</p>

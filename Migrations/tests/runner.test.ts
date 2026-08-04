@@ -55,7 +55,11 @@ function options(
   runtimeConfigFile = path.join(agentWorkspace, "config.yaml"),
 ): RunMigrationsOptions {
   return {
-    targets: { agentWorkspace, runtimeConfigFile },
+    targets: {
+      agentWorkspace,
+      runtimeConfigFile,
+      sessionDagDir: path.join(agentWorkspace, "session-dag"),
+    },
     logger: logger(),
   };
 }
@@ -102,13 +106,17 @@ describe("migration runner", () => {
     expect(first.applied.map((item) => item.id)).toEqual([
       "v1.0.4/0001-add-webui-session-binding",
       "v1.0.5/0001-flatten-memory-model-config",
+      "v1.0.5/0002-normalize-goal-state",
+      "v1.0.5/0003-add-goal-dag-boundary",
     ]);
-    expect(first.results).toEqual({ scanned: 2, changed: 2, ignored: 0 });
+    expect(first.results).toEqual({ scanned: 3, changed: 2, ignored: 1 });
     expect(second).toEqual({
       applied: [],
       skipped: [
         "v1.0.4/0001-add-webui-session-binding",
         "v1.0.5/0001-flatten-memory-model-config",
+        "v1.0.5/0002-normalize-goal-state",
+        "v1.0.5/0003-add-goal-dag-boundary",
       ],
       results: { scanned: 0, changed: 0, ignored: 0 },
     });
@@ -132,6 +140,21 @@ describe("migration runner", () => {
         target: {
           type: "runtime-config",
           key: runtimeConfigTargetKey(configPath),
+        },
+      },
+      {
+        id: "v1.0.5/0002-normalize-goal-state",
+        introducedIn: "1.0.5",
+        appliedAt: expect.stringMatching(/Z$/),
+        target: { type: "agent-workspace" },
+      },
+      {
+        id: "v1.0.5/0003-add-goal-dag-boundary",
+        introducedIn: "1.0.5",
+        appliedAt: expect.stringMatching(/Z$/),
+        target: {
+          type: "session-dag",
+          key: expect.stringMatching(/^[a-f0-9]{64}$/),
         },
       },
     ]);
@@ -399,6 +422,35 @@ describe("migration runner", () => {
     expect([left.applied.length, right.applied.length].sort()).toEqual([0, 1]);
   });
 
+  it("tracks a session-dag migration independently for each normalized directory", async () => {
+    const profileWorkspace = await workspace();
+    const seenTargets: string[] = [];
+    const definitions = [definition("v1.0.1/0001-session-dag", "1.0.1", {
+      scope: "session-dag",
+      up: async (context) => {
+        seenTargets.push(context.sessionDagDir);
+        return { scanned: 1, changed: 1, ignored: 0 };
+      },
+    })];
+    const firstOptions = options(profileWorkspace);
+    firstOptions.targets.sessionDagDir = path.join(profileWorkspace, "nested", "..", "dag-a");
+    const secondOptions = options(profileWorkspace);
+    secondOptions.targets.sessionDagDir = path.join(profileWorkspace, "dag-b");
+
+    const first = await runMigrationsForTest(firstOptions, { definitions });
+    const second = await runMigrationsForTest(secondOptions, { definitions });
+    const repeated = await runMigrationsForTest(firstOptions, { definitions });
+
+    expect(first.applied).toHaveLength(1);
+    expect(second.applied).toHaveLength(1);
+    expect(repeated.applied).toHaveLength(0);
+    expect(repeated.skipped).toEqual(["v1.0.1/0001-session-dag"]);
+    expect(seenTargets).toEqual([
+      path.join(profileWorkspace, "dag-a"),
+      path.join(profileWorkspace, "dag-b"),
+    ]);
+  });
+
   it("returns a stable timeout when another process holds the workspace state lock", async () => {
     const profileWorkspace = await workspace();
     const paths = getMigrationStatePaths(profileWorkspace);
@@ -428,7 +480,11 @@ describe("migration runner", () => {
     const profileWorkspace = await workspace();
     await expect(
       runMigrations({
-        targets: { agentWorkspace: profileWorkspace, runtimeConfigFile: " " },
+        targets: {
+          agentWorkspace: profileWorkspace,
+          runtimeConfigFile: " ",
+          sessionDagDir: path.join(profileWorkspace, "session-dag"),
+        },
         logger: logger(),
       }),
     ).rejects.toMatchObject({

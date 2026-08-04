@@ -32,6 +32,7 @@ async function fixture(
       profileWorkspace: root,
       sessionsDir: path.join(root, "sessions"),
       runtimeConfigFile: configPath,
+      sessionDagDir: path.join(root, "session-dag"),
       logger: logger(),
     },
   };
@@ -429,6 +430,7 @@ describe("v1.0.5/0001-flatten-memory-model-config", () => {
       profileWorkspace: root,
       sessionsDir: path.join(root, "sessions"),
       runtimeConfigFile: path.join(root, "missing.yaml"),
+      sessionDagDir: path.join(root, "session-dag"),
       logger: logger(),
     };
 
@@ -457,6 +459,7 @@ describe("v1.0.5/0001-flatten-memory-model-config", () => {
       profileWorkspace: root,
       sessionsDir: path.join(root, "sessions"),
       runtimeConfigFile: configPath,
+      sessionDagDir: path.join(root, "session-dag"),
       logger: logger(),
     };
 

@@ -9432,3 +9432,128 @@ input[type="checkbox"].check-sky:checked::after {
     font-size: 28px;
   }
 }
+.agent-goal-bar {
+  margin-bottom: 0.5rem;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 35%, transparent);
+  border-radius: 0.75rem;
+  background: color-mix(in srgb, var(--color-background-paper) 96%, transparent);
+  padding: 0.75rem;
+}
+
+.agent-goal-bar__header,
+.agent-goal-bar__actions,
+.agent-goal-bar__form-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.agent-goal-bar__header {
+  justify-content: space-between;
+}
+
+.agent-goal-bar__status {
+  border-radius: 9999px;
+  background: color-mix(in srgb, var(--color-canvas-oat) 80%, transparent);
+  padding: 0.2rem 0.55rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.agent-goal-bar__status--active,
+.agent-goal-bar__status--completed {
+  color: var(--color-action-sky);
+}
+
+.agent-goal-bar__status--blocked,
+.agent-goal-bar__status--usage_limited,
+.agent-goal-bar__status--budget_limited {
+  color: var(--color-status-error);
+}
+
+.agent-goal-bar__usage,
+.agent-goal-bar__hint,
+.agent-goal-bar__link {
+  color: color-mix(in srgb, var(--color-text-ink) 58%, transparent);
+  font-size: 0.72rem;
+}
+
+.agent-goal-bar__objective {
+  margin-top: 0.55rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: color-mix(in srgb, var(--color-text-ink) 82%, transparent);
+  font-size: 0.8rem;
+}
+
+.agent-goal-bar__objective--collapsed {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.agent-goal-bar__link {
+  margin-top: 0.25rem;
+  cursor: pointer;
+}
+
+.agent-goal-bar__hint {
+  margin-top: 0.5rem;
+}
+
+.agent-goal-bar__actions {
+  margin-top: 0.65rem;
+}
+
+.agent-goal-bar__button {
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 45%, transparent);
+  border-radius: 0.5rem;
+  padding: 0.28rem 0.6rem;
+  color: color-mix(in srgb, var(--color-text-ink) 75%, transparent);
+  font-size: 0.72rem;
+}
+
+.agent-goal-bar__button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-canvas-oat) 70%, transparent);
+}
+
+.agent-goal-bar__button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.agent-goal-bar__button--danger {
+  color: var(--color-status-error);
+}
+
+.agent-goal-bar__form {
+  margin-top: 0.65rem;
+}
+
+.agent-goal-bar__form textarea,
+.agent-goal-bar__form input {
+  width: 100%;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 45%, transparent);
+  border-radius: 0.5rem;
+  background: var(--color-background-paper);
+  padding: 0.55rem;
+  color: var(--color-text-ink);
+  font-size: 0.78rem;
+}
+
+.agent-goal-bar__form textarea {
+  min-height: 5.5rem;
+  resize: vertical;
+}
+
+.agent-goal-bar__form-actions {
+  margin-top: 0.45rem;
+}
+
+.agent-goal-bar__validation {
+  margin-top: 0.35rem;
+  color: var(--color-status-error);
+  font-size: 0.72rem;
+}

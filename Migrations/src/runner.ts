@@ -93,6 +93,17 @@ function resolveRuntimeConfigTarget(target: string): string {
   return path.normalize(path.resolve(target));
 }
 
+function resolveSessionDagTarget(target: string): string {
+  if (typeof target !== "string" || !target.trim()) {
+    throw new MigrationError(
+      "migration_target_unavailable",
+      "Session DAG migration target is unavailable",
+      { scope: "session-dag" },
+    );
+  }
+  return path.normalize(path.resolve(target));
+}
+
 function isLockContention(error: unknown): boolean {
   return (
     typeof error === "object" &&
@@ -124,6 +135,7 @@ async function runMigrationsInternal(
 
   const profileWorkspace = await resolveTarget(options.targets.agentWorkspace);
   const runtimeConfigFile = resolveRuntimeConfigTarget(options.targets.runtimeConfigFile);
+  const sessionDagDir = resolveSessionDagTarget(options.targets.sessionDagDir);
   const statePaths = getMigrationStatePaths(profileWorkspace);
   try {
     await fs.mkdir(statePaths.directory, { recursive: true });
@@ -155,12 +167,12 @@ async function runMigrationsInternal(
   try {
     const state = await readMigrationState(statePaths.file, definitions);
     const skipped = definitions
-      .filter((definition) => isMigrationApplied(state, definition, runtimeConfigFile))
+      .filter((definition) => isMigrationApplied(state, definition, runtimeConfigFile, sessionDagDir))
       .map((definition) => definition.id);
     const applied: RunMigrationsResult["applied"] = [];
 
     for (const definition of definitions) {
-      if (isMigrationApplied(state, definition, runtimeConfigFile)) continue;
+      if (isMigrationApplied(state, definition, runtimeConfigFile, sessionDagDir)) continue;
       options.logger.info("migration_started", {
         migrationId: definition.id,
         scope: definition.scope,
@@ -172,6 +184,7 @@ async function runMigrationsInternal(
           profileWorkspace,
           sessionsDir: path.join(profileWorkspace, "sessions"),
           runtimeConfigFile,
+          sessionDagDir,
           logger: options.logger,
         });
         result = definition.scope === "runtime-config"
@@ -182,7 +195,11 @@ async function runMigrationsInternal(
           error instanceof MigrationError
             ? error
             : ioError(
-                definition.scope === "runtime-config" ? runtimeConfigFile : profileWorkspace,
+                definition.scope === "runtime-config"
+                  ? runtimeConfigFile
+                  : definition.scope === "session-dag"
+                    ? sessionDagDir
+                    : profileWorkspace,
                 error,
                 definition.id,
                 definition.scope,
@@ -199,7 +216,7 @@ async function runMigrationsInternal(
         id: definition.id,
         introducedIn: definition.introducedIn,
         appliedAt: (internals.now ?? (() => new Date()))().toISOString(),
-        target: migrationTargetFor(definition, runtimeConfigFile),
+        target: migrationTargetFor(definition, runtimeConfigFile, sessionDagDir),
       });
       await writeMigrationState(statePaths, state, definition.id);
       applied.push({

@@ -923,8 +923,8 @@ const WEBUI_CRON_TRANSIENT_METADATA_KEYS = [
   "toolEvents",
   "fileEditEvents",
   "retryWait",
-  "goalStatus",
-  "goalStatusEvent",
+  "runStatus",
+  "runStatusEvent",
   "goalState",
   "goalStateSync",
 ] as const;
@@ -1047,7 +1047,16 @@ export async function gateway({
     webuiModelSelectionResolver: (input) => loop.resolveTurnModelSelection(input),
     cancelActiveTasks: cancelSessionTasks,
     closeBrowserChat: (channel, chatId) => loop.closeBrowserChat(channel, chatId),
+    goalControlHandler: (request) => loop.goalRuntime.control(request),
+    activeGoalStopHandler: async (sessionKey) => {
+      const goal = loop.goalRuntime.get(sessionKey);
+      if (goal?.status !== "active") return false;
+      await loop.goalRuntime.pauseAndCancel(sessionKey, goal.goalId);
+      await loop.goalRuntime.flushEffects(sessionKey);
+      return true;
+    },
   });
+  loop.setChannelCapabilitiesResolver?.((channel) => manager.channelCapabilities(channel));
   const webuiChannel = manager.getChannel("websocket");
   let transcriptMonitor: GatewayTranscriptMonitor | null = null;
   if (webuiChannel instanceof WebSocketChannel) {

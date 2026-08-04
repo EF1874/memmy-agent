@@ -26,14 +26,22 @@ import {
   TerminalRunControl,
   TerminalSessionTurnLock,
 } from "../session/terminal-session-control.js";
-import { goalStateRuntimeLines, runnerWallLlmTimeoutS, sustainedGoalActive } from "../session/goal-state.js";
+import {
+  goalSummary,
+  readGoalState,
+  runnerWallLlmTimeoutS,
+  type GoalState,
+  type GoalStatus,
+} from "../session/goal-state.js";
 import { finishWebuiTurn, markWebuiSession, maybeGenerateWebuiTitle, publishTurnRunStatus, publishWebuiThreadSessionUpdated, shouldPublishWebuiRunStatus, WEBUI_LANGUAGE_METADATA_KEY } from "../session/webui-turns.js";
 import { extractDocuments } from "../../utils/document.js";
+import { renderTemplate } from "../../utils/prompt-templates.js";
 import { imageGenerationPrompt } from "../../utils/image-generation-intent.js";
 import { LLMRuntime } from "../../utils/llm-runtime.js";
 import { withProgressCapabilities } from "../../utils/progress-events.js";
-import { EMPTY_FINAL_RESPONSE_MESSAGE, SUSTAINED_GOAL_CONTINUE_PROMPT } from "../../utils/runtime.js";
-import { AgentRunner, AgentRunSpec } from "./runner.js";
+import { EMPTY_FINAL_RESPONSE_MESSAGE } from "../../utils/runtime.js";
+import { AgentRunner, AgentRunSpec, type AgentInternalTurnContext } from "./runner.js";
+import { GoalRuntime, GoalRuntimeError } from "./goal-runtime.js";
 import { resolveToolResultMaxChars, SESSION_TOOL_RESULT_MAX_CHARS_BY_NAME } from "./tool-result-budget.js";
 import { AgentProgressHook } from "./progress-hook.js";
 import { createTurnCancellationBoundary, type TurnCancellationBoundary } from "./turn-cancellation-boundary.js";
@@ -53,7 +61,12 @@ import { AutoCompact } from "./autocompact.js";
 import { configuredModelPresets, defaultSelectionSignature, makePresetSnapshotLoader, normalizePresetName } from "./model-presets.js";
 import { installMemmyMemory } from "../../memmy-memory/index.js";
 import { createByokTokenUsageRecorder, installByokTokenUsage } from "../../integrations/byok-token-usage/index.js";
-import { SessionDagQueueManager, SessionDagUsageReporter, type DagTurnInput } from "../../session-dag/index.js";
+import {
+  SessionDagQueueManager,
+  SessionDagUsageReporter,
+  type DagGoalContext,
+  type DagTurnInput,
+} from "../../session-dag/index.js";
 import {
   assertWebuiWorkspaceAvailable,
   ProjectStore,
@@ -62,9 +75,20 @@ import {
 
 export const UNIFIED_SESSION_KEY = "unified:default";
 
+function isImmediateGoalControlCommand(raw: string): boolean {
+  const command = raw.trim().toLowerCase();
+  if (command === "/goal") return true;
+  if (!command.startsWith("/goal ")) return false;
+  const subcommand = command.slice("/goal ".length).trim().split(/\s+/, 1)[0] ?? "";
+  return ["status", "help", "pause", "resume", "edit", "budget", "clear"].includes(subcommand);
+}
+
 function isSessionOrderedCommand(raw: string): boolean {
   const command = raw.trim().toLowerCase();
-  return command === "/model" || command.startsWith("/model ");
+  return command === "/model"
+    || command.startsWith("/model ")
+    || ((command === "/goal" || command.startsWith("/goal "))
+      && !isImmediateGoalControlCommand(command));
 }
 
 type ToolRegistryInstance = ReturnType<ToolLoader["loadRegistry"]>;
@@ -94,8 +118,14 @@ type GuiTranscriptMirrorLike = {
     text: string,
     latencyMs?: number | null,
     agentUi?: unknown,
+    errorCategory?: ProviderErrorCategory | null,
   ) => void;
-  ended: (turn: GuiMirrorTurn, latencyMs?: number | null) => void;
+  ended: (
+    turn: GuiMirrorTurn,
+    latencyMs?: number | null,
+    goalId?: string | null,
+    goalOutcome?: GoalStatus | null,
+  ) => void;
 };
 
 type AgentLoopResult = [
@@ -108,6 +138,7 @@ type AgentLoopResult = [
   actualModelProvider: string | null,
   actualModel: string | null,
   errorCategory: ProviderErrorCategory | null,
+  usage: Record<string, number>,
 ];
 
 export enum TurnState {
@@ -148,6 +179,10 @@ export class TurnContext {
   finalContent: string | null = null;
   finalContentStreamed = false;
   errorCategory: ProviderErrorCategory | null = null;
+  usage: Record<string, number> = {};
+  goalIdForTurn: string | null = null;
+  dagGoalContext: DagGoalContext | null = null;
+  goalOutcome: GoalStatus | null = null;
   toolsUsed: string[] = [];
   allMessages: Record<string, any>[] = [];
   stopReason = "";
@@ -233,6 +268,15 @@ function truncateText(text: string, maxChars: number): string {
 function stripRuntimeContext(content: string): string {
   const pos = content.indexOf(ContextBuilder.RUNTIME_CONTEXT_TAG);
   return pos >= 0 ? content.slice(0, pos).trimEnd() : content;
+}
+
+function escapeXmlText(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
 }
 
 const PLATFORM_API_ERROR_FALLBACK_ZH = "平台服务响应异常，请稍后重试。";
@@ -331,11 +375,19 @@ function sameSignature(left: any, right: any): boolean {
   return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
 }
 
-function normalizeUsageRecord(usage: Record<string, any> | null | undefined): Record<string, any> {
-  const out = { ...(usage ?? {}) };
-  out.prompt_tokens = Number(out.prompt_tokens ?? 0);
-  out.completion_tokens = Number(out.completion_tokens ?? 0);
-  return out;
+export function normalizeUsageRecord(
+  usage: Record<string, unknown> | null | undefined,
+): Record<string, number> {
+  const normalize = (value: unknown): number => (
+    typeof value === "number" && Number.isFinite(value) && value > 0
+      ? Math.floor(value)
+      : 0
+  );
+  return {
+    prompt_tokens: normalize(usage?.prompt_tokens),
+    completion_tokens: normalize(usage?.completion_tokens),
+    total_tokens: normalize(usage?.total_tokens),
+  };
 }
 
 class AsyncMutex {
@@ -457,7 +509,9 @@ export class AgentLoop {
   backgroundTasks: Array<Promise<any>> = [];
   extraHooks: AgentHook[] = [];
   startTime: number;
-  lastUsage: Record<string, number>;
+  lastUsageBySession: Map<string, Record<string, number>>;
+  goalRuntime: GoalRuntime;
+  scheduledGoalSessions: Map<string, { goalId: string; updatedAt: string }>;
   activeTasks: Map<string, any[]>;
   pendingQueues: Map<string, AsyncQueue<InboundMessage>>;
   turnSlots: Map<string, TurnSlot[]>;
@@ -470,6 +524,7 @@ export class AgentLoop {
   toolsSnapshotLoader: (() => any) | null = null;
   presetSnapshotLoader: ((name: string) => any) | null = null;
   runtimeModelPublisher: ((model: string | null, modelPreset?: string | null) => void) | null = null;
+  private channelCapabilitiesResolver: ((channel: string) => { supportsStreaming: boolean } | null) | null = null;
   private readonly modelSelectionResolver: ((input: {
     requestedPreset?: string | null;
     sessionPreset?: string | null;
@@ -487,7 +542,8 @@ export class AgentLoop {
 
   constructor(init: AgentLoopInit = {}) {
     this.startTime = Date.now() / 1000;
-    this.lastUsage = {};
+    this.lastUsageBySession = new Map();
+    this.scheduledGoalSessions = new Map();
     this.activeTasks = new Map();
     this.pendingQueues = new Map();
     this.turnSlots = new Map();
@@ -543,6 +599,13 @@ export class AgentLoop {
       init.sessionDir ?? path.join(this.workspace, "sessions"),
       { legacyWebuiWorkspaceCwd: this.workspace },
     );
+    this.goalRuntime = new GoalRuntime({
+      sessions: this.sessions,
+      bus: this.bus,
+      cancelActiveTasks: (sessionKey) => this.cancelActiveTasks(sessionKey),
+      scheduleGoalWork: (sessionKey, goal) => this.scheduleGoalWork(sessionKey, goal),
+      invalidateGoalWork: (sessionKey) => this.scheduledGoalSessions.delete(sessionKey),
+    });
     this.projectStore = init.projectStore ?? null;
     this.guiTranscriptMirror = init.guiTranscriptMirror ?? null;
     const terminalControlRoot = this.sessions.root
@@ -709,6 +772,7 @@ export class AgentLoop {
       execSessionManager: this.execSessionManager,
       fileStateStore: this.fileStateStore,
       browserSessionManager: this.browserSessionManager,
+      goalRuntime: this.goalRuntime,
       readonlySkillRoots,
       timezone: this.context.timezone || this.config.agents.defaults.timezone || "UTC",
       runtimeState: this,
@@ -1049,6 +1113,154 @@ export class AgentLoop {
     return AgentLoop.runtimeChatId(msg);
   }
 
+  setChannelCapabilitiesResolver(
+    resolver: (channel: string) => { supportsStreaming: boolean } | null,
+  ): void {
+    this.channelCapabilitiesResolver = resolver;
+  }
+
+  private resolveChannelCapabilities(channel: string): { supportsStreaming: boolean } | null {
+    if (channel === "cli") return { supportsStreaming: false };
+    return this.channelCapabilitiesResolver?.(channel) ?? null;
+  }
+
+  private renderGoalContinuation(goal: GoalState): string {
+    const remainingTokens = goal.tokenBudget === null
+      ? "unbounded"
+      : Math.max(0, goal.tokenBudget - goal.tokensUsed);
+    return renderTemplate("agent/goal-continuation.md", {
+      objective: escapeXmlText(goal.objective),
+      tokens_used: goal.tokensUsed,
+      token_budget: goal.tokenBudget ?? "none",
+      remaining_tokens: remainingTokens,
+      strip: true,
+    });
+  }
+
+  scheduleGoalWork(sessionKey: string, goal: GoalState): void {
+    if (goal.status !== "active") {
+      this.scheduledGoalSessions.delete(sessionKey);
+      return;
+    }
+    this.scheduledGoalSessions.set(sessionKey, {
+      goalId: goal.goalId,
+      updatedAt: goal.updatedAt,
+    });
+    if (!(this.activeTasks.get(sessionKey)?.length ?? 0) && !this.goalRuntime.hasGoalLease(sessionKey)) {
+      void this.dispatchNextGoalWork(sessionKey);
+    }
+  }
+
+  private async dispatchNextGoalWork(sessionKey: string): Promise<void> {
+    if (
+      (this.activeTasks.get(sessionKey)?.length ?? 0) > 0
+      || this.goalRuntime.hasGoalLease(sessionKey)
+      || this.goalRuntime.hasWorkReservation(sessionKey)
+      || this.sessionDeletionQueues.has(sessionKey)
+    ) return;
+    const scheduled = this.scheduledGoalSessions.get(sessionKey);
+    const inbox = this.goalRuntime.inbox(sessionKey);
+    if (inbox.length) {
+      const turnId = cryptoRandomId();
+      if (!this.goalRuntime.reserveWork(sessionKey, turnId, "inbox")) return;
+      try {
+        const entry = await this.goalRuntime.reserveInboxEntry(sessionKey, turnId);
+        if (!entry) {
+          this.goalRuntime.releaseWork(sessionKey, turnId);
+          return;
+        }
+        const metadata = { ...entry.metadata, ...turnMetadata(turnId) };
+        await this.bus.publishInbound(new InboundMessage({
+          channel: entry.channel,
+          chatId: entry.chatId,
+          senderId: entry.senderId,
+          content: entry.content,
+          media: entry.media,
+          metadata,
+          timestamp: entry.receivedAt,
+          sessionKeyOverride: sessionKey,
+        }));
+      } catch (error) {
+        this.goalRuntime.releaseWork(sessionKey, turnId);
+        throw error;
+      }
+      return;
+    }
+    if (!scheduled) return;
+    const goal = this.goalRuntime.get(sessionKey);
+    const route = this.goalRuntime.route(sessionKey);
+    if (
+      !goal
+      || goal.status !== "active"
+      || goal.goalId !== scheduled.goalId
+      || goal.updatedAt !== scheduled.updatedAt
+      || !route
+    ) {
+      this.scheduledGoalSessions.delete(sessionKey);
+      if (goal?.status === "active" && !route) {
+        const blocked = await this.goalRuntime.updateFromModel(sessionKey, goal.goalId, "blocked");
+        await this.goalRuntime.flushEffects(sessionKey);
+        console.warn("[goal] route unavailable", { sessionKey, goalId: blocked.goalId });
+      }
+      return;
+    }
+    const capabilities = this.resolveChannelCapabilities(route.channel);
+    if (!capabilities) {
+      this.scheduledGoalSessions.delete(sessionKey);
+      const blocked = await this.goalRuntime.updateFromModel(sessionKey, goal.goalId, "blocked");
+      await this.goalRuntime.flushEffects(sessionKey);
+      console.warn("[goal] route unavailable", {
+        sessionKey,
+        goalId: blocked.goalId,
+        channel: route.channel,
+      });
+      return;
+    }
+    const turnId = cryptoRandomId();
+    if (!this.goalRuntime.reserveWork(sessionKey, turnId, "continuation")) return;
+    this.scheduledGoalSessions.delete(sessionKey);
+    try {
+      await this.bus.publishInbound(new InboundMessage({
+        channel: route.channel,
+        chatId: route.chatId,
+        senderId: "goal-runtime",
+        content: this.renderGoalContinuation(goal),
+        metadata: {
+          webui: route.channel === "websocket"
+            && this.sessions.get(sessionKey)?.metadata?.webui === true,
+          wantsStream: capabilities.supportsStreaming,
+          ...turnMetadata(turnId),
+        },
+        internal: {
+          kind: "goal_continuation",
+          goalId: goal.goalId,
+          goalUpdatedAt: goal.updatedAt,
+        },
+        sessionKeyOverride: sessionKey,
+      }));
+    } catch (error) {
+      this.goalRuntime.releaseWork(sessionKey, turnId);
+      this.scheduleGoalWork(sessionKey, goal);
+      throw error;
+    }
+  }
+
+  private async recoverGoalWork(): Promise<void> {
+    for (const session of this.sessions.listSessionRecords()) {
+      const inbox = this.goalRuntime.inbox(session.key);
+      if (inbox.some((entry) => entry.turnId !== null)) {
+        await this.goalRuntime.resetDispatchingInbox(session.key);
+      }
+      const goal = readGoalState(session.metadata);
+      if (inbox.length) {
+        if (goal?.status === "active") this.scheduleGoalWork(session.key, goal);
+        else void this.dispatchNextGoalWork(session.key);
+        continue;
+      }
+      if (goal?.status === "active") this.scheduleGoalWork(session.key, goal);
+    }
+  }
+
   replayTokenBudget(modelSelection: ResolvedModelSelection | null = null): number {
     const contextWindowTokens = modelSelection?.snapshot.contextWindowTokens
       ?? this.contextWindowTokens;
@@ -1091,7 +1303,7 @@ export class AgentLoop {
 
   isSessionGoalActive(sessionKey: string): boolean {
     const session = this.sessions.get(sessionKey);
-    return Boolean(session && sustainedGoalActive(session.metadata));
+    return readGoalState(session?.metadata ?? null)?.status === "active";
   }
 
   isCronTargetBlocked(channel: string, sessionKey: string): boolean {
@@ -1468,7 +1680,12 @@ export class AgentLoop {
     };
   }
 
-  persistUserMessageEarly(msg: InboundMessage, session: Session, extra: Record<string, any> = {}): boolean {
+  private appendUserMessage(
+    msg: InboundMessage,
+    session: Session,
+    extra: Record<string, any> = {},
+    timestamp?: string,
+  ): boolean {
     const mediaPaths = (msg.media ?? []).filter((item) => typeof item === "string" && item);
     const hasText = typeof msg.content === "string" && msg.content.trim().length > 0;
     if (!hasText && !mediaPaths.length) return false;
@@ -1491,10 +1708,24 @@ export class AgentLoop {
       ...extra,
     };
     session.addMessage("user", typeof msg.content === "string" ? msg.content : "", metadataExtra);
+    if (timestamp) session.messages.at(-1)!.timestamp = timestamp;
     this.markPendingUserTurn(session);
+    return true;
+  }
+
+  persistUserMessageEarly(msg: InboundMessage, session: Session, extra: Record<string, any> = {}): boolean {
+    if (!this.appendUserMessage(msg, session, extra)) return false;
     this.sessions.save(session, {
       fsync: typeof msg.metadata?.client_request_id === "string",
     });
+    return true;
+  }
+
+  private persistGoalContinuationContext(ctx: TurnContext): boolean {
+    const content = ctx.msg.content;
+    if (!content.trim()) return false;
+    ctx.session!.addMessage("user", content, { internal_context: "goal_continuation" });
+    this.sessions.save(ctx.session!, { fsync: true });
     return true;
   }
 
@@ -1512,6 +1743,23 @@ export class AgentLoop {
           modelPreset: msg.metadata?.model_preset ?? null,
           modelProvider: msg.metadata?.model_provider ?? null,
           model: msg.metadata?.model ?? null,
+        },
+      }),
+    );
+  }
+
+  async publishWebuiMessageRejected(msg: InboundMessage, reason: string): Promise<void> {
+    const clientRequestId = msg.metadata?.client_request_id;
+    if (msg.channel !== "websocket" || typeof clientRequestId !== "string") return;
+    await this.bus.publishOutbound(
+      new OutboundMessage({
+        channel: "websocket",
+        chatId: msg.chatId,
+        content: "",
+        metadata: {
+          webuiMessageRejected: true,
+          clientRequestId,
+          reason,
         },
       }),
     );
@@ -1561,12 +1809,6 @@ export class AgentLoop {
       hook: this.lifecycleHook(),
       sessionWorkspace,
     });
-  }
-
-  private goalContinueMessage(session: Session | null | undefined): string {
-    const goalLines = goalStateRuntimeLines(session?.metadata ?? null);
-    if (!goalLines.length) return SUSTAINED_GOAL_CONTINUE_PROMPT;
-    return "You have an active sustained goal:\n\n" + `${goalLines.join("\n")}\n\n` + "Please continue working toward the objective using your tools, or call complete_goal if the work is truly finished.";
   }
 
   async dispatchCommandInline(msg: InboundMessage, key: string, raw: string, dispatchFn: (ctx: CommandContext) => Promise<OutboundMessage | null> | OutboundMessage | null): Promise<void> {
@@ -1665,6 +1907,7 @@ export class AgentLoop {
     messageStart: number,
     messageEnd: number,
     modelSelection: ResolvedModelSelection | null = null,
+    goalContext: DagGoalContext | null = null,
   ): void {
     if (!this.sessionDagQueue || !this.config.sessionDag.enabled) return;
     if (messageEnd <= messageStart) return;
@@ -1673,8 +1916,12 @@ export class AgentLoop {
       turn_id: turnId,
       message_start: messageStart,
       message_end: messageEnd,
-      user_text: firstMessageText(turnMessages, "user"),
+      user_text: turnMessages.some((message) => message.internal_context === "goal_continuation")
+        && goalContext
+        ? `Goal continuation: ${goalSummary(goalContext.objective)}`
+        : firstMessageText(turnMessages, "user"),
       assistant_text: lastMessageText(turnMessages, "assistant"),
+      goal_context: goalContext,
     };
     try {
       this.sessionDagQueue.enqueueSavedTurn(
@@ -1781,6 +2028,15 @@ export class AgentLoop {
   }
 
   restorePendingUserTurn(session: Session): boolean {
+    if (
+      session.messages.at(-1)?.role === "user"
+      && session.messages.at(-1)?.internal_context === "goal_continuation"
+    ) {
+      session.messages.pop();
+      session.updatedAt = new Date().toISOString();
+      this.clearPendingUserTurn(session);
+      return true;
+    }
     if (!session.metadata[AgentLoop.PENDING_USER_TURN_KEY]) return false;
     if (session.messages.at(-1)?.role === "user") {
       session.messages.push({
@@ -1794,9 +2050,23 @@ export class AgentLoop {
     return true;
   }
 
-  async dispatchCommand(msg: InboundMessage, session: Session, key: string, abortSignal: AbortSignal | null = null): Promise<OutboundMessage | null | "continue"> {
+  async dispatchCommand(
+    msg: InboundMessage,
+    session: Session,
+    key: string,
+    abortSignal: AbortSignal | null = null,
+    turnId: string | null = null,
+  ): Promise<OutboundMessage | null | "continue"> {
     const raw = msg.content.trim();
-    const result = await this.commands.dispatch(new CommandContext({ msg, session, key, raw, loop: this, abortSignal }));
+    const result = await this.commands.dispatch(new CommandContext({
+      msg,
+      session,
+      key,
+      raw,
+      loop: this,
+      abortSignal,
+      turnId,
+    }));
     if (result == null) {
       return raw.startsWith("/") && msg.content !== raw ? "continue" : null;
     }
@@ -1842,6 +2112,7 @@ export class AgentLoop {
       tools = null,
       sessionWorkspace = this.workspace,
       modelSelection = null,
+      internalTurnContext = null,
     }: {
       onProgress?: any;
       onStream?: any;
@@ -1860,6 +2131,7 @@ export class AgentLoop {
       tools?: ToolRegistryInstance | null;
       sessionWorkspace?: string;
       modelSelection?: ResolvedModelSelection | null;
+      internalTurnContext?: AgentInternalTurnContext | null;
     } = {},
   ): Promise<AgentLoopResult> {
     if (!modelSelection) this.refreshProviderSnapshot();
@@ -1876,7 +2148,7 @@ export class AgentLoop {
       channel: channel ?? "cli",
       chatId: chatId ?? "direct",
       messageId: messageId ?? null,
-      metadata: metadata ?? {},
+      metadata: { ...(metadata ?? {}), ...(turnId ? turnMetadata(turnId) : {}) },
       sessionKey: activeSessionKey,
       toolHintMaxLength: this.toolHintMaxLength,
       setToolContext: (...args: any[]) => this.setToolContext(
@@ -1919,15 +2191,15 @@ export class AgentLoop {
         }),
         turnId,
         boundary,
-        goalActivePredicate: session ? () => sustainedGoalActive(session.metadata) : null,
-        goalContinueMessage: this.goalContinueMessage(session),
         abortSignal,
         hook,
         concurrentTools: true,
         injectionCallback: ({ limit = 3 } = {}) => this.drainPendingQueue(pendingQueue, limit, session?.key ?? sessionKey),
+        internalTurnContext,
       }),
     );
-    this.lastUsage = normalizeUsageRecord(result.usage ?? result.response?.usage);
+    const usage = normalizeUsageRecord(result.usage ?? result.response?.usage);
+    if (activeSessionKey) this.lastUsageBySession.set(activeSessionKey, usage);
     const toolsUsed = (result.toolCalls ?? []).map((call: any) => call?.function?.name ?? call?.name).filter(Boolean);
     return [
       result.finalContent ?? result.content ?? EMPTY_FINAL_RESPONSE_MESSAGE,
@@ -1939,6 +2211,7 @@ export class AgentLoop {
       firstString(result.response?.actualProvider, activeProvider?.spec?.name),
       firstString(result.response?.actualModel, activeModel),
       result.response?.errorCategory ?? null,
+      usage,
     ];
   }
 
@@ -1948,11 +2221,13 @@ export class AgentLoop {
     allMessages: Record<string, any>[],
     stopReason: string,
     hadInjections: boolean,
-    { turnLatencyMs = null, tools = null, finalContentStreamed = false, errorCategory = null }: {
+    { turnLatencyMs = null, tools = null, finalContentStreamed = false, errorCategory = null, goalId = null, goalOutcome = null }: {
       turnLatencyMs?: number | null;
       tools?: ToolRegistryInstance | null;
       finalContentStreamed?: boolean;
       errorCategory?: ProviderErrorCategory | null;
+      goalId?: string | null;
+      goalOutcome?: GoalStatus | null;
     } = {},
   ): OutboundMessage | null {
     void allMessages;
@@ -1969,6 +2244,7 @@ export class AgentLoop {
         ...(finalContentStreamed && !["error", "toolError"].includes(stopReason) ? { streamed: true } : {}),
         ...(turnLatencyMs != null ? { latencyMs: Math.trunc(turnLatencyMs) } : {}),
         ...(errorCategory === "quota_exhausted" ? { modelErrorCategory: errorCategory } : {}),
+        ...(goalId && goalOutcome ? { goalId, goalOutcome } : {}),
       },
     });
   }
@@ -2018,6 +2294,7 @@ export class AgentLoop {
       sessionKey: ctx.sessionKey,
       sessionKeyOverride: msg.sessionKeyOverride,
       timestamp: msg.timestamp,
+      internal: msg.internal,
     });
     const reservation = existingSession
       || msg.channel !== "websocket"
@@ -2051,6 +2328,7 @@ export class AgentLoop {
         sessionKey: ctx.sessionKey,
         sessionKeyOverride: msg.sessionKeyOverride,
         timestamp: msg.timestamp,
+        internal: msg.internal,
       });
     }
     const binding = this.resolveSessionWorkspace(
@@ -2073,6 +2351,7 @@ export class AgentLoop {
         sessionKey: ctx.sessionKey,
         sessionKeyOverride: msg.sessionKeyOverride,
         timestamp: msg.timestamp,
+        internal: msg.internal,
       });
     }
     markWebuiSession(ctx.session, msg.metadata);
@@ -2090,7 +2369,13 @@ export class AgentLoop {
   }
 
   async stateCommand(ctx: TurnContext): Promise<string> {
-    const command = await this.dispatchCommand(ctx.msg, ctx.session!, ctx.sessionKey, ctx.abortSignal);
+    const command = await this.dispatchCommand(
+      ctx.msg,
+      ctx.session!,
+      ctx.sessionKey,
+      ctx.abortSignal,
+      ctx.turnId,
+    );
     if (command && command !== "continue") {
       ctx.outbound = command;
       return "shortcut";
@@ -2101,8 +2386,66 @@ export class AgentLoop {
   async stateBuild(ctx: TurnContext): Promise<string> {
     const sessionWorkspace = ctx.sessionWorkspace;
     if (!sessionWorkspace) throw new SessionWorkspaceError("workspace_missing");
-    ctx.userPersistedEarly = this.persistUserMessageEarly(ctx.msg, ctx.session!);
-    if (ctx.userPersistedEarly) {
+    const goal = this.goalRuntime.get(ctx.sessionKey);
+    const internalGoal = ctx.msg.internal?.kind === "goal_continuation"
+      ? ctx.msg.internal
+      : null;
+    if (internalGoal) {
+      if (
+        !goal
+        || goal.status !== "active"
+        || goal.goalId !== internalGoal.goalId
+        || goal.updatedAt !== internalGoal.goalUpdatedAt
+      ) throw createTaskCancelledError();
+      this.goalRuntime.registerLease(ctx.sessionKey, goal.goalId, ctx.turnId);
+      ctx.goalIdForTurn = goal.goalId;
+      ctx.dagGoalContext = {
+        goalId: goal.goalId,
+        objective: goal.objective,
+        status: goal.status,
+      };
+      ctx.userPersistedEarly = this.persistGoalContinuationContext(ctx);
+    } else {
+      if (goal?.status === "active") {
+        this.goalRuntime.registerLease(ctx.sessionKey, goal.goalId, ctx.turnId);
+        ctx.goalIdForTurn = goal.goalId;
+      }
+      if (goal && goal.status !== "completed") {
+        ctx.dagGoalContext = {
+          goalId: goal.goalId,
+          objective: goal.objective,
+          status: goal.status,
+        };
+      }
+      const hasReservedInbox = this.goalRuntime.inbox(ctx.sessionKey)
+        .some((entry) => entry.turnId === ctx.turnId);
+      if (goal || hasReservedInbox) {
+        const persisted = await this.goalRuntime.persistGoalUserTurn(
+          ctx.sessionKey,
+          ctx.turnId,
+          { channel: ctx.msg.channel, chatId: ctx.msg.chatId },
+          (session, entry) => {
+            const source = entry
+              ? new InboundMessage({
+                  channel: entry.channel,
+                  chatId: entry.chatId,
+                  senderId: entry.senderId,
+                  content: entry.content,
+                  media: entry.media,
+                  metadata: entry.metadata,
+                  timestamp: entry.receivedAt,
+                  sessionKeyOverride: ctx.sessionKey,
+                })
+              : ctx.msg;
+            this.appendUserMessage(source, session, {}, entry?.receivedAt);
+          },
+        );
+        ctx.userPersistedEarly = Boolean(persisted.entry || ctx.msg.content.trim() || ctx.msg.media.length);
+      } else {
+        ctx.userPersistedEarly = this.persistUserMessageEarly(ctx.msg, ctx.session!);
+      }
+    }
+    if (ctx.userPersistedEarly && !internalGoal) {
       if (ctx.mirrorTurn) {
         this.guiTranscriptMirror?.user(
           ctx.mirrorTurn,
@@ -2162,7 +2505,7 @@ export class AgentLoop {
       ctx.msg.channel,
       ctx.msg.chatId,
       ctx.msg.metadata?.message_id ?? ctx.msg.metadata?.messageId ?? null,
-      ctx.msg.metadata ?? {},
+      { ...(ctx.msg.metadata ?? {}), ...turnMetadata(ctx.turnId) },
       ctx.sessionKey,
       sessionWorkspace,
       ctx.tools,
@@ -2238,6 +2581,7 @@ export class AgentLoop {
       actualModelProvider,
       actualModel,
       errorCategory,
+      usage,
     ] = await this.runAgentLoop(ctx.initialMessages, {
       onProgress: ctx.onProgress,
       onStream: ctx.onStream,
@@ -2256,6 +2600,13 @@ export class AgentLoop {
       tools: ctx.tools,
       sessionWorkspace: ctx.sessionWorkspace ?? this.workspace,
       modelSelection: ctx.modelSelection,
+      internalTurnContext: ctx.msg.internal?.kind === "goal_continuation" && ctx.dagGoalContext
+        ? {
+            kind: "goal_continuation",
+            goalId: ctx.dagGoalContext.goalId,
+            objective: ctx.dagGoalContext.objective,
+          }
+        : null,
     });
     if (ctx.abortSignal?.aborted || stopReason === "cancelled") {
       throw createTaskCancelledError();
@@ -2276,6 +2627,7 @@ export class AgentLoop {
     ctx.actualModelProvider = actualModelProvider;
     ctx.actualModel = actualModel;
     ctx.errorCategory = errorCategory;
+    ctx.usage = usage;
     return "ok";
   }
 
@@ -2295,12 +2647,39 @@ export class AgentLoop {
     ctx.session!.enforceFileCap((messages) =>
       this.context.memory.rawArchive(messages, { sessionKey: ctx.sessionKey }),
     );
-    this.sessions.save(ctx.session!);
+    ctx.goalIdForTurn ??= this.goalRuntime.goalIdForTurn(ctx.sessionKey, ctx.turnId);
+    if (ctx.goalIdForTurn) {
+      const settlement = await this.goalRuntime.settleTurn({
+        sessionKey: ctx.sessionKey,
+        turnId: ctx.turnId,
+        goalId: ctx.goalIdForTurn,
+        usage: ctx.usage,
+        latencyMs: ctx.turnLatencyMs,
+        stopReason: ctx.stopReason,
+        errorCategory: ctx.errorCategory,
+      });
+      ctx.goalOutcome = settlement.goal?.status ?? null;
+      if (settlement.goal) {
+        ctx.dagGoalContext = {
+          goalId: settlement.goal.goalId,
+          objective: settlement.goal.objective,
+          status: settlement.goal.status,
+        };
+      }
+      if (settlement.shouldContinue && settlement.goal) {
+        this.scheduleGoalWork(ctx.sessionKey, settlement.goal);
+      }
+      await this.goalRuntime.flushEffects(ctx.sessionKey);
+    } else {
+      this.sessions.save(ctx.session!);
+    }
     if (ctx.mirrorTurn && ctx.finalContent) {
       this.guiTranscriptMirror?.final(
         ctx.mirrorTurn,
         ctx.finalContent,
         ctx.turnLatencyMs,
+        null,
+        ctx.errorCategory,
       );
     }
     if (
@@ -2323,6 +2702,7 @@ export class AgentLoop {
       dagMessageStart,
       ctx.session!.messages.length,
       ctx.modelSelection,
+      ctx.dagGoalContext,
     );
     const followupCompaction = (ctx.consolidator ?? this.consolidator).maybeConsolidateByTokens(ctx.session!, {
       replayMaxMessages: this.maxMessages,
@@ -2338,6 +2718,8 @@ export class AgentLoop {
       tools: ctx.tools,
       finalContentStreamed: ctx.finalContentStreamed,
       errorCategory: ctx.errorCategory,
+      goalId: ctx.goalIdForTurn,
+      goalOutcome: ctx.goalOutcome,
     });
     return "ok";
   }
@@ -2411,6 +2793,7 @@ export class AgentLoop {
       sessionKey: key,
       sessionKeyOverride: msg.sessionKeyOverride,
       timestamp: msg.timestamp,
+      internal: msg.internal,
     });
     let session = existingSession ?? await this.getOrCreateSession(key);
     session.metadata.modelPreset = modelSelection.preset;
@@ -2638,7 +3021,12 @@ export class AgentLoop {
       return ctx.outbound;
     } finally {
       if (ctx.mirrorTurn) {
-        this.guiTranscriptMirror?.ended(ctx.mirrorTurn, ctx.turnLatencyMs);
+        this.guiTranscriptMirror?.ended(
+          ctx.mirrorTurn,
+          ctx.turnLatencyMs,
+          ctx.goalIdForTurn,
+          ctx.goalOutcome,
+        );
       }
     }
   }
@@ -2715,13 +3103,24 @@ export class AgentLoop {
       throw new Error("session_deletion_in_progress");
     }
     const deferred: InboundMessage[] = [];
+    this.goalRuntime.beginSessionDeletion(sessionKey);
     this.sessionDeletionQueues.set(sessionKey, deferred);
     try {
+      this.scheduledGoalSessions.delete(sessionKey);
+      this.lastUsageBySession.delete(sessionKey);
       await prepare();
-      return await this.withSessionTurnBarrier(sessionKey, operation);
+      await this.goalRuntime.drainSessionDeletion(sessionKey);
+      const result = await this.withSessionTurnBarrier(sessionKey, operation);
+      this.scheduledGoalSessions.delete(sessionKey);
+      this.lastUsageBySession.delete(sessionKey);
+      return result;
     } finally {
+      await this.goalRuntime.drainSessionDeletion(sessionKey);
+      this.goalRuntime.endSessionDeletion(sessionKey);
       this.sessionDeletionQueues.delete(sessionKey);
-      for (const message of deferred) await this.bus.publishInbound(message);
+      for (const message of deferred) {
+        if (!message.internal) await this.bus.publishInbound(message);
+      }
     }
   }
 
@@ -2744,6 +3143,7 @@ export class AgentLoop {
         ...turnMetadata(turnId),
       },
       timestamp: msg.timestamp,
+      internal: msg.internal,
       sessionKey: msg.sessionKey,
       sessionKeyOverride: sessionKey !== msg.sessionKey ? sessionKey : msg.sessionKeyOverride,
     });
@@ -2754,6 +3154,7 @@ export class AgentLoop {
     const lock = this.lockFor(sessionKey);
     const publishRunStatus = shouldPublishWebuiRunStatus(effectiveMsg);
     let didPublishRunning = false;
+    let goalTurnResult: { goalId: string; goalOutcome: GoalStatus } | null = null;
     try {
       await lock.runExclusive(() => this.withTerminalTurn(
         sessionKey,
@@ -2829,6 +3230,15 @@ export class AgentLoop {
             turnId,
             boundary,
           });
+          if (
+            typeof response?.metadata?.goalId === "string"
+            && typeof response?.metadata?.goalOutcome === "string"
+          ) {
+            goalTurnResult = {
+              goalId: response.metadata.goalId,
+              goalOutcome: response.metadata.goalOutcome as GoalStatus,
+            };
+          }
           if (!isCancelled() && response) await this.bus.publishOutbound(response);
           if (!isCancelled() && effectiveMsg.channel === "cli") {
             await this.bus.publishOutbound(
@@ -2888,6 +3298,15 @@ export class AgentLoop {
       } catch {
         // Preserve the original dispatch failure; checkpoint restore is best-effort.
       }
+      if (effectiveMsg.internal?.kind === "goal_continuation") {
+        const currentGoal = this.goalRuntime.get(sessionKey);
+        if (
+          currentGoal?.status === "active"
+          && currentGoal.goalId === effectiveMsg.internal.goalId
+        ) {
+          this.scheduleGoalWork(sessionKey, currentGoal);
+        }
+      }
       throw error;
     } finally {
       if (didPublishRunning) {
@@ -2896,6 +3315,7 @@ export class AgentLoop {
           msg: effectiveMsg,
           sessionKey,
           sessions: this.sessions,
+          ...(goalTurnResult ?? {}),
         });
       }
       boundary.close(effectiveAbortSignal?.aborted ? "aborted" : "ended");
@@ -2908,6 +3328,8 @@ export class AgentLoop {
         if (!item) break;
         await this.bus.publishInbound(item);
       }
+      this.goalRuntime.releaseTurn(sessionKey, turnId);
+      this.goalRuntime.releaseWork(sessionKey, turnId);
     }
   }
 
@@ -2915,6 +3337,7 @@ export class AgentLoop {
     this.running = true;
     await this.initializeRuntimeTools();
     if (!this.running) return;
+    await this.recoverGoalWork();
     while (this.running) {
       const msg = this.bus.inbound.getNowait();
       if (!msg) {
@@ -2931,6 +3354,43 @@ export class AgentLoop {
       }
       if (this.commands.isPriority(raw)) {
         await this.dispatchCommandInline(msg, msg.sessionKey, raw, (ctx) => this.commands.dispatchPriority(ctx));
+        continue;
+      }
+      const reservedTurnId = firstString(msg.metadata?.turn_id, msg.metadata?.turnId);
+      const ownsGoalReservation = reservedTurnId
+        ? this.goalRuntime.ownsWorkReservation(effectiveKey, reservedTurnId)
+        : false;
+      if (msg.internal?.kind === "goal_continuation" && !ownsGoalReservation) {
+        continue;
+      }
+      const dispatchableCommand = this.commands.isDispatchableCommand(raw);
+      if (
+        !msg.internal
+        && !ownsGoalReservation
+        && dispatchableCommand
+        && isImmediateGoalControlCommand(raw)
+      ) {
+        await this.dispatchCommandInline(msg, effectiveKey, raw, (ctx) => this.commands.dispatch(ctx));
+        continue;
+      }
+      const goal = this.goalRuntime.get(effectiveKey);
+      const shouldPersistGoalInbox = !msg.internal
+        && !ownsGoalReservation
+        && (
+          this.goalRuntime.hasGoalLease(effectiveKey)
+          || this.goalRuntime.hasWorkReservation(effectiveKey)
+          || this.scheduledGoalSessions.has(effectiveKey)
+          || (goal?.status === "active" && (this.activeTasks.get(effectiveKey)?.length ?? 0) > 0)
+        );
+      if (shouldPersistGoalInbox) {
+        try {
+          await this.goalRuntime.enqueueUserMessage(effectiveKey, msg);
+          await this.publishWebuiMessageAccepted(msg);
+          void this.dispatchNextGoalWork(effectiveKey);
+        } catch (error) {
+          const reason = error instanceof GoalRuntimeError ? error.code : "goal_inbox_unavailable";
+          await this.publishWebuiMessageRejected(msg, reason);
+        }
         continue;
       }
       const route = `${msg.channel}\0${String(msg.chatId)}`;
@@ -2954,6 +3414,7 @@ export class AgentLoop {
               media: msg.media,
               metadata: msg.metadata,
               timestamp: msg.timestamp,
+              internal: msg.internal,
               sessionKeyOverride: effectiveKey,
             });
         try {
@@ -2963,7 +3424,6 @@ export class AgentLoop {
           // A closing legacy queue falls through to a new turn slot.
         }
       }
-      const dispatchableCommand = this.commands.isDispatchableCommand(raw);
       if (lastSlot?.route === route) {
         if (dispatchableCommand && !isSessionOrderedCommand(raw)) {
           await this.dispatchCommandInline(msg, effectiveKey, raw, (ctx) => this.commands.dispatch(ctx));
@@ -2979,6 +3439,7 @@ export class AgentLoop {
               media: msg.media,
               metadata: msg.metadata,
               timestamp: msg.timestamp,
+              internal: msg.internal,
               sessionKeyOverride: effectiveKey,
             });
         try {
@@ -3013,6 +3474,7 @@ export class AgentLoop {
           const next = current.filter((item) => item !== task);
           if (next.length) this.activeTasks.set(effectiveKey, next);
           else this.activeTasks.delete(effectiveKey);
+          void this.dispatchNextGoalWork(effectiveKey);
         })
         .catch(() => undefined);
     }
@@ -3085,6 +3547,9 @@ export class AgentLoop {
     } catch (error) {
       if (isTaskCancelledError(error)) return null;
       throw error;
+    } finally {
+      this.goalRuntime.releaseTurn(key, turnId);
+      void this.dispatchNextGoalWork(key);
     }
   }
 }

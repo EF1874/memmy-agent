@@ -1,4 +1,4 @@
-export type MigrationScope = "agent-workspace" | "runtime-config";
+export type MigrationScope = "agent-workspace" | "runtime-config" | "session-dag";
 
 export type MigrationLoggerFields = Record<string, string | number>;
 
@@ -18,6 +18,7 @@ export type AgentWorkspaceMigrationContext = {
   profileWorkspace: string;
   sessionsDir: string;
   runtimeConfigFile: string;
+  sessionDagDir: string;
   logger: MigrationLogger;
 };
 
@@ -66,6 +67,7 @@ export type RunMigrationsOptions = {
   targets: {
     agentWorkspace: string;
     runtimeConfigFile: string;
+    sessionDagDir: string;
   };
   logger: MigrationLogger;
 };

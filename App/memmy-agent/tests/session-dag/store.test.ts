@@ -6,7 +6,7 @@ import { safeSessionDagKey, sessionDagDbPath } from "../../src/session-dag/paths
 import { renderHistoryDagSummary, buildHistoryDagPayload } from "../../src/session-dag/render.js";
 import { DagSnapshotBuilder } from "../../src/session-dag/snapshot.js";
 import { deriveActivePath, deriveActivePathSelection, SessionDagStore } from "../../src/session-dag/store.js";
-import type { DagEdge, DagNode } from "../../src/session-dag/types.js";
+import type { DagEdge, DagGoalContext, DagNode } from "../../src/session-dag/types.js";
 
 const roots: string[] = [];
 
@@ -501,6 +501,184 @@ describe("SessionDagStore", () => {
     }
   });
 
+  it.each(["active", "paused", "blocked", "usage_limited", "budget_limited"] as const)(
+    "locks an unfinished Goal task while status is %s",
+    (status) => {
+      const store = makeStore(`websocket:goal-lock-${status}`);
+      try {
+        const goal = goalContext("goal-1", status);
+        const taskId = store.applyPatch({
+          turn: { turn_id: "turn-1", message_start: 0, message_end: 2, goal_context: goal },
+          buildMode: "llm_patch",
+          patch: { ops: [{ op: "add_node", temp_id: "goal-task", kind: "task", status: "active", title: "Goal", summary: "持续目标", importance: 95 }] },
+        }).nodeIds["goal-task"];
+
+        expect(store.readGraphForHistoryDag().nodes.find((node) => node.id === taskId)).toMatchObject({
+          goal_id: "goal-1",
+          status: "active",
+        });
+        expect(() => store.applyPatch({
+          turn: { turn_id: "turn-2", message_start: 2, message_end: 4, goal_context: goal },
+          buildMode: "llm_patch",
+          patch: { ops: [{ op: "update_node", node_id: taskId, status: "done" }] },
+        })).toThrow(/Unfinished Goal turn cannot close its task/);
+        expect(() => store.applyPatch({
+          turn: { turn_id: "turn-3", message_start: 4, message_end: 6, goal_context: goal },
+          buildMode: "llm_patch",
+          patch: { ops: [{ op: "add_node", temp_id: "next-task", kind: "task", status: "active", title: "错误切换", summary: "不能切换", importance: 80 }] },
+        })).toThrow(/cannot create a second task/);
+        expect(store.getTurn("turn-2")).toBeNull();
+        expect(store.getTurn("turn-3")).toBeNull();
+      } finally {
+        store.close();
+      }
+    },
+  );
+
+  it("completes a Goal task as done and then restores ordinary task transitions", () => {
+    const store = makeStore("websocket:goal-complete-transition");
+    try {
+      const activeGoal = goalContext("goal-1", "active");
+      const taskId = store.applyPatch({
+        turn: { turn_id: "turn-1", message_start: 0, message_end: 2, goal_context: activeGoal },
+        buildMode: "llm_patch",
+        patch: { ops: [{ op: "add_node", temp_id: "goal-task", kind: "task", status: "active", title: "Goal", summary: "完成目标", importance: 95 }] },
+      }).nodeIds["goal-task"];
+
+      expect(() => store.applyPatch({
+        turn: { turn_id: "turn-bad", message_start: 2, message_end: 4, goal_context: goalContext("goal-1", "completed") },
+        buildMode: "llm_patch",
+        patch: { ops: [{ op: "update_node", node_id: taskId, status: "failed" }] },
+      })).toThrow(/only close its task as done/);
+
+      store.applyPatch({
+        turn: { turn_id: "turn-2", message_start: 2, message_end: 4, goal_context: goalContext("goal-1", "completed") },
+        buildMode: "llm_patch",
+        patch: { ops: [] },
+      });
+      expect(store.readGraphForHistoryDag().nodes.find((node) => node.id === taskId)?.status).toBe("done");
+
+      const next = store.applyPatch({
+        turn: { turn_id: "turn-3", message_start: 4, message_end: 6 },
+        buildMode: "llm_patch",
+        patch: {
+          ops: [
+            { op: "add_node", temp_id: "next-task", kind: "task", status: "active", title: "普通任务", summary: "Goal 后的新问题", importance: 80 },
+            { op: "add_edge", source_id: taskId, target_id: "next-task", type: "continues" },
+          ],
+        },
+      });
+      expect(store.readGraphForHistoryDag().edges).toContainEqual(expect.objectContaining({
+        source_id: taskId,
+        target_id: next.nodeIds["next-task"],
+        type: "continues",
+      }));
+    } finally {
+      store.close();
+    }
+  });
+
+  it("freezes a cleared open Goal task before switching to an ordinary task", () => {
+    const store = makeStore("websocket:goal-clear-transition");
+    try {
+      const taskId = store.applyPatch({
+        turn: { turn_id: "turn-1", message_start: 0, message_end: 2, goal_context: goalContext("goal-1", "active") },
+        buildMode: "llm_patch",
+        patch: { ops: [{ op: "add_node", temp_id: "goal-task", kind: "task", status: "active", title: "Goal", summary: "随后 Clear", importance: 95 }] },
+      }).nodeIds["goal-task"];
+
+      const next = store.applyPatch({
+        turn: { turn_id: "turn-2", message_start: 2, message_end: 4 },
+        buildMode: "llm_patch",
+        patch: {
+          ops: [
+            { op: "update_node", node_id: taskId, status: "frozen" },
+            { op: "add_node", temp_id: "next-task", kind: "task", status: "active", title: "普通任务", summary: "Clear 后的新问题", importance: 80 },
+            { op: "add_edge", source_id: taskId, target_id: "next-task", type: "supersedes" },
+          ],
+        },
+      });
+      const graph = store.readGraphForHistoryDag();
+      expect(graph.nodes.find((node) => node.id === taskId)).toMatchObject({ status: "frozen", goal_id: "goal-1" });
+      expect(graph.activePathNodeIds[0]).toBe(next.nodeIds["next-task"]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("keeps a side_branch and all of its successors out of the Goal active path", () => {
+    const store = makeStore("websocket:goal-side-branch");
+    try {
+      const result = store.applyPatch({
+        turn: { turn_id: "turn-1", message_start: 0, message_end: 8, goal_context: goalContext("goal-1", "active") },
+        buildMode: "llm_patch",
+        patch: {
+          ops: [
+            { op: "add_node", temp_id: "goal-task", kind: "task", status: "active", title: "Goal", summary: "主目标", importance: 95 },
+            { op: "add_node", temp_id: "main", kind: "subtask", status: "active", title: "主路径", summary: "继续目标", importance: 60 },
+            { op: "add_node", temp_id: "branch", kind: "decision", status: "blocked", title: "旁支", summary: "无关问题", importance: 100 },
+            { op: "add_node", temp_id: "branch-next", kind: "subtask", status: "blocked", title: "旁支后继", summary: "仍属旁支", importance: 100 },
+            { op: "add_edge", source_id: "goal-task", target_id: "main", type: "decomposes" },
+            { op: "add_edge", source_id: "goal-task", target_id: "branch", type: "side_branch" },
+            { op: "add_edge", source_id: "branch", target_id: "branch-next", type: "continues" },
+          ],
+        },
+      });
+      const graph = store.readGraphForHistoryDag();
+      expect(graph.activePathNodeIds).toEqual([result.nodeIds["goal-task"], result.nodeIds.main]);
+      expect(graph.activePathNodeIds).not.toContain(result.nodeIds.branch);
+      expect(graph.activePathNodeIds).not.toContain(result.nodeIds["branch-next"]);
+      expect(store.readBuilderContext(20).nodes.map((node) => node.id)).toEqual(expect.arrayContaining([
+        result.nodeIds.branch,
+        result.nodeIds["branch-next"],
+      ]));
+    } finally {
+      store.close();
+    }
+  });
+
+  it("rejects a side_branch that does not start at the current Goal task and rolls back", () => {
+    const store = makeStore("websocket:goal-side-branch-source");
+    try {
+      const first = store.applyPatch({
+        turn: { turn_id: "turn-1", message_start: 0, message_end: 2, goal_context: goalContext("goal-1", "active") },
+        buildMode: "llm_patch",
+        patch: { ops: [{ op: "add_node", temp_id: "goal-task", kind: "task", status: "active", title: "Goal 1", summary: "第一个目标", importance: 95 }] },
+      });
+      store.applyPatch({
+        turn: { turn_id: "turn-2", message_start: 2, message_end: 4, goal_context: goalContext("goal-1", "completed") },
+        buildMode: "llm_patch",
+        patch: { ops: [] },
+      });
+      const second = store.applyPatch({
+        turn: { turn_id: "turn-3", message_start: 4, message_end: 6, goal_context: goalContext("goal-2", "active") },
+        buildMode: "llm_patch",
+        patch: {
+          ops: [
+            { op: "add_node", temp_id: "goal-task-2", kind: "task", status: "active", title: "Goal 2", summary: "第二个目标", importance: 95 },
+            { op: "add_edge", source_id: first.nodeIds["goal-task"], target_id: "goal-task-2", type: "continues" },
+          ],
+        },
+      });
+
+      expect(() => store.applyPatch({
+        turn: { turn_id: "turn-4", message_start: 6, message_end: 8, goal_context: goalContext("goal-2", "active") },
+        buildMode: "llm_patch",
+        patch: {
+          ops: [
+            { op: "add_node", temp_id: "branch", kind: "subtask", status: "done", title: "错误旁支", summary: "从旧 Goal 发出", importance: 40 },
+            { op: "add_edge", source_id: first.nodeIds["goal-task"], target_id: "branch", type: "side_branch" },
+          ],
+        },
+      })).toThrow(/current Goal task/);
+      expect(store.getTurn("turn-4")).toBeNull();
+      expect(store.readGraphForHistoryDag().nodes.map((node) => node.title)).not.toContain("错误旁支");
+      expect(store.readGraphForHistoryDag().activePathNodeIds[0]).toBe(second.nodeIds["goal-task-2"]);
+    } finally {
+      store.close();
+    }
+  });
+
   it("selects the blocked frontier before an active branch inside the current task", () => {
     const nodes = [
       dagNode("task", "task", "active"),
@@ -653,7 +831,12 @@ function dagNode(
     updated_by: "llm_patch",
     created_at: updatedAt,
     updated_at: updatedAt,
+    goal_id: null,
   };
+}
+
+function goalContext(goalId: string, status: DagGoalContext["status"]): DagGoalContext {
+  return { goalId, objective: `Objective for ${goalId}`, status };
 }
 
 function insertLegacyTask(

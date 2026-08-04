@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MessageBus, OutboundMessage } from "../../../src/core/runtime-messages/index.js";
 import { AgentLoop } from "../../../src/core/agent-runtime/loop.js";
+import { GoalRuntime } from "../../../src/core/agent-runtime/goal-runtime.js";
 import { getMediaDir } from "../../../src/config/paths.js";
 import { SessionManager } from "../../../src/core/session/manager.js";
 import {
@@ -46,6 +47,14 @@ function modelSelection(preset: string, provider: string, model: string): any {
       signature: [provider, model],
     },
   };
+}
+
+function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
 }
 
 const oldDataDir = process.env.MEMMY_AGENT_DATA_DIR;
@@ -271,7 +280,7 @@ describe("WebSocket channel", () => {
     const ws = connection();
     channel.attachConnection(ws, "chat-1");
 
-    await channel.sendGoalStatus("chat-1", "running", { startedAt: 123, turnId: "turn-1" });
+    await channel.sendRunStatus("chat-1", "running", { startedAt: 123, turnId: "turn-1" });
     await channel.send(new OutboundMessage({
       channel: "websocket",
       chatId: "chat-1",
@@ -295,7 +304,7 @@ describe("WebSocket channel", () => {
     const ws = connection();
     channel.attachConnection(ws, "chat-1");
 
-    await channel.sendGoalStatus("chat-1", "running", { startedAt: 123, turnId: "turn-active" });
+    await channel.sendRunStatus("chat-1", "running", { startedAt: 123, turnId: "turn-active" });
     await channel.send(new OutboundMessage({
       channel: "websocket",
       chatId: "chat-1",
@@ -304,7 +313,7 @@ describe("WebSocket channel", () => {
     }));
 
     expect(ws.send).toHaveBeenCalledTimes(1);
-    expect(sent(ws)).toMatchObject({ event: "goal_status", turn_id: "turn-active" });
+    expect(sent(ws)).toMatchObject({ event: "run_status", turn_id: "turn-active" });
     expect(fs.existsSync(webuiTranscriptPath("websocket:chat-1"))).toBe(false);
   });
 
@@ -523,11 +532,11 @@ describe("WebSocket channel", () => {
 
     await channel.sendDelta("chat-1", "hel", { streamId: "s1" });
     await channel.sendDelta("chat-1", "lo", { streamId: "s1", streamEnd: true });
-    await channel.sendGoalStatus("chat-1", "running", { startedAt: 123 });
+    await channel.sendRunStatus("chat-1", "running", { startedAt: 123 });
 
     expect(JSON.parse(ws.send.mock.calls[0][0])).toMatchObject({ event: "delta", text: "hel", stream_id: "s1" });
     expect(JSON.parse(ws.send.mock.calls[1][0])).toMatchObject({ event: "stream_end", text: "hello", stream_id: "s1" });
-    expect(JSON.parse(ws.send.mock.calls[2][0])).toMatchObject({ event: "goal_status", status: "running", started_at: 123 });
+    expect(JSON.parse(ws.send.mock.calls[2][0])).toMatchObject({ event: "run_status", status: "running", started_at: 123 });
   });
 
   it("strips trailing HTTP slashes except for root", () => {
@@ -889,7 +898,7 @@ describe("WebSocket channel", () => {
     const ws = connection();
     channel.attachConnection(ws, "chat-1");
 
-    await channel.sendGoalStatus("chat-1", "running", { startedAt: 123, turnId: "turn-active" });
+    await channel.sendRunStatus("chat-1", "running", { startedAt: 123, turnId: "turn-active" });
     await channel.send(new OutboundMessage({
       channel: "websocket",
       chatId: "chat-1",
@@ -907,7 +916,7 @@ describe("WebSocket channel", () => {
     await channel.sendDelta("chat-1", "late answer", { turn_id: "turn-stopped" });
 
     expect(ws.send).toHaveBeenCalledTimes(1);
-    expect(sent(ws)).toMatchObject({ event: "goal_status", status: "running", turn_id: "turn-active" });
+    expect(sent(ws)).toMatchObject({ event: "run_status", status: "running", turn_id: "turn-active" });
 
     await channel.send(new OutboundMessage({
       channel: "websocket",
@@ -1020,7 +1029,11 @@ describe("WebSocket channel", () => {
 
     await channel.sendReasoningDelta("chat-1", "thinking", { streamId: "r1" });
     await channel.sendReasoningEnd("chat-1", { streamId: "r1" });
-    await channel.sendTurnEnd("chat-1", { latencyMs: 42, goalState: { active: true } });
+    await channel.sendTurnEnd("chat-1", {
+      latencyMs: 42,
+      goalId: "goal-1",
+      goalOutcome: "active",
+    });
 
     const lines = fs.readFileSync(webuiTranscriptPath("websocket:chat-1"), "utf8")
       .trim()
@@ -1029,7 +1042,13 @@ describe("WebSocket channel", () => {
     expect(lines).toEqual([
       { event: "reasoning_delta", chat_id: "chat-1", text: "thinking", stream_id: "r1" },
       { event: "reasoning_end", chat_id: "chat-1", stream_id: "r1" },
-      { event: "turn_end", chat_id: "chat-1", latency_ms: 42, goal_state: { active: true } },
+      {
+        event: "turn_end",
+        chat_id: "chat-1",
+        latency_ms: 42,
+        goal_id: "goal-1",
+        goal_outcome: "active",
+      },
     ]);
   });
 
@@ -1090,14 +1109,18 @@ describe("WebSocket channel", () => {
     expect(sent(ws).latency_ms).toBe(42);
   });
 
-  it("includes goal state in turn_end events", async () => {
+  it("includes paired Goal identity and outcome in turn_end events", async () => {
     const channel = new WebSocketChannel({}, new MessageBus());
     const ws = connection();
     channel.attachConnection(ws, "chat-1");
 
-    await channel.sendTurnEnd("chat-1", { goalState: { active: true } });
+    await channel.sendTurnEnd("chat-1", {
+      goalId: "goal-1",
+      goalOutcome: "active",
+    });
 
-    expect(sent(ws).goal_state).toEqual({ active: true });
+    expect(sent(ws)).toMatchObject({ goal_id: "goal-1", goal_outcome: "active" });
+    expect(sent(ws)).not.toHaveProperty("goal_state");
   });
 
   it("emits running goal status with started_at", async () => {
@@ -1105,9 +1128,9 @@ describe("WebSocket channel", () => {
     const ws = connection();
     channel.attachConnection(ws, "chat-1");
 
-    await channel.sendGoalStatus("chat-1", "running", { startedAt: 123 });
+    await channel.sendRunStatus("chat-1", "running", { startedAt: 123 });
 
-    expect(sent(ws)).toMatchObject({ event: "goal_status", status: "running", started_at: 123 });
+    expect(sent(ws)).toMatchObject({ event: "run_status", status: "running", started_at: 123 });
   });
 
   it("omits started_at for idle goal status", async () => {
@@ -1115,9 +1138,9 @@ describe("WebSocket channel", () => {
     const ws = connection();
     channel.attachConnection(ws, "chat-1");
 
-    await channel.sendGoalStatus("chat-1", "idle", { startedAt: 123 });
+    await channel.sendRunStatus("chat-1", "idle", { startedAt: 123 });
 
-    expect(sent(ws)).toMatchObject({ event: "goal_status", status: "idle" });
+    expect(sent(ws)).toMatchObject({ event: "run_status", status: "idle" });
     expect(sent(ws).started_at).toBeUndefined();
   });
 
@@ -1151,7 +1174,7 @@ describe("WebSocket channel", () => {
         turn_id: "turn-1",
       },
       {
-        event: "goal_status",
+        event: "run_status",
         chat_id: "chat-1",
         status: "running",
         started_at: 1780732800,
@@ -1218,9 +1241,19 @@ describe("WebSocket channel", () => {
   it("sends the run snapshot before active goal hydration", async () => {
     const channel = new WebSocketChannel({}, new MessageBus());
     const ws = connection();
+    const goalState = {
+      goalId: "8f59f58a-7295-4c34-8e03-55e7035a5a8d",
+      status: "active",
+      objective: "Ship the fix",
+      tokenBudget: 12_000,
+      tokensUsed: 500,
+      timeUsedSeconds: 30,
+      createdAt: "2026-08-04T08:00:00.000Z",
+      updatedAt: "2026-08-04T08:00:30.000Z",
+    };
     channel.sessionManager = {
       readSessionFile: vi.fn(() => ({
-        metadata: { goalState: { status: "active", objective: "Ship the fix" } },
+        metadata: { goalState },
       })),
     };
 
@@ -1232,7 +1265,16 @@ describe("WebSocket channel", () => {
       {
         event: "goal_state",
         chat_id: "chat-1",
-        goal_state: { active: true, objective: "Ship the fix" },
+        goal_state: {
+          goal_id: goalState.goalId,
+          status: goalState.status,
+          objective: goalState.objective,
+          token_budget: goalState.tokenBudget,
+          tokens_used: goalState.tokensUsed,
+          time_used_seconds: goalState.timeUsedSeconds,
+          created_at: goalState.createdAt,
+          updated_at: goalState.updatedAt,
+        },
       },
     ]);
   });
@@ -1241,10 +1283,20 @@ describe("WebSocket channel", () => {
     const channel = new WebSocketChannel({}, new MessageBus());
     const stale = { send: vi.fn(async () => { throw new Error("closed"); }) };
     const attaching = connection();
+    const goalState = {
+      goalId: "8f59f58a-7295-4c34-8e03-55e7035a5a8d",
+      status: "active",
+      objective: "Ship the fix",
+      tokenBudget: null,
+      tokensUsed: 0,
+      timeUsedSeconds: 0,
+      createdAt: "2026-08-04T08:00:00.000Z",
+      updatedAt: "2026-08-04T08:00:00.000Z",
+    };
     channel.attachConnection(stale, "chat-1");
     channel.sessionManager = {
       readSessionFile: vi.fn(() => ({
-        metadata: { goalState: { status: "active", objective: "Ship the fix" } },
+        metadata: { goalState },
       })),
     };
 
@@ -1259,7 +1311,16 @@ describe("WebSocket channel", () => {
       {
         event: "goal_state",
         chat_id: "chat-1",
-        goal_state: { active: true, objective: "Ship the fix" },
+        goal_state: {
+          goal_id: goalState.goalId,
+          status: goalState.status,
+          objective: goalState.objective,
+          token_budget: goalState.tokenBudget,
+          tokens_used: goalState.tokensUsed,
+          time_used_seconds: goalState.timeUsedSeconds,
+          created_at: goalState.createdAt,
+          updated_at: goalState.updatedAt,
+        },
       },
     ]);
     expect(channel.subscriptions.get("chat-1")?.has(stale)).toBe(false);
@@ -1273,6 +1334,122 @@ describe("WebSocket channel", () => {
     await channel.sendGoalState("chat-1", { active: true, objective: "ship" });
 
     expect(sent(ws)).toMatchObject({ event: "goal_state", goal_state: { active: true, objective: "ship" } });
+  });
+
+  it("publishes committed Goal state before the matching control result", async () => {
+    const root = tempDataDir();
+    const bus = new MessageBus();
+    const sessions = new SessionManager(path.join(root, "sessions"));
+    sessions.getOrCreate("websocket:chat-1");
+    const runtime = new GoalRuntime({ sessions, bus });
+    const channel = new WebSocketChannel({}, bus, {
+      sessionManager: sessions,
+      goalControlHandler: (request) => runtime.control(request),
+    });
+    const ws = connection();
+    const goal = await runtime.create({
+      sessionKey: "websocket:chat-1",
+      objective: "Ship Goal mode",
+      tokenBudget: null,
+      route: { channel: "websocket", chatId: "chat-1" },
+      turnId: "turn-create",
+    });
+    await runtime.flushEffects("websocket:chat-1");
+    await bus.nextOutbound();
+    channel.attachConnection(ws, "chat-1");
+
+    await channel.dispatchEnvelope(ws, "client-1", {
+      type: "goal_control",
+      chat_id: "chat-1",
+      request_id: "11111111-1111-4111-8111-111111111111",
+      goal_id: goal.goalId,
+      action: "pause",
+    });
+    await channel.send(await bus.nextOutbound());
+    await channel.send(await bus.nextOutbound());
+
+    expect(ws.send.mock.calls.map(([raw]) => JSON.parse(raw))).toEqual([
+      expect.objectContaining({
+        event: "goal_state",
+        chat_id: "chat-1",
+        goal_state: expect.objectContaining({ goal_id: goal.goalId, status: "paused" }),
+      }),
+      {
+        event: "goal_control_result",
+        chat_id: "chat-1",
+        request_id: "11111111-1111-4111-8111-111111111111",
+        ok: true,
+      },
+    ]);
+    expect(sent(ws, 1)).not.toHaveProperty("goal_state");
+  });
+
+  it("coalesces equal in-flight Goal controls and rejects a conflicting request summary", async () => {
+    const gate = deferred<void>();
+    const bus = new MessageBus();
+    const handler = vi.fn(async () => {
+      await gate.promise;
+      return { ok: true };
+    });
+    const channel = new WebSocketChannel({}, bus, { goalControlHandler: handler });
+    const first = connection();
+    const duplicate = connection();
+    const conflicting = connection();
+    const request = {
+      type: "goal_control",
+      chat_id: "chat-1",
+      request_id: "22222222-2222-4222-8222-222222222222",
+      goal_id: "8f59f58a-7295-4c34-8e03-55e7035a5a8d",
+      action: "pause",
+    };
+
+    const firstDispatch = channel.dispatchEnvelope(first, "client-1", request);
+    await vi.waitFor(() => expect(handler).toHaveBeenCalledOnce());
+    await channel.dispatchEnvelope(duplicate, "client-2", request);
+    await channel.dispatchEnvelope(conflicting, "client-3", { ...request, action: "resume" });
+
+    expect(sent(conflicting)).toEqual({
+      event: "goal_control_result",
+      chat_id: "chat-1",
+      request_id: request.request_id,
+      ok: false,
+      error: "request_id_conflict",
+    });
+    expect(handler).toHaveBeenCalledOnce();
+    expect(first.send).not.toHaveBeenCalled();
+    expect(duplicate.send).not.toHaveBeenCalled();
+
+    gate.resolve();
+    await firstDispatch;
+    await channel.send(await bus.nextOutbound());
+
+    expect(sent(first)).toMatchObject({ event: "goal_control_result", ok: true });
+    expect(sent(duplicate)).toMatchObject({ event: "goal_control_result", ok: true });
+  });
+
+  it.each([
+    [{ action: "edit", objective: "" }, "invalid_objective"],
+    [{ action: "set_budget", token_budget: 0 }, "invalid_token_budget"],
+    [{ action: "pause", goal_id: "not-a-uuid" }, "invalid_transition"]
+  ] as const)("rejects invalid Goal control fields with %s", async (overrides, expectedError) => {
+    const handler = vi.fn(async () => ({ ok: true }));
+    const channel = new WebSocketChannel({}, new MessageBus(), { goalControlHandler: handler });
+    const ws = connection();
+
+    await channel.dispatchEnvelope(ws, "client-1", {
+      type: "goal_control",
+      chat_id: "chat-1",
+      request_id: "33333333-3333-4333-8333-333333333333",
+      goal_id: "8f59f58a-7295-4c34-8e03-55e7035a5a8d",
+      ...overrides,
+    });
+
+    expect(sent(ws)).toMatchObject({
+      event: "goal_control_result",
+      ok: false,
+      error: expectedError,
+    });
+    expect(handler).not.toHaveBeenCalled();
   });
 
   it("active goal push is a no-op without a session manager", async () => {
@@ -1613,16 +1790,16 @@ describe("WebSocketChannel memmy parity cases", () => {
     const channel = new WebSocketChannel({}, new MessageBus());
     const ws = connection();
     channel.attachConnection(ws, "chat-1");
-    await channel.sendGoalStatus("chat-1", "running", { startedAt: 123 });
-    expect(sent(ws)).toMatchObject({ event: "goal_status", status: "running", started_at: 123 });
+    await channel.sendRunStatus("chat-1", "running", { startedAt: 123 });
+    expect(sent(ws)).toMatchObject({ event: "run_status", status: "running", started_at: 123 });
   });
 
   it("omits startedAt for idle goal status", async () => {
     const channel = new WebSocketChannel({}, new MessageBus());
     const ws = connection();
     channel.attachConnection(ws, "chat-1");
-    await channel.sendGoalStatus("chat-1", "idle", { startedAt: 123 });
-    expect(sent(ws)).toMatchObject({ event: "goal_status", status: "idle" });
+    await channel.sendRunStatus("chat-1", "idle", { startedAt: 123 });
+    expect(sent(ws)).toMatchObject({ event: "run_status", status: "idle" });
     expect(sent(ws).started_at).toBeUndefined();
   });
 

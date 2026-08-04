@@ -7,6 +7,73 @@
  */
 import { z } from "zod";
 
+export type AgentGoalStatus =
+  | "active"
+  | "paused"
+  | "blocked"
+  | "usage_limited"
+  | "budget_limited"
+  | "completed";
+
+export type AgentGoalState = {
+  goal_id: string | null;
+  status: AgentGoalStatus | null;
+  objective: string;
+  token_budget: number | null;
+  tokens_used: number;
+  time_used_seconds: number;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+export type AgentGoalControlAction = "pause" | "resume" | "edit" | "set_budget" | "clear";
+
+export type AgentGoalControlInput = {
+  chatId: string;
+  goalId: string;
+  action: AgentGoalControlAction;
+  requestId?: string;
+  objective?: string;
+  tokenBudget?: number | null;
+};
+
+export type AgentGoalControlResult = {
+  ok: true;
+  requestId: string;
+  warning?: "turn_cancel_failed";
+};
+
+const AgentGoalStateSchema = z.object({
+  goal_id: z.string().nullable(),
+  status: z.union([
+    z.literal("active"),
+    z.literal("paused"),
+    z.literal("blocked"),
+    z.literal("usage_limited"),
+    z.literal("budget_limited"),
+    z.literal("completed")
+  ]).nullable(),
+  objective: z.string(),
+  token_budget: z.number().int().positive().nullable(),
+  tokens_used: z.number().int().nonnegative(),
+  time_used_seconds: z.number().int().nonnegative(),
+  created_at: z.string().nullable(),
+  updated_at: z.string().nullable()
+}).strict();
+
+export function isAgentGoalStatus(value: unknown): value is AgentGoalStatus {
+  return value === "active"
+    || value === "paused"
+    || value === "blocked"
+    || value === "usage_limited"
+    || value === "budget_limited"
+    || value === "completed";
+}
+
+export function isAgentGoalState(value: unknown): value is AgentGoalState {
+  return AgentGoalStateSchema.safeParse(value).success;
+}
+
 export const DEFAULT_MEMMY_AGENT_WEBUI_BASE_URL = "http://127.0.0.1:18980";
 const WEBUI_TOKEN_REFRESH_SKEW_MS = 30_000;
 
@@ -119,7 +186,23 @@ const WebuiThreadSchema = z.object({
   schemaVersion: z.number(),
   sessionKey: z.string(),
   last_turn_closed: z.boolean().optional(),
+  last_turn_goal_id: z.string().uuid().optional(),
+  last_turn_goal_outcome: z.union([
+    z.literal("active"),
+    z.literal("paused"),
+    z.literal("blocked"),
+    z.literal("usage_limited"),
+    z.literal("budget_limited"),
+    z.literal("completed")
+  ]).optional(),
   messages: z.array(z.record(z.string(), z.unknown()))
+}).superRefine((value, context) => {
+  if ((value.last_turn_goal_id === undefined) !== (value.last_turn_goal_outcome === undefined)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "last Turn Goal identity and outcome must be paired"
+    });
+  }
 });
 
 const LastCompactionSchema = z.object({
@@ -334,7 +417,9 @@ export type MemmyAgentWsEvent = {
   tool_events?: unknown;
   agent_ui?: unknown;
   edits?: unknown;
-  goal_state?: unknown;
+  goal_state?: AgentGoalState;
+  goal_id?: string;
+  goal_outcome?: AgentGoalStatus;
   compaction_id?: string;
   status?: string;
   started_at?: number;
@@ -346,7 +431,7 @@ export type MemmyAgentWsEvent = {
 };
 
 export type MemmyAgentRunLifecycleEvent = MemmyAgentWsEvent & {
-  event: "goal_status" | "turn_end" | "stop_result" | "run_status_snapshot";
+  event: "run_status" | "turn_end" | "stop_result" | "run_status_snapshot";
   chat_id: string;
 };
 
@@ -402,6 +487,11 @@ export interface MemmyAgentWebSocketConnection {
   ): Promise<MemmyAgentNewChatResult>;
   attach(chatId: string): void;
   sendMessage(input: MemmyAgentSendMessageInput, expectedGeneration: number): Promise<void>;
+  controlGoal(
+    input: AgentGoalControlInput,
+    expectedGeneration: number,
+    timeoutMs?: number
+  ): Promise<AgentGoalControlResult>;
   stop(chatId: string): void;
   restart(chatId: string): void;
   status(chatId: string): void;
@@ -415,7 +505,7 @@ export interface MemmyAgentWebSocketConnection {
   onRunLifecycle(handler: (chatId: string, event: MemmyAgentRunLifecycleEvent) => void): MemmyAgentUnsubscribe;
   requestRunStatusSnapshot(chatId: string, expectedGeneration: number, timeoutMs?: number): Promise<MemmyAgentRunStatusSnapshot>;
   getRunStartedAt(chatId: string): number | null;
-  getGoalState(chatId: string): unknown;
+  getGoalState(chatId: string): AgentGoalState | undefined;
   close(): void;
 }
 
@@ -495,6 +585,18 @@ export class MemmyAgentMessageRejectedError extends Error {
     this.name = "MemmyAgentMessageRejectedError";
     this.detail = detail;
     this.reason = reason;
+  }
+}
+
+export class MemmyAgentGoalControlError extends Error {
+  readonly code: string;
+  readonly unknownResult: boolean;
+
+  constructor(code: string, { unknownResult = false }: { unknownResult?: boolean } = {}) {
+    super(unknownResult ? "Goal control result is unknown" : `Goal control failed: ${code}`);
+    this.name = "MemmyAgentGoalControlError";
+    this.code = code;
+    this.unknownResult = unknownResult;
   }
 }
 
@@ -882,6 +984,8 @@ const READY_HANDSHAKE_TIMEOUT_MS = 5_000;
 const MESSAGE_ACK_TIMEOUT_MS = 10_000;
 const MESSAGE_RESULT_TIMEOUT_MS = 30_000;
 const MAX_AUTOMATIC_MESSAGE_CONFIRMATIONS = 3;
+const GOAL_CONTROL_TIMEOUT_MS = 15_000;
+const GOAL_CONTROL_HYDRATE_TIMEOUT_MS = 5_000;
 
 interface MemmyAgentWebSocketSessionInput {
   bootstrap(options?: { force?: boolean }): Promise<MemmyAgentBootstrap>;
@@ -904,6 +1008,15 @@ interface PendingRunStatusSnapshot {
   resolve: (snapshot: MemmyAgentRunStatusSnapshot) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+}
+
+interface PendingGoalControl {
+  input: AgentGoalControlInput & { requestId: string };
+  promise: Promise<AgentGoalControlResult>;
+  resolve: (result: AgentGoalControlResult) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout> | null;
+  calibrating: boolean;
 }
 
 interface PendingMessageAttempt {
@@ -931,6 +1044,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
   private pendingInitialReady: PendingInitialReady | null = null;
   private readonly pendingRunStatusSnapshots = new Map<string, PendingRunStatusSnapshot>();
   private readonly pendingMessageAttempts = new Map<string, PendingMessageAttempt>();
+  private readonly pendingGoalControls = new Map<string, PendingGoalControl>();
   private connectionGeneration = 0;
   private transportOpenGeneration: number | null = null;
   private readyGeneration: number | null = null;
@@ -948,7 +1062,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
   private readonly runStatusHandlers = new Set<(chatId: string, startedAt: number | null) => void>();
   private readonly runLifecycleHandlers = new Set<(chatId: string, event: MemmyAgentRunLifecycleEvent) => void>();
   private readonly runStartedAtByChatId = new Map<string, number>();
-  private readonly goalStateByChatId = new Map<string, unknown>();
+  private readonly goalStateByChatId = new Map<string, AgentGoalState>();
 
   constructor(private readonly input: MemmyAgentWebSocketSessionInput) {}
 
@@ -1085,6 +1199,61 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     return promise;
   }
 
+  controlGoal(
+    input: AgentGoalControlInput,
+    expectedGeneration: number,
+    timeoutMs = GOAL_CONTROL_TIMEOUT_MS
+  ): Promise<AgentGoalControlResult> {
+    this.assertReadyGeneration(expectedGeneration);
+    const requestId = input.requestId ?? crypto.randomUUID();
+    const normalizedInput = { ...input, requestId };
+    const key = messageAttemptKey(input.chatId, requestId);
+    const current = this.pendingGoalControls.get(key);
+    if (current) {
+      if (!sameGoalControl(current.input, normalizedInput)) {
+        return Promise.reject(new MemmyAgentGoalControlError("request_id_conflict"));
+      }
+      return current.promise;
+    }
+
+    let resolveControl!: (result: AgentGoalControlResult) => void;
+    let rejectControl!: (error: Error) => void;
+    const promise = new Promise<AgentGoalControlResult>((resolve, reject) => {
+      resolveControl = resolve;
+      rejectControl = reject;
+    });
+    const pending: PendingGoalControl = {
+      input: normalizedInput,
+      promise,
+      resolve: resolveControl,
+      reject: rejectControl,
+      calibrating: false,
+      timer: null
+    };
+    pending.timer = setTimeout(() => {
+      if (this.pendingGoalControls.get(key) !== pending) return;
+      this.beginGoalControlCalibration(key, pending);
+    }, timeoutMs);
+    this.pendingGoalControls.set(key, pending);
+    try {
+      this.sendOrdinaryFrame({
+        type: "goal_control",
+        chat_id: input.chatId,
+        request_id: requestId,
+        goal_id: input.goalId,
+        action: input.action,
+        ...(input.action === "edit" ? { objective: input.objective } : {}),
+        ...(input.action === "set_budget" ? { token_budget: input.tokenBudget } : {})
+      }, expectedGeneration);
+      this.knownChats.add(input.chatId);
+    } catch (error) {
+      if (pending.timer) clearTimeout(pending.timer);
+      this.pendingGoalControls.delete(key);
+      pending.reject(asError(error, "Unable to control Goal"));
+    }
+    return promise;
+  }
+
   stop(chatId: string): void {
     if (!chatId) {
       return;
@@ -1187,7 +1356,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     this.runLifecycleHandlers.add(handler);
     for (const [chatId, startedAt] of this.runStartedAtByChatId) {
       handler(chatId, {
-        event: "goal_status",
+        event: "run_status",
         chat_id: chatId,
         status: "running",
         started_at: startedAt,
@@ -1201,7 +1370,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     return this.runStartedAtByChatId.get(chatId) ?? null;
   }
 
-  getGoalState(chatId: string): unknown {
+  getGoalState(chatId: string): AgentGoalState | undefined {
     return this.goalStateByChatId.get(chatId);
   }
 
@@ -1248,6 +1417,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     this.rejectPendingNewChat(new Error("newChat cancelled"));
     this.rejectPendingRunStatusSnapshots(new Error("run status snapshot cancelled"));
     this.rejectPendingMessageAttempts(new Error("message confirmation cancelled"));
+    this.rejectPendingGoalControls(new Error("Goal control cancelled"));
     this.rejectInitialReady(new Error("Agent gateway connection cancelled"));
     this.clearReadyHandshakeTimer();
     if (this.reconnectTimer) {
@@ -1333,6 +1503,8 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
       this.resolvePendingMessageAttempt(normalized);
     } else if (normalized.event === "error") {
       this.rejectPendingMessageAttempt(normalized);
+    } else if (normalized.event === "goal_control_result") {
+      this.resolvePendingGoalControl(normalized);
     }
 
     if (normalized.event === "attached") {
@@ -1417,6 +1589,9 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     this.readyGeneration = null;
     this.clearReadyHandshakeTimer();
     this.suspendPendingMessageAttemptsForReconnect();
+    for (const [key, pending] of this.pendingGoalControls) {
+      this.beginGoalControlCalibration(key, pending);
+    }
     this.rejectPendingNewChat(new Error("newChat failed because websocket closed"));
     this.rejectPendingRunStatusSnapshots(new Error("run status snapshot failed because websocket closed"), generation);
     if (this.intentionallyClosed) {
@@ -1739,7 +1914,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
   }
 
   private recordRunStatus(chatId: string, event: MemmyAgentWsEvent): void {
-    if (event.event !== "goal_status" && event.event !== "turn_end" && event.event !== "stop_result" && event.event !== "run_status_snapshot") {
+    if (event.event !== "run_status" && event.event !== "turn_end" && event.event !== "stop_result" && event.event !== "run_status_snapshot") {
       return;
     }
     if (event.event === "run_status_snapshot") {
@@ -1771,10 +1946,62 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
   }
 
   private recordGoalState(chatId: string, event: MemmyAgentWsEvent): void {
-    if (event.event === "goal_state") {
-      this.goalStateByChatId.set(chatId, event.goal_state);
-    } else if (event.event === "turn_end" && event.goal_state != null) {
-      this.goalStateByChatId.set(chatId, event.goal_state);
+    if (event.event !== "goal_state") return;
+    const parsed = AgentGoalStateSchema.safeParse(event.goal_state);
+    if (!parsed.success) return;
+    this.goalStateByChatId.set(chatId, parsed.data);
+    for (const [key, pending] of this.pendingGoalControls) {
+      if (pending.input.chatId !== chatId || !pending.calibrating) continue;
+      this.pendingGoalControls.delete(key);
+      if (pending.timer) clearTimeout(pending.timer);
+      if (goalControlPostcondition(pending.input, parsed.data)) {
+        pending.resolve({ ok: true, requestId: pending.input.requestId });
+      } else {
+        pending.reject(new MemmyAgentGoalControlError("result_unknown", { unknownResult: true }));
+      }
+    }
+  }
+
+  private resolvePendingGoalControl(event: MemmyAgentWsEvent): void {
+    const chatId = event.chat_id;
+    const requestId = typeof event.request_id === "string" ? event.request_id : null;
+    if (!chatId || !requestId) return;
+    const key = messageAttemptKey(chatId, requestId);
+    const pending = this.pendingGoalControls.get(key);
+    if (!pending) return;
+    this.pendingGoalControls.delete(key);
+    if (pending.timer) clearTimeout(pending.timer);
+    if (event.ok === true) {
+      pending.resolve({
+        ok: true,
+        requestId,
+        ...(event.warning === "turn_cancel_failed" ? { warning: event.warning } : {})
+      });
+      return;
+    }
+    pending.reject(new MemmyAgentGoalControlError(
+      typeof event.error === "string" ? event.error : "invalid_transition"
+    ));
+  }
+
+  private beginGoalControlCalibration(key: string, pending: PendingGoalControl): void {
+    if (this.pendingGoalControls.get(key) !== pending) return;
+    if (pending.timer) clearTimeout(pending.timer);
+    pending.calibrating = true;
+    const generation = this.readyGeneration;
+    if (generation !== null) this.sendAttach(pending.input.chatId, generation);
+    pending.timer = setTimeout(() => {
+      if (this.pendingGoalControls.get(key) !== pending) return;
+      this.pendingGoalControls.delete(key);
+      pending.reject(new MemmyAgentGoalControlError("result_unknown", { unknownResult: true }));
+    }, GOAL_CONTROL_HYDRATE_TIMEOUT_MS);
+  }
+
+  private rejectPendingGoalControls(error: Error): void {
+    for (const [key, pending] of this.pendingGoalControls) {
+      this.pendingGoalControls.delete(key);
+      if (pending.timer) clearTimeout(pending.timer);
+      pending.reject(error);
     }
   }
 
@@ -1812,6 +2039,39 @@ function sameMessageAttempt(
     modelPreset: right.modelPreset ?? null,
     mediaPaths: right.media?.map((item) => item.path) ?? []
   });
+}
+
+function sameGoalControl(
+  left: AgentGoalControlInput & { requestId: string },
+  right: AgentGoalControlInput & { requestId: string }
+): boolean {
+  return JSON.stringify({
+    chatId: left.chatId,
+    requestId: left.requestId,
+    goalId: left.goalId,
+    action: left.action,
+    objective: left.action === "edit" ? left.objective?.trim() ?? "" : null,
+    tokenBudget: left.action === "set_budget" ? left.tokenBudget ?? null : null
+  }) === JSON.stringify({
+    chatId: right.chatId,
+    requestId: right.requestId,
+    goalId: right.goalId,
+    action: right.action,
+    objective: right.action === "edit" ? right.objective?.trim() ?? "" : null,
+    tokenBudget: right.action === "set_budget" ? right.tokenBudget ?? null : null
+  });
+}
+
+function goalControlPostcondition(
+  input: AgentGoalControlInput,
+  state: AgentGoalState
+): boolean {
+  if (input.action === "clear") return state.goal_id === null && state.status === null;
+  if (state.goal_id !== input.goalId) return false;
+  if (input.action === "pause") return state.status === "paused";
+  if (input.action === "resume") return state.status === "active";
+  if (input.action === "edit") return state.objective === input.objective?.trim();
+  return state.token_budget === (input.tokenBudget ?? null);
 }
 
 function combineAbortSignals(

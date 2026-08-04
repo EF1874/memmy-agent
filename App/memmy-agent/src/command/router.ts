@@ -10,6 +10,7 @@ export class CommandContext {
   metadata: Record<string, any>;
   text: string;
   abortSignal: AbortSignal | null;
+  turnId: string | null;
 
   constructor(init: {
     msg?: InboundMessage;
@@ -21,6 +22,7 @@ export class CommandContext {
     text?: string;
     metadata?: Record<string, any>;
     abortSignal?: AbortSignal | null;
+    turnId?: string | null;
   } = {}) {
     this.msg = init.msg ?? new InboundMessage({ channel: "", chatId: "", content: init.text ?? init.raw ?? "" });
     this.session = init.session ?? null;
@@ -31,6 +33,7 @@ export class CommandContext {
     this.metadata = init.metadata ?? this.msg.metadata ?? {};
     this.text = init.text ?? this.raw;
     this.abortSignal = init.abortSignal ?? null;
+    this.turnId = init.turnId ?? null;
   }
 }
 

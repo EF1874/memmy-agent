@@ -553,7 +553,7 @@ describe("AgentLoop progress integration", () => {
     expect(outbound.some((message) => message.metadata?.streamEnd)).toBe(true);
     expect(outbound.find((message) => message.content === "Hello")?.metadata.streamed).toBe(true);
     expect(outbound.some((message) => message.metadata?.turnEnd)).toBe(true);
-    expect(outbound.some((message) => message.metadata?.goalStatusEvent && message.metadata.goalStatus === "idle")).toBe(true);
+    expect(outbound.some((message) => message.metadata?.runStatusEvent && message.metadata.runStatus === "idle")).toBe(true);
     expect((loop.provider as any).chatWithRetry).not.toHaveBeenCalled();
   });
 
@@ -647,7 +647,7 @@ describe("AgentLoop progress integration", () => {
     const outbound = await drain(bus);
     const doneIndex = outbound.findIndex((message) => message.content === "Done");
     const turnEndIndex = outbound.findIndex((message) => message.metadata?.turnEnd);
-    const idleIndex = outbound.findIndex((message) => message.metadata?.goalStatusEvent && message.metadata.goalStatus === "idle");
+    const idleIndex = outbound.findIndex((message) => message.metadata?.runStatusEvent && message.metadata.runStatus === "idle");
     expect(doneIndex).toBeGreaterThanOrEqual(0);
     expect(turnEndIndex).toBeGreaterThan(doneIndex);
     expect(idleIndex).toBeGreaterThan(turnEndIndex);

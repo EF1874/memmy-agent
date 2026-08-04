@@ -94,7 +94,7 @@ describe("app reducer", () => {
   it("clears the current chat completion dot when navigation returns to the visible chat view", () => {
     let state = appReducer(createInitialAppState(), appActions.bootstrapLoaded(bootstrap, "/tools"));
     state = appReducer(state, agentActions.newChatCreated("chat-1"));
-    state = appReducer(state, agentActions.wsEventReceived({ event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1781240000000 }));
+    state = appReducer(state, agentActions.wsEventReceived({ event: "run_status", chat_id: "chat-1", status: "running", started_at: 1781240000000 }));
     state = appReducer(state, agentActions.wsEventReceived({ event: "turn_end", chat_id: "chat-1" }));
 
     expect(state.agent.chatViewVisible).toBe(false);

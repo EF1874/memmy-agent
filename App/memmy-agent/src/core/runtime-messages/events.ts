@@ -5,6 +5,12 @@ export const RUNTIME_CONTROL_MCP_RELOAD = "mcpReload";
 
 type TimestampInput = Date | string | number;
 
+export type InboundMessageInternal = {
+  kind: "goal_continuation";
+  goalId: string;
+  goalUpdatedAt: string;
+};
+
 function normalizeTimestamp(value: TimestampInput | null | undefined): Date {
   if (value instanceof Date) return new Date(value.getTime());
   if (value !== null && value !== undefined) {
@@ -26,6 +32,7 @@ export class InboundMessage {
   role: string;
   sessionKeyOverride: string | null;
   timestamp: Date;
+  internal: InboundMessageInternal | null;
   private explicitSessionKey!: string | null;
 
   constructor(init: {
@@ -41,6 +48,7 @@ export class InboundMessage {
     sessionKey?: string;
     sessionKeyOverride?: string | null;
     timestamp?: TimestampInput | null;
+    internal?: InboundMessageInternal | null;
   }) {
     this.channel = init.channel;
     this.chatId = init.chatId ?? "";
@@ -53,6 +61,7 @@ export class InboundMessage {
     this.role = init.role ?? "user";
     this.sessionKeyOverride = init.sessionKeyOverride ?? null;
     this.timestamp = normalizeTimestamp(init.timestamp);
+    this.internal = init.internal ?? null;
     Object.defineProperty(this, "explicitSessionKey", {
       value: init.sessionKey ?? null,
       writable: true,

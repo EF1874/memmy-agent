@@ -36,6 +36,21 @@ const sidebarState: MemmyAgentSidebarState = {
   updated_at: null
 };
 
+const goalId = "8f59f58a-7295-4c34-8e03-55e7035a5a8d";
+
+function goalState(status: "active" | "paused" | "completed" = "active") {
+  return {
+    goal_id: goalId,
+    status,
+    objective: "整理 PRD",
+    token_budget: 12_000,
+    tokens_used: 500,
+    time_used_seconds: 30,
+    created_at: "2026-08-04T08:00:00.000Z",
+    updated_at: "2026-08-04T08:00:30.000Z"
+  } as const;
+}
+
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
@@ -404,6 +419,37 @@ describe("memmy-agent client", () => {
         }
       ]
     });
+  });
+
+  it("requires WebUI thread Goal identity and outcome to be a valid pair", async () => {
+    let payload: Record<string, unknown> = {
+      schemaVersion: 3,
+      sessionKey: "websocket:chat-goal",
+      last_turn_closed: true,
+      last_turn_goal_id: goalId,
+      last_turn_goal_outcome: "active",
+      messages: []
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/webui/bootstrap") return json(bootstrap);
+      if (url.pathname.endsWith("/webui-thread")) return json(payload);
+      return json({ error: "not found" }, 404);
+    });
+    const client = createMemmyAgentClient({
+      baseUrl: "http://127.0.0.1:18980",
+      clientId: "frontend-test",
+      fetchFn: fetchMock as typeof fetch
+    });
+
+    await expect(client.readWebuiThread("websocket:chat-goal")).resolves.toMatchObject({
+      last_turn_goal_id: goalId,
+      last_turn_goal_outcome: "active"
+    });
+    payload = { ...payload, last_turn_goal_id: undefined };
+    await expect(client.readWebuiThread("websocket:chat-goal")).rejects.toThrow();
+    payload = { ...payload, last_turn_goal_id: "not-a-uuid", last_turn_goal_outcome: "unknown" };
+    await expect(client.readWebuiThread("websocket:chat-goal")).rejects.toThrow();
   });
 
   it("resolves, opens, and reveals artifacts through authenticated JSON POST routes", async () => {
@@ -1162,11 +1208,12 @@ describe("memmy-agent client", () => {
     sockets[0]?.emit({ event: "session_updated", chat_id: "chat-1", scope: "thread" });
     sockets[0]?.emit({ event: "session_updated", chat_id: "chat-1", scope: "metadata" });
     sockets[0]?.emit({ event: "runtime_model_updated", model_name: "gpt-4.1-mini", model_preset: "openai" });
-    sockets[0]?.emit({ event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800 });
-    sockets[0]?.emit({ event: "goal_state", chat_id: "chat-1", goal_state: { active: true } });
+    sockets[0]?.emit({ event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800 });
+    const activeGoal = goalState();
+    sockets[0]?.emit({ event: "goal_state", chat_id: "chat-1", goal_state: activeGoal });
     sockets[0]?.emit({ event: "stop_result", chat_id: "chat-1", stopped: 1 });
     sockets[0]?.emit({ event: "turn_end", chat_id: "chat-1" });
-    sockets[0]?.emit({ event: "goal_status", chat_id: "chat-1", status: "idle" });
+    sockets[0]?.emit({ event: "run_status", chat_id: "chat-1", status: "idle" });
 
     expect(sessionUpdates).toEqual([
       { chatId: "chat-1", scope: "thread" },
@@ -1180,13 +1227,155 @@ describe("memmy-agent client", () => {
       { chatId: "chat-1", startedAt: null }
     ]);
     expect(runLifecycleUpdates).toEqual([
-      { chatId: "chat-1", event: expect.objectContaining({ event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }) },
+      { chatId: "chat-1", event: expect.objectContaining({ event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }) },
       { chatId: "chat-1", event: expect.objectContaining({ event: "stop_result", chat_id: "chat-1", stopped: 1 }) },
       { chatId: "chat-1", event: expect.objectContaining({ event: "turn_end", chat_id: "chat-1" }) },
-      { chatId: "chat-1", event: expect.objectContaining({ event: "goal_status", chat_id: "chat-1", status: "idle" }) }
+      { chatId: "chat-1", event: expect.objectContaining({ event: "run_status", chat_id: "chat-1", status: "idle" }) }
     ]);
     expect(connection.getRunStartedAt("chat-1")).toBeNull();
-    expect(connection.getGoalState("chat-1")).toEqual({ active: true });
+    expect(connection.getGoalState("chat-1")).toEqual(activeGoal);
+  });
+
+  it("resolves Goal controls from matching results and rejects protocol errors", async () => {
+    const sockets: FakeSocket[] = [];
+    const client = createMemmyAgentClient({
+      baseUrl: "https://agent.local:18980",
+      clientId: "frontend-test",
+      fetchFn: vi.fn(async () => json(bootstrap)) as typeof fetch,
+      webSocketFactory: (url) => {
+        const socket = new FakeSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+    const connection = await connectReady(client, sockets);
+    const requestId = "11111111-1111-4111-8111-111111111111";
+
+    const pausing = connection.controlGoal({
+      chatId: "chat-1",
+      goalId,
+      action: "pause",
+      requestId
+    }, 1);
+    expect(JSON.parse(sockets[0]!.sent.at(-1)!)).toEqual({
+      type: "goal_control",
+      chat_id: "chat-1",
+      request_id: requestId,
+      goal_id: goalId,
+      action: "pause"
+    });
+    sockets[0]?.emit({
+      event: "goal_control_result",
+      chat_id: "chat-1",
+      request_id: requestId,
+      ok: true,
+      warning: "turn_cancel_failed"
+    });
+    await expect(pausing).resolves.toEqual({ ok: true, requestId, warning: "turn_cancel_failed" });
+
+    const resuming = connection.controlGoal({
+      chatId: "chat-1",
+      goalId,
+      action: "resume",
+      requestId: "22222222-2222-4222-8222-222222222222"
+    }, 1);
+    sockets[0]?.emit({
+      event: "goal_control_result",
+      chat_id: "chat-1",
+      request_id: "22222222-2222-4222-8222-222222222222",
+      ok: false,
+      error: "invalid_transition"
+    });
+    await expect(resuming).rejects.toMatchObject({ code: "invalid_transition", unknownResult: false });
+  });
+
+  it("reuses equal in-flight Goal controls and rejects a conflicting request_id", async () => {
+    const sockets: FakeSocket[] = [];
+    const client = createMemmyAgentClient({
+      baseUrl: "https://agent.local:18980",
+      clientId: "frontend-test",
+      fetchFn: vi.fn(async () => json(bootstrap)) as typeof fetch,
+      webSocketFactory: (url) => {
+        const socket = new FakeSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+    const connection = await connectReady(client, sockets);
+    const input = {
+      chatId: "chat-1",
+      goalId,
+      action: "pause" as const,
+      requestId: "33333333-3333-4333-8333-333333333333"
+    };
+
+    const first = connection.controlGoal(input, 1);
+    const duplicate = connection.controlGoal(input, 1);
+    await expect(connection.controlGoal({ ...input, action: "resume" }, 1))
+      .rejects.toMatchObject({ code: "request_id_conflict" });
+    expect(first).toBe(duplicate);
+    expect(sockets[0]?.sent.filter((raw) => JSON.parse(raw).type === "goal_control")).toHaveLength(1);
+
+    sockets[0]?.emit({
+      event: "goal_control_result",
+      chat_id: "chat-1",
+      request_id: input.requestId,
+      ok: true
+    });
+    await expect(first).resolves.toMatchObject({ ok: true });
+  });
+
+  it("hydrates an unknown Goal control result after timeout without replaying the mutation", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const client = createMemmyAgentClient({
+      baseUrl: "https://agent.local:18980",
+      clientId: "frontend-test",
+      fetchFn: vi.fn(async () => json(bootstrap)) as typeof fetch,
+      webSocketFactory: (url) => {
+        const socket = new FakeSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+    const connection = await connectReady(client, sockets);
+    const requestId = "44444444-4444-4444-8444-444444444444";
+    const pending = connection.controlGoal({ chatId: "chat-1", goalId, action: "pause", requestId }, 1, 10);
+
+    await vi.advanceTimersByTimeAsync(10);
+    expect(sockets[0]?.sent.map((raw) => JSON.parse(raw))).toContainEqual({ type: "attach", chat_id: "chat-1" });
+    expect(sockets[0]?.sent.filter((raw) => JSON.parse(raw).type === "goal_control")).toHaveLength(1);
+    sockets[0]?.emit({ event: "goal_state", chat_id: "chat-1", goal_state: goalState("paused") });
+
+    await expect(pending).resolves.toEqual({ ok: true, requestId });
+  });
+
+  it("switches a disconnected Goal control to hydrate-only calibration", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const client = createMemmyAgentClient({
+      baseUrl: "https://agent.local:18980",
+      clientId: "frontend-test",
+      fetchFn: vi.fn(async () => json(bootstrap)) as typeof fetch,
+      webSocketFactory: (url) => {
+        const socket = new FakeSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+    const connection = await connectReady(client, sockets);
+    const requestId = "55555555-5555-4555-8555-555555555555";
+    const pending = connection.controlGoal({ chatId: "chat-1", goalId, action: "pause", requestId }, 1, 60_000);
+
+    sockets[0]?.emitClose();
+    await vi.advanceTimersByTimeAsync(500);
+    while (!sockets[1]) await Promise.resolve();
+    sockets[1]!.emit({ event: "ready", chat_id: "ready-2" });
+    expect(sockets[1]!.sent.map((raw) => JSON.parse(raw))).toContainEqual({ type: "attach", chat_id: "chat-1" });
+    expect(sockets[1]!.sent.some((raw) => JSON.parse(raw).type === "goal_control")).toBe(false);
+    sockets[1]!.emit({ event: "goal_state", chat_id: "chat-1", goal_state: goalState("paused") });
+
+    await expect(pending).resolves.toEqual({ ok: true, requestId });
   });
 
   it("routes run status snapshots through cache, lifecycle, and chat handlers in order", async () => {
@@ -1240,7 +1429,7 @@ describe("memmy-agent client", () => {
     expect(chatEvents).toEqual([expect.objectContaining({ event: "run_status_snapshot", status: "running" })]);
 
     callbackOrder.length = 0;
-    sockets[0]?.emit({ event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800 });
+    sockets[0]?.emit({ event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800 });
     sockets[0]?.emit({ event: "run_status_snapshot", chat_id: "chat-1", status: "idle", turn_id: "turn-1" });
     sockets[0]?.emit({ event: "run_status_snapshot", chat_id: "chat-1", status: "idle", turn_id: "turn-1" });
 

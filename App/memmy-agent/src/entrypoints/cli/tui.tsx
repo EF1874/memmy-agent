@@ -149,7 +149,7 @@ const TOOLSET_ORDER = ["web", "exec", "file", "runtime", "image", "goal", "cron"
 
 const TOOLSET_BY_TOOL_NAME: Record<string, string> = {
   apply_patch: "file",
-  complete_goal: "goal",
+  create_goal: "goal",
   cron: "cron",
   edit_file: "file",
   exec: "exec",
@@ -158,7 +158,8 @@ const TOOLSET_BY_TOOL_NAME: Record<string, string> = {
   grep: "file",
   list_dir: "file",
   list_exec_sessions: "exec",
-  long_task: "goal",
+  get_goal: "goal",
+  update_goal: "goal",
   message: "runtime",
   read_file: "file",
   spawn: "runtime",

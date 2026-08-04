@@ -11,6 +11,7 @@ vi.mock("@memmy/migrations", () => ({ runMigrations }));
 
 import {
   MIGRATIONS_READY_CONFIG_ENV,
+  MIGRATIONS_READY_SESSION_DAG_ENV,
   MIGRATIONS_READY_WORKSPACE_ENV,
   prepareStartupMigrations,
   resolveStartupMigrationTarget,
@@ -22,6 +23,13 @@ function tempRoot(): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-startup-migrations-"));
   roots.push(root);
   return root;
+}
+
+function migrationEnv(root: string): NodeJS.ProcessEnv {
+  return {
+    HOME: root,
+    MEMMY_AGENT_SESSION_DAG_DIR: path.join(root, "session-dag"),
+  };
 }
 
 afterEach(() => {
@@ -36,12 +44,13 @@ describe("startup migrations", () => {
     const workspaceInput = path.join(root, "nested", "..", "workspace");
     const target = resolveStartupMigrationTarget(
       { config: configInput, workspace: workspaceInput },
-      { HOME: root },
+      migrationEnv(root),
     );
 
     expect(target).toEqual({
       runtimeConfigFile: path.join(root, "config.yaml"),
       agentWorkspace: fs.realpathSync(path.join(root, "workspace")),
+      sessionDagDir: path.join(root, "session-dag"),
     });
   });
 
@@ -55,9 +64,10 @@ describe("startup migrations", () => {
       "utf8",
     );
 
-    expect(resolveStartupMigrationTarget({ config: configPath }, { HOME: root })).toEqual({
+    expect(resolveStartupMigrationTarget({ config: configPath }, migrationEnv(root))).toEqual({
       runtimeConfigFile: configPath,
       agentWorkspace: fs.realpathSync(workspace),
+      sessionDagDir: path.join(root, "session-dag"),
     });
   });
 
@@ -68,7 +78,7 @@ describe("startup migrations", () => {
 
     const result = await prepareStartupMigrations(
       { config: configPath, workspace },
-      { HOME: root },
+      migrationEnv(root),
     );
 
     expect(result.source).toBe("executed");
@@ -84,9 +94,10 @@ describe("startup migrations", () => {
     const workspace = path.join(root, "workspace");
     fs.mkdirSync(workspace);
     const env = {
-      HOME: root,
+      ...migrationEnv(root),
       [MIGRATIONS_READY_CONFIG_ENV]: configPath,
       [MIGRATIONS_READY_WORKSPACE_ENV]: workspace,
+      [MIGRATIONS_READY_SESSION_DAG_ENV]: path.join(root, "session-dag"),
     };
 
     const result = await prepareStartupMigrations({ config: configPath, workspace }, env);
@@ -95,20 +106,23 @@ describe("startup migrations", () => {
     expect(runMigrations).not.toHaveBeenCalled();
   });
 
-  it.each(["config", "workspace"] as const)(
+  it.each(["config", "workspace", "session-dag"] as const)(
     "executes when the prepared %s target differs",
     async (differentTarget) => {
       const root = tempRoot();
       const configPath = path.join(root, "config.yaml");
       const workspace = path.join(root, "workspace");
       const env = {
-        HOME: root,
+        ...migrationEnv(root),
         [MIGRATIONS_READY_CONFIG_ENV]: differentTarget === "config"
           ? path.join(root, "other.yaml")
           : configPath,
         [MIGRATIONS_READY_WORKSPACE_ENV]: differentTarget === "workspace"
           ? path.join(root, "other-workspace")
           : workspace,
+        [MIGRATIONS_READY_SESSION_DAG_ENV]: differentTarget === "session-dag"
+          ? path.join(root, "other-session-dag")
+          : path.join(root, "session-dag"),
       };
 
       const result = await prepareStartupMigrations({ config: configPath, workspace }, env);
@@ -123,9 +137,10 @@ describe("startup migrations", () => {
     const configPath = path.join(root, "config.yaml");
     const workspace = path.join(root, "workspace");
     const env = {
-      HOME: root,
+      ...migrationEnv(root),
       [MIGRATIONS_READY_CONFIG_ENV]: configPath,
       [MIGRATIONS_READY_WORKSPACE_ENV]: workspace,
+      [MIGRATIONS_READY_SESSION_DAG_ENV]: path.join(root, "session-dag"),
     };
 
     await prepareStartupMigrations(
@@ -147,6 +162,6 @@ describe("startup migrations", () => {
     await expect(prepareStartupMigrations({
       config: path.join(root, "config.yaml"),
       workspace: path.join(root, "workspace"),
-    }, { HOME: root })).rejects.toBe(failure);
+    }, migrationEnv(root))).rejects.toBe(failure);
   });
 });

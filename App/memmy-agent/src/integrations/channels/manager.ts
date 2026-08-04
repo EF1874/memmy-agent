@@ -56,6 +56,8 @@ export class ChannelManager {
   workspacePath: string | null = null;
   cancelActiveTasks: ((sessionKey: string) => Promise<number>) | null = null;
   closeBrowserChat: ((channel: string, chatId: string) => Promise<void>) | null = null;
+  goalControlHandler: ((request: any) => Promise<any>) | null = null;
+  activeGoalStopHandler: ((sessionKey: string) => Promise<boolean>) | null = null;
 
   constructor(
     configOrBus: any = defaultConfig(),
@@ -70,6 +72,8 @@ export class ChannelManager {
       workspacePath?: string | null;
       cancelActiveTasks?: ((sessionKey: string) => Promise<number>) | null;
       closeBrowserChat?: ((channel: string, chatId: string) => Promise<void>) | null;
+      goalControlHandler?: ((request: any) => Promise<any>) | null;
+      activeGoalStopHandler?: ((sessionKey: string) => Promise<boolean>) | null;
     } = {},
   ) {
     if (configOrBus instanceof MessageBus) {
@@ -87,6 +91,8 @@ export class ChannelManager {
       : null;
     this.cancelActiveTasks = options.cancelActiveTasks ?? null;
     this.closeBrowserChat = options.closeBrowserChat ?? null;
+    this.goalControlHandler = options.goalControlHandler ?? null;
+    this.activeGoalStopHandler = options.activeGoalStopHandler ?? null;
     this.initChannels();
   }
 
@@ -96,6 +102,12 @@ export class ChannelManager {
 
   getChannel(name: string): BaseChannel | null {
     return this.channels[name] ?? null;
+  }
+
+  channelCapabilities(name: string): { supportsStreaming: boolean } | null {
+    const channel = this.getChannel(normalizeChannelName(name));
+    if (!channel) return null;
+    return { supportsStreaming: channel.config?.streaming === true };
   }
 
   channelSection(name: string): any {
@@ -149,6 +161,8 @@ export class ChannelManager {
     }
     if (this.cancelActiveTasks) options.cancelActiveTasks = this.cancelActiveTasks;
     if (this.closeBrowserChat) options.closeBrowserChat = this.closeBrowserChat;
+    if (this.goalControlHandler) options.goalControlHandler = this.goalControlHandler;
+    if (this.activeGoalStopHandler) options.activeGoalStopHandler = this.activeGoalStopHandler;
     return options;
   }
 

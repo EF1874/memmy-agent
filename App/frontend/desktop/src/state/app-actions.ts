@@ -17,7 +17,7 @@ import { isIntegrationSetupDiagnosticError, logHiddenIntegrationSetupDiagnosticE
 import type { IntegrationsClient } from "../api/integrations-client.js";
 import type { IntegrationConnection } from "../integrations/connection-state.js";
 import type { IntegrationMeta } from "../integrations/integration-meta.js";
-import type { ChatModelPreset, MemmyAgentRunStatusSnapshot, MemmyAgentSessionSnapshot, MemmyAgentSessionSummary, MemmyAgentSidebarState, MemmyAgentWebuiThread, MemmyAgentWsEvent, WebuiSessionTarget } from "../api/memmy-agent-client.js";
+import type { AgentGoalControlAction, ChatModelPreset, MemmyAgentRunStatusSnapshot, MemmyAgentSessionSnapshot, MemmyAgentSessionSummary, MemmyAgentSidebarState, MemmyAgentWebuiThread, MemmyAgentWsEvent, WebuiSessionTarget } from "../api/memmy-agent-client.js";
 import type { PendingAttachment } from "./agent-composer-state.js";
 import type {
   AgentAction,
@@ -419,6 +419,19 @@ export const agentActions = {
 
   stopUnconfirmed(chatId: string): AppAction {
     return { type: "agent/stopUnconfirmed", chatId };
+  },
+
+  goalMutationStarted(input: {
+    chatId: string;
+    requestId: string;
+    goalId: string;
+    action: AgentGoalControlAction;
+  }): AppAction {
+    return { type: "agent/goalMutationStarted", ...input };
+  },
+
+  goalMutationSettled(chatId: string, requestId: string): AppAction {
+    return { type: "agent/goalMutationSettled", chatId, requestId };
   },
 
   restartRequested(startedAt: number): AppAction {

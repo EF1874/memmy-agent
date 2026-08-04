@@ -392,7 +392,9 @@ function mergeUniqueToolTraceLines(previousTraces: string[], lines: string[]): [
 
 function sessionCreatedAts(messages: Dict[] | null, role: "user" | "assistant"): number[] {
   return (messages ?? [])
-    .filter((message) => message.role === role)
+    .filter(
+      (message) => message.role === role && message.internal_context !== "goal_continuation",
+    )
     .map(transcriptCreatedAt)
     .filter((createdAt): createdAt is number => createdAt != null);
 }
@@ -1205,6 +1207,30 @@ export function lastTranscriptUserTurnClosed(lines: Dict[]): boolean {
   return sawUser && closed;
 }
 
+function lastTranscriptGoalOutcome(lines: Dict[]): Dict {
+  let lastTurnEnd: Dict | null = null;
+  for (const rec of lines) {
+    if (rec.event === "turn_end") lastTurnEnd = rec;
+  }
+  if (!lastTurnEnd) return {};
+  const goalId = stringValue(lastTurnEnd.goal_id);
+  const goalOutcome = lastTurnEnd.goal_outcome;
+  if (!goalId || !isGoalStatus(goalOutcome)) return {};
+  return {
+    last_turn_goal_id: goalId,
+    last_turn_goal_outcome: goalOutcome,
+  };
+}
+
+function isGoalStatus(value: unknown): boolean {
+  return value === "active"
+    || value === "paused"
+    || value === "blocked"
+    || value === "usage_limited"
+    || value === "budget_limited"
+    || value === "completed";
+}
+
 export function buildWebuiThreadResponse(sessionKey: string, messages: any[]): Dict;
 export function buildWebuiThreadResponse(sessionKey: string, options?: BuildWebuiThreadResponseOptions | null): Dict | null;
 export function buildWebuiThreadResponse(sessionKey: string, messagesOrOptions: any[] | BuildWebuiThreadResponseOptions | null = null): Dict | null {
@@ -1215,6 +1241,7 @@ export function buildWebuiThreadResponse(sessionKey: string, messagesOrOptions: 
     schemaVersion: WEBUI_TRANSCRIPT_SCHEMA_VERSION,
     sessionKey,
     last_turn_closed: lastTranscriptUserTurnClosed(lines),
+    ...lastTranscriptGoalOutcome(lines),
     messages: replayTranscriptToUiMessages(lines, messagesOrOptions ?? {}),
   };
 }

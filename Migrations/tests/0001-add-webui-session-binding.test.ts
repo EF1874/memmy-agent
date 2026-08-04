@@ -54,6 +54,7 @@ async function runMigration(
       profileWorkspace: workspace,
       sessionsDir,
       runtimeConfigFile: path.join(workspace, "config.yaml"),
+      sessionDagDir: path.join(workspace, "session-dag"),
       logger,
     },
     hooks,

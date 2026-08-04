@@ -416,7 +416,7 @@ describe("HomePage", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
     const keyDownHandler = source.slice(source.indexOf("function handleComposerKeyDown"), source.indexOf("  /**\n   * 校验并暂存用户选择"));
 
-    expect(keyDownHandler).toContain("!composerSubmitDisabled");
+    expect(keyDownHandler).toContain("!composerSendDisabled");
     expect(keyDownHandler).not.toContain("!state.agent.isSending && !isCreatingChat");
   });
 
@@ -548,7 +548,7 @@ describe("HomePage", () => {
     expect(subscriptionBlock).toContain("if (chatId === subscribedChatRef.current)");
     expect(subscriptionBlock).toContain("dispatch(agentActions.wsEventReceived(event));");
     expect(subscriptionBlock).not.toContain("nextConnection.onRunStatus");
-    expect(subscriptionBlock).not.toContain('event: "goal_status"');
+    expect(subscriptionBlock).not.toContain('event: "run_status"');
   });
 
   it("consumes the shared AgentRuntimeBridge connection instead of owning websocket lifecycle", () => {
@@ -573,7 +573,46 @@ describe("HomePage", () => {
     expect(source).toContain("const stopInFlight = state.agent.currentChatId ? Boolean(state.agent.stopInFlightByChatId[state.agent.currentChatId]) : false;");
     expect(source).toContain("const stopRequestLocksRef = useRef<Set<string>>(new Set());");
     expect(source).toContain("input.stopRequestLocks.has(chatId)");
-    expect(submitDisabledBlock).toContain("isCurrentAgentRunning\n    ? stopInFlight");
+    expect(source).toContain("const composerStopDisabled = stopInFlight");
+    expect(submitDisabledBlock).toContain("isCurrentAgentRunning && !isCurrentGoalActive");
+  });
+
+  it("keeps Send available beside Goal Stop and routes that Stop through Pause", () => {
+    const source = readFileSync(homePageSourcePath, "utf8").replace(/\r\n/g, "\n");
+    const stopBlock = source.slice(
+      source.indexOf("function stopCurrentTurn()"),
+      source.indexOf("async function controlGoal")
+    );
+    const goalRunningControls = source.slice(
+      source.indexOf("{isCurrentAgentRunning && isCurrentGoalActive ? ("),
+      source.indexOf(") : (", source.indexOf("{isCurrentAgentRunning && isCurrentGoalActive ? ("))
+    );
+
+    expect(goalRunningControls.match(/<ComposerSubmitButton/g)).toHaveLength(2);
+    expect(goalRunningControls).toContain("disabled={composerSendDisabled}");
+    expect(goalRunningControls).toContain("onClick={() => void sendMessage()}");
+    expect(goalRunningControls).toContain("disabled={composerStopDisabled}");
+    expect(goalRunningControls).toContain("onClick={stopCurrentTurn}");
+    expect(stopBlock).toContain('controlGoal({ chatId, goalId: goal.goal_id, action: "pause" })');
+    expect(stopBlock.indexOf("return;")).toBeLessThan(stopBlock.indexOf("requestAgentStop({"));
+  });
+
+  it("holds one synchronous Goal control lock per chat through async calibration", () => {
+    const source = readFileSync(homePageSourcePath, "utf8").replace(/\r\n/g, "\n");
+    const controlBlock = source.slice(
+      source.indexOf("async function controlGoal"),
+      source.indexOf("/**\n   * Updates the input draft")
+    );
+    const sendBlock = source.slice(
+      source.indexOf("async function sendMessage()"),
+      source.indexOf("/**\n   * Stops the current Agent turn.")
+    );
+
+    expect(controlBlock).toContain("goalMutationLocksRef.current.has(request.chatId)");
+    expect(controlBlock).toContain("goalMutationLocksRef.current.add(request.chatId)");
+    expect(controlBlock.indexOf("await connection.controlGoal({"))
+      .toBeLessThan(controlBlock.indexOf("goalMutationLocksRef.current.delete(request.chatId)"));
+    expect(sendBlock).not.toContain("goalMutationLocksRef");
   });
 
   it("locks duplicate stop clicks before React state re-renders", () => {

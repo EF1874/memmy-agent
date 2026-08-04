@@ -10,7 +10,8 @@ import {
 
 export type AppliedMigrationTarget =
   | { type: "agent-workspace" }
-  | { type: "runtime-config"; key: string };
+  | { type: "runtime-config"; key: string }
+  | { type: "session-dag"; key: string };
 
 export type AppliedMigrationRecord = {
   id: string;
@@ -94,12 +95,12 @@ function validateTarget(value: unknown): AppliedMigrationTarget {
     return { type: "agent-workspace" };
   }
   if (
-    value.type === "runtime-config" &&
+    (value.type === "runtime-config" || value.type === "session-dag") &&
     hasOnlyKeys(value, ["type", "key"]) &&
     typeof value.key === "string" &&
     SHA256_PATTERN.test(value.key)
   ) {
-    return { type: "runtime-config", key: value.key };
+    return { type: value.type, key: value.key };
   }
   throw stateError("Migration state contains an invalid target");
 }
@@ -107,7 +108,7 @@ function validateTarget(value: unknown): AppliedMigrationTarget {
 function recordIdentity(record: Pick<AppliedMigrationRecord, "id" | "target">): string {
   return record.target.type === "agent-workspace"
     ? `${record.id}:agent-workspace`
-    : `${record.id}:runtime-config:${record.target.key}`;
+    : `${record.id}:${record.target.type}:${record.target.key}`;
 }
 
 function validateKnownDefinition(
@@ -169,21 +170,30 @@ export function runtimeConfigTargetKey(runtimeConfigFile: string): string {
   return createHash("sha256").update(normalized).digest("hex");
 }
 
+export function sessionDagTargetKey(sessionDagDir: string): string {
+  const normalized = path.normalize(path.resolve(sessionDagDir));
+  return createHash("sha256").update(normalized).digest("hex");
+}
+
 export function migrationTargetFor(
   definition: Pick<MigrationDefinition, "scope">,
   runtimeConfigFile: string,
+  sessionDagDir: string,
 ): AppliedMigrationTarget {
-  return definition.scope === "agent-workspace"
-    ? { type: "agent-workspace" }
-    : { type: "runtime-config", key: runtimeConfigTargetKey(runtimeConfigFile) };
+  if (definition.scope === "agent-workspace") return { type: "agent-workspace" };
+  if (definition.scope === "runtime-config") {
+    return { type: "runtime-config", key: runtimeConfigTargetKey(runtimeConfigFile) };
+  }
+  return { type: "session-dag", key: sessionDagTargetKey(sessionDagDir) };
 }
 
 export function isMigrationApplied(
   state: MigrationState,
   definition: MigrationDefinition,
   runtimeConfigFile: string,
+  sessionDagDir: string,
 ): boolean {
-  const target = migrationTargetFor(definition, runtimeConfigFile);
+  const target = migrationTargetFor(definition, runtimeConfigFile, sessionDagDir);
   const identity = recordIdentity({ id: definition.id, target });
   return state.applied.some((record) => recordIdentity(record) === identity);
 }

@@ -3,13 +3,16 @@ import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
 import { getConfigPath, setConfigPath } from "../../config/loader.js";
+import { sessionDagRoot } from "../../session-dag/paths.js";
 
 export const MIGRATIONS_READY_CONFIG_ENV = "MEMMY_MIGRATIONS_READY_CONFIG";
 export const MIGRATIONS_READY_WORKSPACE_ENV = "MEMMY_MIGRATIONS_READY_WORKSPACE";
+export const MIGRATIONS_READY_SESSION_DAG_ENV = "MEMMY_MIGRATIONS_READY_SESSION_DAG";
 
 export interface StartupMigrationTarget {
   runtimeConfigFile: string;
   agentWorkspace: string;
+  sessionDagDir: string;
 }
 
 export interface StartupMigrationPreparation {
@@ -75,7 +78,8 @@ export function resolveStartupMigrationTarget(
     workspace ?? "~/.memmy/workspace",
     env,
   );
-  return { runtimeConfigFile, agentWorkspace };
+  const sessionDagDir = path.normalize(path.resolve(sessionDagRoot(env)));
+  return { runtimeConfigFile, agentWorkspace, sessionDagDir };
 }
 
 function preparedTargetMatches(
@@ -84,10 +88,12 @@ function preparedTargetMatches(
 ): boolean {
   const preparedConfig = env[MIGRATIONS_READY_CONFIG_ENV];
   const preparedWorkspace = env[MIGRATIONS_READY_WORKSPACE_ENV];
-  if (!preparedConfig || !preparedWorkspace) return false;
+  const preparedSessionDag = env[MIGRATIONS_READY_SESSION_DAG_ENV];
+  if (!preparedConfig || !preparedWorkspace || !preparedSessionDag) return false;
   try {
     return normalizeConfigPath(preparedConfig, env) === target.runtimeConfigFile
-      && canonicalWorkspacePath(preparedWorkspace, env) === target.agentWorkspace;
+      && canonicalWorkspacePath(preparedWorkspace, env) === target.agentWorkspace
+      && path.normalize(path.resolve(preparedSessionDag)) === target.sessionDagDir;
   } catch {
     return false;
   }

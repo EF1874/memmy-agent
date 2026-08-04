@@ -12,9 +12,17 @@ import { OUTBOUND_META_AGENT_UI, MessageBus, OutboundMessage } from "../../core/
 import { builtinCommandPalette } from "../../command/builtin.js";
 import { loadConfig } from "../../config/loader.js";
 import type { ResolvedModelSelection } from "../../providers/model-catalog.js";
+import type {
+  GoalControlRequest,
+  GoalControlResult,
+} from "../../core/agent-runtime/goal-runtime.js";
 import { getMediaDir, getWorkspacePath } from "../../config/paths.js";
 import type { CronService } from "../../cron/service.js";
-import { goalStateWsBlob } from "../../core/session/goal-state.js";
+import {
+  GOAL_TURN_INBOX_KEY,
+  goalStateWsBlob,
+  type GoalStatus,
+} from "../../core/session/goal-state.js";
 import {
   readWebuiSessionBinding,
   type Session,
@@ -122,6 +130,8 @@ type WebSocketChannelOptions = {
   cancelActiveTasks?: (sessionKey: string) => Promise<number>;
   closeBrowserChat?: (channel: string, chatId: string) => Promise<void>;
   fileMemoryEnabled?: boolean;
+  goalControlHandler?: (request: GoalControlRequest) => Promise<GoalControlResult>;
+  activeGoalStopHandler?: (sessionKey: string) => Promise<boolean>;
 };
 type SessionDeletionServices = {
   cronService: CronService;
@@ -600,6 +610,10 @@ export class WebSocketChannel extends BaseChannel {
   sessionUpdateTimers = new Map<string, NodeJS.Timeout>();
   sessionUpdateScopes = new Map<string, string>();
   pendingProjectDeleteContinuation: Promise<void> | null = null;
+  goalControlHandler: WebSocketChannelOptions["goalControlHandler"] = undefined;
+  activeGoalStopHandler: WebSocketChannelOptions["activeGoalStopHandler"] = undefined;
+  goalControlConnections = new Map<string, Set<any>>();
+  dispatchingGoalControls = new Map<string, string>();
 
   constructor(config: any = {}, bus?: any, options: WebSocketChannelOptions = {}) {
     const normalized = config instanceof WebSocketConfig ? config : new WebSocketConfig(config);
@@ -622,6 +636,8 @@ export class WebSocketChannel extends BaseChannel {
     this.fileMemoryEnabled = options.fileMemoryEnabled === true;
     this.cancelActiveTasks = options.cancelActiveTasks ?? config?.cancelActiveTasks ?? null;
     this.closeBrowserChat = options.closeBrowserChat ?? config?.closeBrowserChat ?? null;
+    this.goalControlHandler = options.goalControlHandler ?? config?.goalControlHandler;
+    this.activeGoalStopHandler = options.activeGoalStopHandler ?? config?.activeGoalStopHandler;
     const workspacePath = options.workspacePath ?? config?.workspacePath ?? getWorkspacePath();
     this.workspacePath = path.resolve(String(workspacePath));
   }
@@ -797,9 +813,23 @@ export class WebSocketChannel extends BaseChannel {
       const message = session.messages[index];
       if (
         message?.role === "user"
+        && message?.internal_context !== "goal_continuation"
         && message?.client_request_id === clientRequestId
       ) {
         return message;
+      }
+    }
+    const inbox = session.metadata?.[GOAL_TURN_INBOX_KEY];
+    if (Array.isArray(inbox)) {
+      const entry = inbox.find(
+        (item: any) => item?.metadata?.client_request_id === clientRequestId,
+      );
+      if (entry) {
+        return {
+          ...(entry.metadata ?? {}),
+          content: entry.content,
+          media: entry.media,
+        };
       }
     }
     return null;
@@ -934,7 +964,6 @@ export class WebSocketChannel extends BaseChannel {
     const row = this.readSessionFile(sessionKey);
     const metadata = row && typeof row.metadata === "object" ? row.metadata : {};
     const blob = goalStateWsBlob(metadata);
-    if (!blob.active) return;
     await this.sendGoalState(chatId, blob);
   }
 
@@ -943,7 +972,7 @@ export class WebSocketChannel extends BaseChannel {
     const startedAt = websocketTurnWallStartedAt(chatId)
       ?? (terminalRun ? terminalRun.startedAt / 1000 : null);
     if (startedAt == null) return;
-    await this.sendGoalStatus(chatId, "running", {
+    await this.sendRunStatus(chatId, "running", {
       startedAt,
       turnId: this.activeTurnIdByChatId.get(chatId) ?? terminalRun?.turnId ?? null,
     });
@@ -1482,7 +1511,12 @@ export class WebSocketChannel extends BaseChannel {
     const data = this.readSessionFile(resolved.canonicalSessionKey);
     if (!data) return httpError(404, "session not found");
     data.key = resolved.guiSessionKey;
-    if (Array.isArray(data.messages)) scrubSubagentMessagesForChannel(data.messages);
+    if (Array.isArray(data.messages)) {
+      data.messages = data.messages.filter(
+        (message: Record<string, any>) => message?.internal_context !== "goal_continuation",
+      );
+      scrubSubagentMessagesForChannel(data.messages);
+    }
     this.augmentMediaUrls(data, resolved.canonicalSessionKey);
     return httpJsonResponse(data);
   }
@@ -1493,9 +1527,14 @@ export class WebSocketChannel extends BaseChannel {
     if (decodedKey == null) return invalidGuiSessionKeyResponse(key);
     const resolved = this.resolveGuiSessionResponse(decodedKey);
     if ("status" in resolved) return resolved;
-    const sessionMessages = this.readSessionFile(resolved.canonicalSessionKey)?.messages;
+    const rawSessionMessages = this.readSessionFile(resolved.canonicalSessionKey)?.messages;
+    const sessionMessages = Array.isArray(rawSessionMessages)
+      ? rawSessionMessages.filter(
+          (message: Record<string, any>) => message?.internal_context !== "goal_continuation",
+        )
+      : null;
     const data = buildWebuiThreadResponse(resolved.guiSessionKey, {
-      sessionMessages: Array.isArray(sessionMessages) ? sessionMessages : null,
+      sessionMessages,
       augmentUserMedia: (paths: string[]) => this.augmentTranscriptUserMedia(paths, resolved.canonicalSessionKey),
       augmentAssistantMedia: (paths: string[]) => paths.flatMap((p) => this.webuiMediaAttachmentForPath(p, resolved.canonicalSessionKey) ?? []),
       augmentAssistantText: (text: string) => this.rewriteLocalMarkdownImages(text, resolved.canonicalSessionKey),
@@ -2101,7 +2140,7 @@ export class WebSocketChannel extends BaseChannel {
     return (
       payload.event === "turn_end" ||
       payload.event === "stop_result" ||
-      (payload.event === "goal_status" && payload.status === "idle") ||
+      (payload.event === "run_status" && payload.status === "idle") ||
       (payload.event === "file_edit" && payload.cancellation_terminal === true)
     );
   }
@@ -2722,6 +2761,108 @@ export class WebSocketChannel extends BaseChannel {
 
   async dispatchEnvelope(connection: any, clientId: string, envelope: Record<string, any>): Promise<void> {
     const type = envelope.type;
+    if (type === "goal_control") {
+      const chatId = typeof envelope.chat_id === "string" && isValidGuiChatId(envelope.chat_id)
+        ? envelope.chat_id
+        : "";
+      const requestId = typeof envelope.request_id === "string" && UUID_RE.test(envelope.request_id)
+        ? envelope.request_id
+        : "";
+      const goalId = typeof envelope.goal_id === "string" && UUID_RE.test(envelope.goal_id)
+        ? envelope.goal_id
+        : "";
+      const action = envelope.action;
+      const validAction = action === "pause"
+        || action === "resume"
+        || action === "edit"
+        || action === "set_budget"
+        || action === "clear";
+      const hasObjective = Object.prototype.hasOwnProperty.call(envelope, "objective");
+      const hasTokenBudget = Object.prototype.hasOwnProperty.call(envelope, "token_budget");
+      const objectiveValid = action === "edit"
+        ? typeof envelope.objective === "string"
+          && envelope.objective.trim().length > 0
+          && envelope.objective.length <= 12_000
+          && !hasTokenBudget
+        : !hasObjective;
+      const tokenBudgetValid = action === "set_budget"
+        ? hasTokenBudget
+          && (envelope.token_budget === null
+            || (Number.isSafeInteger(envelope.token_budget) && envelope.token_budget > 0))
+          && !hasObjective
+        : !hasTokenBudget;
+      const sessionKey = chatId ? this.canonicalSessionKeyForChatId(chatId) : null;
+      if (
+        !chatId
+        || !requestId
+        || !goalId
+        || !validAction
+        || !objectiveValid
+        || !tokenBudgetValid
+        || !sessionKey
+        || !this.goalControlHandler
+      ) {
+        await this.safeSendTo(connection, {
+          event: "goal_control_result",
+          chat_id: chatId,
+          request_id: requestId,
+          ok: false,
+          error: action === "edit" && !objectiveValid
+            ? "invalid_objective"
+            : action === "set_budget" && !tokenBudgetValid
+              ? "invalid_token_budget"
+              : "invalid_transition",
+        });
+        return;
+      }
+      const key = `${sessionKey}\0${requestId}`;
+      const summary = JSON.stringify({
+        goalId,
+        action,
+        ...(action === "edit" ? { objective: envelope.objective.trim() } : {}),
+        ...(action === "set_budget" ? { tokenBudget: envelope.token_budget } : {}),
+      });
+      const dispatchingSummary = this.dispatchingGoalControls.get(key);
+      if (dispatchingSummary !== undefined && dispatchingSummary !== summary) {
+        await this.safeSendTo(connection, {
+          event: "goal_control_result",
+          chat_id: chatId,
+          request_id: requestId,
+          ok: false,
+          error: "request_id_conflict",
+        });
+        return;
+      }
+      const connections = this.goalControlConnections.get(key) ?? new Set<any>();
+      connections.add(connection);
+      this.goalControlConnections.set(key, connections);
+      if (dispatchingSummary !== undefined) return;
+      this.dispatchingGoalControls.set(key, summary);
+      let result: GoalControlResult;
+      try {
+        result = await this.goalControlHandler({
+          sessionKey,
+          requestId,
+          goalId,
+          action,
+          ...(action === "edit" ? { objective: envelope.objective.trim() } : {}),
+          ...(action === "set_budget" ? { tokenBudget: envelope.token_budget } : {}),
+        });
+      } catch {
+        result = { ok: false, error: "invalid_transition" };
+      }
+      await this.bus.publishOutbound(new OutboundMessage({
+        channel: "websocket",
+        chatId,
+        content: "",
+        metadata: {
+          goalControlResult: true,
+          requestId,
+          result,
+        },
+      }));
+      return;
+    }
     if (type === "new_chat") {
       const clientRequestId = typeof envelope.client_request_id === "string"
         && UUID_RE.test(envelope.client_request_id)
@@ -2839,7 +2980,10 @@ export class WebSocketChannel extends BaseChannel {
       const turnId = this.activeTurnIdByChatId.get(chatId) ?? null;
       let stopped = 0;
       try {
-        stopped = await (this.cancelActiveTasks?.(sessionKey) ?? Promise.resolve(0));
+        const goalHandled = await (this.activeGoalStopHandler?.(sessionKey) ?? Promise.resolve(false));
+        stopped = goalHandled
+          ? 1
+          : await (this.cancelActiveTasks?.(sessionKey) ?? Promise.resolve(0));
       } catch {
         await this.sendEvent(connection, "error", { chat_id: chatId, detail: "stop_failed" });
         return;
@@ -3023,6 +3167,48 @@ export class WebSocketChannel extends BaseChannel {
       }
       return;
     }
+    if (message.metadata?.webuiMessageRejected) {
+      const clientRequestId = String(message.metadata.clientRequestId ?? "");
+      if (!clientRequestId) return;
+      const canonicalSessionKey = this.canonicalSessionKeyForChatId(message.chatId);
+      if (!canonicalSessionKey) return;
+      const key = this.webuiRequestKey(canonicalSessionKey, clientRequestId);
+      const inflight = this.inflightWebuiMessageRequests.get(key);
+      this.inflightWebuiMessageRequests.delete(key);
+      const payload = {
+        event: "error",
+        chat_id: message.chatId,
+        client_request_id: clientRequestId,
+        detail: "message_request_rejected",
+        reason: String(message.metadata.reason ?? "goal_inbox_unavailable"),
+      };
+      for (const connection of inflight?.connections ?? this.subscriptions.get(message.chatId) ?? []) {
+        await this.safeSendTo(connection, payload);
+      }
+      return;
+    }
+    if (message.metadata?.goalControlResult) {
+      const requestId = String(message.metadata.requestId ?? "");
+      const canonicalSessionKey = this.canonicalSessionKeyForChatId(message.chatId);
+      if (!requestId || !canonicalSessionKey) return;
+      const key = `${canonicalSessionKey}\0${requestId}`;
+      const result = message.metadata.result && typeof message.metadata.result === "object"
+        ? message.metadata.result
+        : { ok: false, error: "invalid_transition" };
+      const payload = {
+        event: "goal_control_result",
+        chat_id: message.chatId,
+        request_id: requestId,
+        ok: result.ok === true,
+        ...(typeof result.warning === "string" ? { warning: result.warning } : {}),
+        ...(typeof result.error === "string" ? { error: result.error } : {}),
+      };
+      const connections = this.goalControlConnections.get(key) ?? new Set<any>();
+      this.goalControlConnections.delete(key);
+      this.dispatchingGoalControls.delete(key);
+      for (const connection of connections) await this.safeSendTo(connection, payload);
+      return;
+    }
     if (message.metadata?.runtimeModelUpdated) {
       await this.sendRuntimeModelUpdated({
         modelName: message.metadata.model,
@@ -3039,12 +3225,17 @@ export class WebSocketChannel extends BaseChannel {
       return;
     }
     if (message.metadata?.goalStateSync) {
-      await this.sendGoalState(message.chatId, typeof message.metadata.goalState === "object" ? message.metadata.goalState : { active: false });
+      await this.sendGoalState(
+        message.chatId,
+        typeof message.metadata.goalState === "object"
+          ? message.metadata.goalState
+          : goalStateWsBlob(),
+      );
       return;
     }
-    if (message.metadata?.goalStatusEvent) {
-      await this.sendGoalStatus(message.chatId, String(message.metadata.goalStatus), {
-        startedAt: numberOrNull(message.metadata.startedAt ?? message.metadata.goalStartedAt),
+    if (message.metadata?.runStatusEvent) {
+      await this.sendRunStatus(message.chatId, String(message.metadata.runStatus), {
+        startedAt: numberOrNull(message.metadata.startedAt),
         turnId: this.turnIdFromMetadata(message.metadata),
       });
       return;
@@ -3052,7 +3243,8 @@ export class WebSocketChannel extends BaseChannel {
     if (message.metadata?.turnEnd) {
       await this.sendTurnEnd(message.chatId, {
         latencyMs: numberOrNull(message.metadata.latencyMs),
-        goalState: typeof message.metadata.goalState === "object" ? message.metadata.goalState : null,
+        goalId: firstNonemptyString(message.metadata.goalId),
+        goalOutcome: firstNonemptyString(message.metadata.goalOutcome) as GoalStatus | null,
         turnId: this.turnIdFromMetadata(message.metadata),
       });
       return;
@@ -3205,12 +3397,22 @@ export class WebSocketChannel extends BaseChannel {
     await this.sendTurnPayload(chatId, payload);
   }
 
-  async sendTurnEnd(chatId: string, { latencyMs = null, goalState = null, turnId = null }: { latencyMs?: number | null; goalState?: Record<string, any> | null; turnId?: string | null } = {}): Promise<void> {
+  async sendTurnEnd(chatId: string, {
+    latencyMs = null,
+    goalId = null,
+    goalOutcome = null,
+    turnId = null,
+  }: {
+    latencyMs?: number | null;
+    goalId?: string | null;
+    goalOutcome?: GoalStatus | null;
+    turnId?: string | null;
+  } = {}): Promise<void> {
     const payload = {
       event: "turn_end",
       chat_id: chatId,
       ...(latencyMs != null ? { latency_ms: latencyMs } : {}),
-      ...(goalState ? { goal_state: goalState } : {}),
+      ...(goalId && goalOutcome ? { goal_id: goalId, goal_outcome: goalOutcome } : {}),
       ...(turnId ? { turn_id: turnId } : {}),
     };
     await this.sendTurnPayload(chatId, payload);
@@ -3224,7 +3426,7 @@ export class WebSocketChannel extends BaseChannel {
     await this.broadcast(chatId, { event: "goal_state", chat_id: chatId, goal_state: blob });
   }
 
-  async sendGoalStatus(chatId: string, status: string, { startedAt = null, turnId = null }: { startedAt?: number | null; turnId?: string | null } = {}): Promise<void> {
+  async sendRunStatus(chatId: string, status: string, { startedAt = null, turnId = null }: { startedAt?: number | null; turnId?: string | null } = {}): Promise<void> {
     if (status === "running" && startedAt != null) {
       websocketTurnWallStartTimes.set(chatId, startedAt);
       if (turnId) this.activeTurnIdByChatId.set(chatId, turnId);
@@ -3233,7 +3435,7 @@ export class WebSocketChannel extends BaseChannel {
       if (turnId && this.activeTurnIdByChatId.get(chatId) === turnId) this.activeTurnIdByChatId.delete(chatId);
     }
     await this.sendTurnPayload(chatId, {
-      event: "goal_status",
+      event: "run_status",
       chat_id: chatId,
       status,
       ...(status === "running" && startedAt != null ? { started_at: startedAt } : {}),
@@ -3259,8 +3461,8 @@ export class WebSocketChannel extends BaseChannel {
       this.queueGlobalSessionUpdated(chatId, String(record.scope ?? "metadata"));
       return;
     }
-    if (record.event === "goal_status") {
-      await this.sendGoalStatus(chatId, String(record.status ?? ""), {
+    if (record.event === "run_status") {
+      await this.sendRunStatus(chatId, String(record.status ?? ""), {
         startedAt: numberOrNull(record.started_at),
         turnId: firstNonemptyString(record.turn_id, record.turnId),
       });

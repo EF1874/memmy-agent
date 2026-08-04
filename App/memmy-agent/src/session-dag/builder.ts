@@ -114,7 +114,17 @@ export class SessionDagBuilder {
       let patch: DagPatch;
       try {
         const validatedPatch = validateDagPatch(parsed, { contextNodeKinds });
-        patch = normalizeDagTaskTransition(validatedPatch, dagContext);
+        patch = normalizeDagTaskTransition(
+          validatedPatch,
+          dagContext,
+          turn.goal_id && turn.goal_objective && turn.goal_status
+            ? {
+                goalId: turn.goal_id,
+                objective: turn.goal_objective,
+                status: turn.goal_status,
+              }
+            : null,
+        );
         auditRecord.validation = { ok: true, parsedPatch: parsed, validatedPatch, normalizedPatch: patch };
       } catch (error) {
         auditRecord.validation = { ok: false, error: errorMessage(error) };
@@ -162,8 +172,25 @@ export class SessionDagBuilder {
     const status = fallbackStatus(turn);
     const subtaskTempId = "fallback_subtask";
     const ops: DagPatch["ops"] = [];
-    const taskRef = existingTask?.id ?? "fallback_task";
-    if (!existingTask) {
+    const turnGoal = turn.goal_id && turn.goal_objective && turn.goal_status
+      ? { goalId: turn.goal_id, objective: turn.goal_objective, status: turn.goal_status }
+      : null;
+    const continuesSameGoal = Boolean(turnGoal && existingTask?.goal_id === turnGoal.goalId);
+    const mustCreateTask = !existingTask
+      || Boolean(turnGoal && !continuesSameGoal)
+      || Boolean(!turnGoal && existingTask.goal_id);
+    const taskRef = mustCreateTask ? "fallback_task" : existingTask!.id;
+    const existingTaskTransition = existingTask
+      ? existingTask.status === "done" || existingTask.status === "failed"
+        ? { status: existingTask.status, type: "continues" as const }
+        : { status: "frozen" as const, type: "supersedes" as const }
+      : null;
+    if (mustCreateTask && existingTask) {
+      if (existingTaskTransition?.status !== existingTask.status) {
+        ops.push({ op: "update_node", node_id: existingTask.id, status: existingTaskTransition!.status });
+      }
+    }
+    if (mustCreateTask) {
       ops.push({
         op: "add_node",
         temp_id: "fallback_task",
@@ -175,6 +202,14 @@ export class SessionDagBuilder {
         detail_json: {},
         source_refs: [],
       });
+      if (existingTask) {
+        ops.push({
+          op: "add_edge",
+          source_id: existingTask.id,
+          target_id: "fallback_task",
+          type: existingTaskTransition!.type,
+        });
+      }
     }
     ops.push({
       op: "add_node",
@@ -187,10 +222,16 @@ export class SessionDagBuilder {
       detail_json: { result: truncateText(turn.assistant_text || turn.user_text || "", 500) },
       source_refs: [],
     });
-    if (activeSubtask) {
+    if (activeSubtask && !mustCreateTask) {
+      if (continuesSameGoal && (activeSubtask.status === "active" || activeSubtask.status === "blocked")) {
+        ops.push({ op: "update_node", node_id: activeSubtask.id, status: "done" });
+      }
       ops.push({ op: "add_edge", source_id: activeSubtask.id, target_id: subtaskTempId, type: "continues" });
     } else {
       ops.push({ op: "add_edge", source_id: taskRef, target_id: subtaskTempId, type: "decomposes" });
+    }
+    if (turnGoal?.status === "completed" && continuesSameGoal) {
+      ops.unshift({ op: "update_node", node_id: existingTask!.id, status: "done" });
     }
     this.store.applyPatch({
       turn: turnToInput(turn),
@@ -204,7 +245,12 @@ export class SessionDagBuilder {
     const start = Math.max(0, turn.message_start);
     const end = Math.min(session.messages.length, turn.message_end);
     if (end <= start) throw new Error("DAG turn range is outside session messages");
-    return session.messages.slice(start, end).map((message, offset) => normalizeTurnMessage(message, start + offset));
+    return session.messages.slice(start, end).map((message, offset) => {
+      const normalizedSource = message.internal_context === "goal_continuation"
+        ? { ...message, content: turn.user_text }
+        : message;
+      return normalizeTurnMessage(normalizedSource, start + offset);
+    });
   }
 
   private buildPatchRequest(turn: DagTurn, messages: NormalizedTurnMessage[], dagContext: DagBuilderContext): DagPatchRequest {
@@ -216,6 +262,13 @@ export class SessionDagBuilder {
         messages,
       },
       dag_context: dagContext,
+      goal_context: turn.goal_id
+        ? {
+            goal_id: turn.goal_id,
+            objective: turn.goal_objective,
+            status: turn.goal_status,
+          }
+        : null,
     };
     if (turn.last_error) {
       payload.previous_patch_error = {
@@ -358,6 +411,13 @@ function turnToInput(turn: DagTurn): DagTurnInput {
     message_end: turn.message_end,
     user_text: turn.user_text,
     assistant_text: turn.assistant_text,
+    goal_context: turn.goal_id && turn.goal_objective && turn.goal_status
+      ? {
+          goalId: turn.goal_id,
+          objective: turn.goal_objective,
+          status: turn.goal_status,
+        }
+      : null,
   };
 }
 
@@ -435,7 +495,7 @@ add_edge required fields:
 - op: "add_edge"
 - source_id: existing node id from dag_context.nodes, or n0/n1/n2 created earlier by add_node in this patch
 - target_id: existing node id from dag_context.nodes, or n0/n1/n2 created earlier by add_node in this patch
-- type: "decomposes" | "continues" | "blocks" | "supersedes"
+- type: "decomposes" | "continues" | "blocks" | "supersedes" | "side_branch"
 
 Node kind meanings:
 - task: a higher-level user task or task phase in this session. A session can have multiple tasks over time.
@@ -448,8 +508,14 @@ Edge type meanings:
 - continues: done/failed task -> next task, or subtask/decision -> subtask/decision when the main line continues in time or logic.
 - blocks: subtask/decision -> subtask, when a failure, blocker, or decision prevents a downstream subtask.
 - supersedes: frozen task -> replacement task, or frozen subtask/decision -> replacement subtask/decision when a new node replaces an old route or conclusion.
+- side_branch: current Goal task -> subtask/decision for an unrelated but durable question asked while that Goal remains open. A side branch never changes the root task or Goal main path.
 
 Task operation rules:
+- goal_context is null for ordinary turns. When present, compare goal_context.goal_id with the goal_id on the root task in dag_context.nodes.
+- If goal_context exists and the root task has the same goal_id, never add a task. Related work stays on the Goal main path. An unrelated durable question must use a side_branch edge from the Goal task; unrelated small talk returns {"ops":[]}.
+- If goal_context exists and there is no task, or the root task has a different/null goal_id, close the prior task when needed and add exactly one new task for this Goal. The server assigns goal_id; never output goal_id yourself.
+- A non-completed Goal must keep its Goal task active or blocked. When goal_context.status is completed, close that Goal task as done and do not create another task in the same patch.
+- When goal_context is null but the root task has a goal_id, that Goal was cleared or ended before this turn. Freeze it before creating a new ordinary task and connect it with supersedes.
 - In one patch, the same task may be either added or updated, never both.
 - If dag_context.root_task_id is null and this turn has durable task state, add exactly one task as the first meaningful op. Its status must be active or blocked.
 - Adding a task while dag_context.root_task_id exists is a task switch. Emit at most one new task in a patch.

@@ -353,9 +353,10 @@ export function AppFrame(props: AppFrameProps) {
       tasks: state.agent.tasks.map((task) => ({
         sessionIds: [task.chatId, task.sessionKey],
         isRunning: task.runStartedAt != null
+          || state.agent.goalStatesByChatId[task.chatId]?.status === "active"
       }))
     });
-  }, [state.agent.tasks, syncAgentTaskStatuses]);
+  }, [state.agent.goalStatesByChatId, state.agent.tasks, syncAgentTaskStatuses]);
 
   useEffect(() => {
     const current = new Set(state.agent.sessions.map((session) => session.key));

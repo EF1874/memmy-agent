@@ -5,7 +5,6 @@ import type { ToolExecutionContext } from "./tools/base.js";
 import { AgentHook, AgentHookContext } from "./hook.js";
 import {
   buildFinalizationRetryMessage,
-  buildGoalContinueMessage,
   buildLengthRecoveryMessage,
   EMPTY_FINAL_RESPONSE_MESSAGE,
   ensureNonemptyToolResult,
@@ -59,6 +58,12 @@ export const BACKFILL_CONTENT = "[Tool result unavailable - call was interrupted
 export const MAX_INJECTION_CYCLES = 5;
 export const MICROCOMPACT_KEEP_RECENT = 10;
 
+export type AgentInternalTurnContext = {
+  kind: "goal_continuation";
+  goalId: string;
+  objective: string;
+};
+
 export class AgentRunSpec {
   messages: Record<string, any>[];
   initialMessages: Record<string, any>[];
@@ -90,8 +95,7 @@ export class AgentRunSpec {
   abortSignal?: AbortSignal | null;
   turnId?: string | null;
   boundary?: TurnCancellationBoundary | null;
-  goalActivePredicate?: (() => boolean) | null;
-  goalContinueMessage?: string | null;
+  internalTurnContext?: AgentInternalTurnContext | null;
 
   constructor(init: {
     messages?: Record<string, any>[];
@@ -124,8 +128,7 @@ export class AgentRunSpec {
     abortSignal?: AbortSignal | null;
     turnId?: string | null;
     boundary?: TurnCancellationBoundary | null;
-    goalActivePredicate?: (() => boolean) | null;
-    goalContinueMessage?: string | null;
+    internalTurnContext?: AgentInternalTurnContext | null;
   } = {}) {
     this.messages = this.initialMessages = init.messages ?? init.initialMessages ?? [];
     this.provider = init.provider;
@@ -156,8 +159,7 @@ export class AgentRunSpec {
     this.abortSignal = init.abortSignal ?? null;
     this.turnId = init.turnId ?? null;
     this.boundary = init.boundary ?? null;
-    this.goalActivePredicate = init.goalActivePredicate ?? null;
-    this.goalContinueMessage = init.goalContinueMessage ?? null;
+    this.internalTurnContext = init.internalTurnContext ?? null;
   }
 }
 
@@ -270,17 +272,13 @@ export class AgentRunner {
     messages: Record<string, any>[],
     assistantMessage: Record<string, any> | null,
     injectionCycles: number,
-    opts: { phase?: string; iteration?: number | null; allowGoalContinue?: boolean } = {},
+    opts: { phase?: string; iteration?: number | null } = {},
   ): Promise<[boolean, number]> {
     let injections: Record<string, any>[] = [];
     let realInjection = false;
     if (injectionCycles < MAX_INJECTION_CYCLES) {
       injections = await this.drainInjections(spec);
       realInjection = injections.length > 0;
-    }
-    const predicate = spec.goalActivePredicate;
-    if (!injections.length && opts.allowGoalContinue && assistantMessage && predicate?.()) {
-      injections = [buildGoalContinueMessage(spec.goalContinueMessage ?? null)];
     }
     if (!injections.length) return [false, injectionCycles];
     if (realInjection) injectionCycles += 1;
@@ -1086,7 +1084,6 @@ export class AgentRunner {
       const [shouldContinue, cycles] = await this.tryDrainInjections(spec, messages, assistant, injectionCycles, {
         phase: "after final response",
         iteration,
-        allowGoalContinue: true,
       });
       injectionCycles = cycles;
       if (shouldContinue) hadInjections = true;

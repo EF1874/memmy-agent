@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentLoop } from "../../../src/core/agent-runtime/loop.js";
 import { InboundMessage, MessageBus } from "../../../src/core/runtime-messages/index.js";
 import { Config } from "../../../src/config/schema.js";
+import { GOAL_STATE_KEY, readGoalState } from "../../../src/core/session/goal-state.js";
 
 const roots: string[] = [];
 
@@ -140,6 +141,43 @@ describe("AgentLoop concurrent chat turns", () => {
     await running;
   });
 
+  it("fences Goal writes until a Session deletion barrier fully exits", async () => {
+    const loop = makeLoop();
+    const sessionKey = "websocket:delete-goal";
+    loop.sessions.getOrCreate(sessionKey);
+    const goal = await loop.goalRuntime.create({
+      sessionKey,
+      objective: "delete without stale Goal writes",
+      tokenBudget: null,
+      route: { channel: "websocket", chatId: "delete-goal" },
+      turnId: "turn-before-delete",
+    });
+    loop.goalRuntime.releaseTurn(sessionKey, "turn-before-delete");
+    let releaseDeletion!: () => void;
+    const deletionGate = new Promise<void>((resolve) => {
+      releaseDeletion = resolve;
+    });
+
+    const deletion = loop.withSessionDeletionBarrier(
+      sessionKey,
+      () => deletionGate,
+      async () => {
+        loop.sessions.deleteSession(sessionKey);
+      },
+    );
+
+    expect(loop.goalRuntime.reserveWork(sessionKey, "stale-continuation", "continuation")).toBe(false);
+    await expect(loop.goalRuntime.setBudget(sessionKey, goal.goalId, 100))
+      .rejects.toMatchObject({ code: "session_deletion_in_progress" });
+    releaseDeletion();
+    await deletion;
+
+    expect(loop.sessions.get(sessionKey)).toBeNull();
+    expect(loop.goalRuntime.get(sessionKey)).toBeNull();
+    expect(loop.goalRuntime.hasGoalLease(sessionKey)).toBe(false);
+    expect(loop.goalRuntime.hasWorkReservation(sessionKey)).toBe(false);
+  });
+
   it("exposes WebUI-only cron target busy and goal-active checks", () => {
     const loop = makeLoop();
     const key = "websocket:chat-1";
@@ -157,12 +195,21 @@ describe("AgentLoop concurrent chat turns", () => {
     loop.pendingQueues.delete(key);
 
     const session = loop.sessions.getOrCreate(key);
-    session.metadata.goalState = { status: "active", objective: "finish the goal" };
+    session.metadata.goalState = {
+      goalId: "8f59f58a-7295-4c34-8e03-55e7035a5a8d",
+      status: "active",
+      objective: "finish the goal",
+      tokenBudget: null,
+      tokensUsed: 0,
+      timeUsedSeconds: 0,
+      createdAt: "2026-08-04T08:00:00.000Z",
+      updatedAt: "2026-08-04T08:00:00.000Z",
+    };
     expect(loop.isSessionGoalActive(key)).toBe(true);
     expect(loop.isCronTargetBlocked("websocket", key)).toBe(true);
     expect(loop.isCronTargetBlocked("slack", key)).toBe(false);
 
-    session.metadata.goalState = { status: "complete" };
+    session.metadata.goalState = { ...session.metadata.goalState, status: "completed" };
     expect(loop.isCronTargetBlocked("websocket", key)).toBe(false);
   });
 
@@ -228,5 +275,51 @@ describe("AgentLoop concurrent chat turns", () => {
     expect(prompts.get("websocket:chat-1")).not.toContain("/media/city-b.png");
     expect(prompts.get("websocket:chat-2")).toContain("/media/city-b.png");
     expect(prompts.get("websocket:chat-2")).not.toContain("/media/wonton-a.png");
+  });
+
+  it("keeps concurrent Turn usage and Goal settlement isolated by Session", async () => {
+    const loop = makeLoop();
+    const keys = ["websocket:usage-a", "websocket:usage-b"] as const;
+    for (const [index, key] of keys.entries()) {
+      const session = loop.sessions.getOrCreate(key);
+      session.metadata[GOAL_STATE_KEY] = {
+        goalId: `00000000-0000-4000-8000-00000000000${index + 1}`,
+        status: "active",
+        objective: `Goal ${index + 1}`,
+        tokenBudget: null,
+        tokensUsed: 0,
+        timeUsedSeconds: 0,
+        createdAt: "2026-08-04T08:00:00.000Z",
+        updatedAt: "2026-08-04T08:00:00.000Z",
+      };
+      loop.sessions.save(session);
+    }
+
+    let releaseBoth!: () => void;
+    const bothStarted = new Promise<void>((resolve) => {
+      releaseBoth = resolve;
+    });
+    const started: string[] = [];
+    loop.runner.run = vi.fn(async (spec: any) => {
+      started.push(spec.sessionKey);
+      if (started.length === 2) releaseBoth();
+      await bothStarted;
+      const totalTokens = spec.sessionKey === keys[0] ? 11 : 22;
+      return {
+        ...runResult(),
+        usage: { total_tokens: totalTokens, prompt_tokens: totalTokens - 1, completion_tokens: 1 },
+        response: { usage: { total_tokens: totalTokens }, finishReason: "stop" },
+      } as any;
+    });
+
+    await Promise.all([
+      loop.processMessage(new InboundMessage({ channel: "websocket", senderId: "user", chatId: "usage-a", content: "Continue A" })),
+      loop.processMessage(new InboundMessage({ channel: "websocket", senderId: "user", chatId: "usage-b", content: "Continue B" })),
+    ]);
+
+    expect(loop.lastUsageBySession.get(keys[0])).toMatchObject({ total_tokens: 11 });
+    expect(loop.lastUsageBySession.get(keys[1])).toMatchObject({ total_tokens: 22 });
+    expect(readGoalState(loop.sessions.getOrCreate(keys[0]).metadata)?.tokensUsed).toBe(11);
+    expect(readGoalState(loop.sessions.getOrCreate(keys[1]).metadata)?.tokensUsed).toBe(22);
   });
 });

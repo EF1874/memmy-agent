@@ -87,9 +87,12 @@ function messagePreviewText(message: Record<string, any>): string {
 }
 
 function sessionSummary(session: Session, filePath: string, options: { repairPreview?: boolean } = {}): Record<string, any> {
-  const scan = session.messages.slice(0, 200);
+  const visibleMessages = session.messages.filter(
+    (message) => message.internal_context !== "goal_continuation",
+  );
+  const scan = visibleMessages.slice(0, 200);
   const previewMessage = options.repairPreview
-    ? session.messages.find((m) => messagePreviewText(m)) ?? {}
+    ? visibleMessages.find((m) => messagePreviewText(m)) ?? {}
     : scan.find((m) => m.role === "user") ?? scan[0] ?? {};
   const summary: Record<string, any> = {
     key: session.key,
@@ -744,6 +747,18 @@ export class SessionManager {
     }
     rows.sort((a, b) => String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")));
     return rows;
+  }
+
+  listSessionRecords(): Session[] {
+    const records = new Map<string, Session>();
+    for (const session of this.sessions.values()) records.set(session.key, session);
+    if (!fs.existsSync(this.root)) return [...records.values()];
+    for (const file of fs.readdirSync(this.root).filter((name) => name.endsWith(".jsonl"))) {
+      const fallbackKey = path.basename(file, ".jsonl").replace("_", ":");
+      const session = this.loadSession(fallbackKey);
+      if (session) records.set(session.key, session);
+    }
+    return [...records.values()].sort((left, right) => left.key.localeCompare(right.key));
   }
 
   webuiSessionSummary(session: Session): Record<string, any> {

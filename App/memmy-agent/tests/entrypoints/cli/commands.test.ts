@@ -63,7 +63,9 @@ const ENV_KEYS = [
   "MEMMY_AGENT_WORKSPACE",
   "MEMMY_CONFIG",
   "MEMMY_MIGRATIONS_READY_CONFIG",
+  "MEMMY_MIGRATIONS_READY_SESSION_DAG",
   "MEMMY_MIGRATIONS_READY_WORKSPACE",
+  "MEMMY_AGENT_SESSION_DAG_DIR",
   "MEMMY_CLOUD_SERVICE",
   "OAUTH_CLI_KIT_TOKEN_PATH",
   "OPENAI_CODEX_TOKEN_PATH",
@@ -84,6 +86,7 @@ const originalStdinIsTty = (process.stdin as any).isTTY;
 function tempRoot(prefix = "memmy-cli-"): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   roots.push(root);
+  process.env.MEMMY_AGENT_SESSION_DAG_DIR = path.join(root, "session-dag");
   return root;
 }
 
@@ -733,7 +736,7 @@ describe("CLI command helpers", () => {
     const migratedBytes = fs.readFileSync(legacySessionPath);
     const secondRuntime = await gateway({ config: configPath });
     expect(fs.readFileSync(legacySessionPath)).toEqual(migratedBytes);
-    expect(JSON.parse(fs.readFileSync(migrationStatePath, "utf8")).applied).toHaveLength(2);
+    expect(JSON.parse(fs.readFileSync(migrationStatePath, "utf8")).applied).toHaveLength(4);
     await secondRuntime.stop();
     expect(fakeLoop.stop).toHaveBeenCalledTimes(2);
   });

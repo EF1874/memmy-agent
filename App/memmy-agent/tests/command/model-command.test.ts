@@ -87,12 +87,18 @@ function makeLoop(): AgentLoop {
   });
 }
 
-function ctx(loop: AgentLoop, raw: string, args = "", sessionInput: any = null): CommandContext {
+function ctx(
+  loop: AgentLoop,
+  raw: string,
+  args = "",
+  sessionInput: any = null,
+  turnId: string | null = null,
+): CommandContext {
   const msg = new InboundMessage({ channel: "cli", senderId: "user", chatId: "direct", content: raw });
   const session = sessionInput === true
     ? loop.sessions.getOrCreate(msg.sessionKey)
     : sessionInput;
-  return new CommandContext({ msg, session, key: msg.sessionKey, raw, args, loop });
+  return new CommandContext({ msg, session, key: msg.sessionKey, raw, args, loop, turnId });
 }
 
 describe("model command", () => {
@@ -162,60 +168,69 @@ describe("model command", () => {
 });
 
 describe("goal command", () => {
-  it("shows usage without args and rejects mid-turn without session", async () => {
+  it("shows the empty Goal state without args", async () => {
     const loop = makeLoop();
-    expect((await cmdGoal(ctx(loop, "/goal")))?.content).toContain("Usage: /goal");
-    expect((await cmdGoal(ctx(loop, "/goal do work", "do work")))?.content).toContain("/stop");
+    const content = (await cmdGoal(ctx(loop, "/goal")))?.content ?? "";
+    expect(content).toContain('"goal_id": null');
+    expect(content).toContain("Available: create <objective>");
   });
 
-  it("shows usage without args", async () => {
+  it("shows the Goal control help", async () => {
     const loop = makeLoop();
-    expect((await cmdGoal(ctx(loop, "/goal")))?.content).toContain("Usage: /goal");
+    const content = (await cmdGoal(ctx(loop, "/goal help", "help")))?.content ?? "";
+    expect(content).toContain("/goal create <objective>");
+    expect(content).toContain("/goal budget <positive-int|none>");
   });
 
-  it("rejects mid-turn starts when no session is available", async () => {
+  it("rejects Goal creation when the command has no top-level turn identity", async () => {
     const loop = makeLoop();
-    expect((await cmdGoal(ctx(loop, "/goal do work", "do work")))?.content).toContain("/stop");
+    expect((await cmdGoal(ctx(loop, "/goal do work", "do work")))?.content)
+      .toContain("goal_route_unavailable");
   });
 
-  it("rewrites to an agent prompt when a session is available", async () => {
+  it("creates persistent Goal state instead of rewriting the model prompt", async () => {
     const loop = makeLoop();
-    const commandCtx = ctx(loop, "/goal audit the repo", "audit the repo", {});
+    const schedule = vi.spyOn(loop, "scheduleGoalWork");
+    const commandCtx = ctx(loop, "/goal audit the repo", "audit the repo", true, "turn-goal-1");
     const out = await cmdGoal(commandCtx);
-    expect(out).toBeNull();
-    expect(commandCtx.msg.content).toContain("audit the repo");
-    expect(commandCtx.msg.content).toContain("long_task");
-    expect(commandCtx.msg.metadata.originalCommand).toBe("/goal");
-    expect(commandCtx.msg.metadata.originalContent).toBe("/goal audit the repo");
-    expect(typeof commandCtx.msg.metadata.goalStartedAt).toBe("number");
+    expect(out.content).toContain("Goal created.");
+    expect(loop.goalRuntime.get(commandCtx.key)).toMatchObject({
+      objective: "audit the repo",
+      status: "active",
+    });
+    expect(schedule).toHaveBeenCalledOnce();
+    expect(commandCtx.msg.content).toBe("/goal audit the repo");
   });
 
   it("is registered and appears in help and palette", async () => {
     const router = new CommandRouter();
     registerBuiltinCommands(router);
     const loop = makeLoop();
-    const commandCtx = ctx(loop, "/goal ship it", "ship it", {});
+    const commandCtx = ctx(loop, "/goal ship it", "ship it", true, "turn-goal-2");
     const out = await router.dispatch(commandCtx);
-    expect(out).toBeNull();
-    expect(commandCtx.msg.content).toContain("ship it");
-    expect(builtinCommandPalette()).toEqual(expect.arrayContaining([expect.objectContaining({ command: "/goal", arg_hint: "<goal>" })]));
-    expect(buildHelpText()).toContain("/goal <goal>");
+    expect(out?.content).toContain("Goal created.");
+    expect(loop.goalRuntime.get(commandCtx.key)?.objective).toBe("ship it");
+    expect(builtinCommandPalette()).toEqual(expect.arrayContaining([expect.objectContaining({
+      command: "/goal",
+      arg_hint: "[status|help|create <objective>|pause|resume|edit <objective>|budget <n|none>|clear]",
+    })]));
+    expect(buildHelpText()).toContain("/goal [status|help|create <objective>|pause|resume|edit <objective>|budget <n|none>|clear]");
   });
 
   it("dispatches through the command router", async () => {
     const router = new CommandRouter();
     registerBuiltinCommands(router);
     const loop = makeLoop();
-    const commandCtx = ctx(loop, "/goal ship it", "ship it", {});
+    const commandCtx = ctx(loop, "/goal ship it", "ship it", true, "turn-goal-3");
 
     const out = await router.dispatch(commandCtx);
 
-    expect(out).toBeNull();
-    expect(commandCtx.msg.content).toContain("ship it");
+    expect(out?.content).toContain("Goal created.");
+    expect(loop.goalRuntime.get(commandCtx.key)?.objective).toBe("ship it");
   });
 
   it("appears in help and command palette", () => {
-    expect(builtinCommandPalette()).toEqual(expect.arrayContaining([expect.objectContaining({ command: "/goal", arg_hint: "<goal>" })]));
-    expect(buildHelpText()).toContain("/goal <goal>");
+    expect(builtinCommandPalette()).toEqual(expect.arrayContaining([expect.objectContaining({ command: "/goal" })]));
+    expect(buildHelpText()).toContain("/goal [status|help|create <objective>|pause|resume|edit <objective>|budget <n|none>|clear]");
   });
 });
