@@ -54,7 +54,7 @@ const iconByName: Record<string, LucideIcon> = {
   "undo-2": Undo2
 };
 
-const localizedBuiltinCommandKeys: Record<string, { title: MessageKey; description: MessageKey; argHint?: MessageKey }> = {
+const localizedBuiltinCommandKeys: Record<string, { title: MessageKey; description: MessageKey; hideArgHint?: boolean }> = {
   "/new": {
     title: "home.command.newTitle",
     description: "home.command.newDescription"
@@ -86,7 +86,7 @@ const localizedBuiltinCommandKeys: Record<string, { title: MessageKey; descripti
   "/goal": {
     title: "home.command.goalTitle",
     description: "home.command.goalDescription",
-    argHint: "home.command.goalArgHint"
+    hideArgHint: true
   },
   "/dream": {
     title: "home.command.dreamTitle",
@@ -120,13 +120,13 @@ export function localizeSlashCommands(
     if (!keys) {
       return command;
     }
-    if (language !== "zh-CN" && !keys.argHint) {
+    if (language !== "zh-CN" && !keys.hideArgHint) {
       return command;
     }
     return {
       ...command,
       ...(language === "zh-CN" ? { title: t(keys.title), description: t(keys.description) } : {}),
-      ...(keys.argHint ? { argHint: t(keys.argHint) } : {})
+      ...(keys.hideArgHint ? { argHint: "" } : {})
     };
   });
 }
