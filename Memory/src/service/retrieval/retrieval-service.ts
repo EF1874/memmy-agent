@@ -7,6 +7,7 @@ import { clip } from "../../utils/text.js";
 import {
   compileRetrievalQuery,
   displayReflectionText,
+  failureAvoidancePolicyIsRetrievalEligible,
   focusResearchRetrievalQuery,
   isRepositoryRepairPrompt,
   isResearchDomain,
@@ -71,6 +72,8 @@ type InternalMemorySearchRequest = MemorySearchRequest & {
   targetSkillId?: string;
   contextHints?: Record<string, unknown>;
   injectedContextQuery?: string;
+  turnIntentDecision?: unknown;
+  routeProposal?: unknown;
   recordEvent?: boolean;
 };
 
@@ -913,7 +916,11 @@ function contextMemoriesForInjectedSources(memories: MemoryRow[], sourceMemoryId
     if (visibleIds.has(memory.id)) return true;
     if (memory.memoryLayer !== "L2") return false;
     const policy = policyMetaFromMemory(memory);
-    if (!policy || !policyHasDecisionGuidance(policy)) return false;
+    if (
+      !policy ||
+      !policyHasDecisionGuidance(policy) ||
+      !failureAvoidancePolicyIsRetrievalEligible(policy)
+    ) return false;
     if (legacySkillSourcePolicyIds.has(memory.id)) return true;
     return policy.sourceTraceIds.some((id) => visibleIds.has(id)) ||
       policy.sourceEpisodeIds.some((id) => visibleEpisodeIds.has(id));
@@ -943,7 +950,11 @@ function contextMemoriesForRecallHits(hits: RecallHit[], memories: MemoryRow[]):
   for (const memory of memories) {
     if (memory.memoryLayer !== "L2") continue;
     const policy = policyMetaFromMemory(memory);
-    if (!policy || !policyHasDecisionGuidance(policy)) continue;
+    if (
+      !policy ||
+      !policyHasDecisionGuidance(policy) ||
+      !failureAvoidancePolicyIsRetrievalEligible(policy)
+    ) continue;
     const traceOverlap = policy.sourceTraceIds.some((id) => hitTraceIds.has(id));
     const episodeOverlap = policy.sourceEpisodeIds.some((id) => hitEpisodeIds.has(id));
     const legacySkillFallback = legacySkillSourcePolicyIds.has(memory.id);
@@ -1022,6 +1033,7 @@ function failureAvoidanceSection(memories: MemoryRow[]): InjectedContext["sectio
     const policy = policyMetaFromMemory(memory);
     if (
       !policy
+      || !failureAvoidancePolicyIsRetrievalEligible(policy)
       || (
         policy.experienceType !== "failure_avoidance"
         && policy.evidencePolarity !== "negative"

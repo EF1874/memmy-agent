@@ -102,6 +102,8 @@ export interface SkillMemoryMeta {
   sourceWorldModelIds: string[];
   evidenceAnchorIds: string[];
   invocationGuide: string;
+  retrievalBlurb?: string;
+  triggerContext?: string;
   trialsAttempted: number;
   trialsPassed: number;
   repairOrigin: boolean;
@@ -425,7 +427,10 @@ function detectFeedbackPreference(
     };
   }
   if (/(prefer|instead|should use|下次用|改用|而不是)/.test(normalized)) {
-    return { shape: "preference", confidence: 0.55 };
+    return {
+      shape: "preference",
+      confidence: feedbackMatchesAny(normalized, FEEDBACK_NEGATIVE_PATTERNS) ? 0.75 : 0.55
+    };
   }
   return null;
 }
@@ -1047,7 +1052,8 @@ Fields:
 - turnSummaries: chronological L1 summaries of the episode.
 - finalExchange: exact trailing user and assistant text.
 - execution: authoritative aggregate tool outcome.
-- feedback: explicit or implicit user signal; implicit feedback is weaker.
+- feedback: the latest explicit or implicit user signal; implicit feedback is weaker.
+- feedbackHistory: all captured user signals in chronological order.
 - host: authoritative host-agent identity/model context. Do not project your
   own identity, provider, policies, or capabilities onto the host agent.
 
@@ -1057,7 +1063,8 @@ Score three independent axes in [-1, 1]:
 - user_satisfaction: -1 correction/frustration, 0 no signal, +1 acceptance.
 
 Rules:
-- Judge goal achievement against mission, using turnSummaries in order.
+- Judge goal achievement against the active goal, using turnSummaries in order. If later user turns revise or replace the initial mission within the same episode, grade the latest active goal.
+- Treat feedback chronologically. A negative correction followed by demonstrated recovery or explicit acceptance is not a permanent failure.
 - If execution.completedByTool is "no", goal_achievement must not exceed 0
   unless a later summary shows a successful recovery.
 - Explicit negative feedback without later recovery means goal_achievement <= 0.
@@ -1278,7 +1285,7 @@ Rules:
 
 export const L3_ABSTRACTION_PROMPT = {
   id: "l3.abstraction",
-  version: 2,
+  version: 3,
   description:
     "Distill an L3 world model (declarative environment knowledge) from a cluster of L2 policies, with explicit boundaries against L2 procedural drift.",
   system: `You abstract environment world models from cross-task policy evidence.
@@ -1357,14 +1364,19 @@ Return JSON:
   "title": "short noun phrase, e.g. 'Alpine python dependency model'",
   "domain_tags": ["tag1", "tag2"],   // 1-4 short, lowercase, no spaces
   "environment": [
-    { "label": "...", "description": "...", "evidenceIds": ["po_...", "tr_..."] }
+    { "label": "...", "description": "...", "evidenceIds": ["policy_<exact input id>", "trace_<exact input id>"] }
   ],
   "inference":   [ { "label": "...", "description": "...", "evidenceIds": [] } ],
   "constraints": [ { "label": "...", "description": "...", "evidenceIds": [] } ],
-  "body": "rendered markdown summary of the three sections",
+  "summary": "1-3 sentences describing the environment and its most important invariants",
   "confidence": number in [0, 1],
   "supersedes_world_ids": []
-}`
+}
+
+Evidence ID rules:
+- Copy evidence IDs exactly from the input lines prefixed with "policy" or "trace".
+- Never abbreviate, rewrite, or invent an evidence ID.
+- Use [] when no supplied ID directly supports an entry.`
 } as const;
 
 export const SKILL_CRYSTALLIZE_PROMPT = {
@@ -1484,6 +1496,7 @@ export interface WorldModelMemoryMeta {
   cohesion: number;
   admission: "strict" | "loose";
   structure: WorldModelStructure;
+  summary?: string;
   body: string;
   vec: number[] | null;
 }
@@ -1510,6 +1523,7 @@ export interface WorldModelDraft {
   cohesion: number;
   admission: "strict" | "loose";
   structure: WorldModelStructure;
+  summary: string;
   body: string;
   vec: number[] | null;
   tags: string[];
@@ -3250,10 +3264,32 @@ export function policyMetaFromMemory(memory: MemoryRow): PolicyMemoryMeta | null
   };
 }
 
+export function failureAvoidancePolicyIsRetrievalEligible(policy: PolicyMemoryMeta): boolean {
+  if (policy.experienceType !== "failure_avoidance" && policy.evidencePolarity !== "negative") {
+    return true;
+  }
+  if (policy.confidence < 0.6 || !policy.trigger.trim()) return false;
+  const preferences = new Set(policy.decisionGuidance.preference.map(normalizeGuidanceForComparison).filter(Boolean));
+  const antiPatterns = new Set(policy.decisionGuidance.antiPattern.map(normalizeGuidanceForComparison).filter(Boolean));
+  if (preferences.size === 0 || antiPatterns.size === 0) return false;
+  return [...preferences].some((item) => !antiPatterns.has(item));
+}
+
+function normalizeGuidanceForComparison(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/^(?:avoid|prefer|safer behavior)\s*:\s*/i, "")
+    .replace(/[\s.。!！?？,，;；:：]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export function skillMetaFromMemory(memory: MemoryRow): SkillMemoryMeta | null {
   if (memory.memoryLayer !== "Skill") return null;
   const skill = getInternal<Record<string, unknown>>(memory, "skill");
   if (!skill) return null;
+  const procedure = recordField(skill, "procedure_json") ??
+    recordField(memory.properties.internal_info as Record<string, unknown>, "procedure_json");
   return {
     id: memory.id,
     memory,
@@ -3266,6 +3302,12 @@ export function skillMetaFromMemory(memory: MemoryRow): SkillMemoryMeta | null {
     evidenceAnchorIds: stringArrayField(skill, "evidence_anchor_ids")
       .concat(stringArrayField(skill, "evidence_anchors")),
     invocationGuide: stringField(skill, "invocation_guide") ?? memory.memoryValue,
+    retrievalBlurb: procedure
+      ? stringField(procedure, "retrievalBlurb") ?? stringField(procedure, "retrieval_blurb")
+      : undefined,
+    triggerContext: procedure
+      ? stringField(procedure, "triggerContext") ?? stringField(procedure, "trigger_context")
+      : undefined,
     trialsAttempted: numberField(skill, "trials_attempted") ?? 0,
     trialsPassed: numberField(skill, "trials_passed") ?? 0,
     repairOrigin: booleanishField(skill, "repairOrigin") ?? booleanishField(skill, "repair_origin") ?? false,
@@ -3297,9 +3339,49 @@ export function worldModelMetaFromMemory(memory: MemoryRow): WorldModelMemoryMet
     cohesion: numberField(wm, "cohesion") ?? 1,
     admission: statusField(wm, "admission", ["strict", "loose"]) ?? "strict",
     structure: worldModelStructureField(wm, "structure"),
+    summary: stringField(wm, "summary") ?? stringField(memory.properties.internal_info as Record<string, unknown>, "summary"),
     body: stringField(wm, "body") ?? memory.memoryValue,
     vec: memoryVector(memory, "vec")
   };
+}
+
+export const RETRIEVAL_DOCUMENT_VERSION = 2;
+
+/** Builds the canonical text shared by vector, FTS, and in-memory retrieval for Skill and L3. */
+export function retrievalDocumentForMemory(memory: MemoryRow): string {
+  const skill = skillMetaFromMemory(memory);
+  if (skill) {
+    const shortGuide = [skill.retrievalBlurb, skill.triggerContext].filter(Boolean);
+    return [skill.name, ...(shortGuide.length > 0 ? shortGuide : [skill.invocationGuide]), memory.tags.join(" ")]
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  const world = worldModelMetaFromMemory(memory);
+  if (world) {
+    const structuredFacts = world.summary
+      ? [
+          ...world.structure.environment,
+          ...world.structure.inference,
+          ...world.structure.constraints
+        ].map((entry) => [entry.label, entry.description].filter(Boolean).join(": "))
+      : [world.body];
+    return [world.title, world.summary, world.domainTags.join(" "), ...structuredFacts]
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  return memory.memoryValue;
+}
+
+export function retrievalDocumentSourceHash(memory: MemoryRow): string {
+  return stableHash(retrievalDocumentForMemory(memory));
+}
+
+export function retrievalDocumentIsCurrent(memory: MemoryRow): boolean {
+  const index = recordField(memory.properties.internal_info as Record<string, unknown>, "retrieval_index");
+  return numberField(index ?? {}, "version") === RETRIEVAL_DOCUMENT_VERSION &&
+    stringField(index ?? {}, "source_hash") === retrievalDocumentSourceHash(memory);
 }
 
 function worldModelTitleFromMemory(memory: MemoryRow, wm: Record<string, unknown>): string {
@@ -3611,6 +3693,7 @@ export function buildWorldModelDraft(args: {
       admission,
       cohesion
     });
+    const summary = fallbackWorldModelSummary(title, structure);
     const body = [
       title,
       `Admission: ${admission} (cohesion=${round(cohesion, 4)})`,
@@ -3635,6 +3718,7 @@ export function buildWorldModelDraft(args: {
       cohesion,
       admission,
       structure,
+      summary,
       body,
       vec: center,
       tags: distinct(["world_model", ...tags])
@@ -4621,6 +4705,15 @@ function fallbackWorldModelStructure(input: {
   };
 }
 
+function fallbackWorldModelSummary(title: string, structure: WorldModelStructure): string {
+  const facts = [
+    structure.environment[0]?.description,
+    structure.inference[0]?.description,
+    structure.constraints[0]?.description
+  ].filter((value): value is string => Boolean(value?.trim()));
+  return [title, ...facts].join(" — ");
+}
+
 function skillNameFromPolicy(policy: PolicyMemoryMeta): string {
   const raw = policy.title
     .replace(/^Policy:\s*/i, "")
@@ -4915,6 +5008,9 @@ function candidateFromMemory(
     if (skill.eta < options.config.minSkillEta) return null;
   }
   if (memory.memoryLayer === "L2" && policy?.status === "archived") {
+    return null;
+  }
+  if (memory.memoryLayer === "L2" && policy && !failureAvoidancePolicyIsRetrievalEligible(policy)) {
     return null;
   }
   if (memory.memoryLayer === "L3" && (world?.confidence ?? 0) < options.config.minWorldModelConfidence) {
@@ -5461,11 +5557,11 @@ function memoryTextForRetrieval(memory: MemoryRow): string {
   }
   const skill = skillMetaFromMemory(memory);
   if (skill) {
-    return [skill.name, skill.invocationGuide].join("\n");
+    return retrievalDocumentForMemory(memory);
   }
   const world = worldModelMetaFromMemory(memory);
   if (world) {
-    return [world.title, world.body, world.domainTags.join(" ")].join("\n");
+    return retrievalDocumentForMemory(memory);
   }
   return memory.memoryValue;
 }
