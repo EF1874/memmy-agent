@@ -1468,8 +1468,7 @@ describe("app state store migrations", () => {
       SET scan_permission = 'scan_and_write_skill', updated_at = ?
       WHERE uuid = 'cloud-account-a'
     `).run("2026-08-03T10:00:00.000Z");
-    initialStore.db.prepare("DELETE FROM account_onboarding_state WHERE uuid = ?").run(INSTALLATION_SCAN_SCOPE_UUID);
-    initialStore.db.prepare("DELETE FROM _migrations WHERE name = ?").run("0024-installation-scan-permission.sql");
+    resetInstallationScanPermissionMigration(initialStore.db);
     initialStore.close();
 
     const migratedStore = createAppStateStore({ databasePath });
@@ -1485,6 +1484,100 @@ describe("app state store migrations", () => {
     expect(onboarding.scanPermission).toBe("scan_and_write_skill");
     expect(installationRow.scan_permission).toBe("scan_and_write_skill");
     expect(accountRow.scan_permission).toBe("unset");
+  });
+
+  it("prefers the BYOK permission over a stale active account during migration", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-app-state-"));
+    const databasePath = join(tempDir, "app.sqlite");
+    const initialStore = createAppStateStore({ databasePath });
+
+    initialStore.repositories.accountSession.upsert({
+      profile: accountProfile("user-a", "a@example.com", "Account A"),
+      uuid: "cloud-account-a"
+    });
+    initialStore.repositories.bootstrap.updateAppSettings({ userMode: "byok" });
+    initialStore.repositories.bootstrap.getOnboardingState();
+    initialStore.db.prepare(`
+      UPDATE account_onboarding_state
+      SET scan_permission = 'scan_only', updated_at = ?
+      WHERE uuid = 'cloud-account-a'
+    `).run("2026-08-01T10:00:00.000Z");
+    initialStore.db.prepare(`
+      UPDATE account_onboarding_state
+      SET scan_permission = 'none', updated_at = ?
+      WHERE uuid = ?
+    `).run("2026-08-02T10:00:00.000Z", LOCAL_BYOK_ACCOUNT_UUID);
+    resetInstallationScanPermissionMigration(initialStore.db);
+    initialStore.close();
+
+    const migratedStore = createAppStateStore({ databasePath });
+    const onboarding = migratedStore.repositories.bootstrap.getOnboardingState();
+    migratedStore.close();
+
+    expect(onboarding.scanPermission).toBe("none");
+  });
+
+  it("inherits the latest explicit permission when the active account is unset", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-app-state-"));
+    const databasePath = join(tempDir, "app.sqlite");
+    const initialStore = createAppStateStore({ databasePath });
+
+    initialStore.repositories.accountSession.upsert({
+      profile: accountProfile("user-a", "a@example.com", "Account A"),
+      uuid: "cloud-account-a"
+    });
+    initialStore.db.prepare(`
+      UPDATE account_onboarding_state
+      SET scan_permission = 'scan_and_write_skill', updated_at = ?
+      WHERE uuid = 'cloud-account-a'
+    `).run("2026-08-01T10:00:00.000Z");
+    initialStore.repositories.accountSession.upsert({
+      profile: accountProfile("user-b", "b@example.com", "Account B"),
+      uuid: "cloud-account-b"
+    });
+    initialStore.repositories.bootstrap.updateAppSettings({ userMode: "account" });
+    resetInstallationScanPermissionMigration(initialStore.db);
+    initialStore.close();
+
+    const migratedStore = createAppStateStore({ databasePath });
+    const onboarding = migratedStore.repositories.bootstrap.getOnboardingState();
+    migratedStore.close();
+
+    expect(onboarding.scanPermission).toBe("scan_and_write_skill");
+  });
+
+  it("preserves the active account's explicit denial over historical permission", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-app-state-"));
+    const databasePath = join(tempDir, "app.sqlite");
+    const initialStore = createAppStateStore({ databasePath });
+
+    initialStore.repositories.accountSession.upsert({
+      profile: accountProfile("user-a", "a@example.com", "Account A"),
+      uuid: "cloud-account-a"
+    });
+    initialStore.db.prepare(`
+      UPDATE account_onboarding_state
+      SET scan_permission = 'scan_only', updated_at = ?
+      WHERE uuid = 'cloud-account-a'
+    `).run("2026-08-02T10:00:00.000Z");
+    initialStore.repositories.accountSession.upsert({
+      profile: accountProfile("user-b", "b@example.com", "Account B"),
+      uuid: "cloud-account-b"
+    });
+    initialStore.db.prepare(`
+      UPDATE account_onboarding_state
+      SET scan_permission = 'none', updated_at = ?
+      WHERE uuid = 'cloud-account-b'
+    `).run("2026-08-01T10:00:00.000Z");
+    initialStore.repositories.bootstrap.updateAppSettings({ userMode: "account" });
+    resetInstallationScanPermissionMigration(initialStore.db);
+    initialStore.close();
+
+    const migratedStore = createAppStateStore({ databasePath });
+    const onboarding = migratedStore.repositories.bootstrap.getOnboardingState();
+    migratedStore.close();
+
+    expect(onboarding.scanPermission).toBe("none");
   });
 
   it("repairs missing default seed rows when reopening an existing database", () => {
@@ -2036,6 +2129,11 @@ describe("bootstrap repository writes", () => {
 function getMigrationCount(db: { prepare(sql: string): { get(): unknown } }): number {
   const row = db.prepare("SELECT COUNT(*) AS count FROM _migrations").get() as { count: number };
   return row.count;
+}
+
+function resetInstallationScanPermissionMigration(db: DatabaseSync): void {
+  db.prepare("DELETE FROM account_onboarding_state WHERE uuid = ?").run(INSTALLATION_SCAN_SCOPE_UUID);
+  db.prepare("DELETE FROM _migrations WHERE name = ?").run("0024-installation-scan-permission.sql");
 }
 
 /**
