@@ -1306,11 +1306,14 @@ export function HomePage() {
   // this closes the race where fast-streaming tokens grow scrollHeight while
   // a deferred native "scroll" event from our own assignment is still in
   // flight, which could otherwise be misread as the user scrolling away.
+  // Also re-pin when the first-encounter relay card mounts after turn_end:
+  // messages stop changing before `afterMessageContent` appears, so omitting
+  // that dependency leaves "Switch AI and keep going" below the fold.
   useLayoutEffect(() => {
     if (shouldAutoScrollAgentConversationRef.current) {
       scrollAgentConversationToBottom();
     }
-  }, [chatScopeKey, state.agent.messages]);
+  }, [chatScopeKey, firstEncounterRelayAnchorMessageId, state.agent.messages]);
 
   function scrollAgentConversationToBottom() {
     const element = scrollRef.current;

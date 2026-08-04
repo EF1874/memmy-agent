@@ -12,7 +12,13 @@ import {
   type MainWindowActionResolution,
   type PetGuideChoice
 } from "./pet-guide.js";
-import { ProductTourGuide, productTourMemorySubPage, productTourTabRoute, type ProductTourTab } from "./product-tour.js";
+import {
+  ProductTourGuide,
+  productTourIncludesLogs,
+  productTourMemorySubPage,
+  productTourTabRoute,
+  type ProductTourTab
+} from "./product-tour.js";
 import { GlobalUpdateDialog } from "./update-coordinator.js";
 import {
   clearDeferredGuidanceStep,
@@ -218,6 +224,7 @@ export function AppRouter(props: { onRetry: () => void }) {
       {windowDragRegion}
       {workspaceGuidanceStep === "product_tour" && (
         <ProductTourGuide
+          includeLogs={productTourIncludesLogs(state.bootstrap?.onboarding.scanPermission)}
           onDismiss={dismissProductTour}
           onTabChange={(tab: ProductTourTab) => {
             const memorySubPage = productTourMemorySubPage(tab);

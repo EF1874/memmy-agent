@@ -1,5 +1,6 @@
 /** Product tour module. */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import type { ScanPermission } from "@memmy/local-api-contracts";
 import { FileText, PlugZap, Settings2 } from "lucide-react";
 import { Memmy, type MemmyPose } from "../components/mascot/memmy.js";
 import { zhCNMessages, type MessageKey } from "../i18n/messages.js";
@@ -17,6 +18,7 @@ import {
   PRODUCT_TOUR_TOOLS_CONTENT_ANCHOR,
   PRODUCT_TOUR_TOOLS_NAV_ANCHOR,
   resolveProductTourStepLayout,
+  scrollProductTourHighlightIntoView,
   type ProductTourBubblePlacement,
   type ProductTourHighlightSpec
 } from "./product-tour-layout.js";
@@ -74,11 +76,35 @@ export interface ProductTourStep {
   extraHighlights?: ProductTourHighlightSpec[];
 }
 
+export interface CreateProductTourStepsOptions {
+  /** When false, skip the memory-logs step (deny-scan / 4-step tour). Defaults to true. */
+  includeLogs?: boolean;
+}
+
+/** Scan permission that earned a first-encounter report → keep the logs tour step. */
+export function productTourIncludesLogs(scanPermission: ScanPermission | undefined | null): boolean {
+  return scanPermission === "scan_only" || scanPermission === "scan_and_write_skill";
+}
+
+/** First route when opening the deferred product tour. */
+export function productTourStartRoute(includeLogs: boolean): AppRoutePath {
+  return includeLogs ? "/memory" : "/memory-sources";
+}
+
+/** Memory sub-page to arm before the first tour step (null when starting on /memory-sources). */
+export function productTourStartMemorySubPage(includeLogs: boolean): "logs" | "sources" {
+  return includeLogs ? "logs" : "sources";
+}
+
 export const productTourSteps: ProductTourStep[] = createProductTourSteps((key) => zhCNMessages[key]);
 
 /** Creates create product tour steps. */
-export function createProductTourSteps(t: (key: MessageKey) => string): ProductTourStep[] {
-  return [
+export function createProductTourSteps(
+  t: (key: MessageKey) => string,
+  options: CreateProductTourStepsOptions = {}
+): ProductTourStep[] {
+  const includeLogs = options.includeLogs ?? true;
+  const steps: ProductTourStep[] = [
     {
       tab: "logs",
       title: t("onboarding.featureDig.logs.title"),
@@ -130,6 +156,8 @@ export function createProductTourSteps(t: (key: MessageKey) => string): ProductT
       pose: "chat",
       description: t("onboarding.featureDig.agentsScan.description"),
       arrow: "left",
+      // Nav-anchored right placement; layout parks near the Auto sync mask when
+      // the preferred nav slot does not sit next to the spotlight.
       bubblePlacement: {
         anchorId: PRODUCT_TOUR_MEMORY_SOURCES_NAV_ANCHOR,
         side: "right",
@@ -190,19 +218,25 @@ export function createProductTourSteps(t: (key: MessageKey) => string): ProductT
       ]
     }
   ];
+  return includeLogs ? steps : steps.filter((step) => step.tab !== "logs");
 }
 
 /** Contract for product tour guide props. */
 export interface ProductTourGuideProps {
   onDismiss: () => void;
   onTabChange: (tab: ProductTourTab) => void;
+  /** Deny-scan tours omit the logs step (4/4). Defaults to true (5/5). */
+  includeLogs?: boolean;
 }
 
 /** Handles product tour guide. */
 export function ProductTourGuide(props: ProductTourGuideProps) {
-  const { onDismiss, onTabChange } = props;
+  const { onDismiss, onTabChange, includeLogs = true } = props;
   const { t } = useTranslation();
-  const steps = useMemo(() => createProductTourSteps(t) as [ProductTourStep, ...ProductTourStep[]], [t]);
+  const steps = useMemo(
+    () => createProductTourSteps(t, { includeLogs }) as [ProductTourStep, ...ProductTourStep[]],
+    [includeLogs, t]
+  );
   const [step, setStep] = useState(() =>
     readProductTourStep(typeof window === "undefined" ? undefined : window.sessionStorage) ?? 0
   );
@@ -260,9 +294,21 @@ export function ProductTourGuide(props: ProductTourGuideProps) {
     });
 
     const highlightElement = document.querySelector<HTMLElement>(`[data-tour-anchor="${current.highlight.anchorId}"]`);
-    highlightElement?.scrollIntoView({ block: "center", behavior: "smooth" });
+    if (highlightElement) {
+      // Tall page-top anchors (agents list / overview cards / logs) must not be
+      // centered — that hides the section title. Scan prefs sit near the page
+      // bottom: scroll the pane to its end so Auto sync is fully on-screen before
+      // spotlight/bubble measurement. Tools only needs nearest.
+      const scrollMode = current.tab === "agentsScan"
+        ? "page-end"
+        : current.tab === "tools"
+          ? "nearest"
+          : "page-start";
+      scrollProductTourHighlightIntoView(highlightElement, scrollMode);
+    }
 
     setLayout(null);
+    // Measure after the (instant) scroll so highlight/bubble use final geometry.
     scheduleMeasurement();
     window.addEventListener("resize", scheduleMeasurement);
     window.addEventListener("scroll", scheduleMeasurement, true);
@@ -373,7 +419,9 @@ export function ProductTourGuide(props: ProductTourGuideProps) {
               onClick={goNext}
               className="px-4 py-1.5 text-xs font-normal text-white bg-action-sky rounded-btn hover:bg-action-sky-hover cursor-pointer transition-all shadow-sm"
             >
-              {isLast ? t("onboarding.featureDig.startChat") : t("productTour.next")}
+              {isLast
+                ? (includeLogs ? t("onboarding.featureDig.startChat") : t("productTour.start"))
+                : t("productTour.next")}
             </button>
           </div>
 

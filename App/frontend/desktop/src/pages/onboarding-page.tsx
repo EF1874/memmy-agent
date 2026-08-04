@@ -4,6 +4,11 @@ import { PenLine, Search, type LucideIcon } from "lucide-react";
 import type { AgentSourceMemoryPluginConflict, ScanPermission } from "@memmy/local-api-contracts";
 import { useApiClients } from "../app/providers.js";
 import {
+  productTourIncludesLogs,
+  productTourStartMemorySubPage,
+  productTourStartRoute
+} from "../app/product-tour.js";
+import {
   buildOnboardingCompletionPatch,
   clearProductTourStep,
   readGuidanceCompleted,
@@ -602,10 +607,16 @@ export function OnboardingPage() {
       const guidanceStep = isAccountMode && state.bootstrap?.onboarding.improvementProgram === "unset"
         ? "improvement"
         : "product_tour";
-      const nextRoute: AppRoutePath = guidanceStep === "product_tour" ? "/memory" : targetRoute;
+      // Deny-scan skips the logs tour step and opens on cross-agent sources (4/4).
+      const includeLogs = productTourIncludesLogs(
+        persistedPatch?.scanPermission ?? state.bootstrap?.onboarding.scanPermission
+      );
+      const nextRoute: AppRoutePath = guidanceStep === "product_tour"
+        ? productTourStartRoute(includeLogs)
+        : targetRoute;
       if (guidanceStep === "product_tour") {
         clearProductTourStep(storage);
-        writeMemorySubPage(storage, "logs");
+        writeMemorySubPage(storage, productTourStartMemorySubPage(includeLogs));
       }
       writeDeferredGuidanceStep(storage, guidanceStep);
       dispatch(appActions.navigate(nextRoute));

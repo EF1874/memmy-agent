@@ -86,6 +86,14 @@ export interface ProductTourBelowBubblePlacement {
   gap: number;
 }
 
+/** Contract for product tour above bubble placement. */
+export interface ProductTourAboveBubblePlacement {
+  anchorId: string;
+  side: "above";
+  align: "start" | "center";
+  gap: number;
+}
+
 /** Contract for product tour inside bubble placement. */
 export interface ProductTourInsideBubblePlacement {
   anchorId: string;
@@ -100,6 +108,7 @@ export interface ProductTourInsideBubblePlacement {
 export type ProductTourBubblePlacement =
   | ProductTourRightBubblePlacement
   | ProductTourBelowBubblePlacement
+  | ProductTourAboveBubblePlacement
   | ProductTourInsideBubblePlacement;
 
 /** Arrow direction resolved with the bubble. */
@@ -174,6 +183,87 @@ export function createDomProductTourAnchorLookup(ownerDocument: Document): Produ
   };
 }
 
+export type ProductTourScrollMode = "page-start" | "nearest" | "page-end";
+
+/**
+ * Scrolls the tour highlight into a usable position without burying page titles.
+ *
+ * Memory tour steps use tall list/card anchors; `scrollIntoView({ block: "center" })`
+ * pulls those anchors to mid-viewport and hides the section header above them.
+ * Resetting the nearest scroll container to the top keeps titles and first rows visible.
+ * Bottom-of-page anchors (scan preferences / Auto sync) scroll the container to its end
+ * via explicit `scrollTop`, because `scrollIntoView` is unreliable inside nested
+ * `overflow-y: auto` panes and races with spotlight layout measurement.
+ * Tools content stays on `nearest` so we only nudge when the panel is off-screen.
+ *
+ * Tour scrolls use `behavior: "auto"` so layout measurement sees the final position
+ * in the same frame instead of lagging behind a smooth animation.
+ */
+export function scrollProductTourHighlightIntoView(
+  element: HTMLElement,
+  mode: ProductTourScrollMode = "page-start"
+): void {
+  if (mode === "nearest") {
+    element.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "auto" });
+    return;
+  }
+
+  const scroller = findClosestScrollableAncestor(element) ?? findClosestOverflowYAncestor(element);
+  if (mode === "page-end") {
+    if (scroller) {
+      const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+      scroller.scrollTo({ top: maxTop, behavior: "auto" });
+      return;
+    }
+    const scrollingElement = element.ownerDocument.scrollingElement;
+    if (scrollingElement instanceof HTMLElement) {
+      const maxTop = Math.max(0, scrollingElement.scrollHeight - scrollingElement.clientHeight);
+      scrollingElement.scrollTo({ top: maxTop, behavior: "auto" });
+    }
+    return;
+  }
+
+  if (scroller) {
+    scroller.scrollTo({ top: 0, behavior: "auto" });
+    return;
+  }
+
+  const scrollingElement = element.ownerDocument.scrollingElement;
+  if (scrollingElement instanceof HTMLElement) {
+    scrollingElement.scrollTo({ top: 0, behavior: "auto" });
+  }
+}
+
+/** Finds the nearest ancestor that actually scrolls vertically. */
+export function findClosestScrollableAncestor(element: HTMLElement): HTMLElement | null {
+  let current: HTMLElement | null = element.parentElement;
+  while (current) {
+    if (isOverflowYScroller(current) && current.scrollHeight > current.clientHeight + 1) {
+      return current;
+    }
+    current = current.parentElement;
+  }
+  return null;
+}
+
+/** Finds the nearest overflow-y scroller even when content does not yet overflow. */
+export function findClosestOverflowYAncestor(element: HTMLElement): HTMLElement | null {
+  let current: HTMLElement | null = element.parentElement;
+  while (current) {
+    if (isOverflowYScroller(current)) {
+      return current;
+    }
+    current = current.parentElement;
+  }
+  return null;
+}
+
+function isOverflowYScroller(element: HTMLElement): boolean {
+  const style = element.ownerDocument.defaultView?.getComputedStyle(element);
+  const overflowY = style?.overflowY ?? "";
+  return overflowY === "auto" || overflowY === "scroll" || overflowY === "overlay";
+}
+
 /** Handles resolve product tour bubble placement. */
 function resolveProductTourBubblePlacement(
   bubble: ProductTourBubblePlacement,
@@ -196,7 +286,7 @@ function resolveProductTourBubblePlacement(
     };
   }
 
-  if (bubble.side === "below") {
+  if (bubble.side === "below" || bubble.side === "above") {
     const left = bubble.align === "center"
       ? clamp(
         anchorRect.left + anchorRect.width / 2 - PRODUCT_TOUR_BUBBLE_WIDTH / 2,
@@ -208,13 +298,16 @@ function resolveProductTourBubblePlacement(
         PRODUCT_TOUR_VIEWPORT_PADDING,
         Math.max(PRODUCT_TOUR_VIEWPORT_PADDING, viewport.width - PRODUCT_TOUR_BUBBLE_WIDTH - PRODUCT_TOUR_VIEWPORT_PADDING)
       );
+    const rawTop = bubble.side === "below"
+      ? anchorRect.bottom + bubble.gap
+      : anchorRect.top - bubble.gap - PRODUCT_TOUR_BUBBLE_HEIGHT;
     const top = clamp(
-      anchorRect.bottom + bubble.gap,
+      rawTop,
       PRODUCT_TOUR_VIEWPORT_PADDING,
       Math.max(PRODUCT_TOUR_VIEWPORT_PADDING, viewport.height - PRODUCT_TOUR_BUBBLE_HEIGHT - PRODUCT_TOUR_VIEWPORT_PADDING)
     );
     return {
-      arrow: "top",
+      arrow: bubble.side === "below" ? "top" : "bottom",
       style: {
         top: `${top}px`,
         left: `${left}px`
@@ -236,7 +329,8 @@ function resolveProductTourBubblePlacement(
     bottom: preferredTop + PRODUCT_TOUR_BUBBLE_HEIGHT
   };
 
-  if (!avoidRect || !rectsOverlap(preferred, avoidRect)) {
+  // Same-anchor (or no spotlight to dodge): keep the simple right-side placement.
+  if (!avoidRect) {
     if (bubble.align === "center") {
       return {
         arrow: "left",
@@ -256,21 +350,37 @@ function resolveProductTourBubblePlacement(
     };
   }
 
+  // Highlight differs from the bubble anchor: park near the spotlight so the
+  // callout tracks scroll/mask position instead of sticking to the nav rect.
   const gap = bubble.gap;
-  const leftNearAnchor = clamp(
+  const leftNearHighlight = clamp(
     Math.max(preferredLeft, avoidRect.left),
     PRODUCT_TOUR_VIEWPORT_PADDING,
     Math.max(PRODUCT_TOUR_VIEWPORT_PADDING, viewport.width - PRODUCT_TOUR_BUBBLE_WIDTH - PRODUCT_TOUR_VIEWPORT_PADDING)
   );
 
-  const candidates: Array<{ rect: ProductTourRect; arrow: ProductTourArrowDirection }> = [
+  type BubbleCandidate = {
+    rect: ProductTourRect;
+    arrow: ProductTourArrowDirection;
+    /** When set, pin the bubble edge to the spotlight instead of assuming bubble height. */
+    style?: CSSProperties;
+  };
+
+  const aboveBottomInset = viewport.height - avoidRect.top + gap;
+  const aboveTop = avoidRect.top - gap - PRODUCT_TOUR_BUBBLE_HEIGHT;
+  const candidates: BubbleCandidate[] = [
     {
       arrow: "top",
-      rect: box(leftNearAnchor, avoidRect.bottom + gap)
+      rect: box(leftNearHighlight, avoidRect.bottom + gap)
     },
     {
+      // Pin bottom edge just above the mask so real bubble height doesn't leave a gap.
       arrow: "bottom",
-      rect: box(leftNearAnchor, avoidRect.top - gap - PRODUCT_TOUR_BUBBLE_HEIGHT)
+      rect: box(leftNearHighlight, aboveTop),
+      style: {
+        bottom: `${aboveBottomInset}px`,
+        left: `${leftNearHighlight}px`
+      }
     },
     {
       arrow: "left",
@@ -285,11 +395,21 @@ function resolveProductTourBubblePlacement(
     }
   ];
 
+  // Prefer the nav-side slot only when it still sits next to the spotlight.
+  if (!rectsOverlap(preferred, avoidRect) && fitsViewport(preferred, viewport)) {
+    const nearSpotlightVertically =
+      preferred.bottom >= avoidRect.top - gap
+      && preferred.top <= avoidRect.bottom + gap;
+    if (nearSpotlightVertically) {
+      candidates.unshift({ rect: preferred, arrow: "left" });
+    }
+  }
+
   for (const candidate of candidates) {
     if (fitsViewport(candidate.rect, viewport) && !rectsOverlap(candidate.rect, avoidRect)) {
       return {
         arrow: candidate.arrow,
-        style: {
+        style: candidate.style ?? {
           top: `${candidate.rect.top}px`,
           left: `${candidate.rect.left}px`
         }
@@ -297,7 +417,17 @@ function resolveProductTourBubblePlacement(
     }
   }
 
-  // Last resort: park below the highlight, clamped into the viewport.
+  // Last resort: pin above the highlight when there is room, otherwise below.
+  const preferAbove = aboveTop >= PRODUCT_TOUR_VIEWPORT_PADDING;
+  if (preferAbove) {
+    return {
+      arrow: "bottom",
+      style: {
+        bottom: `${aboveBottomInset}px`,
+        left: `${leftNearHighlight}px`
+      }
+    };
+  }
   const fallbackTop = clamp(
     avoidRect.bottom + gap,
     PRODUCT_TOUR_VIEWPORT_PADDING,
@@ -307,7 +437,7 @@ function resolveProductTourBubblePlacement(
     arrow: "top",
     style: {
       top: `${fallbackTop}px`,
-      left: `${leftNearAnchor}px`
+      left: `${leftNearHighlight}px`
     }
   };
 }

@@ -122,74 +122,78 @@ export function FirstEncounterReport(props: FirstEncounterReportProps) {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-canvas-oat overflow-hidden">
-      <div
-        className="my-8 flex max-h-[calc(100vh-64px)] flex-col"
-        style={{ width: "min(calc(100vw - 48px), clamp(600px, 64vw, 760px))" }}
-      >
-        <div className="mb-4 flex shrink-0 justify-end">
-          <div className="agent-user-turn flex min-w-0 max-w-[75%] justify-end">
-            <div className="agent-chat-bubble-frame agent-chat-bubble-frame--user max-w-full min-w-0">
-              <div className="agent-chat-bubble agent-chat-bubble--user max-w-full min-w-0 overflow-hidden px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
-                {t("onboarding.report.userPrompt")}
+    // Outer scrolls on small screens; inner min-h-screen + items-center centers when content fits.
+    // Use min-h-screen (not min-h-full): prebuilt utilities omit min-h-full.
+    <div className="fixed inset-0 z-50 overflow-y-auto bg-canvas-oat">
+      <div className="flex min-h-screen items-center justify-center px-6 py-8">
+        <div
+          className="flex flex-col"
+          style={{ width: "min(calc(100vw - 48px), clamp(600px, 64vw, 760px))" }}
+        >
+          <div className="mb-4 flex shrink-0 justify-end">
+            <div className="agent-user-turn flex min-w-0 max-w-[75%] justify-end">
+              <div className="agent-chat-bubble-frame agent-chat-bubble-frame--user max-w-full min-w-0">
+                <div className="agent-chat-bubble agent-chat-bubble--user max-w-full min-w-0 overflow-hidden px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+                  {t("onboarding.report.userPrompt")}
+                </div>
               </div>
             </div>
           </div>
-        </div>
 
-        <div className="mb-4 flex min-h-0 items-start gap-3">
-          <div className="mt-1 shrink-0">
-            <Memmy pose="celebrate" size={56} />
-          </div>
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-            <div className="flex min-h-0 flex-col rounded-card bg-background-paper p-6 shadow-[0_2px_12px_rgba(0,0,0,0.06)]">
-              <div className="mb-3 flex shrink-0 items-center gap-1.5">
-                <Sparkles size={14} className="text-action-sky" />
-                <h2 className="text-sm font-bold text-text-ink">{t("onboarding.report.title")}</h2>
-              </div>
-              <div
-                ref={scrollRef}
-                className="min-h-[120px] overflow-y-auto pr-1 text-sm leading-[1.8] whitespace-pre-line text-text-ink/80"
-                style={{ maxHeight: "min(42vh, 360px)" }}
-                onScroll={handleReportScroll}
-                onWheel={markReportUserScrollIntent}
-                onTouchMove={markReportUserScrollIntent}
-              >
-                <AgentMessageContent content={displayedText} isStreaming={contentIsStreaming} />
-              </div>
-
-              {showFollowUps && props.followUpMode === "relay" && (
-                <div className="mt-5 shrink-0 animate-in fade-in slide-in-from-bottom-3" style={{ animationDuration: "500ms" }}>
-                  <FirstEncounterRelayChallenge
-                    agents={props.agents}
-                    onOpenAgent={props.onOpenAgent}
-                    onVerifyMemory={props.onVerifyMemory}
-                    onLifecycle={props.onRelayLifecycle}
-                  />
-                </div>
-              )}
-
-              {showFollowUps && props.followUpMode === "connect" && (
-                <div className="mt-5 shrink-0 animate-in fade-in slide-in-from-bottom-3" style={{ animationDuration: "500ms" }}>
-                  {/* scan_only: keep the value card, omit the connect button — this screen cannot install Agents. */}
-                  <FirstEncounterRelayOptIn />
-                </div>
-              )}
+          <div className="flex items-start gap-3">
+            <div className="mt-1 shrink-0">
+              <Memmy pose="celebrate" size={56} />
             </div>
-
-            {showFollowUps && (
-              <div className="mt-4 flex shrink-0 items-center justify-between px-1 animate-in fade-in" style={{ animationDuration: "600ms" }}>
-                <p className="text-xs leading-relaxed text-text-ink/40">{t("onboarding.report.disclaimer")}</p>
-                <button
-                  type="button"
-                  onClick={props.onContinue}
-                  className="ml-4 inline-flex shrink-0 cursor-pointer items-center gap-1.5 rounded-btn bg-action-sky px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-action-sky-hover"
+            <div className="flex min-w-0 flex-1 flex-col">
+              <div className="flex flex-col rounded-card bg-background-paper p-6 shadow-[0_2px_12px_rgba(0,0,0,0.06)]">
+                <div className="mb-3 flex shrink-0 items-center gap-1.5">
+                  <Sparkles size={14} className="text-action-sky" />
+                  <h2 className="text-sm font-bold text-text-ink">{t("onboarding.report.title")}</h2>
+                </div>
+                <div
+                  ref={scrollRef}
+                  className="min-h-[120px] overflow-y-auto pr-1 text-sm leading-[1.8] whitespace-pre-line text-text-ink/80"
+                  style={{ maxHeight: "min(42vh, 360px)" }}
+                  onScroll={handleReportScroll}
+                  onWheel={markReportUserScrollIntent}
+                  onTouchMove={markReportUserScrollIntent}
                 >
-                  {t("onboarding.report.continue")}
-                  <ArrowRight size={13} aria-hidden="true" />
-                </button>
+                  <AgentMessageContent content={displayedText} isStreaming={contentIsStreaming} />
+                </div>
+
+                {showFollowUps && props.followUpMode === "relay" && (
+                  <div className="mt-5 shrink-0 animate-in fade-in slide-in-from-bottom-3" style={{ animationDuration: "500ms" }}>
+                    <FirstEncounterRelayChallenge
+                      agents={props.agents}
+                      onOpenAgent={props.onOpenAgent}
+                      onVerifyMemory={props.onVerifyMemory}
+                      onLifecycle={props.onRelayLifecycle}
+                    />
+                  </div>
+                )}
+
+                {showFollowUps && props.followUpMode === "connect" && (
+                  <div className="mt-5 shrink-0 animate-in fade-in slide-in-from-bottom-3" style={{ animationDuration: "500ms" }}>
+                    {/* scan_only: keep the value card, omit the connect button — this screen cannot install Agents. */}
+                    <FirstEncounterRelayOptIn />
+                  </div>
+                )}
               </div>
-            )}
+
+              {showFollowUps && (
+                <div className="mt-4 flex shrink-0 items-center justify-between px-1 animate-in fade-in" style={{ animationDuration: "600ms" }}>
+                  <p className="text-xs leading-relaxed text-text-ink/40">{t("onboarding.report.disclaimer")}</p>
+                  <button
+                    type="button"
+                    onClick={props.onContinue}
+                    className="ml-4 inline-flex shrink-0 cursor-pointer items-center gap-1.5 rounded-btn bg-action-sky px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-action-sky-hover"
+                  >
+                    {t("onboarding.report.continue")}
+                    <ArrowRight size={13} aria-hidden="true" />
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </div>
