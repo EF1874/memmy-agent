@@ -15,6 +15,7 @@ import { fetchSearchUsage } from "../utils/searchusage.js";
 import { buildHistoryDagPayload, renderHistoryDagSummary, SessionDagStore } from "../session-dag/index.js";
 import { GoalRuntimeError } from "../core/agent-runtime/goal-runtime.js";
 import { publicGoalState, type GoalState } from "../core/session/goal-state.js";
+import { GOAL_COMMAND_SUBCOMMANDS } from "../core/session/webui-user-content.js";
 import { VERSION } from "../version.js";
 import { CommandContext, CommandRouter } from "./router.js";
 
@@ -336,8 +337,6 @@ function resolveAndPersistSessionModel(loop: any, session: any, preset: string) 
   return selection;
 }
 
-const GOAL_SUBCOMMANDS = new Set(["status", "help", "create", "pause", "resume", "edit", "budget", "clear"]);
-
 function goalActions(goal: GoalState | null): string {
   if (!goal) return "create <objective>";
   if (goal.status === "active") return "pause, clear";
@@ -375,7 +374,7 @@ export async function cmdGoal(ctx: CommandContext): Promise<OutboundMessage> {
   const rawArgs = ctx.args.trim();
   const [first = "", ...remaining] = rawArgs.split(/\s+/);
   const command = first.toLowerCase();
-  const explicitSubcommand = GOAL_SUBCOMMANDS.has(command);
+  const explicitSubcommand = GOAL_COMMAND_SUBCOMMANDS.has(command);
   const argument = explicitSubcommand ? remaining.join(" ").trim() : rawArgs;
   const current = runtime.get(ctx.key);
   try {

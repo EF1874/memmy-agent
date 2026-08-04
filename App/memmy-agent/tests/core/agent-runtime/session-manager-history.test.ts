@@ -99,6 +99,18 @@ describe("SessionManager history and previews", () => {
     });
   });
 
+  it("uses the Goal objective instead of its command wrapper in previews", () => {
+    const manager = new SessionManager(tempRoot());
+    const session = manager.getOrCreate("websocket:chat-goal-preview");
+    session.addMessage("user", "/goal 编写亚洲流行文化网页", { commandMessage: true });
+    manager.save(session);
+
+    expect(manager.listSessions()[0]).toMatchObject({
+      key: "websocket:chat-goal-preview",
+      preview: "编写亚洲流行文化网页",
+    });
+  });
+
   it("listSessions isolates a WebUI Session with a partially invalid binding", () => {
     const root = tempRoot();
     const manager = new SessionManager(root, {

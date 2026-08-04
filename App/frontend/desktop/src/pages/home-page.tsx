@@ -232,6 +232,7 @@ export interface SubmitAgentComposerMessageInput {
   } | null;
   ensureChatSubscription?: (chatId: string) => void;
   content: string;
+  displayContent?: string;
   language?: MemmyAgentUiLanguage;
   pendingAttachments: PendingAttachment[];
   uploadAgentMedia: (attachments: UploadAgentMediaInput[]) => Promise<UploadedAgentMedia[]>;
@@ -579,6 +580,7 @@ export function requestNewSessionReset(input: RequestNewSessionResetInput): bool
 
 export async function submitAgentComposerMessage(input: SubmitAgentComposerMessageInput): Promise<boolean> {
   const text = input.content.trim();
+  const displayText = input.displayContent?.trim() || text;
   if ((!text && !input.pendingAttachments.length) || !input.connection) {
     return false;
   }
@@ -708,7 +710,7 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
   }
   input.dispatch(agentActions.userMessageQueued({
     chatId,
-    content: text,
+    content: displayText,
     media: uploadedAttachments.map((item) => ({ url: item.url, name: item.name, kind: item.kind, path: item.path })),
     focus,
     ...(capturedTarget ? { target: capturedTarget } : {})
@@ -1388,6 +1390,7 @@ export function HomePage() {
         connection,
         ensureChatSubscription,
         content: input,
+        displayContent: selectedComposerCommand ? composerInput : undefined,
         language,
         pendingAttachments,
         uploadAgentMedia: (attachments) => clients!.memmyAgent.uploadAgentMedia(attachments),

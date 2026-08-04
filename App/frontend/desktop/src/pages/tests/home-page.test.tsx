@@ -1131,6 +1131,41 @@ describe("HomePage", () => {
     expect(onNewChatMessageSent).not.toHaveBeenCalled();
   });
 
+  it("keeps the Goal command on the wire but shows only its objective", async () => {
+    const sendMessage = vi.fn();
+    const dispatch = vi.fn();
+
+    await expect(submitAgentComposerMessage({
+      chatId: "chat-goal",
+      connection: {
+        getReadyGeneration: () => 1,
+        newChat: vi.fn(async () => ({ chatId: "unused-chat", modelPreset: "desktop-openai-gpt-5" })),
+        sendMessage
+      },
+      content: "/goal 编写亚洲流行文化网页",
+      displayContent: "编写亚洲流行文化网页",
+      pendingAttachments: [],
+      uploadAgentMedia: vi.fn(async () => []),
+      dispatch,
+      track: vi.fn(),
+      clearComposer: vi.fn()
+    })).resolves.toBe(true);
+
+    expect(sendMessage).toHaveBeenCalledWith({
+      chatId: "chat-goal",
+      content: "/goal 编写亚洲流行文化网页",
+      clientRequestId: expect.any(String),
+      media: []
+    }, 1);
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "agent/userMessageQueued",
+      chatId: "chat-goal",
+      content: "编写亚洲流行文化网页",
+      media: [],
+      focus: true
+    });
+  });
+
   it("newChat failure keeps composer input for retry", async () => {
     const sendMessage = vi.fn();
     const dispatch = vi.fn();

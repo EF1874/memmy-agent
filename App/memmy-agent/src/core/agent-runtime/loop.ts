@@ -2085,6 +2085,7 @@ export class AgentLoop {
         fsync: typeof msg.metadata?.client_request_id === "string",
       });
       await this.publishWebuiMessageAccepted(msg);
+      await publishWebuiThreadSessionUpdated(this.bus, msg);
     } else if (typeof msg.metadata?.client_request_id === "string") {
       this.sessions.save(session, { fsync: true });
       await this.publishWebuiMessageAccepted(msg);

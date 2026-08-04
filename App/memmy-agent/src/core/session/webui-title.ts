@@ -6,6 +6,7 @@ import type { LLMRuntimeResolver } from "../../utils/llm-runtime.js";
 import { truncateText } from "../../utils/helpers.js";
 import type { ByokTokenUsageRecorderLike } from "../../integrations/byok-token-usage/recorder.js";
 import { Session, SessionManager } from "./manager.js";
+import { goalObjectiveFromCommand, webuiTitleUserText } from "./webui-user-content.js";
 import {
   cleanGeneratedTitle,
   TITLE_GENERATION_MAX_TOKENS,
@@ -61,7 +62,8 @@ export class WebuiTitleService {
     if (input.metadata?.[WEBUI_SESSION_METADATA_KEY] !== true) return;
     if (input.metadata?.webui_ephemeral_command != null) return;
     const mediaPaths = Array.isArray(input.mediaPaths) ? input.mediaPaths.filter((path): path is string => typeof path === "string" && path.trim().length > 0) : [];
-    if (isCommandOnlyText(input.content, mediaPaths)) return;
+    const goalObjective = goalObjectiveFromCommand(input.content);
+    if (isCommandOnlyText(input.content, mediaPaths) && !goalObjective) return;
 
     let runtime: ReturnType<LLMRuntimeResolver>;
     try {
@@ -80,7 +82,7 @@ export class WebuiTitleService {
     this.pendingByChatId.set(input.chatId, {
       chatId: input.chatId,
       sessionKey,
-      content: input.content,
+      content: goalObjective ?? input.content,
       mediaPaths,
       provider: runtime.provider,
       model: runtime.model,
@@ -213,12 +215,8 @@ export class WebuiTitleService {
 
 export function firstTitleUserMessage(session: Session | any): string {
   for (const message of session?.messages ?? []) {
-    if (message?.commandMessage === true) continue;
-    if (message?.role !== "user") continue;
-    const content = typeof message?.content === "string" ? message.content.trim() : "";
-    if (!content) continue;
-    if (isCommandOnlyText(content, [])) continue;
-    return content;
+    const content = webuiTitleUserText(message);
+    if (content) return content;
   }
   return "";
 }
@@ -226,8 +224,7 @@ export function firstTitleUserMessage(session: Session | any): string {
 function countTitleUserMessages(session: Session | any): number {
   let count = 0;
   for (const message of session?.messages ?? []) {
-    if (message?.commandMessage === true) continue;
-    if (message?.role === "user") count += 1;
+    if (webuiTitleUserText(message)) count += 1;
   }
   return count;
 }

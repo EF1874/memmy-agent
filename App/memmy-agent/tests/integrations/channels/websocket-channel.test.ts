@@ -425,7 +425,45 @@ describe("WebSocket channel", () => {
       await channel.send(await bus.nextOutbound());
     }
 
-    expect(ws.send.mock.calls.map(([payload]) => JSON.parse(payload).event)).toContain("message_accepted");
+    const events = ws.send.mock.calls.map(([payload]) => JSON.parse(payload).event);
+    expect(events).toContain("message_accepted");
+    expect(events).toContain("session_updated");
+  });
+
+  it("writes only a Goal objective into the accepted WebUI transcript", async () => {
+    const root = tempDataDir();
+    const sessions = new SessionManager(path.join(root, "sessions"));
+    const channel = new WebSocketChannel({}, new MessageBus(), {
+      sessionManager: sessions,
+      workspacePath: root,
+    });
+    const session = sessions.getOrCreate("websocket:chat-goal");
+    session.addMessage("user", "/goal 编写亚洲流行文化网页", {
+      commandMessage: true,
+      client_request_id: "11111111-1111-4111-8111-111111111111",
+    });
+    sessions.save(session);
+    const ws = connection();
+    channel.attachConnection(ws, "chat-goal");
+
+    await channel.send(new OutboundMessage({
+      channel: "websocket",
+      chatId: "chat-goal",
+      content: "",
+      metadata: {
+        webuiMessageAccepted: true,
+        clientRequestId: "11111111-1111-4111-8111-111111111111",
+      },
+    }));
+
+    const lines = fs.readFileSync(webuiTranscriptPath("websocket:chat-goal"), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(lines).toContainEqual(expect.objectContaining({
+      event: "user",
+      text: "编写亚洲流行文化网页",
+    }));
   });
 
   it("notifies the WebUI title service only after thread-scoped session updates are sent", async () => {

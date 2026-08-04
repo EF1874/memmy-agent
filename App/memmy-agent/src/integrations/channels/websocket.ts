@@ -29,6 +29,7 @@ import {
 } from "../../core/session/manager.js";
 import { websocketTurnWallStartedAt, websocketTurnWallStartTimes } from "../../core/session/webui-turns.js";
 import type { WebuiTitleService } from "../../core/session/webui-title.js";
+import { visibleWebuiUserContent } from "../../core/session/webui-user-content.js";
 import { TerminalRunControl } from "../../core/session/terminal-session-control.js";
 import { scrubSubagentMessagesForChannel } from "../../utils/subagent-channel-display.js";
 import {
@@ -854,7 +855,7 @@ export class WebSocketChannel extends BaseChannel {
     const wire: Record<string, any> = {
       event: "user",
       chat_id: chatId,
-      text: typeof message.content === "string" ? message.content : "",
+      text: typeof message.content === "string" ? visibleWebuiUserContent(message.content) : "",
       client_request_id: clientRequestId,
     };
     if (Array.isArray(message.media) && message.media.length) {

@@ -193,6 +193,33 @@ describe("WebuiTitleService", () => {
     expect(sessions.loadSession("websocket:chat-title")?.metadata[WEBUI_TITLE_METADATA_KEY]).toBe("用户手动标题");
   });
 
+  it("generates a title from the objective of the first Goal command", async () => {
+    const sessions = new SessionManager(sessionRoot());
+    const session = sessions.getOrCreate("websocket:chat-goal");
+    session.metadata.webui = true;
+    session.metadata.webuiProjectId = null;
+    session.metadata.webuiWorkspaceCwd = fs.realpathSync(sessions.root);
+    session.addMessage("user", "/goal 编写亚洲流行文化网页", { commandMessage: true });
+    session.addMessage("assistant", "Goal created.", { commandMessage: true });
+    sessions.save(session);
+    const provider = titleProvider("亚洲流行文化网页");
+    const { service, scheduled } = createService({ sessions, provider });
+
+    service.trackUserMessage({
+      chatId: "chat-goal",
+      content: "/goal 编写亚洲流行文化网页",
+      metadata: { webui: true },
+    });
+    service.onUserMessagePersisted("chat-goal");
+    await scheduled[0];
+
+    expect(provider.chatWithRetry).toHaveBeenCalledTimes(1);
+    const request = provider.chatWithRetry.mock.calls[0]?.[0];
+    expect(request.messages[1].content).toContain("编写亚洲流行文化网页");
+    expect(request.messages[1].content).not.toContain("/goal");
+    expect(sessions.loadSession("websocket:chat-goal")?.metadata[WEBUI_TITLE_METADATA_KEY]).toBe("亚洲流行文化网页");
+  });
+
   it("does not treat later user messages as a historical title generation trigger", async () => {
     const sessions = new SessionManager(sessionRoot());
     createSession(sessions, "chat-later", "第一条消息没有生成标题");

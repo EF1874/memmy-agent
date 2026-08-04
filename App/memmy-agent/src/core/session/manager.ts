@@ -3,6 +3,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { scrubSubagentAnnounceBody } from "../../utils/subagent-channel-display.js";
 import { findLegalMessageStart, imagePlaceholderText, stripThink } from "../../utils/helpers.js";
+import { visibleWebuiUserContent } from "./webui-user-content.js";
 
 export const FILE_MAX_MESSAGES = 2_000;
 const WEBUI_SESSION_METADATA_KEY = "webui";
@@ -74,7 +75,7 @@ function messagePreviewText(message: Record<string, any>): string {
     : message.content;
   let text = "";
   if (typeof content === "string") {
-    text = content;
+    text = message.role === "user" ? visibleWebuiUserContent(content) : content;
   } else if (Array.isArray(content)) {
     const parts: string[] = [];
     for (const block of content) {
