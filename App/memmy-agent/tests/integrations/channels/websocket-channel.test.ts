@@ -209,6 +209,23 @@ describe("WebSocket channel", () => {
     });
   });
 
+  it("consumes a successful WebUI Goal creation acknowledgement", async () => {
+    tempDataDir();
+    const channel = new WebSocketChannel({}, new MessageBus());
+    const ws = connection();
+    channel.attachConnection(ws, "chat-goal");
+
+    await channel.send(new OutboundMessage({
+      channel: "websocket",
+      chatId: "chat-goal",
+      content: "Goal created.\n## Goal\n{ ... }",
+      metadata: { webuiGoalCreateAck: true, webui: true },
+    }));
+
+    expect(ws.send).not.toHaveBeenCalled();
+    expect(fs.existsSync(webuiTranscriptPath("websocket:chat-goal"))).toBe(false);
+  });
+
   it("sends and persists structured quota errors without leaking internal metadata", async () => {
     tempDataDir();
     const channel = new WebSocketChannel({}, new MessageBus());

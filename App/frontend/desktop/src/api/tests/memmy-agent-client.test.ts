@@ -426,6 +426,7 @@ describe("memmy-agent client", () => {
     let payload: Record<string, unknown> = {
       schemaVersion: 3,
       sessionKey: "websocket:chat-goal",
+      last_turn_id: "turn-goal",
       last_turn_closed: true,
       last_turn_goal_id: goalId,
       last_turn_goal_outcome: "active",
@@ -444,6 +445,7 @@ describe("memmy-agent client", () => {
     });
 
     await expect(client.readWebuiThread("websocket:chat-goal")).resolves.toMatchObject({
+      last_turn_id: "turn-goal",
       last_turn_goal_id: goalId,
       last_turn_goal_outcome: "active"
     });

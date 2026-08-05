@@ -427,7 +427,12 @@ export async function cmdGoal(ctx: CommandContext): Promise<OutboundMessage> {
       turnId,
     });
     ctx.loop.scheduleGoalWork?.(ctx.key, goal);
-    return reply(ctx, `Goal created.\n${goalStatusText(goal)}`, { renderAs: "text" });
+    return reply(ctx, `Goal created.\n${goalStatusText(goal)}`, {
+      renderAs: "text",
+      ...(ctx.msg.channel === "websocket" && ctx.msg.metadata?.webui === true
+        ? { webuiGoalCreateAck: true }
+        : {}),
+    });
   } catch (error) {
     const code = error instanceof GoalRuntimeError ? error.code : String(error);
     return reply(ctx, `Goal command failed: ${code}`, { renderAs: "text" });

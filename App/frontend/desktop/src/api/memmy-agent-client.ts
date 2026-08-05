@@ -184,6 +184,7 @@ const SidebarStateSchema = z.object({
 const WebuiThreadSchema = z.object({
   schemaVersion: z.number(),
   sessionKey: z.string(),
+  last_turn_id: z.string().min(1).optional(),
   last_turn_closed: z.boolean().optional(),
   last_turn_goal_id: z.string().uuid().optional(),
   last_turn_goal_outcome: z.union([

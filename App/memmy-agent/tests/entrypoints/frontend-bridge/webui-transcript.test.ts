@@ -7,8 +7,10 @@ import {
   WEBUI_TRANSCRIPT_SCHEMA_VERSION,
   appendTranscriptObject,
   buildWebuiThreadResponse,
+  lastTranscriptTurnState,
   readTranscriptLines,
   replayTranscriptToUiMessages,
+  toolTraceLinesFromEvents,
 } from "../../../src/entrypoints/frontend-bridge/transcript.js";
 import { WebSocketChannel } from "../../../src/integrations/channels/websocket.js";
 
@@ -35,6 +37,43 @@ afterEach(() => {
 });
 
 describe("webui transcript replay", () => {
+  it("keeps trace lines for distinct UI calls with a repeated Provider id", () => {
+    expect(toolTraceLinesFromEvents([
+      { phase: "end", call_id: "provider-final", ui_tool_call_id: "ui-1", name: "write_file", arguments: { path: "a.ts" } },
+      { phase: "end", call_id: "provider-final", ui_tool_call_id: "ui-2", name: "write_file", arguments: { path: "b.ts" } },
+    ])).toHaveLength(2);
+  });
+
+  it("keeps context compaction activity scoped to its turn", () => {
+    const messages = replayTranscriptToUiMessages([
+      { event: "context_compaction", turn_id: "turn-a", compaction_id: "compact", status: "done" },
+      { event: "context_compaction", turn_id: "turn-b", compaction_id: "compact", status: "running" },
+    ]);
+
+    expect(messages.filter((message) => message.kind === "context_compaction")).toEqual([
+      expect.objectContaining({ turnId: "turn-a", compactionStatus: "done" }),
+      expect.objectContaining({ turnId: "turn-b", compactionStatus: "running" }),
+    ]);
+  });
+
+  it("preserves streaming state only for an identified turn without turn_end", () => {
+    const openMessages = replayTranscriptToUiMessages([
+      { event: "reasoning_delta", turn_id: "turn-open", text: "分析中" },
+    ]);
+    const closedMessages = replayTranscriptToUiMessages([
+      { event: "reasoning_delta", turn_id: "turn-closed", text: "分析中" },
+      { event: "turn_end", turn_id: "turn-closed" },
+    ]);
+
+    expect(openMessages[0]).toMatchObject({
+      turnId: "turn-open",
+      reasoningStreaming: true,
+      isStreaming: true,
+    });
+    expect(closedMessages[0].reasoningStreaming).toBeUndefined();
+    expect(closedMessages[0].isStreaming).toBeUndefined();
+  });
+
   it("appends and reads JSONL records", () => {
     useDataDir();
     const key = "websocket:t1";
@@ -962,6 +1001,124 @@ describe("webui transcript replay", () => {
         status: "editing",
       },
     ]);
+  });
+
+  it("uses UI call identity for file phases without merging separate invocations", () => {
+    const messages = replayTranscriptToUiMessages([
+      {
+        event: "file_edit",
+        turn_id: "turn-ui",
+        edits: [{
+          call_id: "stream-id",
+          ui_tool_call_id: "ui-1",
+          tool: "apply_patch",
+          path: "src/a.ts",
+          absolute_path: "/workspace/src/a.ts",
+          phase: "start",
+          status: "editing",
+          added: 20,
+          approximate: true,
+        }],
+      },
+      {
+        event: "file_edit",
+        turn_id: "turn-ui",
+        edits: [
+          {
+            call_id: "provider-final",
+            ui_tool_call_id: "ui-1",
+            tool: "apply_patch",
+            path: "src/a.ts",
+            absolute_path: "/workspace/src/a.ts",
+            phase: "end",
+            status: "done",
+            added: 487,
+            approximate: false,
+          },
+          {
+            call_id: "provider-final",
+            ui_tool_call_id: "ui-1",
+            tool: "apply_patch",
+            path: "src/b.ts",
+            absolute_path: "/workspace/src/b.ts",
+            phase: "end",
+            status: "done",
+            added: 5,
+          },
+        ],
+      },
+      {
+        event: "file_edit",
+        turn_id: "turn-ui",
+        edits: [{
+          call_id: "stream-id",
+          ui_tool_call_id: "ui-1",
+          tool: "apply_patch",
+          path: "src/a.ts",
+          absolute_path: "/workspace/src/a.ts",
+          phase: "start",
+          status: "editing",
+          added: 1,
+          approximate: true,
+        }],
+      },
+      {
+        event: "file_edit",
+        turn_id: "turn-ui",
+        edits: [{
+          call_id: "provider-final",
+          ui_tool_call_id: "ui-2",
+          tool: "apply_patch",
+          path: "src/a.ts",
+          absolute_path: "/workspace/src/a.ts",
+          phase: "end",
+          status: "done",
+          added: 2,
+        }],
+      },
+    ]);
+
+    const fileRows = messages.filter((message) => message.fileEdits);
+    expect(fileRows).toHaveLength(2);
+    expect(fileRows[0].turnId).toBe("turn-ui");
+    expect(fileRows[0].fileEdits).toHaveLength(2);
+    expect(fileRows[0].fileEdits[0]).toMatchObject({ phase: "end", status: "done", added: 487, approximate: false });
+    expect(fileRows[1].fileEdits).toEqual([expect.objectContaining({ ui_tool_call_id: "ui-2", added: 2 })]);
+  });
+
+  it("partitions automatic Goal continuation activity by turn id", () => {
+    const lines = [
+      { event: "user", turn_id: "turn-a", text: "完成目标" },
+      { event: "reasoning_delta", turn_id: "turn-a", text: "第一轮" },
+      { event: "turn_end", turn_id: "turn-a" },
+      { event: "reasoning_delta", turn_id: "turn-b", text: "第二轮" },
+      { event: "turn_end", turn_id: "turn-a" },
+      { event: "reasoning_delta", turn_id: "turn-b", text: "继续" },
+      {
+        event: "file_edit",
+        turn_id: "turn-b",
+        edits: [{ call_id: "call-b", ui_tool_call_id: "ui-b", tool: "write_file", path: "b.ts", phase: "start", status: "editing" }],
+      },
+    ];
+
+    const messages = replayTranscriptToUiMessages(lines);
+    const turnBReasoning = messages.filter((message) => message.turnId === "turn-b" && message.reasoning);
+    const turnBFile = messages.find((message) => message.turnId === "turn-b" && message.fileEdits);
+    expect(turnBReasoning).toHaveLength(1);
+    expect(turnBReasoning[0].reasoning).toBe("第二轮继续");
+    expect(turnBFile?.fileEdits[0]).toMatchObject({ phase: "start", status: "editing" });
+    expect(lastTranscriptTurnState(lines)).toEqual({ last_turn_id: "turn-b", last_turn_closed: false });
+  });
+
+  it("ignores unseen cancellation terminals when deriving the latest turn", () => {
+    const lines = [
+      { event: "reasoning_delta", turn_id: "turn-a", text: "work" },
+      { event: "turn_end", turn_id: "turn-a" },
+      { event: "file_edit", turn_id: "turn-old", cancellation_terminal: true, edits: [] },
+      { event: "turn_end", turn_id: "turn-command" },
+    ];
+
+    expect(lastTranscriptTurnState(lines)).toEqual({ last_turn_id: "turn-command", last_turn_closed: true });
   });
 
   it("keeps a new file-edit row after reasoning in order within one activity segment", () => {

@@ -28,12 +28,19 @@ function makeLoop(): AgentLoop {
   });
 }
 
-function context(loop: AgentLoop, raw: string, turnId: string | null = null): CommandContext {
+function context(
+  loop: AgentLoop,
+  raw: string,
+  turnId: string | null = null,
+  channel = "cli",
+  metadata: Record<string, any> = {},
+): CommandContext {
   const msg = new InboundMessage({
-    channel: "cli",
+    channel,
     chatId: "direct",
     senderId: "user",
     content: raw,
+    metadata,
   });
   const session = loop.sessions.getOrCreate(msg.sessionKey);
   return new CommandContext({
@@ -80,6 +87,33 @@ describe("/goal command", () => {
     const created = await cmdGoal(context(loop, "/goal create pause migration", "turn-create"));
     expect(created.content).toContain("Goal created.");
     expect(loop.goalRuntime.get("cli:direct")?.objective).toBe("pause migration");
+  });
+
+  it("marks only successful WebUI Goal creation acknowledgements as hidden", async () => {
+    const webuiLoop = makeLoop();
+    const created = await cmdGoal(context(
+      webuiLoop,
+      "/goal create ship it",
+      "turn-webui",
+      "websocket",
+      { webui: true },
+    ));
+    expect(created.metadata.webuiGoalCreateAck).toBe(true);
+    expect(created.content).toContain("Goal created.");
+
+    const cliLoop = makeLoop();
+    const cliCreated = await cmdGoal(context(cliLoop, "/goal create ship it", "turn-cli"));
+    expect(cliCreated.metadata.webuiGoalCreateAck).toBeUndefined();
+
+    const failed = await cmdGoal(context(
+      webuiLoop,
+      "/goal create another goal",
+      "turn-failed",
+      "websocket",
+      { webui: true },
+    ));
+    expect(failed.content).toContain("Goal command failed:");
+    expect(failed.metadata.webuiGoalCreateAck).toBeUndefined();
   });
 
   it("covers pause, edit, budget, resume, and clear state restrictions", async () => {

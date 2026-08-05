@@ -775,17 +775,27 @@ function completeRecoveryChatLoad(
   const canonicalContainsPendingUser = localUser !== null
     && canonicalUser !== null
     && userPayloadEquivalent(canonicalUser, localUser);
+  const recoveryActiveTurnId = state.activeTurnIdByChatId[action.chatId]
+    ?? (action.runSnapshot?.status === "running" ? action.runSnapshot.turnId : null);
+  const recoveryTurnClosed = action.thread
+    ? threadClosesCurrentTurn(action.thread, recoveryActiveTurnId)
+    : false;
   const runningSnapshotCompletedBeforeHistory = action.runSnapshot?.status === "running"
-    && action.thread?.last_turn_closed === true
+    && recoveryTurnClosed
     && canonicalContainsPendingUser
     && !runVersionChanged;
+  const idleSnapshotHasClosedHistory = action.runSnapshot?.status === "idle"
+    && (!recoveryActiveTurnId || recoveryTurnClosed);
   let nextState: AgentState = { ...state, currentRecoveryChatRequest: null, isLoadingHistory: false };
 
   if (snapshotMessages
     && !runVersionChanged
-    && (action.runSnapshot?.status === "idle" || runningSnapshotCompletedBeforeHistory)) {
+    && (idleSnapshotHasClosedHistory || runningSnapshotCompletedBeforeHistory)) {
     nextState = replaceChatMessages(nextState, action.chatId, snapshotMessages);
-    nextState = markChatIdle(nextState, action.chatId, { source: "session_hydrate" });
+    nextState = markChatIdle(nextState, action.chatId, {
+      source: "session_hydrate",
+      turnId: action.thread?.last_turn_id ?? recoveryActiveTurnId,
+    });
     nextState = {
       ...nextState,
       deliveryUncertainByChatId: clearChatMapValue(nextState.deliveryUncertainByChatId, action.chatId)
@@ -800,7 +810,7 @@ function completeRecoveryChatLoad(
     } else if (
       canonicalContainsPendingUser
       && isChatBusy(state, action.chatId)
-      && action.thread?.last_turn_closed !== true
+      && !recoveryTurnClosed
     ) {
       nextState = setOperationError(nextState, "chat", recoveryNotice(
         action.chatId,
@@ -810,13 +820,10 @@ function completeRecoveryChatLoad(
       ));
     }
   } else if (snapshotMessages) {
-    const guardedThread = runVersionChanged || (
-      action.runSnapshot?.status === "running"
-      && action.thread?.last_turn_closed === true
-      && !canonicalContainsPendingUser
-    )
-      ? { ...action.thread!, last_turn_closed: false }
-      : action.thread!;
+    const guardedThread = {
+      ...action.thread!,
+      last_turn_closed: !runVersionChanged && recoveryTurnClosed,
+    };
     nextState = completeHistoryHydrateLoad({
       ...nextState,
       currentHistoryHydrateRequestIdByChatId: {
@@ -834,8 +841,11 @@ function completeRecoveryChatLoad(
 
   if (action.runSnapshot?.status === "running" && !runVersionChanged && !runningSnapshotCompletedBeforeHistory) {
     nextState = applyRecoveryRunningSnapshot(nextState, action.chatId, action.runSnapshot);
-  } else if (action.runSnapshot?.status === "idle" && !action.thread && !runVersionChanged) {
-    nextState = markChatIdle(nextState, action.chatId, { source: "session_hydrate" });
+  } else if (action.runSnapshot?.status === "idle" && !runVersionChanged) {
+    nextState = markChatIdle(nextState, action.chatId, {
+      source: "run_status_snapshot",
+      turnId: action.runSnapshot.turnId ?? state.activeTurnIdByChatId[action.chatId] ?? null,
+    });
   }
 
   if (action.failureMessage) {
@@ -1322,6 +1332,19 @@ function beginHistoryLoad(state: AgentState, sessionKey: string, chatId: string,
   });
 }
 
+function threadClosesCurrentTurn(
+  thread: MemmyAgentWebuiThread,
+  activeTurnId: string | null,
+): boolean {
+  if (thread.last_turn_closed !== true) return false;
+  if (!activeTurnId) return true;
+  return typeof thread.last_turn_id === "string" && thread.last_turn_id === activeTurnId;
+}
+
+function messagesContainTurn(messages: AgentChatMessage[], turnId: string | null): boolean {
+  return Boolean(turnId && messages.some((message) => message.turnId === turnId));
+}
+
 function completeHistoryLoad(state: AgentState, thread: MemmyAgentWebuiThread, requestId: string): AgentState {
   const chatId = sessionKeyToChatId(thread.sessionKey);
   if (state.currentChatId !== chatId || state.currentHistoryRequestIdByChatId[chatId] !== requestId) {
@@ -1330,11 +1353,13 @@ function completeHistoryLoad(state: AgentState, thread: MemmyAgentWebuiThread, r
 
   const snapshot = normalizeThreadMessages(thread.messages);
   const currentMessages = state.messages;
-  const historyTurnClosed = thread.last_turn_closed === true;
+  const activeTurnId = state.activeTurnIdByChatId[chatId] ?? null;
+  const historyTurnClosed = threadClosesCurrentTurn(thread, activeTurnId);
   const chatBusy = isChatBusy(state, chatId);
   const hasLiveStream = hasLiveStreamingMessage(currentMessages);
   const shouldKeepLiveStream = !historyTurnClosed && hasLiveStream && currentMessages.length > 0;
-  const shouldKeepCurrent = shouldKeepLiveStream
+  const shouldKeepCurrent = (!historyTurnClosed && messagesContainTurn(currentMessages, activeTurnId))
+    || shouldKeepLiveStream
     || isStaleThreadSnapshot(currentMessages, snapshot)
     || (snapshot.length === 0 && chatBusy && currentMessages.length > 0)
     || (chatBusy && isSnapshotMissingLatestUserMessage(currentMessages, snapshot));
@@ -1362,7 +1387,9 @@ function completeHistoryLoad(state: AgentState, thread: MemmyAgentWebuiThread, r
     isLoadingHistory: false,
     refreshRequested: false
   }), chatId, messages, historyTurnClosed);
-  return thread.last_turn_closed ? markChatIdle(nextState, chatId, { source: "session_hydrate" }) : nextState;
+  return historyTurnClosed
+    ? markChatIdle(nextState, chatId, { source: "session_hydrate", turnId: thread.last_turn_id ?? null })
+    : nextState;
 }
 
 function completeHistoryOpenMissing(state: AgentState, sessionKey: string, chatId: string, requestId: string): AgentState {
@@ -1402,11 +1429,13 @@ function completeHistoryHydrateLoad(state: AgentState, thread: MemmyAgentWebuiTh
 
   const snapshot = normalizeThreadMessages(thread.messages);
   const currentMessages = chatId === state.currentChatId ? state.messages : state.messagesByChatId[chatId] ?? [];
-  const hydrateTurnClosed = thread.last_turn_closed === true;
+  const activeTurnId = state.activeTurnIdByChatId[chatId] ?? null;
+  const hydrateTurnClosed = threadClosesCurrentTurn(thread, activeTurnId);
   const chatBusy = isChatBusy(state, chatId);
   const hasLiveStream = hasLiveStreamingMessage(currentMessages);
   const shouldKeepLiveStream = !hydrateTurnClosed && hasLiveStream && currentMessages.length > 0;
-  const shouldKeepCurrent = shouldKeepLiveStream
+  const shouldKeepCurrent = (!hydrateTurnClosed && messagesContainTurn(currentMessages, activeTurnId))
+    || shouldKeepLiveStream
     || isStaleThreadSnapshot(currentMessages, snapshot)
     || (snapshot.length === 0 && chatBusy && currentMessages.length > 0)
     || (chatBusy && isSnapshotMissingLatestUserMessage(currentMessages, snapshot));
@@ -1431,7 +1460,9 @@ function completeHistoryHydrateLoad(state: AgentState, thread: MemmyAgentWebuiTh
   }, chatId, messages, hydrateTurnClosed);
 
   const hydrated = deriveTasks(nextState);
-  return hydrateTurnClosed ? markChatIdle(hydrated, chatId, { source: "session_hydrate" }) : hydrated;
+  return hydrateTurnClosed
+    ? markChatIdle(hydrated, chatId, { source: "session_hydrate", turnId: thread.last_turn_id ?? null })
+    : hydrated;
 }
 
 function failHistoryHydrateLoad(
@@ -1852,9 +1883,22 @@ function isStaleThreadSnapshot(currentMessages: AgentChatMessage[], snapshot: Ag
   if (snapshot.length >= currentMessages.length) {
     return snapshot.length === currentMessages.length
       && hasUserStoppedMessage(currentMessages)
-      && snapshot.every((message, index) => messagesEquivalent(message, currentMessages[index]));
+      && snapshot.every((message, index) => stoppedMessagePayloadEquivalent(message, currentMessages[index]));
   }
   return snapshot.every((message, index) => messagesEquivalent(message, currentMessages[index]));
+}
+
+function stoppedMessagePayloadEquivalent(left: AgentChatMessage, right: AgentChatMessage | undefined): boolean {
+  if (!right) return false;
+  return left.role === right.role
+    && left.turnId === right.turnId
+    && left.content === right.content
+    && left.reasoning === right.reasoning
+    && left.kind === right.kind
+    && JSON.stringify(left.media ?? []) === JSON.stringify(right.media ?? [])
+    && JSON.stringify(left.traces ?? []) === JSON.stringify(right.traces ?? [])
+    && JSON.stringify(left.toolEvents ?? []) === JSON.stringify(right.toolEvents ?? [])
+    && JSON.stringify(left.fileEdits ?? []) === JSON.stringify(right.fileEdits ?? []);
 }
 
 function isSnapshotMissingLatestUserMessage(currentMessages: AgentChatMessage[], snapshot: AgentChatMessage[]): boolean {
@@ -1885,10 +1929,15 @@ function messagesEquivalent(left: AgentChatMessage, right: AgentChatMessage | un
     return false;
   }
   return left.role === right.role
+    && left.turnId === right.turnId
     && left.content === right.content
+    && left.reasoning === right.reasoning
     && left.kind === right.kind
     && JSON.stringify(left.media ?? []) === JSON.stringify(right.media ?? [])
-    && JSON.stringify(left.traces ?? []) === JSON.stringify(right.traces ?? []);
+    && JSON.stringify(left.traces ?? []) === JSON.stringify(right.traces ?? [])
+    && JSON.stringify(left.toolEvents ?? []) === JSON.stringify(right.toolEvents ?? [])
+    && JSON.stringify(left.fileEdits ?? []) === JSON.stringify(right.fileEdits ?? [])
+    && left.activitySegmentId === right.activitySegmentId;
 }
 
 function handleAttached(state: AgentState, chatId: string | null): AgentState {
@@ -2180,16 +2229,16 @@ function reduceChatContentEvent(state: AgentState, event: MemmyAgentWsEvent): Ag
         return upsertRetryWaitStatus(scopedState, event);
       case "delta":
         if (suppressing) return activeState;
-        return appendAssistantDelta(activeState, event.text ?? "");
+        return appendAssistantDelta(activeState, event.text ?? "", turnId);
       case "stream_end":
         if (suppressing) return activeState;
-        return endAssistantStream(activeState, event.text, event.resuming === true);
+        return endAssistantStream(activeState, event.text, event.resuming === true, turnId);
       case "reasoning_delta":
         if (suppressing) return activeState;
-        return appendReasoningDelta(activeState, event.text ?? "");
+        return appendReasoningDelta(activeState, event.text ?? "", turnId);
       case "reasoning_end":
         if (suppressing) return activeState;
-        return closeReasoningStream(activeState);
+        return closeReasoningStream(activeState, turnId);
       case "message":
         if (event.kind === "progress" || event.kind === "tool_hint") {
           if (suppressing) return activeState;
@@ -2197,7 +2246,7 @@ function reduceChatContentEvent(state: AgentState, event: MemmyAgentWsEvent): Ag
         }
         if (event.kind === "reasoning") {
           if (suppressing) return activeState;
-          return appendCompleteReasoningMessage(activeState, event.text ?? event.content ?? "");
+          return appendCompleteReasoningMessage(activeState, event.text ?? event.content ?? "", turnId);
         }
         {
           const nextState = appendAssistantMessage(activeState, event);
@@ -2454,56 +2503,102 @@ function completeRestartAfterReconnect(state: AgentState): AgentState {
  * deliberate "the agent moved on" gesture), while a final close leaves it
  * untouched, so the real answer never restyles at the end of the turn.
  */
-function newStreamingAssistantMessage(messages: AgentChatMessage[], text: string, keepBusy: boolean): AgentChatMessage {
+function latestMessageIndexForTurn(messages: AgentChatMessage[], turnId: string | null): number {
+  if (!turnId) {
+    return messages.length - 1;
+  }
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.turnId === turnId) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function previousMessageIndexForTurn(messages: AgentChatMessage[], beforeIndex: number, turnId: string | null): number {
+  if (!turnId) {
+    return beforeIndex - 1;
+  }
+  for (let index = beforeIndex - 1; index >= 0; index -= 1) {
+    if (messages[index]?.turnId === turnId) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function newStreamingAssistantMessage(
+  messages: AgentChatMessage[],
+  text: string,
+  keepBusy: boolean,
+  turnId: string | null
+): AgentChatMessage {
   return {
     id: nextMessageId(messages, "assistant"),
     role: "assistant",
     content: text,
+    ...(turnId ? { turnId } : {}),
     createdAt: Date.now(),
     isStreaming: keepBusy,
     ...(!keepBusy ? { stoppedByUser: true } : {})
   };
 }
 
-function appendAssistantDelta(state: AgentState, text: string): AgentState {
+function appendAssistantDelta(state: AgentState, text: string, turnId: string | null): AgentState {
   if (!text) {
     return state;
   }
 
   const keepBusy = shouldLiveEventKeepChatBusy(state);
   const messages = [...state.messages];
-  const last = messages.at(-1);
+  const lastIndex = latestMessageIndexForTurn(messages, turnId);
+  const last = lastIndex >= 0 ? messages[lastIndex] : undefined;
   if (last && isReasoningOnlyActivityMessage(last) && last.isStreaming) {
     const closedReasoning = {
       ...last,
       reasoningStreaming: false,
       isStreaming: false,
-      activitySegmentId: last.activitySegmentId ?? currentTurnActivitySegmentId(messages)
+      activitySegmentId: last.activitySegmentId ?? currentOrTurnActivitySegmentId(messages, turnId)
     };
-    messages[messages.length - 1] = {
+    messages[lastIndex] = {
       ...closedReasoning,
       ...(!keepBusy && hasLoadedMessagePayload(closedReasoning) ? { stoppedByUser: true } : {})
     };
-    messages.push(newStreamingAssistantMessage(messages, text, keepBusy));
+    messages.push(newStreamingAssistantMessage(messages, text, keepBusy, turnId));
   } else if (last?.role === "assistant" && last.isStreaming) {
-    const next = { ...last, content: `${last.content}${text}`, isStreaming: keepBusy };
-    messages[messages.length - 1] = {
+    const next = {
+      ...last,
+      content: `${last.content}${text}`,
+      ...(turnId ? { turnId } : {}),
+      isStreaming: keepBusy
+    };
+    messages[lastIndex] = {
       ...next,
       ...(!keepBusy && hasLoadedMessagePayload(next) ? { stoppedByUser: true } : {})
     };
   } else {
-    messages.push(newStreamingAssistantMessage(messages, text, keepBusy));
+    messages.push(newStreamingAssistantMessage(messages, text, keepBusy, turnId));
   }
   return syncCurrentMessages({ ...state, messages, isSending: keepBusy });
 }
 
-function endAssistantStream(state: AgentState, text: string | undefined, resuming: boolean): AgentState {
+function endAssistantStream(
+  state: AgentState,
+  text: string | undefined,
+  resuming: boolean,
+  turnId: string | null
+): AgentState {
   const messages = [...state.messages];
-  const last = messages.at(-1);
+  const lastIndex = latestMessageIndexForTurn(messages, turnId);
+  const last = lastIndex >= 0 ? messages[lastIndex] : undefined;
   let closedIndex = -1;
   if (last?.role === "assistant" && last.isStreaming) {
-    messages[messages.length - 1] = { ...last, content: text ?? last.content };
-    closedIndex = messages.length - 1;
+    messages[lastIndex] = {
+      ...last,
+      content: text ?? last.content,
+      ...(turnId ? { turnId } : {})
+    };
+    closedIndex = lastIndex;
   }
   if (resuming) {
     // The runtime says this text segment is a mid-turn draft: the loop will
@@ -2512,7 +2607,7 @@ function endAssistantStream(state: AgentState, text: string | undefined, resumin
     // semantic signal (no content heuristics) that keeps live rendering and
     // history hydration consistent, and prevents cumulative drafts stacking
     // up as repeated answer bubbles.
-    const targetIndex = closedIndex >= 0 ? closedIndex : findLatestFoldableAssistantAnswerIndex(messages);
+    const targetIndex = closedIndex >= 0 ? closedIndex : findLatestFoldableAssistantAnswerIndex(messages, turnId);
     if (targetIndex >= 0) {
       const target = messages[targetIndex]!;
       const hasContent = target.content.trim().length > 0;
@@ -2521,7 +2616,7 @@ function endAssistantStream(state: AgentState, text: string | undefined, resumin
         ...(hasContent && target.kind !== "trace" && !target.media?.length ? { kind: "narration" as const } : {}),
         isStreaming: false,
         reasoningStreaming: false,
-        activitySegmentId: target.activitySegmentId ?? currentTurnActivitySegmentId(messages)
+        activitySegmentId: target.activitySegmentId ?? currentOrTurnActivitySegmentId(messages, turnId)
       };
     }
   } else if (closedIndex >= 0) {
@@ -2538,7 +2633,7 @@ function endAssistantStream(state: AgentState, text: string | undefined, resumin
   return syncCurrentMessages({ ...state, messages });
 }
 
-function appendReasoningDelta(state: AgentState, text: string): AgentState {
+function appendReasoningDelta(state: AgentState, text: string, turnId: string | null): AgentState {
   if (!text) {
     return state;
   }
@@ -2551,7 +2646,8 @@ function appendReasoningDelta(state: AgentState, text: string): AgentState {
   // block that precedes that answer — never a brand-new thought below it.
   // Splitting here used to fracture the answer into two bubbles and spawn an
   // orphan "Thinking" cluster holding half a sentence.
-  const streamingAnswer = state.messages.at(-1);
+  const streamingAnswerIndex = findLatestStreamingAssistantAnswerIndex(state.messages, turnId);
+  const streamingAnswer = streamingAnswerIndex >= 0 ? state.messages[streamingAnswerIndex] : undefined;
   if (
     streamingAnswer?.role === "assistant"
     && streamingAnswer.kind !== "trace"
@@ -2559,18 +2655,19 @@ function appendReasoningDelta(state: AgentState, text: string): AgentState {
     && streamingAnswer.content.trim()
   ) {
     const messages = [...state.messages];
-    const previousIndex = messages.length - 2;
+    const previousIndex = previousMessageIndexForTurn(messages, streamingAnswerIndex, turnId);
     const previous = messages[previousIndex];
     if (previous?.role === "assistant" && previous.kind !== "trace" && previous.reasoning) {
       messages[previousIndex] = { ...previous, reasoning: `${previous.reasoning}${text}` };
     } else {
-      messages.splice(messages.length - 1, 0, {
+      messages.splice(streamingAnswerIndex, 0, {
         id: nextMessageId(messages, "assistant"),
         role: "assistant",
         content: "",
         reasoning: text,
         reasoningStreaming: false,
-        activitySegmentId: currentTurnActivitySegmentId(messages),
+        ...(turnId ? { turnId } : {}),
+        activitySegmentId: currentOrTurnActivitySegmentId(messages, turnId),
         createdAt: Date.now(),
         isStreaming: false
       });
@@ -2578,16 +2675,18 @@ function appendReasoningDelta(state: AgentState, text: string): AgentState {
     return syncCurrentMessages({ ...state, messages, isSending: keepBusy });
   }
 
-  const messages = closeLatestAssistantAnswerBeforeNewActivity([...state.messages]);
-  const last = messages.at(-1);
+  const messages = closeLatestAssistantAnswerBeforeNewActivity([...state.messages], turnId);
+  const lastIndex = latestMessageIndexForTurn(messages, turnId);
+  const last = lastIndex >= 0 ? messages[lastIndex] : undefined;
   if (last?.role === "assistant" && last.kind !== "trace" && last.isStreaming && !last.content.trim() && !last.media?.length) {
     const next = {
       ...last,
       reasoning: `${last.reasoning ?? ""}${text}`,
       reasoningStreaming: keepBusy,
-      activitySegmentId: last.activitySegmentId ?? currentTurnActivitySegmentId(messages)
+      ...(turnId ? { turnId } : {}),
+      activitySegmentId: last.activitySegmentId ?? currentOrTurnActivitySegmentId(messages, turnId)
     };
-    messages[messages.length - 1] = {
+    messages[lastIndex] = {
       ...next,
       isStreaming: keepBusy,
       ...(!keepBusy && hasLoadedMessagePayload(next) ? { stoppedByUser: true } : {})
@@ -2599,7 +2698,8 @@ function appendReasoningDelta(state: AgentState, text: string): AgentState {
       content: "",
       reasoning: text,
       reasoningStreaming: keepBusy,
-      activitySegmentId: currentTurnActivitySegmentId(messages),
+      ...(turnId ? { turnId } : {}),
+      activitySegmentId: currentOrTurnActivitySegmentId(messages, turnId),
       createdAt: Date.now(),
       isStreaming: keepBusy,
       ...(!keepBusy ? { stoppedByUser: true } : {})
@@ -2798,7 +2898,6 @@ function contextCompactionEventText(event: MemmyAgentWsEvent, status: AgentCompa
 }
 
 function findFileEditTraceIndex(messages: AgentChatMessage[], incoming: AgentFileEdit[], turnId: string | null = null): number {
-  const incomingKeys = new Set(incoming.map(fileEditKey));
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
     if (!message || (!turnId && message.role === "user")) {
@@ -2808,7 +2907,7 @@ function findFileEditTraceIndex(messages: AgentChatMessage[], incoming: AgentFil
     if (message.kind !== "trace" || !message.fileEdits?.length) {
       continue;
     }
-    if (message.fileEdits.some((edit) => incomingKeys.has(fileEditKey(edit)))) {
+    if (message.fileEdits.some((edit) => incoming.some((candidate) => fileEditsShareActivity(edit, candidate)))) {
       return index;
     }
   }
@@ -2826,12 +2925,26 @@ function toolEventCallId(event: AgentToolProgressEvent): string {
   return typeof event.call_id === "string" && event.call_id ? event.call_id : "";
 }
 
+function toolEventUiCallId(event: AgentToolProgressEvent): string {
+  return typeof event.ui_tool_call_id === "string" && event.ui_tool_call_id ? event.ui_tool_call_id : "";
+}
+
 function fileEditCallId(edit: AgentFileEdit): string {
-  const fallbackCallId = `${edit.tool}:${edit.path || "pending"}`;
-  return edit.call_id && edit.call_id !== fallbackCallId ? edit.call_id : "";
+  return edit.call_id || "";
+}
+
+function fileEditUiCallId(edit: AgentFileEdit): string {
+  return edit.ui_tool_call_id || "";
 }
 
 function fileEditMatchesToolEvent(edit: AgentFileEdit, event: AgentToolProgressEvent): boolean {
+  const editUiCallId = fileEditUiCallId(edit);
+  const eventUiCallId = toolEventUiCallId(event);
+  if (editUiCallId && eventUiCallId) {
+    if (editUiCallId !== eventUiCallId) return false;
+    const name = toolEventName(event);
+    return !name || edit.tool === name;
+  }
   const editCallId = fileEditCallId(edit);
   const eventCallId = toolEventCallId(event);
   if (!editCallId || !eventCallId || editCallId !== eventCallId) {
@@ -2842,6 +2955,14 @@ function fileEditMatchesToolEvent(edit: AgentFileEdit, event: AgentToolProgressE
 }
 
 function toolEventsMatch(left: AgentToolProgressEvent, right: AgentToolProgressEvent): boolean {
+  const leftUiCallId = toolEventUiCallId(left);
+  const rightUiCallId = toolEventUiCallId(right);
+  if (leftUiCallId && rightUiCallId) {
+    if (leftUiCallId !== rightUiCallId) return false;
+    const leftName = toolEventName(left);
+    const rightName = toolEventName(right);
+    return !leftName || !rightName || leftName === rightName;
+  }
   const leftCallId = toolEventCallId(left);
   const rightCallId = toolEventCallId(right);
   if (!leftCallId || !rightCallId || leftCallId !== rightCallId) {
@@ -2937,9 +3058,16 @@ function isReasoningOnlyActivityMessage(message: AgentChatMessage): boolean {
     && !message.media?.length;
 }
 
-function findLatestFoldableAssistantAnswerIndex(messages: AgentChatMessage[]): number {
-  for (let index = messages.length - 1; index >= currentTurnStartIndex(messages); index -= 1) {
+function findLatestFoldableAssistantAnswerIndex(
+  messages: AgentChatMessage[],
+  turnId: string | null = null
+): number {
+  const startIndex = turnId ? 0 : currentTurnStartIndex(messages);
+  for (let index = messages.length - 1; index >= startIndex; index -= 1) {
     const message = messages[index];
+    if (turnId && message?.turnId !== turnId) {
+      continue;
+    }
     if (
       message?.role === "assistant"
       && message.kind !== "trace"
@@ -2967,8 +3095,11 @@ function findLatestFoldableAssistantAnswerIndex(messages: AgentChatMessage[]): n
  * required so a later round doesn't keep appending text onto an old,
  * already-finished answer bubble.
  */
-function closeLatestAssistantAnswerBeforeNewActivity(messages: AgentChatMessage[]): AgentChatMessage[] {
-  const targetIndex = findLatestFoldableAssistantAnswerIndex(messages);
+function closeLatestAssistantAnswerBeforeNewActivity(
+  messages: AgentChatMessage[],
+  turnId: string | null = null
+): AgentChatMessage[] {
+  const targetIndex = findLatestFoldableAssistantAnswerIndex(messages, turnId);
   if (targetIndex < 0) {
     return messages;
   }
@@ -2982,7 +3113,28 @@ function closeLatestAssistantAnswerBeforeNewActivity(messages: AgentChatMessage[
 }
 
 function fileEditKey(edit: AgentFileEdit): string {
-  return edit.call_id ? `call:${edit.call_id}:${edit.tool}` : `${edit.tool}:${edit.path}`;
+  const identity = edit.ui_tool_call_id
+    ? `ui:${edit.ui_tool_call_id}`
+    : edit.call_id
+      ? `call:${edit.call_id}`
+      : `legacy:${edit.tool}`;
+  const editPath = (edit.absolute_path || edit.path || "pending").replace(/\\/gu, "/");
+  return `${identity}:${edit.tool}:${editPath}`;
+}
+
+function fileEditsShareActivity(left: AgentFileEdit, right: AgentFileEdit): boolean {
+  if (left.ui_tool_call_id && right.ui_tool_call_id) {
+    return left.ui_tool_call_id === right.ui_tool_call_id && left.tool === right.tool;
+  }
+  if (left.call_id && right.call_id) {
+    return left.call_id === right.call_id && left.tool === right.tool;
+  }
+  return !left.ui_tool_call_id
+    && !right.ui_tool_call_id
+    && !left.call_id
+    && !right.call_id
+    && left.tool === right.tool
+    && fileEditKey(left) === fileEditKey(right);
 }
 
 const IMAGE_ATTACHMENT_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".tif", ".tiff"]);
@@ -3009,11 +3161,11 @@ function inferMediaKind(media: { url?: string; name?: string; kind?: AgentChatMe
   return "file";
 }
 
-function closeReasoningStream(state: AgentState): AgentState {
+function closeReasoningStream(state: AgentState, turnId: string | null): AgentState {
   return syncCurrentMessages({
     ...state,
     messages: state.messages.map((message) => {
-      if (!message.reasoningStreaming) {
+      if (!message.reasoningStreaming || (turnId && message.turnId !== turnId)) {
         return message;
       }
       return {
@@ -3025,18 +3177,24 @@ function closeReasoningStream(state: AgentState): AgentState {
   });
 }
 
-function appendCompleteReasoningMessage(state: AgentState, text: string): AgentState {
+function appendCompleteReasoningMessage(state: AgentState, text: string, turnId: string | null): AgentState {
   if (!text) {
     return state;
   }
-  return closeReasoningStream(appendReasoningDelta(state, text));
+  return closeReasoningStream(appendReasoningDelta(state, text, turnId), turnId);
 }
 
-function findLatestStreamingAssistantAnswerIndex(messages: AgentChatMessage[]): number {
+function findLatestStreamingAssistantAnswerIndex(
+  messages: AgentChatMessage[],
+  turnId: string | null = null
+): number {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
-    if (!message || message.role === "user") {
+    if (!message || (!turnId && message.role === "user")) {
       break;
+    }
+    if (turnId && message.turnId !== turnId) {
+      continue;
     }
     if (
       message.role === "assistant"
@@ -3078,28 +3236,31 @@ function normalizeModelError(value: unknown): MemmyAgentModelError | undefined {
 }
 
 function appendAssistantMessage(state: AgentState, event: MemmyAgentWsEvent): AgentState {
+  const turnId = eventTurnId(event);
   const text = typeof event.text === "string" ? event.text : typeof event.content === "string" ? event.content : "";
   const media = Array.isArray(event.media_urls) ? normalizeMedia(event.media_urls) : undefined;
   const modelError = normalizeModelError(event.model_error);
   const messages = [...state.messages];
   const forceNewAssistant = isCronProactiveEvent(event);
-  const last = messages.at(-1);
+  const lastIndex = latestMessageIndexForTurn(messages, turnId);
+  const last = lastIndex >= 0 ? messages[lastIndex] : undefined;
   let closedActivity = false;
   if (last && isReasoningOnlyActivityMessage(last) && last.isStreaming) {
-    messages[messages.length - 1] = {
+    messages[lastIndex] = {
       ...last,
       reasoningStreaming: false,
       isStreaming: false,
-      activitySegmentId: last.activitySegmentId ?? currentTurnActivitySegmentId(messages)
+      activitySegmentId: last.activitySegmentId ?? currentOrTurnActivitySegmentId(messages, turnId)
     };
     closedActivity = true;
   }
-  const updatedLast = messages.at(-1);
+  const updatedLastIndex = latestMessageIndexForTurn(messages, turnId);
+  const updatedLast = updatedLastIndex >= 0 ? messages[updatedLastIndex] : undefined;
   const targetIndex = forceNewAssistant
     ? -1
     : updatedLast?.role === "assistant" && updatedLast.isStreaming && updatedLast.kind !== "trace" && updatedLast.kind !== "narration"
-      ? messages.length - 1
-      : findLatestStreamingAssistantAnswerIndex(messages);
+      ? updatedLastIndex
+      : findLatestStreamingAssistantAnswerIndex(messages, turnId);
 
   if (targetIndex >= 0) {
     const target = messages[targetIndex]!;
@@ -3109,6 +3270,7 @@ function appendAssistantMessage(state: AgentState, event: MemmyAgentWsEvent): Ag
       ...(media?.length ? { media } : {}),
       ...(modelError ? { modelError } : {}),
       ...(typeof event.latency_ms === "number" ? { latencyMs: event.latency_ms } : {}),
+      ...(turnId ? { turnId } : {}),
       isStreaming: true
     };
   } else {
@@ -3119,6 +3281,7 @@ function appendAssistantMessage(state: AgentState, event: MemmyAgentWsEvent): Ag
       id: nextMessageId(messages, "assistant"),
       role: "assistant",
       content: text,
+      ...(turnId ? { turnId } : {}),
       createdAt: Date.now(),
       ...(media?.length ? { media } : {}),
       ...(modelError ? { modelError } : {}),
@@ -3141,7 +3304,7 @@ function appendToolProgress(state: AgentState, event: MemmyAgentWsEvent): AgentS
   }
 
   const keepBusy = shouldLiveEventKeepChatBusy(state);
-  const messages = closeLatestAssistantAnswerBeforeNewActivity([...state.messages]);
+  const messages = closeLatestAssistantAnswerBeforeNewActivity([...state.messages], turnId);
   const relatedFileEditIndex = structuredEvents.length ? findFileEditTraceIndexForToolEvents(messages, structuredEvents, turnId) : -1;
   const relatedFileEdit = relatedFileEditIndex >= 0 ? messages[relatedFileEditIndex] : undefined;
   const currentSegmentId = relatedFileEdit?.activitySegmentId ?? currentOrTurnActivitySegmentId(messages, turnId);
@@ -3186,7 +3349,7 @@ function appendToolProgress(state: AgentState, event: MemmyAgentWsEvent): AgentS
     && !isFileEditActivityMessage(last)
     && isActivityMessageRunning(last)
     && (!last.activitySegmentId || last.activitySegmentId === segmentId)
-    && (!turnId || !last.turnId || last.turnId === turnId)
+    && (!turnId || last.turnId === turnId)
   ) {
     const previousTraces = last.traces?.length ? last.traces : last.content ? [last.content] : [];
     const mergedLines = structuredLines.length
@@ -3231,20 +3394,28 @@ function appendToolProgress(state: AgentState, event: MemmyAgentWsEvent): AgentS
 }
 
 function upsertContextCompactionDivider(state: AgentState, event: MemmyAgentWsEvent): AgentState {
+  const turnId = eventTurnId(event);
   const compactionId = typeof event.compaction_id === "string" && event.compaction_id.trim()
     ? event.compaction_id.trim()
     : "context-compaction";
   const compactionStatus = normalizeContextCompactionStatus(event.status);
   const content = contextCompactionEventText(event, compactionStatus);
   const messages = [...state.messages];
-  const existingIndex = messages.findIndex((message) => (
-    message.kind === "context_compaction"
-    && message.compactionId === compactionId
-  ));
+  let existingIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!message || (!turnId && message.role === "user")) break;
+    if (turnId && message.turnId !== turnId) continue;
+    if (message.kind === "context_compaction" && message.compactionId === compactionId) {
+      existingIndex = index;
+      break;
+    }
+  }
   const next = {
     role: "tool" as const,
     kind: "context_compaction" as const,
     content,
+    ...(turnId ? { turnId } : {}),
     compactionId,
     compactionStatus,
     isStreaming: compactionStatus === "running"
@@ -3281,7 +3452,7 @@ function appendFileEditTrace(state: AgentState, event: MemmyAgentWsEvent): Agent
     return state;
   }
   const keepBusy = cancellationTerminal ? false : shouldLiveEventKeepChatBusy(state);
-  const messages = closeLatestAssistantAnswerBeforeNewActivity([...state.messages]);
+  const messages = closeLatestAssistantAnswerBeforeNewActivity([...state.messages], turnId);
   const relatedToolSegmentId = findToolTraceSegmentIdForFileEdits(messages, normalized, turnId);
   const segmentId = relatedToolSegmentId ?? currentOrTurnActivitySegmentId(messages, turnId);
   const targetIndex = findFileEditTraceIndex(messages, normalized, turnId);
@@ -3374,8 +3545,7 @@ function markChatIdle(state: AgentState, chatId: string, options: {
 }): AgentState {
   const activeTurnId = state.activeTurnIdByChatId[chatId] ?? null;
   if (
-    options.source !== "session_hydrate"
-    && activeTurnId
+    activeTurnId
     && (!options.turnId || options.turnId !== activeTurnId)
   ) return state;
   const wasBusy = isChatBusy(state, chatId) || Boolean(state.stopInFlightByChatId[chatId]);

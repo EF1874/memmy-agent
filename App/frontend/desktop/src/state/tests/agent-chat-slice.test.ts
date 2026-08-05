@@ -1597,6 +1597,210 @@ describe("agent chat slice", () => {
     expect(traceTexts).not.toContain('write_file({"path": "/tmp/a.txt", "content": "草泥马"})');
   });
 
+  it("keeps one file row across stale hydrate and final Provider call ids", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 100, turn_id: "turn-b" }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "file_edit",
+        chat_id: "chat-1",
+        turn_id: "turn-b",
+        edits: [{
+          call_id: "stream-id",
+          ui_tool_call_id: "ui-write",
+          tool: "write_file",
+          path: "src/a.ts",
+          absolute_path: "/workspace/src/a.ts",
+          phase: "start",
+          added: 20
+        }]
+      }
+    });
+    state = agentReducer(state, {
+      type: "agent/historyHydrateLoading",
+      sessionKey: "websocket:chat-1",
+      chatId: "chat-1",
+      requestId: "stale-turn-a"
+    });
+    state = agentReducer(state, {
+      type: "agent/historyHydrateLoaded",
+      requestId: "stale-turn-a",
+      thread: {
+        schemaVersion: 3,
+        sessionKey: "websocket:chat-1",
+        last_turn_id: "turn-a",
+        last_turn_closed: true,
+        messages: []
+      }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "file_edit",
+        chat_id: "chat-1",
+        turn_id: "turn-b",
+        edits: [{
+          call_id: "provider-final",
+          ui_tool_call_id: "ui-write",
+          tool: "write_file",
+          path: "src/a.ts",
+          absolute_path: "/workspace/src/a.ts",
+          phase: "end",
+          added: 487
+        }]
+      }
+    });
+
+    const fileRows = state.messages.filter((message) => message.fileEdits);
+    expect(state.activeTurnIdByChatId["chat-1"]).toBe("turn-b");
+    expect(state.isSending).toBe(true);
+    expect(fileRows).toHaveLength(1);
+    expect(fileRows[0].turnId).toBe("turn-b");
+    expect(fileRows[0].fileEdits).toEqual([
+      expect.objectContaining({ ui_tool_call_id: "ui-write", call_id: "provider-final", status: "done", added: 487 })
+    ]);
+  });
+
+  it("keeps separate UI tool invocations distinct even for the same Provider id and path", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+    for (const uiToolCallId of ["ui-1", "ui-2"]) {
+      state = agentReducer(state, {
+        type: "agent/wsEvent",
+        event: {
+          event: "file_edit",
+          chat_id: "chat-1",
+          turn_id: "turn-1",
+          edits: [{
+            call_id: "duplicate-provider-id",
+            ui_tool_call_id: uiToolCallId,
+            tool: "edit_file",
+            path: "src/a.ts",
+            phase: "end",
+            added: 1
+          }]
+        }
+      });
+    }
+
+    const fileRows = state.messages.filter((message) => message.fileEdits);
+    expect(fileRows).toHaveLength(2);
+    expect(fileRows.map((message) => message.fileEdits?.[0]?.ui_tool_call_id)).toEqual(["ui-1", "ui-2"]);
+  });
+
+  it("ignores a closed hydrate for an older turn and keeps reasoning continuous", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 100, turn_id: "turn-b" }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "reasoning_delta", chat_id: "chat-1", turn_id: "turn-b", text: "先分析" }
+    });
+    state = agentReducer(state, {
+      type: "agent/historyHydrateLoading",
+      sessionKey: "websocket:chat-1",
+      chatId: "chat-1",
+      requestId: "reasoning-stale"
+    });
+    state = agentReducer(state, {
+      type: "agent/historyHydrateLoaded",
+      requestId: "reasoning-stale",
+      thread: {
+        schemaVersion: 3,
+        sessionKey: "websocket:chat-1",
+        last_turn_id: "turn-a",
+        last_turn_closed: true,
+        messages: [{ role: "assistant", turnId: "turn-a", content: "旧结果" }]
+      }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "reasoning_delta", chat_id: "chat-1", turn_id: "turn-b", text: "，再执行" }
+    });
+
+    const reasoningRows = state.messages.filter((message) => message.turnId === "turn-b" && message.reasoning);
+    expect(state.activeTurnIdByChatId["chat-1"]).toBe("turn-b");
+    expect(state.isSending).toBe(true);
+    expect(reasoningRows).toHaveLength(1);
+    expect(reasoningRows[0].reasoning).toBe("先分析，再执行");
+    expect(reasoningRows[0].stoppedByUser).not.toBe(true);
+  });
+
+  it("accepts only a matching closed hydrate for the active turn", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 100, turn_id: "turn-b" }
+    });
+    state = agentReducer(state, {
+      type: "agent/historyHydrateLoading",
+      sessionKey: "websocket:chat-1",
+      chatId: "chat-1",
+      requestId: "matching-turn"
+    });
+    state = agentReducer(state, {
+      type: "agent/historyHydrateLoaded",
+      requestId: "matching-turn",
+      thread: {
+        schemaVersion: 3,
+        sessionKey: "websocket:chat-1",
+        last_turn_id: "turn-b",
+        last_turn_closed: true,
+        messages: [{ role: "assistant", turnId: "turn-b", content: "完成" }]
+      }
+    });
+
+    expect(state.activeTurnIdByChatId["chat-1"]).toBeNull();
+    expect(state.isSending).toBe(false);
+    expect(state.messages.map((message) => message.content)).toEqual(["完成"]);
+  });
+
+  it("continues reasoning from an open snapshot for the active turn", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 100, turn_id: "turn-b" }
+    });
+    state = agentReducer(state, {
+      type: "agent/historyHydrateLoading",
+      sessionKey: "websocket:chat-1",
+      chatId: "chat-1",
+      requestId: "open-turn"
+    });
+    state = agentReducer(state, {
+      type: "agent/historyHydrateLoaded",
+      requestId: "open-turn",
+      thread: {
+        schemaVersion: 3,
+        sessionKey: "websocket:chat-1",
+        last_turn_id: "turn-b",
+        last_turn_closed: false,
+        messages: [{
+          role: "assistant",
+          turnId: "turn-b",
+          content: "",
+          reasoning: "先分析",
+          reasoningStreaming: true,
+          isStreaming: true
+        }]
+      }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "reasoning_delta", chat_id: "chat-1", turn_id: "turn-b", text: "，再执行" }
+    });
+
+    const reasoningRows = state.messages.filter((message) => message.turnId === "turn-b" && message.reasoning);
+    expect(reasoningRows).toHaveLength(1);
+    expect(reasoningRows[0].reasoning).toBe("先分析，再执行");
+    expect(reasoningRows[0].reasoningStreaming).toBe(true);
+  });
+
   it("keeps a shared activity segment running until both file edit and tool trace complete", () => {
     let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
     state = agentReducer(state, {
@@ -4023,6 +4227,7 @@ describe("agent chat slice", () => {
       thread: {
         schemaVersion: 1,
         sessionKey: "websocket:chat-1",
+        last_turn_id: "turn-stale",
         last_turn_closed: true,
         messages: [
           { role: "user", content: "已提交消息" },

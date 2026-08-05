@@ -41,11 +41,10 @@ export function AgentGoalBar(props: AgentGoalBarProps) {
     }
   }, [form, goalId, props.chatId]);
 
-  if (!status || !goalId) return null;
+  if (!status || !goalId || status === "completed") return null;
 
   const canResume = status === "paused" || status === "blocked" || status === "usage_limited";
-  const canEdit = status !== "active" && status !== "completed";
-  const canBudget = status !== "completed";
+  const canEdit = status !== "active";
   const objectiveIsLong = props.goal.objective.length > 320 || props.goal.objective.includes("\n");
 
   const control = (action: AgentGoalControlAction) => {
@@ -133,7 +132,7 @@ export function AgentGoalBar(props: AgentGoalBarProps) {
         {status === "active" ? <GoalButton disabled={props.pending} onClick={() => control("pause")}>{t("home.goal.pause")}</GoalButton> : null}
         {canResume ? <GoalButton disabled={props.pending} onClick={() => control("resume")}>{t("home.goal.resume")}</GoalButton> : null}
         {canEdit ? <GoalButton disabled={props.pending} onClick={openEdit}>{t("common.edit")}</GoalButton> : null}
-        {canBudget ? <GoalButton disabled={props.pending} onClick={openBudget}>{t("home.goal.budget")}</GoalButton> : null}
+        <GoalButton disabled={props.pending} onClick={openBudget}>{t("home.goal.budget")}</GoalButton>
         <GoalButton disabled={props.pending} danger onClick={() => control("clear")}>{t("home.goal.clear")}</GoalButton>
       </div>
 

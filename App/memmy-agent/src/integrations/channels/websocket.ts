@@ -3322,6 +3322,7 @@ export class WebSocketChannel extends BaseChannel {
       });
       return;
     }
+    if (message.metadata?.webuiGoalCreateAck === true) return;
 
     const targets = message.chatId === "*" ? [...this.connectionChats.keys()] : [...(this.subscriptions.get(message.chatId) ?? [])];
     const wireText = this.rewriteLocalMarkdownImages(message.content, `websocket:${message.chatId}`);

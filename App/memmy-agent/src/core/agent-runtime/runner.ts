@@ -30,6 +30,7 @@ import {
   StreamingFileEditTracker,
 } from "../../utils/file-edit-events.js";
 import {
+  getOrCreateUiToolCallId,
   invokeFileEditProgress,
   onProgressAcceptsFileEditEvents,
 } from "../../utils/progress-events.js";
@@ -362,14 +363,16 @@ export class AgentRunner {
     };
 
     const finishLiveFileEdits = async (response: LLMResponse): Promise<LLMResponse> => {
-      if (!liveFileEdits) return response;
-      await liveFileEdits.flush();
-      if (response.shouldExecuteTools) liveFileEdits.applyFinalCallIds(response.toolCalls);
-      await liveFileEdits.errorUnmatched(
-        response.shouldExecuteTools ? response.toolCalls : [],
-        "Tool call did not complete.",
-      );
-      liveFileEdits.close();
+      if (liveFileEdits) {
+        await liveFileEdits.flush();
+        if (response.shouldExecuteTools) liveFileEdits.bindFinalToolCalls(response.toolCalls);
+        await liveFileEdits.errorUnmatched(
+          response.shouldExecuteTools ? response.toolCalls : [],
+          "Tool call did not complete.",
+        );
+        liveFileEdits.close();
+      }
+      for (const toolCall of response.toolCalls) getOrCreateUiToolCallId(toolCall);
       return response;
     };
 
@@ -590,6 +593,7 @@ export class AgentRunner {
     const fileEditTrackers = progressCallback
       ? prepareFileEditTrackers({
         callId: call.id,
+        uiToolCallId: getOrCreateUiToolCallId(call),
         toolName: call.name,
         tool,
         workspace: spec.workspace,

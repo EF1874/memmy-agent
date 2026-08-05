@@ -81,11 +81,16 @@ describe("AgentGoalBar", () => {
     ["paused", ["Resume", "Edit", "Budget", "Clear"]],
     ["blocked", ["Resume", "Edit", "Budget", "Clear"]],
     ["usage_limited", ["Resume", "Edit", "Budget", "Clear"]],
-    ["budget_limited", ["Edit", "Budget", "Clear"]],
-    ["completed", ["Clear"]]
+    ["budget_limited", ["Edit", "Budget", "Clear"]]
   ] as const)("renders the %s action matrix", (status, expected) => {
     render({ goal: goal(status) });
     expect(buttons()).toEqual(expected);
+  });
+
+  it("does not render a completed Goal", () => {
+    render({ goal: goal("completed") });
+    expect(container.querySelector(".agent-goal-bar")).toBeNull();
+    expect(container.textContent).toBe("");
   });
 
   it("shows distinct Provider quota and Goal budget recovery guidance", () => {

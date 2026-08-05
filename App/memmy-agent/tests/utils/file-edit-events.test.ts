@@ -14,6 +14,7 @@ import {
   prepareFileEditTrackers,
   readFileSnapshot,
 } from "../../src/utils/file-edit-events.js";
+import { getOrCreateUiToolCallId } from "../../src/utils/progress-events.js";
 
 const roots: string[] = [];
 
@@ -89,6 +90,7 @@ describe("file edit event helpers", () => {
     expect(buildFileEditStartEvent(tracker!, params)).toEqual({
       version: 1,
       call_id: "call-write",
+      ui_tool_call_id: expect.any(String),
       tool: "write_file",
       path: "notes.txt",
       absolute_path: slash(target),
@@ -216,6 +218,7 @@ describe("file edit event helpers", () => {
     expect(events[0]).toEqual({
       version: 1,
       call_id: "call-live",
+      ui_tool_call_id: expect.any(String),
       tool: "write_file",
       path: "notes.md",
       absolute_path: slash(path.join(root, "notes.md")),
@@ -284,6 +287,7 @@ describe("file edit event helpers", () => {
     expect(events[0]).toEqual({
       version: 1,
       call_id: "call-live",
+      ui_tool_call_id: expect.any(String),
       tool: "write_file",
       path: "",
       phase: "start",
@@ -367,6 +371,7 @@ describe("file edit event helpers", () => {
     expect(events[0]).toEqual({
       version: 1,
       call_id: "call-edit",
+      ui_tool_call_id: expect.any(String),
       tool: "edit_file",
       path: "notes.md",
       absolute_path: slash(path.join(root, "notes.md")),
@@ -379,29 +384,46 @@ describe("file edit event helpers", () => {
     expect(events.at(-1)).toMatchObject({ path: "notes.md", status: "editing", approximate: true, added: 24, deleted: 2 });
   });
 
-  it("applies canonical call ids to matching final tool calls", async () => {
+  it("binds live and final calls without changing the Provider call id", async () => {
     const root = tmpRoot();
     const tracker = new StreamingFileEditTracker({ workspace: root, tools: {}, emit: () => undefined });
     await tracker.update({ index: 0, name: "write_file", arguments_delta: '{"path":"matched.md","content":"one\\n' });
     const final = { id: "provider-final-id", name: "write_file", arguments: { path: "matched.md", content: "one\n" } };
 
-    tracker.applyFinalCallIds([final]);
+    tracker.bindFinalToolCalls([final]);
 
-    expect(final.id).toBe("idx:0");
+    expect(final.id).toBe("provider-final-id");
+    expect(getOrCreateUiToolCallId(final)).toBe(tracker.states.get("idx:0")?.uiToolCallId);
   });
 
-  it("does not restore duplicate canonical ids", async () => {
+  it("gives final calls distinct UI ids when streamed Provider ids repeat", async () => {
     const root = tmpRoot();
     const tracker = new StreamingFileEditTracker({ workspace: root, tools: {}, emit: () => undefined });
     await tracker.update({ index: 0, call_id: "call_dup", name: "write_file", arguments_delta: '{"path":"a.md","content":"one\\n"}' });
     await tracker.update({ index: 1, call_id: "call_dup", name: "write_file", arguments_delta: '{"path":"b.md","content":"two\\n"}' });
     const finalA = { id: "call_dup", name: "write_file", arguments: { path: "a.md", content: "one\n" } };
-    const finalB = { id: "call_unique", name: "write_file", arguments: { path: "b.md", content: "two\n" } };
+    const finalB = { id: "call_dup", name: "write_file", arguments: { path: "b.md", content: "two\n" } };
 
-    tracker.applyFinalCallIds([finalA, finalB]);
+    tracker.bindFinalToolCalls([finalA, finalB]);
 
     expect(finalA.id).toBe("call_dup");
-    expect(finalB.id).toBe("call_unique");
+    expect(finalB.id).toBe("call_dup");
+    expect(getOrCreateUiToolCallId(finalA)).not.toBe(getOrCreateUiToolCallId(finalB));
+  });
+
+  it("gives final calls distinct UI ids when Provider ids are missing", async () => {
+    const root = tmpRoot();
+    const tracker = new StreamingFileEditTracker({ workspace: root, tools: {}, emit: () => undefined });
+    await tracker.update({ index: 0, name: "write_file", arguments_delta: '{"path":"a.md","content":"one\\n"}' });
+    await tracker.update({ index: 1, name: "write_file", arguments_delta: '{"path":"b.md","content":"two\\n"}' });
+    const finalA = { id: "", name: "write_file", arguments: { path: "a.md", content: "one\n" } };
+    const finalB = { id: "", name: "write_file", arguments: { path: "b.md", content: "two\n" } };
+
+    tracker.bindFinalToolCalls([finalA, finalB]);
+
+    expect(finalA.id).toBe("");
+    expect(finalB.id).toBe("");
+    expect(getOrCreateUiToolCallId(finalA)).not.toBe(getOrCreateUiToolCallId(finalB));
   });
 
   it("flushes a small pending edit_file count", async () => {
