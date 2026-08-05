@@ -26,14 +26,36 @@ describe("first encounter task launch", () => {
   it("stores and consumes a trimmed report task prompt", () => {
     const storage = new MemoryStorage();
 
-    writePendingFirstEncounterTaskLaunch(storage, "  帮我整理项目背景  ", 123);
+    writePendingFirstEncounterTaskLaunch(storage, "  帮我整理项目背景  ", { now: 123 });
 
     expect(storage.getItem(PENDING_FIRST_ENCOUNTER_TASK_LAUNCH_KEY)).toBe(JSON.stringify({
       prompt: "帮我整理项目背景",
       createdAt: 123
     }));
-    expect(consumePendingFirstEncounterTaskLaunch(storage)).toBe("帮我整理项目背景");
+    expect(consumePendingFirstEncounterTaskLaunch(storage)).toEqual({
+      prompt: "帮我整理项目背景",
+      createdAt: 123
+    });
     expect(storage.getItem(PENDING_FIRST_ENCOUNTER_TASK_LAUNCH_KEY)).toBeNull();
+  });
+
+  it("stores assistant content and seeded chat ids for Home to open without re-running the agent", () => {
+    const storage = new MemoryStorage();
+
+    writePendingFirstEncounterTaskLaunch(storage, "Organize my latest project", {
+      assistantContent: "  Hi Xiaoyan,\n\nFirst report body.  ",
+      chatId: "chat-seeded",
+      sessionKey: "websocket:chat-seeded",
+      now: 456
+    });
+
+    expect(consumePendingFirstEncounterTaskLaunch(storage)).toEqual({
+      prompt: "Organize my latest project",
+      assistantContent: "Hi Xiaoyan,\n\nFirst report body.",
+      chatId: "chat-seeded",
+      sessionKey: "websocket:chat-seeded",
+      createdAt: 456
+    });
   });
 
   it("clears a pending task before opening the empty first conversation", () => {

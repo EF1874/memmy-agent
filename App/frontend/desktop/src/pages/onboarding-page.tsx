@@ -43,6 +43,8 @@ import {
 } from "./first-encounter-protocol.js";
 import {
   armFirstEncounterRelayChat,
+  writeFirstEncounterRelayChat,
+  writeFirstEncounterRelayReadyChat,
   writePendingFirstEncounterTaskLaunch
 } from "./first-encounter-task-launch.js";
 import { HomePage } from "./home-page.js";
@@ -81,6 +83,8 @@ export function OnboardingPage() {
   const hasTrackedFirstReportView = useRef(false);
   const firstScanStepRef = useRef<FirstScanStep | null>(null);
   const firstScanVisualComplete = useRef(false);
+  const firstReportSeedPromiseRef = useRef<Promise<{ chatId: string; sessionKey: string } | null> | null>(null);
+  const firstReportSeededChatRef = useRef<{ chatId: string; sessionKey: string } | null>(null);
   const onboarding = state.bootstrap?.onboarding;
   const isAccountMode = state.bootstrap?.app.userMode === "account";
   const guidanceCompleted = readGuidanceCompleted(typeof window === "undefined" ? undefined : window.localStorage);
@@ -427,6 +431,8 @@ export function OnboardingPage() {
     setFirstReportIsStreaming(false);
     setFirstReportShouldSimulate(false);
     setFirstReportError(null);
+    firstReportSeedPromiseRef.current = null;
+    firstReportSeededChatRef.current = null;
     if (clients) {
       scheduleMemoryPanelCachePrefetch({
         client: clients.memoryRuntime,
@@ -451,6 +457,9 @@ export function OnboardingPage() {
           setFirstReportPayload(payload);
           setFirstScanAgents(payload.agents.length > 0 ? payload.agents : seedAgents);
           firstScanVisualComplete.current = true;
+          // Persist into a real chat as soon as the report exists, so later
+          // navigation / WS timing cannot drop the generated content.
+          void seedFirstEncounterReportChat(payload.body);
         }
       }
     ).catch((error) => {
@@ -518,10 +527,47 @@ export function OnboardingPage() {
   }, [onboarding?.scanPermission, track]);
 
   function continueFromReport() {
-    completeReportFlow(true);
+    void completeReportFlow(true);
   }
 
-  function completeReportFlow(createConversation: boolean) {
+  function seedFirstEncounterReportChat(reportBody: string): Promise<{ chatId: string; sessionKey: string } | null> {
+    const assistantContent = reportBody.trim();
+    const prompt = t("onboarding.report.userPrompt");
+    const storage = typeof window === "undefined" ? undefined : window.sessionStorage;
+    if (!assistantContent) {
+      return Promise.resolve(null);
+    }
+
+    // Keep the report body queued even before seed finishes, so Home can retry.
+    writePendingFirstEncounterTaskLaunch(storage, prompt, { assistantContent });
+
+    const memmyAgent = clients?.memmyAgent;
+    if (!memmyAgent) {
+      return Promise.resolve(null);
+    }
+
+    const seedPromise = memmyAgent.seedWebuiChat({
+      userText: prompt,
+      assistantText: assistantContent,
+      title: t("onboarding.report.title")
+    }).then((seeded) => {
+      const next = { chatId: seeded.chat_id, sessionKey: seeded.session_key };
+      firstReportSeededChatRef.current = next;
+      writePendingFirstEncounterTaskLaunch(storage, prompt, {
+        assistantContent,
+        chatId: next.chatId,
+        sessionKey: next.sessionKey
+      });
+      return next;
+    }).catch((error) => {
+      console.warn("seed first encounter report chat on generate failed", error);
+      return null;
+    });
+    firstReportSeedPromiseRef.current = seedPromise;
+    return seedPromise;
+  }
+
+  async function completeReportFlow(createConversation: boolean) {
     const completionPatch = buildOnboardingCompletionPatch(new Date().toISOString());
     const storage = typeof window === "undefined" ? undefined : window.sessionStorage;
     const localStorageRef = typeof window === "undefined" ? undefined : window.localStorage;
@@ -534,9 +580,22 @@ export function OnboardingPage() {
 
     writePreferredMode(localStorageRef, "full");
     if (createConversation) {
-      // Queue the report prompt so Home creates a sidebar task after the report flow.
-      writePendingFirstEncounterTaskLaunch(storage, t("onboarding.report.userPrompt"));
-      armFirstEncounterRelayChat(storage);
+      const prompt = t("onboarding.report.userPrompt");
+      const assistantContent = firstReportPayload?.body?.trim() || undefined;
+      // Prefer the chat seeded at report-done; wait if still in flight, then retry once.
+      const seeded = firstReportSeededChatRef.current
+        ?? (await firstReportSeedPromiseRef.current)
+        ?? (assistantContent ? await seedFirstEncounterReportChat(assistantContent) : null);
+      writePendingFirstEncounterTaskLaunch(storage, prompt, {
+        ...(assistantContent ? { assistantContent } : {}),
+        ...(seeded ? { chatId: seeded.chatId, sessionKey: seeded.sessionKey } : {})
+      });
+      if (seeded) {
+        writeFirstEncounterRelayChat(storage, seeded.chatId);
+        writeFirstEncounterRelayReadyChat(storage, seeded.chatId);
+      } else {
+        armFirstEncounterRelayChat(storage);
+      }
       dispatch(agentActions.newChatRequested());
     }
     dispatch(appActions.preferredModeUpdated("full"));
