@@ -83,11 +83,13 @@ describe("onboarding insight service", () => {
 
   it("returns a fixed Memmy introduction when agents have no sampled memory", async () => {
     const generateReport = vi.fn(async () => "should not be used");
+    const write = vi.fn(async () => undefined);
     const service = createOnboardingInsightService({
       samplers: [
         sampler("codex", "Codex", [])
       ],
       reportGenerator: { generateReport },
+      memoryWriter: { write },
       now: () => 100
     });
 
@@ -105,6 +107,7 @@ describe("onboarding insight service", () => {
       usedLlm: false
     });
     expect(generateReport).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
   });
 
   it("localizes the fixed empty-history report for English UI", async () => {
@@ -187,6 +190,42 @@ describe("onboarding insight service", () => {
       sample: expect.objectContaining({
         sampledQueryCount: 1
       })
+    }));
+  });
+
+  it("stores the model-summarized task trajectory instead of the raw conversation", async () => {
+    const write = vi.fn(async () => undefined);
+    const taskContext = {
+      topic: "Memmy onboarding handoff",
+      userGoal: "让新 Agent 准确接续最近任务。",
+      latestRequest: "改用归纳后的任务轨迹作为接续上下文。",
+      status: "active",
+      currentState: "双区块输出方案已确定，等待实现验证。",
+      agentActions: ["梳理了报告与任务上下文的边界。"],
+      verifiedResults: [],
+      unresolvedItems: ["尚未验证跨 Agent 召回。"],
+      continuationPoint: "实现双区块解析并运行测试。",
+      trajectorySummary: "用户先发现原始对话导致接续混乱，随后确定改为通用任务轨迹摘要；当前进入实现阶段。"
+    };
+    const service = createOnboardingInsightService({
+      samplers: [
+        sampler("codex", "Codex", [query("codex", "1", "不要保存原始对话，改成任务轨迹摘要")])
+      ],
+      reportGenerator: {
+        async generateReport() {
+          return `<memmy_report>## 最近项目记忆\n已改用任务轨迹摘要。</memmy_report>\n<memmy_task_context>${JSON.stringify(taskContext)}</memmy_task_context>`;
+        }
+      },
+      memoryWriter: { write },
+      now: () => 100
+    });
+
+    const report = await service.generateReport({ locale: "zh-CN" });
+
+    expect(report.reportMarkdown).toBe("## 最近项目记忆\n已改用任务轨迹摘要。");
+    expect(write).toHaveBeenCalledWith(expect.objectContaining({
+      reportMarkdown: "## 最近项目记忆\n已改用任务轨迹摘要。",
+      taskContext
     }));
   });
 
@@ -306,7 +345,7 @@ describe("onboarding insight service", () => {
       maxSessionFiles: 6,
       maxQueries: 12,
       maxQueryChars: 600,
-      deadlineMs: 10_000
+      deadlineMs: 3_000
     }));
   });
 
@@ -399,7 +438,7 @@ describe("onboarding insight service", () => {
       sourceId: "cursor",
       displayName: "Cursor",
       conversationId: "cursor-conversation"
-    }), expect.objectContaining({ deadlineMs: 10_000 }));
+    }), expect.objectContaining({ deadlineMs: 3_000 }));
     const sample = generateReport.mock.calls[0]?.[0].sample;
     expect(sample?.latestConversation).toMatchObject({
       agentSource: "Cursor",
@@ -447,9 +486,10 @@ describe("onboarding insight service", () => {
         usedLlm: false
       }
     });
-    expect(events[1]).toEqual({ type: "chunk", delta: "Hi，" });
-    expect(events[2]).toEqual({ type: "chunk", delta: "我已经开始读你的最近任务。\r\n" });
-    expect(events[3]).toEqual({ type: "chunk", delta: "## 接下来可以做\n1. 先验证记忆已完成摘要和索引。" });
+    expect(events
+      .filter((event): event is { type: "chunk"; delta: string } => event.type === "chunk")
+      .map((event) => event.delta)
+      .join("")).toBe("Hi，我已经开始读你的最近任务。\r\n## 接下来可以做\n1. 先验证记忆已完成摘要和索引。");
     expect(events[4]).toMatchObject({
       type: "done",
       response: {
@@ -464,6 +504,96 @@ describe("onboarding insight service", () => {
       reportMarkdown: expect.stringContaining("先验证记忆已完成摘要和索引"),
       latestConversation: expect.objectContaining({ agentSource: "Codex" })
     }));
+  });
+
+  it("keeps task context hidden even when the model omits the report closing tag", async () => {
+    const write = vi.fn(async () => undefined);
+    const service = createOnboardingInsightService({
+      samplers: [
+        sampler("codex", "Codex", [query("codex", "1", "把最近任务归纳后用于跨 Agent 接续")])
+      ],
+      reportGenerator: {
+        async generateReport() {
+          throw new Error("generateReport not used");
+        },
+        async *streamReport() {
+          yield "<memmy_";
+          yield "report>## 最近项目记忆\n";
+          yield "任务轨迹已归纳。<memmy_task_";
+          yield "context>{\"topic\":\"Memmy 初见报告\",\"userGoal\":\"跨 Agent 接续任务\",\"latestRequest\":\"保存归纳后的轨迹\",\"status\":\"active\",\"currentState\":\"等待验证\",\"agentActions\":[\"已完成摘要设计\"],\"verifiedResults\":[],\"unresolvedItems\":[\"召回尚未验证\"],\"continuationPoint\":\"运行接续测试\",\"trajectorySummary\":\"方案已经确定，当前等待验证。\"}</memmy_task_context>";
+        }
+      },
+      memoryWriter: { write },
+      now: () => 100
+    });
+
+    const events = await collectStreamEvents(service.streamReport({ locale: "zh-CN" }));
+    const visibleText = events
+      .filter((event): event is { type: "chunk"; delta: string } =>
+        Boolean(event && typeof event === "object" && (event as { type?: unknown }).type === "chunk"))
+      .map((event) => event.delta)
+      .join("");
+    const done = events.find((event) =>
+      event && typeof event === "object" && (event as { type?: unknown }).type === "done"
+    ) as { response: { reportMarkdown: string } } | undefined;
+
+    expect(visibleText).toBe("## 最近项目记忆\n任务轨迹已归纳。");
+    expect(visibleText).not.toContain("memmy_task_context");
+    expect(visibleText).not.toContain("trajectorySummary");
+    expect(done?.response.reportMarkdown).toBe("## 最近项目记忆\n任务轨迹已归纳。");
+    expect(write).toHaveBeenCalledWith(expect.objectContaining({
+      taskContext: expect.objectContaining({
+        topic: "Memmy 初见报告",
+        status: "active",
+        continuationPoint: "运行接续测试"
+      })
+    }));
+  });
+
+  it("keeps a naked task-context JSON out of the streamed and final report", async () => {
+    const write = vi.fn(async () => undefined);
+    const taskContext = {
+      topic: "Memmy onboarding",
+      userGoal: "缩短初见报告等待时间。",
+      latestRequest: "不要把内部 JSON 显示给用户。",
+      status: "active",
+      currentState: "正文已经生成，等待记忆索引。",
+      agentActions: ["已开始流式输出正文。"],
+      verifiedResults: [],
+      unresolvedItems: [],
+      continuationPoint: "等待索引完成。",
+      trajectorySummary: "报告正文已经可见，内部任务摘要继续在后台生成。"
+    };
+    const service = createOnboardingInsightService({
+      samplers: [sampler("codex", "Codex", [query("codex", "1", "隐藏初见报告后的 JSON")])],
+      reportGenerator: {
+        async generateReport() {
+          throw new Error("generateReport not used");
+        },
+        async *streamReport() {
+          yield "## 最近项目记忆\n正文先展示。";
+          yield "\n{";
+          yield `${JSON.stringify(taskContext).slice(1)}`;
+        }
+      },
+      memoryWriter: { write },
+      now: () => 100
+    });
+
+    const events = await collectStreamEvents(service.streamReport({ locale: "zh-CN" }));
+    const visibleText = events
+      .filter((event): event is { type: "chunk"; delta: string } =>
+        Boolean(event && typeof event === "object" && (event as { type?: unknown }).type === "chunk"))
+      .map((event) => event.delta)
+      .join("");
+    const done = events.find((event) =>
+      event && typeof event === "object" && (event as { type?: unknown }).type === "done"
+    ) as { response: { reportMarkdown: string } } | undefined;
+
+    expect(visibleText).toBe("## 最近项目记忆\n正文先展示。");
+    expect(visibleText).not.toContain("trajectorySummary");
+    expect(done?.response.reportMarkdown).toBe("## 最近项目记忆\n正文先展示。");
+    expect(write).toHaveBeenCalledWith(expect.objectContaining({ taskContext }));
   });
 
   it("releases a buffered opening bracket when it is ordinary report text", async () => {
@@ -523,7 +653,7 @@ describe("onboarding insight service", () => {
     });
 
     const eventsPromise = collectStreamEvents(service.streamReport({ locale: "zh-CN" }));
-    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(3_000);
     const events = await eventsPromise;
 
     expect(events[0]).toMatchObject({
@@ -650,9 +780,10 @@ describe("onboarding insight service", () => {
     expect(body.messages[0].content).not.toContain("[MEMMY_ACTIONS_JSON]");
     const userPayload = JSON.parse(String(body.messages[1].content));
     expect(userPayload.reportGoal.primary).toBe("user_preferences_latest_project_memory_and_actionable_todos");
-    expect(userPayload.reportGoal.lengthConstraint).toContain("450-700 Chinese characters");
+    expect(userPayload.reportGoal.lengthConstraint).toContain("300-500 Chinese characters");
     expect(userPayload.reportGoal.requiredSections).toContain("latest_project_memory");
     expect(userPayload.reportGoal.requiredSections).toContain("user_preferences");
+    expect(userPayload.reportGoal.outputEnvelope.taskContextFields).toContain("trajectorySummary");
     expect(userPayload.profile.nameHints).toMatchObject({
       selfDeclaredNames: ["Grace"],
       homePathName: "jiang",

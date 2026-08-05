@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
+import type { OnboardingTaskContextSummary } from "./onboarding-task-context.js";
 
 const FIRST_REPORT_SOURCE = "memmy-onboarding";
 const FIRST_REPORT_PROCESSING_TIMEOUT_MS = 180_000;
@@ -9,12 +10,7 @@ const FIRST_REPORT_HANDOFF_QUERY_EN = "Please continue from the first report I j
 const FIRST_REPORT_TAGS = [
   "agent-source",
   "memmy",
-  "初见报告",
-  "首次登录",
-  "memmy-first-report",
   "first-encounter-report",
-  "onboarding-report",
-  "continue-from-first-report",
   "cross-agent-handoff"
 ] as const;
 
@@ -23,15 +19,11 @@ export interface OnboardingFirstReportMemoryInput {
   reportMarkdown: string;
   projects: readonly string[];
   keywords: readonly string[];
+  taskContext: OnboardingTaskContextSummary;
   latestConversation: {
     agentSource: string;
     conversationId: string;
     workspacePath: string | null;
-    messages: ReadonlyArray<{
-      role: "user" | "assistant" | "tool";
-      createdAt: string;
-      text: string;
-    }>;
   };
 }
 
@@ -55,7 +47,12 @@ export function createOnboardingFirstReportMemoryWriter(
         content: renderMemoryContent(input),
         layer: "L1",
         title: firstReportTitle(input),
-        tags: uniqueStrings([...FIRST_REPORT_TAGS, ...input.projects, ...input.keywords]),
+        tags: uniqueStrings([
+          ...FIRST_REPORT_TAGS,
+          ...(input.locale === "zh-CN" ? ["初见报告", "首次登录"] : []),
+          ...input.projects,
+          ...input.keywords
+        ]),
         source: FIRST_REPORT_SOURCE,
         turnId: `first-report:${stableId}`,
         deferProcessing: true
@@ -75,36 +72,81 @@ export function createOnboardingFirstReportMemoryWriter(
 }
 
 function renderMemoryContent(input: OnboardingFirstReportMemoryInput): string {
-  const latestUserQuery = [...input.latestConversation.messages]
-    .reverse()
-    .find((message) => message.role === "user")?.text ?? "";
-  const projects = input.projects.join(", ") || "unknown";
-  const keywords = input.keywords.join(", ") || "unknown";
-  const transcript = input.latestConversation.messages.map((message) => {
-    const label = message.role === "user"
-      ? "User query / 用户请求"
-      : message.role === "assistant" ? "Agent reply / Agent 回复" : "Tool call or result / 简略工具调用";
-    return `【${label} · ${message.createdAt}】\n${message.text}`;
-  }).join("\n\n");
+  const isChinese = input.locale === "zh-CN";
+  const unknown = isChinese ? "未知" : "unknown";
+  const projects = input.projects.join(", ") || unknown;
+  const keywords = input.keywords.join(", ") || unknown;
+  const context = input.taskContext;
+  const none = isChinese ? "无" : "None";
+
+  if (isChinese) {
+    return [
+      "## user",
+      "Memmy 初见报告：跨 Agent 任务接续记忆",
+      "语言：中文",
+      `来源 Agent：${input.latestConversation.agentSource}`,
+      `项目路径：${input.latestConversation.workspacePath ?? unknown}`,
+      `项目：${projects}`,
+      `关键词：${keywords}`,
+      "检索关键词：Memmy、初见报告、首次登录报告、最近项目、最近任务、接续任务",
+      `接续触发词：${FIRST_REPORT_HANDOFF_QUERY_ZH}`,
+      "任务上下文（由最近会话轨迹归纳，不含原始对话流水）",
+      `主题：${context.topic || none}`,
+      `用户目标：${context.userGoal || none}`,
+      `最近请求：${context.latestRequest || none}`,
+      `任务状态：${chineseTaskStatus(context.status)}`,
+      `当前状态：${context.currentState || none}`,
+      renderList("Agent 已执行", context.agentActions, none),
+      renderList("已验证结果", context.verifiedResults, none),
+      renderList("仍待处理", context.unresolvedItems, none),
+      `接续位置：${context.continuationPoint || none}`,
+      `轨迹总结：\n${context.trajectorySummary || none}`,
+      "## assistant",
+      "Memmy 初见报告",
+      input.reportMarkdown
+    ].join("\n\n");
+  }
 
   return [
     "## user",
-    "Memmy 初见报告 / Memmy First Encounter Report / Onboarding Report 跨 Agent 任务接续记忆",
+    "Memmy First Encounter Report: cross-Agent task handoff memory",
+    "Language: English",
     `Source Agent: ${input.latestConversation.agentSource}`,
-    `Workspace: ${input.latestConversation.workspacePath ?? "unknown"}`,
-    `Projects / 项目: ${projects}`,
-    `Keywords / 关键词: ${keywords}`,
-    "Retrieval aliases / 检索别名: Memmy 初见报告, Memmy first report, first encounter report, onboarding report, 首次登录报告, 最近项目, recent project, 最近任务, latest task, current bug, continue task, cross-agent handoff",
-    `Continuation trigger / 中文接续触发词: ${FIRST_REPORT_HANDOFF_QUERY_ZH}`,
-    `Continuation trigger / English handoff query: ${FIRST_REPORT_HANDOFF_QUERY_EN}`,
-    `Latest request / 最近请求: ${latestUserQuery}`,
-    "The following is the scanned first 2 and latest 12 conversation turns, including compact tool calls. Treat the whole block as the user query for cross-Agent continuation.",
-    "以下是扫描到的前 2 轮与最近 12 轮对话及简略工具调用；请把整段作为跨 Agent 接续所需的用户请求上下文。",
-    transcript,
+    `Workspace: ${input.latestConversation.workspacePath ?? unknown}`,
+    `Projects: ${projects}`,
+    `Keywords: ${keywords}`,
+    "Retrieval aliases: Memmy, first encounter report, onboarding report, recent project, latest task, continue task",
+    `Continuation trigger: ${FIRST_REPORT_HANDOFF_QUERY_EN}`,
+    "Task context summarized from the latest conversation trajectory; raw transcript omitted",
+    `Topic: ${context.topic || none}`,
+    `User goal: ${context.userGoal || none}`,
+    `Latest request: ${context.latestRequest || none}`,
+    `Task status: ${context.status}`,
+    `Current state: ${context.currentState || none}`,
+    renderList("Agent actions", context.agentActions, none),
+    renderList("Verified results", context.verifiedResults, none),
+    renderList("Unresolved items", context.unresolvedItems, none),
+    `Continuation point: ${context.continuationPoint || none}`,
+    `Trajectory summary:\n${context.trajectorySummary || none}`,
     "## assistant",
-    "Memmy 初见报告 / Memmy First Encounter Report / Onboarding Report",
+    "Memmy First Encounter Report",
     input.reportMarkdown
   ].join("\n\n");
+}
+
+function chineseTaskStatus(status: OnboardingTaskContextSummary["status"]): string {
+  return {
+    pending: "待处理",
+    active: "进行中",
+    waiting: "等待确认",
+    completed: "已完成",
+    uncertain: "不确定"
+  }[status];
+}
+
+function renderList(title: string, values: readonly string[], emptyLabel: string): string {
+  const separator = /\p{Script=Han}/u.test(title) ? "：" : ":";
+  return `${title}${separator}\n${values.length > 0 ? values.map((value) => `- ${value}`).join("\n") : `- ${emptyLabel}`}`;
 }
 
 async function processFirstReportMemory(
@@ -139,10 +181,9 @@ async function processFirstReportMemory(
 }
 
 function firstReportTitle(input: OnboardingFirstReportMemoryInput): string {
-  const topic = input.projects[0] ?? input.keywords[0];
-  return topic
-    ? `Memmy 初见报告 / First Encounter Report — ${topic}`
-    : "Memmy 初见报告 / First Encounter Report";
+  const topic = input.taskContext.topic || input.projects[0] || input.keywords[0];
+  const base = input.locale === "zh-CN" ? "Memmy 初见报告" : "Memmy First Encounter Report";
+  return topic ? `${base} — ${topic}` : base;
 }
 
 function firstReportHandoffQuery(locale: "zh-CN" | "en-US", workspacePath: string | null): string {
