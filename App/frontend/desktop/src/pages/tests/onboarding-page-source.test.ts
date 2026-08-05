@@ -230,8 +230,11 @@ describe("OnboardingPage source", () => {
     expect(taskLaunchSource).toContain("consumePendingFirstEncounterTaskLaunch");
     expect(taskLaunchSource).toContain("assistantContent");
     expect(taskLaunchSource).toContain("chatId");
-    expect(onboardingSource).toContain("function seedFirstEncounterReportChat(reportBody: string)");
-    expect(onboardingSource).toContain("void seedFirstEncounterReportChat(payload.body)");
+    expect(onboardingSource).toContain("function seedFirstEncounterReportChat(payload: FirstEncounterReportPayload)");
+    expect(onboardingSource).toContain("const prompt = payload.reportPrompt");
+    expect(onboardingSource).toContain("void seedFirstEncounterReportChat(payload)");
+    expect(onboardingSource).toContain("writeFirstEncounterRelayPrompt(");
+    expect(onboardingSource).toContain("payload.relayPrompt");
     expect(onboardingSource).toContain("seedWebuiChat({");
     expect(onboardingSource).toContain("writeFirstEncounterRelayChat(storage, seeded.chatId)");
     expect(onboardingSource).toContain("armFirstEncounterRelayChat(storage)");
