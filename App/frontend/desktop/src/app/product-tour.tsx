@@ -221,17 +221,27 @@ export function createProductTourSteps(
   return includeLogs ? steps : steps.filter((step) => step.tab !== "logs");
 }
 
+export type ProductTourDismissResult = "completed" | "skipped";
+
+export interface ProductTourStepInfo {
+  tourStep: number;
+  tourStepCount: number;
+  tourTab: ProductTourTab;
+}
+
 /** Contract for product tour guide props. */
 export interface ProductTourGuideProps {
-  onDismiss: () => void;
+  onDismiss: (result: ProductTourDismissResult, info: ProductTourStepInfo) => void;
   onTabChange: (tab: ProductTourTab) => void;
+  /** Fired once per step when the bubble layout is ready. */
+  onStepViewed?: (info: ProductTourStepInfo) => void;
   /** Deny-scan tours omit the logs step (4/4). Defaults to true (5/5). */
   includeLogs?: boolean;
 }
 
 /** Handles product tour guide. */
 export function ProductTourGuide(props: ProductTourGuideProps) {
-  const { onDismiss, onTabChange, includeLogs = true } = props;
+  const { onDismiss, onTabChange, onStepViewed, includeLogs = true } = props;
   const { t } = useTranslation();
   const steps = useMemo(
     () => createProductTourSteps(t, { includeLogs }) as [ProductTourStep, ...ProductTourStep[]],
@@ -242,9 +252,12 @@ export function ProductTourGuide(props: ProductTourGuideProps) {
   );
   const current = steps[Math.min(step, steps.length - 1)]!;
   const [layout, setLayout] = useState(() => null as ReturnType<typeof resolveProductTourStepLayout>);
+  const lastViewedStepKeyRef = useRef<string | null>(null);
 
   const onTabChangeRef = useRef(onTabChange);
   onTabChangeRef.current = onTabChange;
+  const onStepViewedRef = useRef(onStepViewed);
+  onStepViewedRef.current = onStepViewed;
 
   useEffect(() => {
     onTabChangeRef.current(current.tab);
@@ -322,18 +335,39 @@ export function ProductTourGuide(props: ProductTourGuideProps) {
     };
   }, [current]);
 
+  useEffect(() => {
+    if (!layout) {
+      return;
+    }
+    const key = `${step}:${current.tab}:${steps.length}`;
+    if (lastViewedStepKeyRef.current === key) {
+      return;
+    }
+    lastViewedStepKeyRef.current = key;
+    onStepViewedRef.current?.({
+      tourStep: step + 1,
+      tourStepCount: steps.length,
+      tourTab: current.tab
+    });
+  }, [layout, step, current.tab, steps.length]);
+
   if (!layout) {
     return null;
   }
 
   const isLast = step === steps.length - 1;
+  const stepInfo: ProductTourStepInfo = {
+    tourStep: step + 1,
+    tourStepCount: steps.length,
+    tourTab: current.tab
+  };
 
   /** Handles go next. */
   function goNext() {
     if (isLast) {
       // Dismiss owns navigation to /main; calling onTabChange("chat") first races
       // with the still-mounted tools step and can bounce back to /tools.
-      onDismiss();
+      onDismiss("completed", stepInfo);
       return;
     }
 
@@ -346,7 +380,7 @@ export function ProductTourGuide(props: ProductTourGuideProps) {
 
   /** Handles handle dismiss. */
   function handleDismiss() {
-    onDismiss();
+    onDismiss("skipped", stepInfo);
   }
 
   const arrow = layout.arrow;

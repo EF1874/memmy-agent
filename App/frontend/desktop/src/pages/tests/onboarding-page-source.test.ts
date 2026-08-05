@@ -278,6 +278,25 @@ describe("OnboardingPage source", () => {
     expect(completeBody).toContain("productTourStartMemorySubPage(includeLogs)");
     expect(completeBody).not.toContain('writeMemorySubPage(storage, "logs");');
   });
+
+  it("onboarding 埋点复用历史事件并补 flow；初见报告走 first_report step", () => {
+    const source = readFileSync(onboardingPageSourcePath, "utf8");
+    const routerSource = readFileSync(fileURLToPath(new URL("../../app/router.tsx", import.meta.url)), "utf8");
+    expect(source).toContain("buildOnboardingStepCompletedEvent");
+    expect(source).toContain("buildOnboardingActivationEvent");
+    expect(source).toContain('step: "scan_permission"');
+    expect(source).toContain('step: "first_report"');
+    expect(source).toContain('choice: "viewed"');
+    expect(source).not.toContain('choice: "continued"');
+    expect(source).toContain('name: "first_entry"');
+    expect(source).not.toContain("buildOnboardingCompletedEvent");
+    expect(routerSource).toContain("buildOnboardingCompletedEvent(scanPermission)");
+    expect(routerSource).toContain('step: "nickname"');
+    expect(source).not.toContain('step: "mode_selection"');
+    expect(source).not.toContain("onboarding_report_viewed");
+    expect(source).not.toContain("onboarding_report_action_clicked");
+    expect(source).not.toContain('params: { step: "scan_permission", step_index: 1');
+  });
 });
 
 describe("OnboardingPage 赠送活动开关", () => {

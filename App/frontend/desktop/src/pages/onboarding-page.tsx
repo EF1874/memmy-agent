@@ -19,6 +19,10 @@ import {
   type PreferredMode
 } from "../app/routes.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
+import {
+  buildOnboardingActivationEvent,
+  buildOnboardingStepCompletedEvent
+} from "../analytics/onboarding-analytics.js";
 import { resolveAnalyticsPageLocation } from "../analytics/page-location.js";
 import { Memmy } from "../components/mascot/memmy.js";
 import { useTranslation } from "../i18n/use-translation.js";
@@ -114,15 +118,13 @@ export function OnboardingPage() {
       return;
     }
     hasTrackedFirstReportView.current = true;
-    track({
-      name: "onboarding_report_viewed",
-      params: {
-        page_path: "/onboarding",
-        empty_history: firstReportPayload.emptyHistory
-      },
-      consentTier: "basic"
-    });
-  }, [activeFirstScanStep, firstReportPayload, track]);
+    track(buildOnboardingStepCompletedEvent({
+      step: "first_report",
+      choice: "viewed",
+      scanPermission: onboarding?.scanPermission,
+      emptyHistory: firstReportPayload.emptyHistory
+    }));
+  }, [activeFirstScanStep, firstReportPayload, onboarding?.scanPermission, track]);
 
   useEffect(() => {
     if (!shouldResumeFirstScan || firstScanStep || !clients || hasResumedFirstScan.current) {
@@ -195,7 +197,11 @@ export function OnboardingPage() {
 
     dispatch(appActions.onboardingUpdated(patch));
     dispatch(appActions.scanPreferencesUpdated(preferences));
-    track({ name: "onboarding_step_completed", params: { step: "scan_permission", step_index: 1, choice: permission }, consentTier: "basic" });
+    track(buildOnboardingStepCompletedEvent({
+      step: "scan_permission",
+      choice: permission,
+      scanPermission: permission
+    }));
     if (permission !== "none") {
       prepareFirstScanUi(permission === "scan_and_write_skill" ? "checking_plugins" : "scanning");
       if (clients) {
@@ -499,29 +505,18 @@ export function OnboardingPage() {
     sourceId: string,
     action: string
   ) => {
-    track({
+    track(buildOnboardingActivationEvent({
       name: event === "memory_verified"
         ? "onboarding_external_memory_verified"
         : "onboarding_relay_clicked",
-      params: {
-        page_path: "/onboarding",
-        action,
-        ...(sourceId ? { source_id: sourceId } : {})
-      },
-      consentTier: "basic"
-    });
-  }, [track]);
+      pagePath: "/onboarding",
+      scanPermission: onboarding?.scanPermission,
+      action,
+      sourceId: sourceId || undefined
+    }));
+  }, [onboarding?.scanPermission, track]);
 
   function continueFromReport() {
-    track({
-      name: "onboarding_report_action_clicked",
-      params: {
-        page_path: "/onboarding",
-        action: "continue_to_product_tour",
-        empty_history: firstReportPayload?.emptyHistory ?? false
-      },
-      consentTier: "basic"
-    });
     completeReportFlow(true);
   }
 
@@ -551,8 +546,7 @@ export function OnboardingPage() {
     }
     writeDeferredGuidanceStep(storage, guidanceStep);
     dispatch(appActions.navigate(nextRoute));
-    track({ name: "onboarding_step_completed", params: { step: "mode_selection", step_index: 3, choice: "full" }, consentTier: "basic" });
-    track({ name: "onboarding_completed", params: {}, consentTier: "basic" });
+    // first_entry = first workspace entry; onboarding_completed fires later after nickname.
     track({ name: "first_entry", params: { page_location: resolveAnalyticsPageLocation(nextRoute) }, consentTier: "basic" });
     void persistReportConversationCompletion(completionPatch).catch((error) => {
       console.warn("persist report conversation onboarding completion failed", error);
@@ -620,8 +614,7 @@ export function OnboardingPage() {
       }
       writeDeferredGuidanceStep(storage, guidanceStep);
       dispatch(appActions.navigate(nextRoute));
-      track({ name: "onboarding_step_completed", params: { step: "mode_selection", step_index: 3, choice: mode }, consentTier: "basic" });
-      track({ name: "onboarding_completed", params: {}, consentTier: "basic" });
+      // first_entry = first workspace entry; onboarding_completed fires later after nickname.
       track({ name: "first_entry", params: { page_location: resolveAnalyticsPageLocation(nextRoute) }, consentTier: "basic" });
     } catch (error) {
       console.error("complete onboarding failed", error);

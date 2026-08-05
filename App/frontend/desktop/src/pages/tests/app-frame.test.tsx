@@ -412,6 +412,17 @@ describe("AppFrame", () => {
     expect(routerSource).toContain("function submitDeferredNickname()");
     expect(routerSource).toContain("persistNickname({");
     expect(routerSource).toContain('isByok: state.bootstrap?.app.userMode === "byok"');
+    expect(routerSource).toContain("buildProductTourStepEvent");
+    expect(routerSource).toContain('choice: "viewed"');
+    expect(routerSource).toContain('if (result === "skipped")');
+    expect(routerSource).toContain('choice: "skipped"');
+    expect(routerSource).not.toContain('choice: "completed"');
+    expect(routerSource).toContain('step: "nickname"');
+    expect(routerSource).toContain("buildOnboardingCompletedEvent(scanPermission)");
+    expect(routerSource).not.toContain("buildProductTourStepViewedEvent");
+    expect(routerSource).not.toContain('step: "product_tour"');
+    expect(appFrameSource).toContain("buildOnboardingStepCompletedEvent");
+    expect(appFrameSource).toContain('step: "improvement_program"');
   });
 
   it("never shows the improvement plan modal in BYOK mode", () => {

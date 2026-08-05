@@ -17,6 +17,7 @@ import {
   type WebuiSessionTarget
 } from "../api/memmy-agent-client.js";
 import type { AnalyticsEvent } from "../analytics/analytics-events.js";
+import { buildOnboardingActivationEvent } from "../analytics/onboarding-analytics.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import { Memmy } from "../components/mascot/memmy.js";
 import { formatMessage, type MessageKey, type MessageValues, zhCNMessages } from "../i18n/messages.js";
@@ -805,14 +806,12 @@ export function HomePage() {
       const completedAt = state.bootstrap?.onboarding.completedAt
         ? Date.parse(state.bootstrap.onboarding.completedAt)
         : Number.NaN;
-      track({
+      track(buildOnboardingActivationEvent({
         name: "onboarding_first_task_completed",
-        params: {
-          page_path: "/main",
-          ...(Number.isFinite(completedAt) ? { duration_ms: Math.max(0, Date.now() - completedAt) } : {})
-        },
-        consentTier: "basic"
-      });
+        pagePath: "/main",
+        scanPermission: state.bootstrap?.onboarding.scanPermission,
+        ...(Number.isFinite(completedAt) ? { durationMs: Math.max(0, Date.now() - completedAt) } : {})
+      }));
     }
   }, [
     firstEncounterRelayAnswerMessageId,
@@ -823,6 +822,7 @@ export function HomePage() {
     state.agent.lastTaskCompletion?.chatId,
     state.agent.messages,
     state.bootstrap?.onboarding.completedAt,
+    state.bootstrap?.onboarding.scanPermission,
     track
   ]);
 
@@ -866,18 +866,16 @@ export function HomePage() {
     sourceId: string,
     action: string
   ) => {
-    track({
+    track(buildOnboardingActivationEvent({
       name: event === "memory_verified"
         ? "onboarding_external_memory_verified"
         : "onboarding_relay_clicked",
-      params: {
-        page_path: "/main",
-        action,
-        ...(sourceId ? { source_id: sourceId } : {})
-      },
-      consentTier: "basic"
-    });
-  }, [track]);
+      pagePath: "/main",
+      scanPermission: state.bootstrap?.onboarding.scanPermission,
+      action,
+      sourceId: sourceId || undefined
+    }));
+  }, [state.bootstrap?.onboarding.scanPermission, track]);
 
   const openFirstEncounterRelayConnections = useCallback(() => {
     dispatch(appActions.navigate("/memory-sources"));

@@ -78,6 +78,14 @@ describe("ProductTourGuide", () => {
     expect(html).toBe("");
   });
 
+  it("导览区分走完与跳过，并在气泡就绪后回调 step viewed", () => {
+    const source = readFileSync(new URL("../product-tour.tsx", import.meta.url), "utf8");
+    expect(source).toContain('onDismiss("completed", stepInfo)');
+    expect(source).toContain('onDismiss("skipped", stepInfo)');
+    expect(source).toContain("onStepViewed");
+    expect(source).toContain("lastViewedStepKeyRef");
+  });
+
   it("导览步骤配置在组件内保持稳定引用，避免布局测量循环清空气泡", () => {
     const source = readFileSync(new URL("../product-tour.tsx", import.meta.url), "utf8");
 

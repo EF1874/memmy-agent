@@ -9,6 +9,7 @@ import { PRODUCT_TOUR_CHAT_CONTENT_ANCHOR, PRODUCT_TOUR_MEMORY_NAV_ANCHOR, PRODU
 import type { AppRoutePath } from "../app/routes.js";
 import { clearFocusedAgentTarget, clearProductTourStep, readDeferredGuidanceStep, readGuidanceCompleted, routeTable, writeDeferredGuidanceStep } from "../app/routes.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
+import { buildOnboardingStepCompletedEvent } from "../analytics/onboarding-analytics.js";
 import {
   useOptionalAgentRuntimeBridge,
   type AgentTaskStateCoordinator,
@@ -564,7 +565,11 @@ export function AppFrame(props: AppFrameProps) {
     dispatch(appActions.navigate(productTourStartRoute(includeLogs)));
     dispatch(appActions.onboardingUpdated(onboardingPatch));
     dispatch(appActions.privacyUpdated(privacyPatch));
-    track({ name: "onboarding_step_completed", params: { step: "improvement_program", step_index: 2, choice: accepted ? "accepted" : "declined" }, consentTier: "basic" });
+    track(buildOnboardingStepCompletedEvent({
+      step: "improvement_program",
+      choice: accepted ? "accepted" : "declined",
+      scanPermission: state.bootstrap?.onboarding.scanPermission
+    }));
 
     void clients?.config
       .setImprovementProgram(accepted)
