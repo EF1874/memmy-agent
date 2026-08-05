@@ -10,15 +10,19 @@ import {
   type OnboardingInsightReportStreamEvent
 } from "@memmy/local-api-contracts";
 import type {
+  OnboardingConversationReference,
+  OnboardingConversationWindow,
+  OnboardingConversationWindowReader,
   OnboardingInsightSampler,
   OnboardingSampleResult,
+  OnboardingSampledMessage,
   OnboardingSampledQuery
 } from "../adapters/outbound/agent-source/insight-sampler-types.js";
 import { stripInlineMediaPayloads } from "../shared/inline-media-sanitizer.js";
 
 const DEFAULT_SAMPLE_OPTIONS = {
-  maxSessionFiles: 12,
-  maxQueries: 24,
+  maxSessionFiles: 6,
+  maxQueries: 12,
   maxQueryChars: 600,
   maxBytesPerFile: 768 * 1024,
   deadlineMs: 10_000
@@ -26,10 +30,8 @@ const DEFAULT_SAMPLE_OPTIONS = {
 
 const FIRST_LOGIN_SCAN_DEADLINE_MS = DEFAULT_SAMPLE_OPTIONS.deadlineMs;
 const MAX_REPORT_QUERY_CHARS = DEFAULT_SAMPLE_OPTIONS.maxQueryChars;
-const MAX_BALANCED_QUERIES = 96;
-const MAX_RECENT_LLM_QUERIES = 10;
-const MAX_BALANCED_LLM_QUERIES = 50;
-const MAX_LLM_QUERIES = MAX_RECENT_LLM_QUERIES + MAX_BALANCED_LLM_QUERIES;
+const MAX_BALANCED_QUERIES = 84;
+const MAX_PREFERENCE_LLM_QUERIES = 24;
 const DEFAULT_LLM_TIMEOUT_MS = 90_000;
 const DEFAULT_LLM_MAX_TOKENS = 2_000;
 const MEMMY_ACCOUNT_AGENT_CHAT_THINKING_BUDGET = 500;
@@ -117,6 +119,7 @@ const USER_INSIGHT_RULES: ReadonlyArray<{
 
 export interface CreateOnboardingInsightServiceOptions {
   samplers: readonly OnboardingInsightSampler[];
+  conversationWindowReader?: OnboardingConversationWindowReader | null;
   reportGenerator?: OnboardingInsightReportGenerator | null;
   agentModelResolver?: OnboardingInsightAgentTaskModelResolver | null;
   now?: () => number;
@@ -156,6 +159,17 @@ export interface OnboardingInsightSampleSummary {
     workspacePath: string | null;
     text: string;
   }>;
+  latestConversation: {
+    agentSource: string;
+    conversationId: string;
+    latestActivityAt: string;
+    workspacePath: string | null;
+    messages: Array<{
+      role: "user" | "assistant" | "tool";
+      createdAt: string;
+      text: string;
+    }>;
+  } | null;
 }
 
 export interface OnboardingInsightProfileSignals {
@@ -175,6 +189,7 @@ export interface OnboardingInsightProfileSignals {
 interface SampleBundle {
   discovered: OnboardingSampleResult[];
   queries: OnboardingSampledQuery[];
+  latestConversation: OnboardingConversationWindow | null;
   elapsedMs: number;
 }
 
@@ -251,7 +266,7 @@ export function createOnboardingInsightService(options: CreateOnboardingInsightS
   return {
     async generateReport(input = {}, signal) {
       const startedAt = now();
-      const sample = await sampleRecentQueries(options.samplers, signal, now);
+      const sample = await sampleRecentQueries(options.samplers, options.conversationWindowReader, signal, now);
       const locale = input.locale ?? inferLocale(sample.queries);
       const profile = buildProfileSignals(sample);
       const elapsedMs = Math.max(0, now() - startedAt);
@@ -267,7 +282,7 @@ export function createOnboardingInsightService(options: CreateOnboardingInsightS
     },
     async *streamReport(input = {}, signal) {
       const startedAt = now();
-      const sample = await sampleRecentQueries(options.samplers, signal, now);
+      const sample = await sampleRecentQueries(options.samplers, options.conversationWindowReader, signal, now);
       yield {
         type: "sampled",
         diagnostics: diagnostics(sample, false, Math.max(0, now() - startedAt))
@@ -494,6 +509,7 @@ function createGoogleOnboardingInsightReportGenerator(
 
 async function sampleRecentQueries(
   samplers: readonly OnboardingInsightSampler[],
+  conversationWindowReader: OnboardingConversationWindowReader | null | undefined,
   signal: AbortSignal | undefined,
   now: () => number
 ): Promise<SampleBundle> {
@@ -503,12 +519,71 @@ async function sampleRecentQueries(
   const results = await Promise.all(samplers.map((sampler) => sampleSamplerWithinDeadline(sampler, sampleSignal)));
   const discovered = results.filter((result): result is OnboardingSampleResult => Boolean(result));
   const queries = selectBalancedQueries(discovered, MAX_BALANCED_QUERIES);
+  const latestReference = resolveLatestConversationReference(discovered);
+  const latestConversation = latestReference
+    ? await loadLatestConversation(latestReference, discovered, conversationWindowReader, sampleSignal)
+    : null;
 
   return {
     discovered,
     queries,
+    latestConversation,
     elapsedMs: Math.max(0, now() - startedAt)
   };
+}
+
+function resolveLatestConversationReference(
+  results: readonly OnboardingSampleResult[]
+): OnboardingConversationReference | null {
+  const candidates = results.flatMap((result) => {
+    const messages = result.recentMessages ?? result.queries.map((query) => ({ ...query, role: "user" as const }));
+    return messages
+      .filter((message) => message.role === "user" || message.role === "assistant")
+      .map((message) => ({ result, message }));
+  }).sort((left, right) =>
+    Date.parse(right.message.createdAt) - Date.parse(left.message.createdAt) ||
+    left.result.sourceId.localeCompare(right.result.sourceId) ||
+    left.message.conversationId.localeCompare(right.message.conversationId)
+  );
+  const latest = candidates[0];
+  if (!latest) {
+    return null;
+  }
+  return {
+    sourceId: latest.result.sourceId,
+    displayName: latest.result.displayName,
+    conversationId: latest.message.conversationId,
+    latestActivityAt: latest.message.createdAt,
+    workspacePath: latest.message.workspacePath
+  };
+}
+
+async function loadLatestConversation(
+  reference: OnboardingConversationReference,
+  results: readonly OnboardingSampleResult[],
+  reader: OnboardingConversationWindowReader | null | undefined,
+  signal: AbortSignal
+): Promise<OnboardingConversationWindow | null> {
+  if (reader) {
+    try {
+      const loaded = await reader.readConversation(reference, {
+        maxQueryChars: MAX_REPORT_QUERY_CHARS,
+        deadlineMs: FIRST_LOGIN_SCAN_DEADLINE_MS,
+        signal
+      });
+      if (loaded?.messages.length) {
+        return loaded;
+      }
+    } catch {
+      // The shallow probe below still preserves the latest visible conversation.
+    }
+  }
+
+  const source = results.find((result) => result.sourceId === reference.sourceId);
+  const messages = (source?.recentMessages ?? source?.queries.map((query) => ({ ...query, role: "user" as const })) ?? [])
+    .filter((message) => message.conversationId === reference.conversationId)
+    .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
+  return messages.length > 0 ? { ...reference, messages } : null;
 }
 
 async function sampleSamplerWithinDeadline(
@@ -574,6 +649,8 @@ async function sampleSampler(
 }
 
 function buildProfileSignals(sample: SampleBundle): OnboardingInsightProfileSignals {
+  const taskQueries = latestConversationUserQueries(sample.latestConversation);
+  const taskSignals = taskQueries.length > 0 ? taskQueries : sample.queries;
   const nameHints = resolveNameHints(sample.queries);
   const preferredResponseLanguage = inferPreferredResponseLanguage(sample.queries);
   const topAgents = sample.discovered
@@ -585,14 +662,13 @@ function buildProfileSignals(sample: SampleBundle): OnboardingInsightProfileSign
     }))
     .filter((agent) => agent.queryCount > 0)
     .sort((left, right) => right.queryCount - left.queryCount || left.displayName.localeCompare(right.displayName));
-  const topKeywords = extractTopKeywords(sample.queries);
-  const topProjects = extractTopProjects(sample.queries);
+  const topKeywords = extractTopKeywords(taskSignals);
+  const topProjects = extractTopProjects(taskSignals);
   const userInsights = extractUserInsights(sample.queries);
-  const taskCandidates = extractTaskCandidates(sample.queries, sample.discovered);
-  const taskLikeQuery = taskCandidates[0]?.latestQuery ?? findTaskLikeQuery(sample.queries);
-  const highSignalQueries = sortQueriesRecent(sample.queries.filter((query) => HIGH_SIGNAL_PATTERN.test(query.text))).slice(0, 30);
-  const allText = sample.queries.map((query) => query.text).join("\n");
-  const sharedSignalCount = countSharedSignals(sample.discovered, topKeywords);
+  const taskCandidates = extractTaskCandidates(taskSignals, sample.discovered);
+  const taskLikeQuery = taskCandidates[0]?.latestQuery ?? findTaskLikeQuery(taskSignals);
+  const highSignalQueries = sortQueriesRecent(taskSignals.filter((query) => HIGH_SIGNAL_PATTERN.test(query.text))).slice(0, 30);
+  const allText = taskSignals.map((query) => query.text).join("\n");
 
   return {
     nameHints,
@@ -605,8 +681,19 @@ function buildProfileSignals(sample: SampleBundle): OnboardingInsightProfileSign
     taskCandidates,
     highSignalQueries,
     taskLikeQuery,
-    actionType: decideActionType({ sharedSignalCount, allText, taskLikeQuery })
+    actionType: decideActionType({ sharedSignalCount: 0, allText, taskLikeQuery })
   };
+}
+
+function latestConversationUserQueries(conversation: OnboardingConversationWindow | null): OnboardingSampledQuery[] {
+  return conversation?.messages.flatMap((message) => message.role === "user" ? [{
+    sourceId: message.sourceId,
+    conversationId: message.conversationId,
+    messageId: message.messageId,
+    createdAt: message.createdAt,
+    text: message.text,
+    workspacePath: message.workspacePath
+  }] : []) ?? [];
 }
 
 async function buildReportResponse(input: {
@@ -640,7 +727,7 @@ async function buildReportResponse(input: {
 
   return {
     status: "ready",
-    reportMarkdown: generatedReport?.reportMarkdown ?? renderFallbackReport(input.profile, input.locale),
+    reportMarkdown: generatedReport?.reportMarkdown ?? renderFallbackReport(input.profile, input.sample, input.locale),
     primaryAction: actions[0],
     secondaryActions: actions.slice(1),
     diagnostics: diagnostics(input.sample, Boolean(generatedReport), input.elapsedMs)
@@ -729,7 +816,7 @@ async function* streamReportResponse(input: {
     type: "done",
     response: {
       status: "ready",
-      reportMarkdown: generatedReport?.reportMarkdown ?? renderFallbackReport(input.profile, input.locale),
+      reportMarkdown: generatedReport?.reportMarkdown ?? renderFallbackReport(input.profile, input.sample, input.locale),
       primaryAction: actions[0],
       secondaryActions: actions.slice(1),
       diagnostics: diagnostics(input.sample, Boolean(generatedReport), Math.max(input.elapsedMs, input.now() - input.startedAt))
@@ -742,10 +829,12 @@ function buildReportActions(
   sample: SampleBundle,
   locale: "zh-CN" | "en-US"
 ): { primaryAction: OnboardingInsightAction; secondaryActions: OnboardingInsightAction[] } {
-  const primaryAction = buildAction(profile.actionType, profile, sample.queries, locale);
+  const recentTaskQueries = latestConversationUserQueries(sample.latestConversation);
+  const actionQueries = recentTaskQueries.length > 0 ? recentTaskQueries : sample.queries;
+  const primaryAction = buildAction(profile.actionType, profile, actionQueries, locale);
   return {
     primaryAction,
-    secondaryActions: buildSecondaryActions(primaryAction.type, profile, sample.queries, locale)
+    secondaryActions: buildSecondaryActions(primaryAction.type, profile, actionQueries, locale)
   };
 }
 
@@ -760,8 +849,12 @@ function appendActionChatOnlyInstruction(
   }));
 }
 
-function renderFallbackReport(profile: OnboardingInsightProfileSignals, locale: "zh-CN" | "en-US"): string {
-  return locale === "en-US" ? renderEnglishReport(profile) : renderChineseReport(profile);
+function renderFallbackReport(
+  profile: OnboardingInsightProfileSignals,
+  sample: SampleBundle,
+  locale: "zh-CN" | "en-US"
+): string {
+  return locale === "en-US" ? renderEnglishReport(profile, sample) : renderChineseReport(profile, sample);
 }
 
 function renderEmptyHistoryReport(locale: "zh-CN" | "en-US"): string {
@@ -895,64 +988,75 @@ function longestMarkerPrefixSuffixLength(value: string): number {
   return 0;
 }
 
-function renderChineseReport(profile: OnboardingInsightProfileSignals): string {
+function renderChineseReport(profile: OnboardingInsightProfileSignals, sample: SampleBundle): string {
   const lines: string[] = [];
   const nameLine = renderChineseNameLine(profile.nameHints);
   if (nameLine) {
     lines.push(nameLine);
   }
 
-  const primaryTask = profile.taskCandidates[0] ?? null;
-  if (primaryTask) {
-    lines.push(`我看你最近主要在推进 ${primaryTask.title}。${renderChineseTaskSummary(primaryTask)}`);
-  } else if (profile.topProjects.length > 0 || profile.topKeywords.length > 0) {
-    lines.push(`我先捕捉到的重点是 ${[...profile.topProjects.slice(0, 2), ...profile.topKeywords.slice(0, 4)].join("、")}。`);
-  }
+  const preferenceLines = [
+    renderContextLanguagePreference(profile, "zh-CN"),
+    ...profile.userInsights.slice(0, 4).map((insight) => insight.textZh)
+  ].filter((line): line is string => Boolean(line));
+  lines.push(`## 你的偏好\n${preferenceLines.length > 0 ? preferenceLines.map((line) => `- ${line}`).join("\n") : "目前只有少量用户表达，我还不会替你下偏好结论。"}`);
 
-  if (profile.userInsights.length > 0) {
-    lines.push(`你的工作方式也有几个稳定信号：${profile.userInsights.slice(0, 3).map((insight) => insight.textZh).join("")}`);
-  }
+  const conversation = sample.latestConversation;
+  const latestUser = latestConversationMessage(conversation, "user");
+  const latestAssistant = latestConversationMessage(conversation, "assistant");
+  const latestTool = latestConversationMessage(conversation, "tool");
+  const task = profile.taskCandidates[0] ?? null;
+  const memoryLines = [
+    conversation ? `最近一次会话来自 ${conversation.displayName}${task ? `，主要在推进 ${task.title}` : ""}。` : null,
+    latestUser ? `你最近的目标是：${trimSentence(latestUser.text, 180)}` : null,
+    latestAssistant ? `Agent 最近表示：${trimSentence(latestAssistant.text, 180)}` : null,
+    latestTool ? `最近的工具验证记录：${trimSentence(latestTool.text, 140)}` : "当前没有明确的工具验证记录。"
+  ].filter((line): line is string => Boolean(line));
+  lines.push(`## 最近项目记忆\n${memoryLines.join("\n\n")}`);
 
-  const relatedAgents = profile.taskCandidates[0]?.relatedAgents.length
-    ? profile.taskCandidates[0].relatedAgents
-    : profile.activeAgentNames.slice(0, 3);
-  if (relatedAgents.length > 1) {
-    lines.push(`这些线索分散在 ${relatedAgents.join("、")} 里，我可以先帮你合成一段可继续执行的上下文。`);
-  } else {
-    lines.push("我可以先把最近任务整理成一段可继续执行的上下文。");
-  }
+  const taskText = latestUser ? trimSentence(latestUser.text, 100) : "最近任务";
+  lines.push(`## 接下来可以做\n1. 明确“${taskText}”当前尚未完成的最小步骤和验收标准。\n2. 核对 Agent 已说明的进度与实际文件、构建或测试结果是否一致。\n3. 执行最小验证，记录成功结果或第一个可复现的阻塞点。`);
 
   return lines.join("\n\n");
 }
 
-function renderEnglishReport(profile: OnboardingInsightProfileSignals): string {
+function renderEnglishReport(profile: OnboardingInsightProfileSignals, sample: SampleBundle): string {
   const lines: string[] = [];
   const nameLine = renderEnglishNameLine(profile.nameHints);
   if (nameLine) {
     lines.push(nameLine);
   }
 
-  const primaryTask = profile.taskCandidates[0] ?? null;
-  if (primaryTask) {
-    lines.push(`You seem to be focused on ${renderEnglishTaskTitle(primaryTask)}. ${renderEnglishTaskSummary(primaryTask)}`);
-  } else if (profile.topProjects.length > 0 || profile.topKeywords.length > 0) {
-    lines.push(`The strongest signals I see are ${[...profile.topProjects.slice(0, 2), ...profile.topKeywords.slice(0, 4)].join(", ")}.`);
-  }
+  const preferenceLines = [
+    renderContextLanguagePreference(profile, "en-US"),
+    ...profile.userInsights.slice(0, 4).map((insight) => insight.textEn)
+  ].filter((line): line is string => Boolean(line));
+  lines.push(`## Your preferences\n${preferenceLines.length > 0 ? preferenceLines.map((line) => `- ${line}`).join("\n") : "I only have a few user-authored signals, so I will not overstate your preferences yet."}`);
 
-  if (profile.userInsights.length > 0) {
-    lines.push(`Your working style has a few stable signals: ${profile.userInsights.slice(0, 3).map((insight) => insight.textEn).join(" ")}`);
-  }
+  const conversation = sample.latestConversation;
+  const latestUser = latestConversationMessage(conversation, "user");
+  const latestAssistant = latestConversationMessage(conversation, "assistant");
+  const latestTool = latestConversationMessage(conversation, "tool");
+  const task = profile.taskCandidates[0] ?? null;
+  const memoryLines = [
+    conversation ? `Your newest conversation is from ${conversation.displayName}${task ? ` and focuses on ${renderEnglishTaskTitle(task)}` : ""}.` : null,
+    latestUser ? `Your latest goal: ${trimSentence(latestUser.text, 180)}` : null,
+    latestAssistant ? `The Agent most recently reported: ${trimSentence(latestAssistant.text, 180)}` : null,
+    latestTool ? `Latest tool verification: ${trimSentence(latestTool.text, 140)}` : "There is no explicit tool verification in the selected window."
+  ].filter((line): line is string => Boolean(line));
+  lines.push(`## Latest project memory\n${memoryLines.join("\n\n")}`);
 
-  const relatedAgents = profile.taskCandidates[0]?.relatedAgents.length
-    ? profile.taskCandidates[0].relatedAgents
-    : profile.activeAgentNames.slice(0, 3);
-  if (relatedAgents.length > 1) {
-    lines.push(`These clues are spread across ${relatedAgents.join(", ")}. I can turn them into a compact context for the next step.`);
-  } else {
-    lines.push("I can turn the recent task clues into a compact context for the next step.");
-  }
+  const taskText = latestUser ? trimSentence(latestUser.text, 100) : "the latest task";
+  lines.push(`## What to do next\n1. Define the smallest unfinished step and acceptance criteria for “${taskText}”.\n2. Check the Agent-reported progress against actual files, build output, or tests.\n3. Run the smallest verification and record either a successful result or the first reproducible blocker.`);
 
   return lines.join("\n\n");
+}
+
+function latestConversationMessage(
+  conversation: OnboardingConversationWindow | null,
+  role: OnboardingSampledMessage["role"]
+): OnboardingSampledMessage | null {
+  return [...(conversation?.messages ?? [])].reverse().find((message) => message.role === role) ?? null;
 }
 
 function renderChineseNameLine(hints: NameHints): string | null {
@@ -1020,32 +1124,6 @@ function formatNameForGreeting(value: string): string {
     return `${trimmed.charAt(0).toLocaleUpperCase()}${trimmed.slice(1)}`;
   }
   return trimmed;
-}
-
-function renderChineseTaskSummary(task: TaskCandidate): string {
-  if (/mindock-agent|记忆扫描|首次登录/.test(task.title)) {
-    return "这条线索集中在记忆扫描边界、首次登录报告、跨 Agent 接续和 token 成本控制。";
-  }
-  if (/bitrade/i.test(task.title)) {
-    return "这条线索集中在参考既有项目架构，补齐 TUI、日志、运行方式和错误处理等稳定性能力。";
-  }
-  if (isDocumentDump(task.summary)) {
-    return "这条线索已经有多个相关上下文，可以继续整理成执行计划。";
-  }
-  return trimSentence(task.summary, 120);
-}
-
-function renderEnglishTaskSummary(task: TaskCandidate): string {
-  if (/mindock-agent|memory scan|onboarding|记忆扫描|首次登录/i.test(task.title)) {
-    return "The thread centers on scan boundaries, first-login reporting, cross-agent continuation, and token cost control.";
-  }
-  if (/bitrade/i.test(task.title)) {
-    return "The thread centers on borrowing the existing project architecture and adding TUI, logging, runtime flow, and error handling.";
-  }
-  if (isDocumentDump(task.summary)) {
-    return "There is enough related context to turn it into an execution plan.";
-  }
-  return trimSentence(task.summary, 120);
 }
 
 function renderEnglishTaskTitle(task: TaskCandidate): string {
@@ -1474,16 +1552,6 @@ function findTaskLikeQuery(queries: readonly OnboardingSampledQuery[]): Onboardi
   return queries.find((query) => PROBLEM_PATTERN.test(query.text) || DECISION_PATTERN.test(query.text)) ?? queries[0] ?? null;
 }
 
-function countSharedSignals(results: readonly OnboardingSampleResult[], keywords: readonly string[]): number {
-  return keywords.filter((keyword) => {
-    const pattern = TOPIC_PATTERNS.find((topic) => topic.keyword === keyword)?.pattern;
-    if (!pattern) {
-      return false;
-    }
-    return results.filter((result) => result.queries.some((query) => pattern.test(query.text))).length > 1;
-  }).length;
-}
-
 function decideActionType(input: {
   sharedSignalCount: number;
   allText: string;
@@ -1607,7 +1675,7 @@ function sortQueriesRecent(queries: readonly OnboardingSampledQuery[]): Onboardi
 
 function toSampleSummary(sample: SampleBundle): OnboardingInsightSampleSummary {
   const agentNames = new Map(sample.discovered.map((result) => [result.sourceId, result.displayName]));
-  const reportQueries = selectLlmReportQueries(sample.discovered);
+  const reportQueries = selectPreferenceReportQueries(sample.discovered);
   return {
     discoveredAgentCount: sample.discovered.length,
     sampledQueryCount: sample.queries.length,
@@ -1624,25 +1692,50 @@ function toSampleSummary(sample: SampleBundle): OnboardingInsightSampleSummary {
       createdAt: query.createdAt,
       workspacePath: query.workspacePath,
       text: clipReportQueryText(query.text)
-    }))
+    })),
+    latestConversation: sample.latestConversation ? {
+      agentSource: agentNames.get(sample.latestConversation.sourceId) ?? sample.latestConversation.displayName,
+      conversationId: sample.latestConversation.conversationId,
+      latestActivityAt: sample.latestConversation.latestActivityAt,
+      workspacePath: sample.latestConversation.workspacePath,
+      messages: sample.latestConversation.messages.map((message) => ({
+        role: message.role,
+        createdAt: message.createdAt,
+        text: message.text
+      }))
+    } : null
   };
 }
 
-function selectLlmReportQueries(results: readonly OnboardingSampleResult[]): OnboardingSampledQuery[] {
-  const recent = sortQueriesRecent(results.flatMap((result) => result.queries)).slice(0, MAX_RECENT_LLM_QUERIES);
-  const seen = new Set(recent.map(queryKey));
-  const balanced = selectBalancedQueries(results, MAX_LLM_QUERIES)
-    .filter((query) => {
-      const key = queryKey(query);
-      if (seen.has(key)) {
-        return false;
+function selectPreferenceReportQueries(results: readonly OnboardingSampleResult[]): OnboardingSampledQuery[] {
+  const queues = results.map((result) => [...result.queries].sort((left, right) =>
+    scorePreferenceEvidence(right.text) - scorePreferenceEvidence(left.text) ||
+    Date.parse(right.createdAt) - Date.parse(left.createdAt)
+  ));
+  const selected: OnboardingSampledQuery[] = [];
+  for (let index = 0; selected.length < MAX_PREFERENCE_LLM_QUERIES; index += 1) {
+    let added = false;
+    for (const queue of queues) {
+      const query = queue[index];
+      if (!query) {
+        continue;
       }
-      seen.add(key);
-      return true;
-    })
-    .slice(0, MAX_BALANCED_LLM_QUERIES);
+      selected.push(query);
+      added = true;
+      if (selected.length >= MAX_PREFERENCE_LLM_QUERIES) {
+        break;
+      }
+    }
+    if (!added) {
+      break;
+    }
+  }
+  return selected;
+}
 
-  return [...recent, ...balanced].slice(0, MAX_LLM_QUERIES);
+function scorePreferenceEvidence(text: string): number {
+  const explicitPreference = /偏好|习惯|喜欢|不喜欢|不要|必须|希望|倾向|更常|简洁|详细|中文|英文|prefer|usually|always|never|don't|must|concise|detailed/i;
+  return USER_INSIGHT_RULES.reduce((score, rule) => score + (rule.pattern.test(text) ? 2 : 0), explicitPreference.test(text) ? 3 : 0);
 }
 
 function clipReportQueryText(text: string): string {
@@ -1655,27 +1748,27 @@ function buildLlmMessages(input: OnboardingInsightGenerationInput): Array<{ role
     {
       role: "system",
       content: [
-        "你是 Memmy 首次登录初见卡片撰写者，风格接近年度总结/Spotify Wrapped 的私人化开场，不是技术报告。",
-        "只依据输入里的明确证据，不要编造。",
+        "你是 Memmy 首次登录初见报告撰写者。报告要像一位刚接手工作的可靠搭档：私人化、具体、克制，不是技术日志，也不是营销文案。",
+        "只依据输入里的明确证据，不要编造项目、完成情况、错误原因或用户偏好。证据不足时直接说明尚不能确认。",
         "不要把 diagnostics 写给用户，不要出现“轻量样本、采样、query 数、discoveredAgentCount”等实现细节。",
-        "你必须根据 user.profile.nameHints 综合判断用户可能希望被怎么称呼。nameHints.selfDeclaredNames 来自扫描到的用户自称，homePathName 是 home 路径最后一段，computerUserName 是电脑用户名，homeAndComputerMatch 表示 home 路径名和电脑用户名一致。",
+        "你必须根据 profile.nameHints 综合判断用户可能希望被怎么称呼。nameHints.selfDeclaredNames 来自扫描到的用户自称，homePathName 是 home 路径最后一段，computerUserName 是电脑用户名，homeAndComputerMatch 表示 home 路径名和电脑用户名一致。",
         "名字判断默认优先使用 homePathName，因为用户一定有 home 路径；不要因为 selfDeclaredNames 为空就省略称呼。只有当 homePathName 是 admin、administrator、root、ubuntu、user、test、guest、default、runner、ec2-user 这类泛化账号名，或明显不是可称呼名字时，才降低它的优先级。",
         "selfDeclaredNames 和 computerUserName 是辅助判断线索：如果 selfDeclaredNames 有明确人名，可以结合它修正称呼；如果 homePathName 与 computerUserName 一致，说明本机线索更可信。",
         "第一句必须包含你判断出的具体称呼：中文报告以“Hi <称呼>，”开头，英文报告以“Hi <name>, ”开头。不得省略名字，不得把名字替换成“这个线索”“这个称呼”“X”等占位词。",
         "严禁出现“本机账号显示为”“本机用户名/路径名显示为”“local username/path shows”“我检测到你的用户名”这类工程口径。",
         "不要向用户暴露 nameHints、homePathName、computerUserName 这些字段名或来源；如果本机线索只是临时称呼，要用柔和语气表达“如果不对，告诉我就好”。中英文混合名不要使用。",
-        "输出中文或英文由 locale 决定。中文时语气要像产品首登卡片：具体、克制、懂用户、有一点年度总结感，不要像调试日志或分析报告。",
-        "profile.preferredResponseLanguage 来自最近用户 query 的主语言统计，不要求用户明确说“请用中文/英文”。如果有值，可以自然理解为后续回复语言偏好。",
-        "用户偏好/习惯段必须明确写出用户更习惯用中文还是英文交流。如果 profile.preferredResponseLanguage 是 zh-CN，写用户最近更常用中文；如果是 en-US，写用户最近更常用英文。",
-        "这份报告的第一目标是任务接续，不是泛泛画像。优先回答：用户最近正在做什么任务、任务散落在哪些 Agent、哪些上下文可以迁到 Memmy Agent 继续完成。",
-        "必须重点阅读 recentTaskSignals。它代表按时间倒序排列的最近 10 条任务线索；请按任务聚类，提炼主任务、未完成事项、下一步可执行动作。",
-        "必须覆盖：对用户的了解、偏好/习惯、最近正在推进的任务、可跨 Agent 整合或接续的任务。",
-        "正文长度是硬约束：中文 600-800 字，英文 400-600 words。低于或高于这个范围都视为失败；不要输出短卡片，也不要写成长报告。",
-        "正文结构是硬约束：写 5-7 个自然段，每段 2-4 句。段落顺序依次覆盖：开场称呼与总体判断、最近最主要任务、最近 10 条任务线索如何聚类、任务分别来自哪些 Agent、用户工作偏好/协作习惯、当前最适合接续到 Memmy Agent 的事项、下一步执行计划与温和收束。",
-        "每段都必须包含至少一个明确线索、偏好判断或可执行下一步。证据不足时写“我只能先按这些线索判断”，但仍然按上述结构展开。",
-        "要自然引导用户从 Claude Code、Codex、Cursor、Hermes 等 Agent 的上下文切到 Memmy Agent 里继续做事，强调任务接续、上下文整合、决策整理和下一步执行，不要贬低其他工具，不要写营销口号。",
+        "输出中文或英文由 locale 决定。profile.preferredResponseLanguage 来自近期用户请求的主语言统计；有值时要自然说明用户最近更常用中文还是英文。",
+        "偏好结论的唯一原始证据是 preferenceEvidence 中由用户本人发送的消息，profile 里的偏好字段也只是这些用户消息的结构化归纳。仅总结用户明确表达或在多个请求中稳定体现的偏好；不要把旧任务内容本身当成偏好，也严禁使用 assistant、tool 或 latestConversation 推断偏好。",
+        "latestConversation 是所有已扫描 Agent 中时间最新的一个会话，只允许依据这个会话总结最近项目、任务、Bug 或关键词及其当前进度。",
+        "latestConversation.messages 已按首 2 个和尾 12 个对话轮次截取。user 是用户请求，assistant 是 Agent 回复，tool 是脱敏后的简短工具执行信息。",
+        "区分三类进度证据：用户要求做什么、Agent 表示做了什么、工具结果实际验证了什么。只有明确成功的 tool 结果才能写成已验证；只有 assistant 自述时应写成“Agent 表示/对话中提到”，不能当成确定事实。",
+        "正文必须包含三个 Markdown 小节：『你的偏好』『最近项目记忆』『接下来可以做』。可以使用短段落和列表，不要使用表格或代码块。",
+        "『你的偏好』只总结用户本人有证据支持的语言、沟通方式、输出形式、方案取舍、实现约束或验证要求，最多 3-5 条；不要混入项目进度、Agent 行为、工具结果或空泛性格标签。",
+        "『最近项目记忆』说明最新会话来自哪个 Agent、涉及什么项目或关键词、用户目标、已讨论或已完成内容、当前进度、关键决策、失败/阻塞和待确认问题。没有的项不要硬凑。",
+        "『接下来可以做』列出 3-5 条按执行顺序排列的具体待办。第一条应是当前最小且可立即执行的下一步，每条都要有明确动作和预期结果。",
+        "正文长度要求：中文 450-700 字，英文 250-400 words。重点是准确提炼最近一个项目现场，不要扩展成跨项目年度总结。",
         "除了报告正文，你还必须为 actionCandidates 中的 3 个行动类型分别生成按钮文案和点击后可直接发送给 Agent 的完整请求。类型和顺序必须与 actionCandidates 完全一致。",
-        "三个按钮必须指向三个不同且具体的后续动作。buttonLabel 要简短；description 要说明点击后会做什么；suggestedPrompt 必须写清具体任务背景、目标和预期产出，不能只写“继续当前任务”“整理最近讨论”之类的泛化句子。",
+        "三个按钮必须从『接下来可以做』中选择三个不同且具体的后续动作。buttonLabel 要简短；description 要说明点击后会做什么；suggestedPrompt 必须写清最新项目背景、目标和预期产出，不能只写“继续当前任务”。",
         "suggestedPrompt 要把输入中的事实自然组织成通顺请求，不要机械罗列“项目：...；主题：...；用户偏好：...；最近任务：...”等字段，也不要编造输入中不存在的项目、结论或进度。",
         "中文 buttonLabel 建议 4-12 字、description 不超过 40 字、suggestedPrompt 80-240 字；英文保持同等信息密度。",
         `输出格式是硬约束：先输出报告正文，然后紧接一行 ${GENERATED_ACTIONS_MARKER}，再输出一行 JSON。JSON 结构必须是 {"actions":[{"type":"...","buttonLabel":"...","description":"...","suggestedPrompt":"..."}]}，包含且只包含 3 个 action。`,
@@ -1687,32 +1780,28 @@ function buildLlmMessages(input: OnboardingInsightGenerationInput): Array<{ role
       content: JSON.stringify({
         locale: input.locale,
         reportGoal: {
-          primary: "task_continuation",
+          primary: "user_preferences_latest_project_memory_and_actionable_todos",
           lengthConstraint: input.locale === "zh-CN"
-            ? "600-800 Chinese characters, 5-7 natural paragraphs, 2-4 sentences per paragraph"
-            : "400-600 English words, 5-7 natural paragraphs, 2-4 sentences per paragraph",
-          mustNotBeShort: true,
-          requiredParagraphPlan: [
+            ? "450-700 Chinese characters"
+            : "250-400 English words",
+          requiredSections: [
             "opening_with_name_or_safe_greeting",
-            "main_recent_task",
-            "cluster_recent_10_task_signals",
-            "agent_context_sources",
-            "user_working_preferences",
-            "best_tasks_to_continue_in_memmy_agent",
-            "next_execution_plan",
-            "warm_closing"
+            "user_preferences",
+            "latest_project_memory",
+            "ordered_actionable_todos"
           ],
           focus: [
-            "最近任务是什么",
-            "这些任务分别来自哪些 Agent 上下文",
-            "哪些任务最适合接续到 Memmy Agent",
-            "如何把跨 Agent 讨论整合成下一步执行计划"
+            "用户有哪些有证据支持的稳定偏好",
+            "全局最新会话对应什么项目、任务、Bug 或关键词",
+            "用户要求、Agent 自述和工具验证分别说明了什么进度",
+            "接下来最可行的 3-5 个待办是什么"
           ]
         },
-        recentTaskSignals: selectRecentTaskSignals(input.sample.queries),
         profile: toLlmProfile(input.profile, input.sample.activeAgents),
         nameDecisionRequirement: buildNameDecisionRequirement(input.profile, input.locale),
-        sample: input.sample,
+        activeAgents: input.sample.activeAgents,
+        preferenceEvidence: input.sample.queries,
+        latestConversation: input.sample.latestConversation,
         actionCandidates: [input.primaryAction, ...input.secondaryActions].map((action, index) => ({
           priority: index === 0 ? "primary" : "secondary",
           type: action.type,
@@ -1750,12 +1839,6 @@ function renderActionObjective(type: OnboardingInsightActionType, locale: "zh-CN
     }
   };
   return locale === "zh-CN" ? objectives[type].zh : objectives[type].en;
-}
-
-function selectRecentTaskSignals(queries: OnboardingInsightSampleSummary["queries"]): OnboardingInsightSampleSummary["queries"] {
-  return [...queries]
-    .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
-    .slice(0, 10);
 }
 
 function toLlmProfile(
