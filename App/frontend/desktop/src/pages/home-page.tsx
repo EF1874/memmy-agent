@@ -64,7 +64,6 @@ import { AppFrame } from "./app-frame.js";
 import { mergeVoiceTranscript, useAsrRecorder } from "./asr-recorder.js";
 import { FirstEncounterRelayChallenge, FirstEncounterRelayOptIn, firstEncounterFollowUpMode, hasDetectedRelayAgents, relayAgentOptions } from "./first-encounter-relay-challenge.js";
 import {
-  armFirstEncounterRelayChat,
   consumeFirstEncounterRelayArm,
   consumePendingFirstEncounterTaskLaunch,
   readFirstEncounterRelayChat,
@@ -1041,8 +1040,60 @@ export function HomePage() {
 
     const memmyAgent = clients.memmyAgent;
     const storage = typeof window === "undefined" ? undefined : window.sessionStorage;
-    const pendingPrompt = consumePendingFirstEncounterTaskLaunch(storage);
-    if (!pendingPrompt) {
+    const pendingLaunch = consumePendingFirstEncounterTaskLaunch(storage);
+    if (!pendingLaunch) {
+      return;
+    }
+
+    // Onboarding first report: open seeded chat history (prefer chatId written at report-done).
+    if (pendingLaunch.chatId || pendingLaunch.assistantContent) {
+      setIsCreatingChat(true);
+      void (async () => {
+        const seeded = pendingLaunch.chatId
+          ? {
+              chat_id: pendingLaunch.chatId,
+              session_key: pendingLaunch.sessionKey || memmyAgent.chatIdToSessionKey(pendingLaunch.chatId)
+            }
+          : await memmyAgent.seedWebuiChat({
+              userText: pendingLaunch.prompt,
+              assistantText: pendingLaunch.assistantContent!,
+              title: t("onboarding.report.title")
+            });
+        ensureChatSubscription(seeded.chat_id);
+        dispatch(agentActions.newChatCreated(seeded.chat_id));
+        rememberFirstEncounterRelayChatIfArmed(seeded.chat_id);
+        writeFirstEncounterRelayChat(storage, seeded.chat_id);
+        writeFirstEncounterRelayReadyChat(storage, seeded.chat_id);
+        setFirstEncounterRelayChatId(seeded.chat_id);
+        setFirstEncounterRelayReadyChatId(seeded.chat_id);
+        const requestId = nextAgentHistoryRequestId(seeded.chat_id);
+        dispatch(agentActions.historyLoading(seeded.session_key, seeded.chat_id, requestId));
+        const thread = await memmyAgent.readWebuiThread(seeded.session_key);
+        dispatch(agentActions.historyLoaded(thread, requestId));
+        taskStateCoordinator.refreshTaskState({
+          expectedChatId: seeded.chat_id,
+          reason: "new-chat",
+          state: state.agent
+        });
+        const completedAt = state.bootstrap?.onboarding.completedAt
+          ? Date.parse(state.bootstrap.onboarding.completedAt)
+          : Number.NaN;
+        track(buildOnboardingActivationEvent({
+          name: "onboarding_first_task_completed",
+          pagePath: "/main",
+          scanPermission: state.bootstrap?.onboarding.scanPermission,
+          ...(Number.isFinite(completedAt) ? { durationMs: Math.max(0, Date.now() - completedAt) } : {})
+        }));
+      })().catch((error) => {
+        console.warn("open first encounter report chat failed", error);
+        writePendingFirstEncounterTaskLaunch(storage, pendingLaunch.prompt, {
+          ...(pendingLaunch.assistantContent ? { assistantContent: pendingLaunch.assistantContent } : {}),
+          ...(pendingLaunch.chatId ? { chatId: pendingLaunch.chatId } : {}),
+          ...(pendingLaunch.sessionKey ? { sessionKey: pendingLaunch.sessionKey } : {})
+        });
+      }).finally(() => {
+        setIsCreatingChat(false);
+      });
       return;
     }
 
@@ -1051,7 +1102,7 @@ export function HomePage() {
       target: { kind: "standalone" },
       connection,
       ensureChatSubscription,
-      content: pendingPrompt,
+      content: pendingLaunch.prompt,
       language,
       pendingAttachments: [],
       uploadAgentMedia: (attachments) => memmyAgent.uploadAgentMedia(attachments),
@@ -1072,7 +1123,7 @@ export function HomePage() {
       }
     }).then((sent) => {
       if (!sent) {
-        writePendingFirstEncounterTaskLaunch(storage, pendingPrompt);
+        writePendingFirstEncounterTaskLaunch(storage, pendingLaunch.prompt);
       }
     });
   }, [
@@ -1083,6 +1134,9 @@ export function HomePage() {
     language,
     rememberFirstEncounterRelayChatIfArmed,
     state.agent,
+    state.bootstrap?.onboarding.completedAt,
+    state.bootstrap?.onboarding.scanPermission,
+    t,
     taskStateCoordinator,
     track
   ]);
