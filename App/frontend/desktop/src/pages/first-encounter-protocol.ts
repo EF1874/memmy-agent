@@ -2,7 +2,6 @@ import {
   OnboardingInsightReportInputSchema,
   OnboardingInsightReportResponseSchema,
   OnboardingInsightReportStreamEventSchema,
-  type OnboardingInsightAction,
   type OnboardingInsightDiagnostics,
   type OnboardingInsightReportResponse,
   type OnboardingInsightReportStreamEvent
@@ -23,15 +22,8 @@ export interface FirstEncounterReportRequest {
   language: ResolvedLanguage;
 }
 
-export interface FirstEncounterTaskAction {
-  buttonLabel: string;
-  description: string;
-  suggestedPrompt: string;
-}
-
 export interface FirstEncounterReportPayload {
   body: string;
-  actions: FirstEncounterTaskAction[];
   agents: DiscoveredAgent[];
   emptyHistory: boolean;
 }
@@ -177,24 +169,11 @@ function parseInsightReportStreamFrame(frame: string): OnboardingInsightReportSt
   }
 }
 
-function toFirstEncounterTaskAction(action: OnboardingInsightAction): FirstEncounterTaskAction {
-  return {
-    buttonLabel: action.buttonLabel,
-    description: action.description,
-    suggestedPrompt: action.suggestedPrompt
-  };
-}
-
 function toFirstEncounterReportPayload(response: OnboardingInsightReportResponse): FirstEncounterReportPayload | null {
   const body = response.reportMarkdown.trim();
-  const actions = [
-    response.primaryAction,
-    ...response.secondaryActions
-  ].filter((action): action is OnboardingInsightAction => Boolean(action)).map(toFirstEncounterTaskAction);
 
   return body ? {
     body,
-    actions,
     agents: toDiscoveredAgents(response.diagnostics),
     emptyHistory: response.diagnostics.sampledQueryCount === 0
   } : null;

@@ -54,6 +54,7 @@ import {
   type OnboardingInsightAgentTaskModelResolver,
   type OnboardingInsightService
 } from "./onboarding-insight-service.js";
+import { createOnboardingFirstReportMemoryWriter } from "./onboarding-first-report-memory-writer.js";
 import { createPanelService, type PanelService } from "./panel-service.js";
 import { createProgressBus, type ProgressBus } from "./progress-bus.js";
 import { createSearchService, type SearchService } from "./search-service.js";
@@ -212,6 +213,7 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     onboardingInsight: createOnboardingInsightService({
       samplers: createBuiltinOnboardingInsightSamplers(),
       conversationWindowReader: createSourceRegistryOnboardingConversationWindowReader(sourceRegistry),
+      memoryWriter: createOnboardingFirstReportMemoryWriter(options.memoryClient),
       agentModelResolver: createAppStateAgentTaskModelResolver(options.appStateStore)
     }),
     progressBus,

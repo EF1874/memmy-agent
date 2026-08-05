@@ -1,10 +1,7 @@
 import { basename } from "node:path";
 import { homedir, userInfo } from "node:os";
 import {
-  OnboardingInsightActionSchema,
   OnboardingInsightReportResponseSchema,
-  type OnboardingInsightAction,
-  type OnboardingInsightActionType,
   type OnboardingInsightReportInput,
   type OnboardingInsightReportResponse,
   type OnboardingInsightReportStreamEvent
@@ -19,6 +16,7 @@ import type {
   OnboardingSampledQuery
 } from "../adapters/outbound/agent-source/insight-sampler-types.js";
 import { stripInlineMediaPayloads } from "../shared/inline-media-sanitizer.js";
+import type { OnboardingFirstReportMemoryWriter } from "./onboarding-first-report-memory-writer.js";
 
 const DEFAULT_SAMPLE_OPTIONS = {
   maxSessionFiles: 6,
@@ -35,12 +33,7 @@ const MAX_PREFERENCE_LLM_QUERIES = 24;
 const DEFAULT_LLM_TIMEOUT_MS = 90_000;
 const DEFAULT_LLM_MAX_TOKENS = 2_000;
 const MEMMY_ACCOUNT_AGENT_CHAT_THINKING_BUDGET = 500;
-const GENERATED_ACTIONS_MARKER = "[MEMMY_ACTIONS_JSON]";
 const MAX_GENERATED_OUTPUT_CHARS = 12_000;
-const ACTION_CHAT_ONLY_INSTRUCTION = {
-  "zh-CN": "请只在当前对话中输出结果，不要创建文件，也不要修改任何文件。",
-  "en-US": "Return the result in this conversation only. Do not create files or modify any existing files."
-} as const;
 
 const TOPIC_PATTERNS: ReadonlyArray<{ keyword: string; pattern: RegExp }> = [
   { keyword: "TypeScript", pattern: /\btypescript\b|\bts\b/i },
@@ -121,6 +114,7 @@ export interface CreateOnboardingInsightServiceOptions {
   samplers: readonly OnboardingInsightSampler[];
   conversationWindowReader?: OnboardingConversationWindowReader | null;
   reportGenerator?: OnboardingInsightReportGenerator | null;
+  memoryWriter?: OnboardingFirstReportMemoryWriter | null;
   agentModelResolver?: OnboardingInsightAgentTaskModelResolver | null;
   now?: () => number;
 }
@@ -135,17 +129,10 @@ export interface OnboardingInsightReportGenerator {
   streamReport?(input: OnboardingInsightGenerationInput): AsyncIterable<string>;
 }
 
-interface GeneratedReportResult {
-  reportMarkdown: string;
-  actions: OnboardingInsightAction[] | null;
-}
-
 export interface OnboardingInsightGenerationInput {
   locale: "zh-CN" | "en-US";
   profile: OnboardingInsightProfileSignals;
   sample: OnboardingInsightSampleSummary;
-  primaryAction: OnboardingInsightAction;
-  secondaryActions: OnboardingInsightAction[];
   signal?: AbortSignal;
 }
 
@@ -183,7 +170,6 @@ export interface OnboardingInsightProfileSignals {
   taskCandidates: TaskCandidate[];
   highSignalQueries: OnboardingSampledQuery[];
   taskLikeQuery: OnboardingSampledQuery | null;
-  actionType: OnboardingInsightActionType;
 }
 
 interface SampleBundle {
@@ -269,14 +255,15 @@ export function createOnboardingInsightService(options: CreateOnboardingInsightS
       const sample = await sampleRecentQueries(options.samplers, options.conversationWindowReader, signal, now);
       const locale = input.locale ?? inferLocale(sample.queries);
       const profile = buildProfileSignals(sample);
-      const elapsedMs = Math.max(0, now() - startedAt);
       const response = await buildReportResponse({
         profile,
         sample,
         locale,
-        elapsedMs,
         reportGenerator,
-        signal
+        memoryWriter: options.memoryWriter,
+        signal,
+        startedAt,
+        now
       });
       return OnboardingInsightReportResponseSchema.parse(response);
     },
@@ -296,6 +283,7 @@ export function createOnboardingInsightService(options: CreateOnboardingInsightS
         locale,
         elapsedMs,
         reportGenerator,
+        memoryWriter: options.memoryWriter,
         signal,
         startedAt,
         now
@@ -668,7 +656,6 @@ function buildProfileSignals(sample: SampleBundle): OnboardingInsightProfileSign
   const taskCandidates = extractTaskCandidates(taskSignals, sample.discovered);
   const taskLikeQuery = taskCandidates[0]?.latestQuery ?? findTaskLikeQuery(taskSignals);
   const highSignalQueries = sortQueriesRecent(taskSignals.filter((query) => HIGH_SIGNAL_PATTERN.test(query.text))).slice(0, 30);
-  const allText = taskSignals.map((query) => query.text).join("\n");
 
   return {
     nameHints,
@@ -680,8 +667,7 @@ function buildProfileSignals(sample: SampleBundle): OnboardingInsightProfileSign
     userInsights,
     taskCandidates,
     highSignalQueries,
-    taskLikeQuery,
-    actionType: decideActionType({ sharedSignalCount: 0, allText, taskLikeQuery })
+    taskLikeQuery
   };
 }
 
@@ -700,37 +686,33 @@ async function buildReportResponse(input: {
   profile: OnboardingInsightProfileSignals;
   sample: SampleBundle;
   locale: "zh-CN" | "en-US";
-  elapsedMs: number;
   reportGenerator: OnboardingInsightReportGenerator | null | undefined;
+  memoryWriter: OnboardingFirstReportMemoryWriter | null | undefined;
   signal: AbortSignal | undefined;
+  startedAt: number;
+  now: () => number;
 }): Promise<OnboardingInsightReportResponse> {
   if (input.sample.queries.length === 0) {
     return {
       status: "ready",
       reportMarkdown: renderEmptyHistoryReport(input.locale),
-      secondaryActions: [],
-      diagnostics: diagnostics(input.sample, false, input.elapsedMs)
+      diagnostics: diagnostics(input.sample, false, Math.max(0, input.now() - input.startedAt))
     };
   }
 
-  const { primaryAction, secondaryActions } = buildReportActions(input.profile, input.sample, input.locale);
-  const fallbackActions = [primaryAction, ...secondaryActions];
   const generatedReport = await generateReportSafely(input.reportGenerator, {
     locale: input.locale,
     profile: input.profile,
     sample: toSampleSummary(input.sample),
-    primaryAction,
-    secondaryActions,
     signal: input.signal
-  }, fallbackActions);
-  const actions = appendActionChatOnlyInstruction(generatedReport?.actions ?? fallbackActions, input.locale);
+  });
+  const reportMarkdown = generatedReport ?? renderFallbackReport(input.profile, input.sample, input.locale);
+  await persistFirstReportMemory(input.memoryWriter, input.profile, input.sample, input.locale, reportMarkdown);
 
   return {
     status: "ready",
-    reportMarkdown: generatedReport?.reportMarkdown ?? renderFallbackReport(input.profile, input.sample, input.locale),
-    primaryAction: actions[0],
-    secondaryActions: actions.slice(1),
-    diagnostics: diagnostics(input.sample, Boolean(generatedReport), input.elapsedMs)
+    reportMarkdown,
+    diagnostics: diagnostics(input.sample, Boolean(generatedReport), Math.max(0, input.now() - input.startedAt))
   };
 }
 
@@ -740,6 +722,7 @@ async function* streamReportResponse(input: {
   locale: "zh-CN" | "en-US";
   elapsedMs: number;
   reportGenerator: OnboardingInsightReportGenerator | null | undefined;
+  memoryWriter: OnboardingFirstReportMemoryWriter | null | undefined;
   signal: AbortSignal | undefined;
   startedAt: number;
   now: () => number;
@@ -750,26 +733,19 @@ async function* streamReportResponse(input: {
       response: {
         status: "ready",
         reportMarkdown: renderEmptyHistoryReport(input.locale),
-        secondaryActions: [],
         diagnostics: diagnostics(input.sample, false, input.elapsedMs)
       }
     };
     return;
   }
 
-  const { primaryAction, secondaryActions } = buildReportActions(input.profile, input.sample, input.locale);
-  const fallbackActions = [primaryAction, ...secondaryActions];
   const generationInput: OnboardingInsightGenerationInput = {
     locale: input.locale,
     profile: input.profile,
     sample: toSampleSummary(input.sample),
-    primaryAction,
-    secondaryActions,
     signal: input.signal
   };
   let rawOutput = "";
-  let pendingReport = "";
-  let reachedActions = false;
 
   if (input.reportGenerator?.streamReport) {
     try {
@@ -778,75 +754,27 @@ async function* streamReportResponse(input: {
           continue;
         }
         rawOutput += delta;
-        if (reachedActions) {
-          continue;
-        }
-
-        pendingReport += delta;
-        const markerIndex = pendingReport.indexOf(GENERATED_ACTIONS_MARKER);
-        if (markerIndex >= 0) {
-          const reportDelta = pendingReport.slice(0, markerIndex);
-          if (reportDelta) {
-            yield { type: "chunk", delta: reportDelta };
-          }
-          pendingReport = "";
-          reachedActions = true;
-          continue;
-        }
-
-        const heldLength = longestMarkerPrefixSuffixLength(pendingReport);
-        const reportDelta = pendingReport.slice(0, pendingReport.length - heldLength);
-        if (reportDelta) {
-          yield { type: "chunk", delta: reportDelta };
-        }
-        pendingReport = pendingReport.slice(pendingReport.length - heldLength);
-      }
-      if (!reachedActions && pendingReport) {
-        yield { type: "chunk", delta: pendingReport };
+        yield { type: "chunk", delta };
       }
     } catch {
       rawOutput = "";
     }
   }
 
-  const generatedReport = parseGeneratedReportOutput(rawOutput, fallbackActions);
-  const actions = appendActionChatOnlyInstruction(generatedReport?.actions ?? fallbackActions, input.locale);
+  const generatedReport = input.reportGenerator?.streamReport
+    ? sanitizeGeneratedReport(normalizeGeneratedOutput(rawOutput))
+    : await generateReportSafely(input.reportGenerator, generationInput);
+  const reportMarkdown = generatedReport ?? renderFallbackReport(input.profile, input.sample, input.locale);
+  await persistFirstReportMemory(input.memoryWriter, input.profile, input.sample, input.locale, reportMarkdown);
 
   yield {
     type: "done",
     response: {
       status: "ready",
-      reportMarkdown: generatedReport?.reportMarkdown ?? renderFallbackReport(input.profile, input.sample, input.locale),
-      primaryAction: actions[0],
-      secondaryActions: actions.slice(1),
+      reportMarkdown,
       diagnostics: diagnostics(input.sample, Boolean(generatedReport), Math.max(input.elapsedMs, input.now() - input.startedAt))
     }
   };
-}
-
-function buildReportActions(
-  profile: OnboardingInsightProfileSignals,
-  sample: SampleBundle,
-  locale: "zh-CN" | "en-US"
-): { primaryAction: OnboardingInsightAction; secondaryActions: OnboardingInsightAction[] } {
-  const recentTaskQueries = latestConversationUserQueries(sample.latestConversation);
-  const actionQueries = recentTaskQueries.length > 0 ? recentTaskQueries : sample.queries;
-  const primaryAction = buildAction(profile.actionType, profile, actionQueries, locale);
-  return {
-    primaryAction,
-    secondaryActions: buildSecondaryActions(primaryAction.type, profile, actionQueries, locale)
-  };
-}
-
-function appendActionChatOnlyInstruction(
-  actions: readonly OnboardingInsightAction[],
-  locale: "zh-CN" | "en-US"
-): OnboardingInsightAction[] {
-  const instruction = ACTION_CHAT_ONLY_INSTRUCTION[locale];
-  return actions.map((action) => ({
-    ...action,
-    suggestedPrompt: `${action.suggestedPrompt.trimEnd()}\n\n${instruction}`
-  }));
 }
 
 function renderFallbackReport(
@@ -869,121 +797,38 @@ function renderEmptyHistoryReport(locale: "zh-CN" | "en-US"): string {
 
 async function generateReportSafely(
   reportGenerator: OnboardingInsightReportGenerator | null | undefined,
-  input: OnboardingInsightGenerationInput,
-  fallbackActions: readonly OnboardingInsightAction[]
-): Promise<GeneratedReportResult | null> {
+  input: OnboardingInsightGenerationInput
+): Promise<string | null> {
   try {
-    return parseGeneratedReportOutput(await reportGenerator?.generateReport(input) ?? null, fallbackActions);
+    return sanitizeGeneratedReport(normalizeGeneratedOutput(await reportGenerator?.generateReport(input) ?? null));
   } catch {
     return null;
   }
 }
 
-function parseGeneratedReportOutput(
-  output: string | null,
-  fallbackActions: readonly OnboardingInsightAction[]
-): GeneratedReportResult | null {
-  const normalized = normalizeGeneratedOutput(output);
-  if (!normalized) {
-    return null;
+async function persistFirstReportMemory(
+  memoryWriter: OnboardingFirstReportMemoryWriter | null | undefined,
+  profile: OnboardingInsightProfileSignals,
+  sample: SampleBundle,
+  locale: "zh-CN" | "en-US",
+  reportMarkdown: string
+): Promise<void> {
+  const latestConversation = toSampleSummary(sample).latestConversation;
+  if (!memoryWriter || !latestConversation) {
+    return;
   }
-
-  const markerIndex = normalized.indexOf(GENERATED_ACTIONS_MARKER);
-  const reportMarkdown = sanitizeGeneratedReport(markerIndex >= 0 ? normalized.slice(0, markerIndex) : normalized);
-  if (!reportMarkdown) {
-    return null;
-  }
-
-  return {
+  await memoryWriter.write({
+    locale,
     reportMarkdown,
-    actions: markerIndex >= 0
-      ? parseGeneratedActions(normalized.slice(markerIndex + GENERATED_ACTIONS_MARKER.length), fallbackActions)
-      : null
-  };
-}
-
-function parseGeneratedActions(
-  rawJson: string,
-  fallbackActions: readonly OnboardingInsightAction[]
-): OnboardingInsightAction[] | null {
-  try {
-    const parsed = JSON.parse(rawJson) as { actions?: unknown };
-    if (!Array.isArray(parsed.actions) || parsed.actions.length !== fallbackActions.length) {
-      return null;
-    }
-    const generatedActions = parsed.actions;
-
-    const actions = fallbackActions.map((fallback, index) => {
-      const candidate = generatedActions[index];
-      if (!candidate || typeof candidate !== "object") {
-        return null;
-      }
-      const fields = candidate as Record<string, unknown>;
-      if (fields.type !== fallback.type) {
-        return null;
-      }
-
-      const buttonLabel = generatedActionText(fields.buttonLabel, 1, 40, false);
-      const description = generatedActionText(fields.description, 1, 160, false);
-      const suggestedPrompt = generatedActionText(fields.suggestedPrompt, 24, 2_000, true);
-      if (!buttonLabel || !description || !suggestedPrompt) {
-        return null;
-      }
-
-      const result = OnboardingInsightActionSchema.safeParse({
-        ...fallback,
-        buttonLabel,
-        description,
-        suggestedPrompt
-      });
-      return result.success ? result.data : null;
-    });
-
-    if (actions.some((action) => !action)) {
-      return null;
-    }
-    const validActions = actions as OnboardingInsightAction[];
-    if (
-      new Set(validActions.map((action) => action.buttonLabel)).size !== validActions.length ||
-      new Set(validActions.map((action) => action.suggestedPrompt)).size !== validActions.length
-    ) {
-      return null;
-    }
-    return validActions;
-  } catch {
-    return null;
-  }
-}
-
-function generatedActionText(value: unknown, minLength: number, maxLength: number, allowLineBreaks: boolean): string | null {
-  if (typeof value !== "string") {
-    return null;
-  }
-  const text = value.trim();
-  if (
-    text.length < minLength ||
-    text.length > maxLength ||
-    text.includes(GENERATED_ACTIONS_MARKER) ||
-    (!allowLineBreaks && /[\r\n]/.test(text))
-  ) {
-    return null;
-  }
-  return text;
+    projects: profile.topProjects,
+    keywords: profile.topKeywords,
+    latestConversation
+  });
 }
 
 function normalizeGeneratedOutput(output: string | null): string | null {
   const trimmed = (output ?? "").trim();
   return trimmed ? trimmed.slice(0, MAX_GENERATED_OUTPUT_CHARS) : null;
-}
-
-function longestMarkerPrefixSuffixLength(value: string): number {
-  const maxLength = Math.min(value.length, GENERATED_ACTIONS_MARKER.length - 1);
-  for (let length = maxLength; length > 0; length -= 1) {
-    if (GENERATED_ACTIONS_MARKER.startsWith(value.slice(-length))) {
-      return length;
-    }
-  }
-  return 0;
 }
 
 function renderChineseReport(profile: OnboardingInsightProfileSignals, sample: SampleBundle): string {
@@ -1145,180 +990,6 @@ function renderEnglishTaskTitle(task: TaskCandidate): string {
     return "recent debugging task";
   }
   return "recent continuing task";
-}
-
-function renderChineseContextTask(task: TaskCandidate): string {
-  if (!isGenericChineseTaskTitle(task.title)) {
-    return task.title;
-  }
-  return trimSentence(task.summary || task.latestQuery.text, 120) || task.title;
-}
-
-function isGenericChineseTaskTitle(title: string): boolean {
-  return title === "最近的连续任务" || /的当前任务$/.test(title);
-}
-
-function renderEnglishContextTask(task: TaskCandidate): string {
-  const title = renderEnglishTaskTitle(task);
-  if (!isGenericEnglishTaskTitle(title)) {
-    return title;
-  }
-  return trimSentence(task.summary || task.latestQuery.text, 140) || title;
-}
-
-function isGenericEnglishTaskTitle(title: string): boolean {
-  return title === "recent continuing task" || / current task$/.test(title);
-}
-
-function buildAction(
-  type: OnboardingInsightActionType,
-  profile: OnboardingInsightProfileSignals,
-  queries: readonly OnboardingSampledQuery[],
-  locale: "zh-CN" | "en-US"
-): OnboardingInsightAction {
-  const agents = (profile.taskCandidates[0]?.relatedAgents.length
-    ? profile.taskCandidates[0].relatedAgents
-    : profile.activeAgentNames
-  ).slice(0, 3);
-  const keywords = profile.topKeywords.slice(0, 5);
-  const contextSummary = summarizeContext(profile, queries, locale);
-
-  if (locale === "en-US") {
-    if (type === "cross_agent_synthesis") {
-      return {
-        type,
-        buttonLabel: "Recover and merge this task",
-        description: agents.length > 1 ? `Recover one task across ${agents.join(", ")}` : "Recover the task context and unfinished work",
-        contextSummary,
-        relatedAgents: agents,
-        topicKeywords: keywords,
-        suggestedPrompt: `Use these recent cross-Agent conversation signals to organize the task background, key decisions, unfinished items, and next execution plan.\n\n${contextSummary}`
-      };
-    }
-
-    if (type === "problem_diagnosis") {
-      return {
-        type,
-        buttonLabel: "Recall how this was debugged",
-        description: "Recap what was tried and continue from the last useful result",
-        contextSummary,
-        relatedAgents: agents,
-        topicKeywords: keywords,
-        suggestedPrompt: `Continue debugging this issue. First recap what has already been tried, then give the smallest verification steps.\n\n${contextSummary}`
-      };
-    }
-
-    if (type === "decision_doc") {
-      return {
-        type,
-        buttonLabel: "Recover the key decisions",
-        description: "Turn previous options and tradeoffs into a usable decision record",
-        contextSummary,
-        relatedAgents: agents,
-        topicKeywords: keywords,
-        suggestedPrompt: `Turn these discussions into a technical decision record covering background, options, tradeoffs, conclusions, and open validation questions.\n\n${contextSummary}`
-      };
-    }
-
-    return {
-      type: "continue_task",
-      buttonLabel: "Continue the unfinished task",
-      description: "Recover the latest state and take the next concrete step",
-      contextSummary,
-      relatedAgents: agents,
-      topicKeywords: keywords,
-      suggestedPrompt: `Use these recent conversation signals to continue the current task.\n\n${contextSummary}`
-    };
-  }
-
-  if (type === "cross_agent_synthesis") {
-    return {
-      type,
-      buttonLabel: "找回并合并这项任务",
-      description: agents.length > 1 ? `找回 ${agents.join("、")} 里的同一项任务` : "找回任务背景、结论和未完成项",
-      contextSummary,
-      relatedAgents: agents,
-      topicKeywords: keywords,
-      suggestedPrompt: `请根据这些最近的跨 Agent 对话线索，帮我整理当前任务背景、关键决策、未完成事项和下一步执行计划。\n\n${contextSummary}`
-    };
-  }
-
-  if (type === "problem_diagnosis") {
-    return {
-      type,
-      buttonLabel: "复盘上次怎么解决",
-      description: "找回已尝试的方法和最后一个有效结果",
-      contextSummary,
-      relatedAgents: agents,
-      topicKeywords: keywords,
-      suggestedPrompt: `请接着排查这个问题，先复盘已尝试内容，再给出最小验证步骤。\n\n${contextSummary}`
-    };
-  }
-
-  if (type === "decision_doc") {
-    return {
-      type,
-      buttonLabel: "找回之前的关键决策",
-      description: "把讨论过的方案、取舍和结论整理成记录",
-      contextSummary,
-      relatedAgents: agents,
-      topicKeywords: keywords,
-      suggestedPrompt: `请把这些讨论整理成技术决策记录，包含背景、选项、取舍、结论和待验证问题。\n\n${contextSummary}`
-    };
-  }
-
-  return {
-    type: "continue_task",
-    buttonLabel: "继续最近未完成的任务",
-    description: "找回最近进度并执行一个明确的下一步",
-    contextSummary,
-    relatedAgents: agents,
-    topicKeywords: keywords,
-    suggestedPrompt: `请基于这些最近对话线索，帮我继续推进当前任务。\n\n${contextSummary}`
-  };
-}
-
-function buildSecondaryActions(
-  primaryType: OnboardingInsightActionType,
-  profile: OnboardingInsightProfileSignals,
-  queries: readonly OnboardingSampledQuery[],
-  locale: "zh-CN" | "en-US"
-): OnboardingInsightAction[] {
-  const candidates: OnboardingInsightActionType[] = ["continue_task", "decision_doc", "problem_diagnosis", "cross_agent_synthesis"];
-  return candidates
-    .filter((type) => type !== primaryType)
-    .slice(0, 2)
-    .map((type) => buildAction(type, profile, queries, locale));
-}
-
-function summarizeContext(
-  profile: OnboardingInsightProfileSignals,
-  queries: readonly OnboardingSampledQuery[],
-  locale: "zh-CN" | "en-US"
-): string {
-  if (locale === "en-US") {
-    const pieces = [
-      profile.topProjects.length > 0 ? `Projects: ${profile.topProjects.slice(0, 3).join(", ")}` : null,
-      profile.topKeywords.length > 0 ? `Topics: ${profile.topKeywords.slice(0, 6).join(", ")}` : null,
-      profile.userInsights.length > 0 ? `User preferences: ${profile.userInsights.slice(0, 3).map((insight) => insight.textEn).join(" ")}` : null,
-      renderContextLanguagePreference(profile, locale),
-      profile.taskCandidates.length > 0
-        ? `Recent tasks: ${profile.taskCandidates.slice(0, 2).map(renderEnglishContextTask).join("; ")}`
-        : `Recent task: ${trimSentence(queries[0]?.text ?? "", 180)}`
-    ].filter((piece): piece is string => Boolean(piece));
-    return pieces.join("; ");
-  }
-
-  const pieces = [
-    profile.topProjects.length > 0 ? `项目：${profile.topProjects.slice(0, 3).join("、")}` : null,
-    profile.topKeywords.length > 0 ? `主题：${profile.topKeywords.slice(0, 6).join("、")}` : null,
-    profile.userInsights.length > 0 ? `用户偏好：${profile.userInsights.slice(0, 3).map((insight) => insight.textZh).join("")}` : null,
-    renderContextLanguagePreference(profile, locale),
-    profile.taskCandidates.length > 0
-      ? `最近任务：${profile.taskCandidates.slice(0, 2).map(renderChineseContextTask).join("；")}`
-      : `最近任务：${trimSentence(queries[0]?.text ?? "", 180)}`
-  ].filter((piece): piece is string => Boolean(piece));
-  return pieces.join("；");
 }
 
 function renderContextLanguagePreference(
@@ -1550,23 +1221,6 @@ function findTaskLikeQuery(queries: readonly OnboardingSampledQuery[]): Onboardi
   return queries.find((query) => PROBLEM_PATTERN.test(query.text) || DECISION_PATTERN.test(query.text)) ?? queries[0] ?? null;
 }
 
-function decideActionType(input: {
-  sharedSignalCount: number;
-  allText: string;
-  taskLikeQuery: OnboardingSampledQuery | null;
-}): OnboardingInsightActionType {
-  if (input.sharedSignalCount > 0) {
-    return "cross_agent_synthesis";
-  }
-  if (PROBLEM_PATTERN.test(input.allText)) {
-    return "problem_diagnosis";
-  }
-  if (DECISION_PATTERN.test(input.allText)) {
-    return "decision_doc";
-  }
-  return input.taskLikeQuery ? "continue_task" : "open_ended";
-}
-
 function inferLocale(queries: readonly OnboardingSampledQuery[]): "zh-CN" | "en-US" {
   return inferPreferredResponseLanguage(queries) ?? "en-US";
 }
@@ -1765,12 +1419,7 @@ function buildLlmMessages(input: OnboardingInsightGenerationInput): Array<{ role
         "『最近项目记忆』说明最新会话来自哪个 Agent、涉及什么项目或关键词、用户目标、已讨论或已完成内容、当前进度、关键决策、失败/阻塞和待确认问题。没有的项不要硬凑。",
         "『接下来可以做』列出 3-5 条按执行顺序排列的具体待办。第一条应是当前最小且可立即执行的下一步，每条都要有明确动作和预期结果。",
         "正文长度要求：中文 450-700 字，英文 250-400 words。重点是准确提炼最近一个项目现场，不要扩展成跨项目年度总结。",
-        "除了报告正文，你还必须为 actionCandidates 中的 3 个行动类型分别生成按钮文案和点击后可直接发送给 Agent 的完整请求。类型和顺序必须与 actionCandidates 完全一致。",
-        "三个按钮必须从『接下来可以做』中选择三个不同且具体的后续动作。buttonLabel 要简短；description 要说明点击后会做什么；suggestedPrompt 必须写清最新项目背景、目标和预期产出，不能只写“继续当前任务”。",
-        "suggestedPrompt 要把输入中的事实自然组织成通顺请求，不要机械罗列“项目：...；主题：...；用户偏好：...；最近任务：...”等字段，也不要编造输入中不存在的项目、结论或进度。",
-        "中文 buttonLabel 建议 4-12 字、description 不超过 40 字、suggestedPrompt 80-240 字；英文保持同等信息密度。",
-        `输出格式是硬约束：先输出报告正文，然后紧接一行 ${GENERATED_ACTIONS_MARKER}，再输出一行 JSON。JSON 结构必须是 {"actions":[{"type":"...","buttonLabel":"...","description":"...","suggestedPrompt":"..."}]}，包含且只包含 3 个 action。`,
-        "报告正文里严禁出现 Main button、Also available、主按钮、次级按钮、CTA、button label、keep moving 或任何按钮说明。内部标记和 JSON 只能出现在正文之后，不要使用 markdown 代码块，不要输出 markdown 表格，不暴露任何密钥。"
+        "只输出报告正文。不要生成按钮、行动卡片、CTA、内部标记、JSON、Markdown 代码块或表格，不暴露任何密钥。"
       ].join("\n")
     },
     {
@@ -1799,44 +1448,10 @@ function buildLlmMessages(input: OnboardingInsightGenerationInput): Array<{ role
         nameDecisionRequirement: buildNameDecisionRequirement(input.profile, input.locale),
         activeAgents: input.sample.activeAgents,
         preferenceEvidence: input.sample.queries,
-        latestConversation: input.sample.latestConversation,
-        actionCandidates: [input.primaryAction, ...input.secondaryActions].map((action, index) => ({
-          priority: index === 0 ? "primary" : "secondary",
-          type: action.type,
-          objective: renderActionObjective(action.type, input.locale),
-          contextSummary: action.contextSummary,
-          relatedAgents: action.relatedAgents,
-          topicKeywords: action.topicKeywords
-        }))
+        latestConversation: input.sample.latestConversation
       }, null, 2)
     }
   ];
-}
-
-function renderActionObjective(type: OnboardingInsightActionType, locale: "zh-CN" | "en-US"): string {
-  const objectives: Record<OnboardingInsightActionType, { zh: string; en: string }> = {
-    continue_task: {
-      zh: "选择最具体、最适合立即执行的近期任务并继续推进",
-      en: "Continue the most concrete recent task with an immediately executable next step"
-    },
-    cross_agent_synthesis: {
-      zh: "整合不同 Agent 中属于同一任务的背景、决策、未完成事项和下一步",
-      en: "Merge background, decisions, unfinished work, and next steps for one task across agents"
-    },
-    decision_doc: {
-      zh: "把近期讨论中的方案、取舍、结论和待验证问题整理成决策记录",
-      en: "Turn recent options, tradeoffs, conclusions, and open questions into a decision record"
-    },
-    problem_diagnosis: {
-      zh: "接续一个有明确证据的问题，复盘已尝试内容并给出最小验证步骤",
-      en: "Resume a supported issue, recap prior attempts, and propose the smallest verification steps"
-    },
-    open_ended: {
-      zh: "基于近期线索提出一个具体、可执行的后续动作",
-      en: "Propose one concrete and executable follow-up based on recent evidence"
-    }
-  };
-  return locale === "zh-CN" ? objectives[type].zh : objectives[type].en;
 }
 
 function toLlmProfile(
@@ -2181,7 +1796,8 @@ function sanitizeGeneratedReport(report: string | null): string | null {
 }
 
 function stripActionCopyFromReport(report: string): string {
-  const paragraphs = report
+  const reportBody = report.split(/\[\s*MEMMY_ACTIONS_JSON\s*\]/i, 1)[0] ?? report;
+  const paragraphs = reportBody
     .replace(/\r\n/g, "\n")
     .split(/\n{2,}/)
     .map((paragraph) => paragraph.trim())
