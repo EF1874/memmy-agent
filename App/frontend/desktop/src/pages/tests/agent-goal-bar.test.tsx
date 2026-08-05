@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentGoalState, AgentGoalStatus } from "../../api/memmy-agent-client.js";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
-import { AgentGoalBar, type AgentGoalBarProps } from "../agent-goal-bar.js";
+import { AgentGoalBar, displayedGoalTimeSeconds, type AgentGoalBarProps } from "../agent-goal-bar.js";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -38,12 +38,14 @@ describe("AgentGoalBar", () => {
   afterEach(() => {
     act(() => root.unmount());
     document.body.replaceChildren();
+    vi.useRealTimers();
   });
 
   function render(props: Partial<AgentGoalBarProps> = {}): void {
     const resolved: AgentGoalBarProps = {
       chatId: "chat-a",
       goal: goal("active"),
+      clock: null,
       pending: false,
       onControl: vi.fn(),
       ...props
@@ -91,6 +93,37 @@ describe("AgentGoalBar", () => {
     render({ goal: goal("completed") });
     expect(container.querySelector(".agent-goal-bar")).toBeNull();
     expect(container.textContent).toBe("");
+  });
+
+  it("adds the live Turn elapsed time to the persisted Goal total", () => {
+    const activeGoal = goal("active", { time_used_seconds: 42 });
+    const clock = { goalId: GOAL_ID, turnId: "turn-1", startedAt: 1_754_352_000, baseSeconds: 42 };
+
+    expect(displayedGoalTimeSeconds(activeGoal, clock, 1_754_352_003_900)).toBe(45);
+    expect(displayedGoalTimeSeconds(
+      goal("active", { time_used_seconds: 47 }),
+      clock,
+      1_754_352_003_900
+    )).toBe(47);
+    expect(displayedGoalTimeSeconds(activeGoal, null, 1_754_352_003_900)).toBe(42);
+  });
+
+  it("refreshes the displayed Goal time once per second while a Turn is running", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2025-08-05T00:00:00.000Z"));
+    render({
+      goal: goal("active", { time_used_seconds: 42 }),
+      clock: {
+        goalId: GOAL_ID,
+        turnId: "turn-1",
+        startedAt: Date.now() / 1000,
+        baseSeconds: 42
+      }
+    });
+    expect(container.querySelector(".agent-goal-bar__usage")?.textContent).toContain("42s");
+
+    act(() => vi.advanceTimersByTime(3_000));
+    expect(container.querySelector(".agent-goal-bar__usage")?.textContent).toContain("45s");
   });
 
   it("shows distinct Provider quota and Goal budget recovery guidance", () => {

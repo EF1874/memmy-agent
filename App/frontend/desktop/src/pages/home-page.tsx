@@ -450,6 +450,14 @@ export function ComposerSubmitButton(props: ComposerSubmitButtonProps) {
   );
 }
 
+export function agentComposerPrimaryAction(input: {
+  isRunning: boolean;
+  isGoalActive: boolean;
+  hasIntent: boolean;
+}): "send" | "stop" {
+  return input.isRunning && !(input.isGoalActive && input.hasIntent) ? "stop" : "send";
+}
+
 /** Displays the selected slash command as a removable composer token. */
 export function ComposerCommandChip(props: {
   command: string;
@@ -1281,6 +1289,7 @@ export function HomePage() {
   const sanitizePlatformApiErrors = isAccountMode;
   const hasBlockedPendingMedia = pendingAttachments.some((item) => item.status !== "ready");
   const hasComposerPayload = Boolean(input.trim() || pendingAttachments.some((item) => item.status === "ready"));
+  const hasComposerIntent = Boolean(input.trim() || pendingAttachments.length > 0);
   const stopInFlight = state.agent.currentChatId ? Boolean(state.agent.stopInFlightByChatId[state.agent.currentChatId]) : false;
   const composerSendDisabled = stopInFlight
     || !hasComposerPayload
@@ -1294,9 +1303,12 @@ export function HomePage() {
     || state.agent.recoveringGeneration !== null
     || selectedChatModel === null;
   const composerStopDisabled = stopInFlight || Boolean(isCurrentGoalActive && goalMutationPending);
-  const composerSubmitDisabled = isCurrentAgentRunning && !isCurrentGoalActive
-    ? composerStopDisabled
-    : composerSendDisabled;
+  const composerPrimaryAction = agentComposerPrimaryAction({
+    isRunning: isCurrentAgentRunning,
+    isGoalActive: isCurrentGoalActive,
+    hasIntent: hasComposerIntent
+  });
+  const composerSubmitDisabled = composerPrimaryAction === "stop" ? composerStopDisabled : composerSendDisabled;
   const centerComposerControls = isComposerSingleLine && pendingAttachments.length === 0;
 
   useEffect(() => {
@@ -1989,7 +2001,7 @@ export function HomePage() {
       return;
     }
     event.preventDefault();
-    if ((!isCurrentAgentRunning || isCurrentGoalActive) && !composerSendDisabled) {
+    if (composerPrimaryAction === "send" && !composerSendDisabled) {
       void sendMessage();
     }
   }
@@ -2319,6 +2331,7 @@ export function HomePage() {
                 <AgentGoalBar
                   chatId={state.agent.currentChatId}
                   goal={currentGoal}
+                  clock={state.agent.goalRunClockByChatId[state.agent.currentChatId] ?? null}
                   pending={Boolean(goalMutationPending)}
                   onControl={(request) => void controlGoal(request)}
                 />
@@ -2424,35 +2437,14 @@ export function HomePage() {
                   >
                     {asrRecorder.isRecording ? <Pause size={15} /> : <Mic size={15} />}
                   </button>
-                  {isCurrentAgentRunning && isCurrentGoalActive ? (
-                    <>
-                      <ComposerSubmitButton
-                        isSending={false}
-                        disabled={composerSendDisabled}
-                        sendLabel={t("home.send")}
-                        stopLabel={t("home.stop")}
-                        variant="compact"
-                        onClick={() => void sendMessage()}
-                      />
-                      <ComposerSubmitButton
-                        isSending
-                        disabled={composerStopDisabled}
-                        sendLabel={t("home.send")}
-                        stopLabel={t("home.stop")}
-                        variant="compact"
-                        onClick={stopCurrentTurn}
-                      />
-                    </>
-                  ) : (
-                    <ComposerSubmitButton
-                      isSending={isCurrentAgentRunning}
-                      disabled={composerSubmitDisabled}
-                      sendLabel={t("home.send")}
-                      stopLabel={t("home.stop")}
-                      variant="compact"
-                      onClick={isCurrentAgentRunning ? stopCurrentTurn : () => void sendMessage()}
-                    />
-                  )}
+                  <ComposerSubmitButton
+                    isSending={composerPrimaryAction === "stop"}
+                    disabled={composerSubmitDisabled}
+                    sendLabel={t("home.send")}
+                    stopLabel={t("home.stop")}
+                    variant="compact"
+                    onClick={composerPrimaryAction === "stop" ? stopCurrentTurn : () => void sendMessage()}
+                  />
                 </div>
               </div>
               <p className="text-center text-[11px] text-text-ink/40 mt-2">{t("home.notice")}</p>

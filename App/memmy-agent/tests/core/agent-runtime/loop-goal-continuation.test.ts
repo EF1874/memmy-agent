@@ -1,13 +1,18 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Config } from "../../../src/config/schema.js";
 import { AgentLoop } from "../../../src/core/agent-runtime/loop.js";
 import { AgentRunResult, type AgentRunSpec } from "../../../src/core/agent-runtime/runner.js";
 import { InboundMessage } from "../../../src/core/runtime-messages/events.js";
 
 const SESSION_KEY = "websocket:goal-chat";
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 
 function makeLoop(): AgentLoop {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-goal-continuation-"));
@@ -28,7 +33,11 @@ function makeLoop(): AgentLoop {
     projectId: null,
     cwd: fs.realpathSync(workspace),
   });
-  loop.sessions.getOrCreate(SESSION_KEY);
+  const session = loop.sessions.getOrCreate(SESSION_KEY);
+  session.metadata.webui = true;
+  session.metadata.webuiProjectId = null;
+  session.metadata.webuiWorkspaceCwd = fs.realpathSync(workspace);
+  loop.sessions.save(session);
   loop.setChannelCapabilitiesResolver((channel) => (
     channel === "websocket" ? { supportsStreaming: true } : null
   ));
@@ -98,6 +107,56 @@ describe("Goal continuation template", () => {
 });
 
 describe("Goal continuation scheduling", () => {
+  it("settles partial Goal usage and wall time when a running Turn is cancelled", async () => {
+    let nowMs = Date.parse("2026-08-05T00:00:00.000Z");
+    vi.spyOn(Date, "now").mockImplementation(() => nowMs);
+    const loop = makeLoop();
+    const goal = await createGoal(loop);
+    loop.goalRuntime.releaseTurn(SESSION_KEY, "turn-create");
+    const scheduleGoalWork = vi.spyOn(loop, "scheduleGoalWork");
+    const controller = new AbortController();
+    let notifyRunnerStarted!: () => void;
+    const runnerStarted = new Promise<void>((resolve) => {
+      notifyRunnerStarted = resolve;
+    });
+    loop.runner.run = vi.fn(async (spec: AgentRunSpec) => {
+      notifyRunnerStarted();
+      await new Promise<void>((resolve) => {
+        spec.abortSignal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+      return new AgentRunResult({
+        finalContent: "cancelled",
+        messages: spec.messages,
+        stopReason: "cancelled",
+        usage: { total_tokens: 5 },
+      });
+    });
+
+    const processing = loop.processMessage(new InboundMessage({
+      channel: "websocket",
+      chatId: "goal-chat",
+      senderId: "user",
+      content: "continue the Goal",
+      metadata: { webui: true },
+    }), SESSION_KEY, {
+      abortSignal: controller.signal,
+      turnId: "turn-cancelled",
+    });
+    await runnerStarted;
+    await loop.goalRuntime.pause(SESSION_KEY, goal.goalId);
+    nowMs += 2_100;
+    controller.abort();
+
+    await expect(processing).rejects.toMatchObject({ name: "TaskCancelledError" });
+    expect(loop.goalRuntime.get(SESSION_KEY)).toMatchObject({
+      goalId: goal.goalId,
+      status: "paused",
+      tokensUsed: 5,
+      timeUsedSeconds: 3,
+    });
+    expect(scheduleGoalWork).not.toHaveBeenCalled();
+  });
+
   it("runs maxIterations continuations as distinct top-level Turns and stops on completed", async () => {
     const loop = makeLoop();
     const goal = await createGoal(loop);

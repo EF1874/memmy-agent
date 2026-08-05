@@ -2880,6 +2880,94 @@ describe("agent chat slice", () => {
     expect(state.goalState).toEqual(activeGoal);
   });
 
+  it("keeps a per-Goal clock stable through settlement updates and clears it on the matching Turn end", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/sessionsLoaded", sessions });
+    state = agentReducer(state, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "goal_state", chat_id: "chat-1", goal_state: goalState("active") }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1_780_732_800, turn_id: "turn-1" }
+    });
+
+    expect(state.goalRunClockByChatId["chat-1"]).toEqual({
+      goalId,
+      turnId: "turn-1",
+      startedAt: 1_780_732_800,
+      baseSeconds: 30
+    });
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "goal_state",
+        chat_id: "chat-1",
+        goal_state: { ...goalState("paused"), time_used_seconds: 35 }
+      }
+    });
+    expect(state.goalRunClockByChatId["chat-1"]?.baseSeconds).toBe(30);
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "turn_end", chat_id: "chat-1", turn_id: "turn-old", goal_id: goalId, goal_outcome: "paused" }
+    });
+    expect(state.goalRunClockByChatId["chat-1"]).not.toBeNull();
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "turn_end", chat_id: "chat-1", turn_id: "turn-1", goal_id: goalId, goal_outcome: "paused" }
+    });
+    expect(state.goalRunClockByChatId["chat-1"]).toBeNull();
+  });
+
+  it("starts a Goal clock when active Goal state arrives after the running event", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/sessionsLoaded", sessions });
+    state = agentReducer(state, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1_780_732_800, turn_id: "turn-1" }
+    });
+    expect(state.goalRunClockByChatId["chat-1"] ?? null).toBeNull();
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "goal_state", chat_id: "chat-1", goal_state: goalState("active") }
+    });
+    expect(state.goalRunClockByChatId["chat-1"]).toEqual({
+      goalId,
+      turnId: "turn-1",
+      startedAt: 1_780_732_800,
+      baseSeconds: 30
+    });
+  });
+
+  it("does not start or leak Goal clocks for paused Goals or other chats", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/sessionsLoaded", sessions });
+    state = agentReducer(state, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "goal_state", chat_id: "chat-1", goal_state: goalState("paused") }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1_780_732_800, turn_id: "turn-1" }
+    });
+    expect(state.goalRunClockByChatId["chat-1"] ?? null).toBeNull();
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "goal_state", chat_id: "chat-2", goal_state: goalState("active") }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "run_status", chat_id: "chat-2", status: "running", started_at: 1_780_732_900, turn_id: "turn-2" }
+    });
+    expect(state.goalRunClockByChatId["chat-1"] ?? null).toBeNull();
+    expect(state.goalRunClockByChatId["chat-2"]).toMatchObject({ turnId: "turn-2", baseSeconds: 30 });
+  });
+
   it("closes intermediate Goal Turns without completion and completes only the terminal Turn", () => {
     vi.spyOn(Date, "now").mockReturnValue(1781240000000);
     let state = agentReducer(initialAgentState, { type: "agent/sessionsLoaded", sessions });

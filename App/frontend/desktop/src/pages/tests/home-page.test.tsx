@@ -18,6 +18,7 @@ import {
   ComposerSubmitButton,
   HomePage,
   AgentOperationErrorSlot,
+  agentComposerPrimaryAction,
   agentErrorText,
   agentStatusText,
   agentChatScopeKey,
@@ -451,6 +452,7 @@ describe("HomePage", () => {
     const keyDownHandler = source.slice(source.indexOf("function handleComposerKeyDown"), source.indexOf("  /**\n   * 校验并暂存用户选择"));
 
     expect(keyDownHandler).toContain("!composerSendDisabled");
+    expect(keyDownHandler).toContain('composerPrimaryAction === "send"');
     expect(keyDownHandler).not.toContain("!state.agent.isSending && !isCreatingChat");
   });
 
@@ -608,25 +610,27 @@ describe("HomePage", () => {
     expect(source).toContain("const stopRequestLocksRef = useRef<Set<string>>(new Set());");
     expect(source).toContain("input.stopRequestLocks.has(chatId)");
     expect(source).toContain("const composerStopDisabled = stopInFlight");
-    expect(submitDisabledBlock).toContain("isCurrentAgentRunning && !isCurrentGoalActive");
+    expect(submitDisabledBlock).toContain('composerPrimaryAction === "stop"');
   });
 
-  it("keeps Send available beside Goal Stop and routes that Stop through Pause", () => {
+  it("switches the single Goal composer button between Stop and Send from user intent", () => {
     const source = readFileSync(homePageSourcePath, "utf8").replace(/\r\n/g, "\n");
     const stopBlock = source.slice(
       source.indexOf("function stopCurrentTurn()"),
       source.indexOf("async function controlGoal")
     );
-    const goalRunningControls = source.slice(
-      source.indexOf("{isCurrentAgentRunning && isCurrentGoalActive ? ("),
-      source.indexOf(") : (", source.indexOf("{isCurrentAgentRunning && isCurrentGoalActive ? ("))
+    const conversationComposer = source.slice(
+      source.indexOf("{state.agent.currentChatId && currentGoal ? ("),
+      source.indexOf('<p className="text-center text-[11px] text-text-ink/40 mt-2">')
     );
-
-    expect(goalRunningControls.match(/<ComposerSubmitButton/g)).toHaveLength(2);
-    expect(goalRunningControls).toContain("disabled={composerSendDisabled}");
-    expect(goalRunningControls).toContain("onClick={() => void sendMessage()}");
-    expect(goalRunningControls).toContain("disabled={composerStopDisabled}");
-    expect(goalRunningControls).toContain("onClick={stopCurrentTurn}");
+    expect(agentComposerPrimaryAction({ isRunning: true, isGoalActive: true, hasIntent: false })).toBe("stop");
+    expect(agentComposerPrimaryAction({ isRunning: true, isGoalActive: true, hasIntent: true })).toBe("send");
+    expect(agentComposerPrimaryAction({ isRunning: true, isGoalActive: false, hasIntent: true })).toBe("stop");
+    expect(agentComposerPrimaryAction({ isRunning: false, isGoalActive: false, hasIntent: false })).toBe("send");
+    expect(source).toContain("const hasComposerIntent = Boolean(input.trim() || pendingAttachments.length > 0);");
+    expect(conversationComposer.match(/<ComposerSubmitButton/g)).toHaveLength(1);
+    expect(source).toContain('isSending={composerPrimaryAction === "stop"}');
+    expect(source).toContain('onClick={composerPrimaryAction === "stop" ? stopCurrentTurn : () => void sendMessage()}');
     expect(stopBlock).toContain('controlGoal({ chatId, goalId: goal.goal_id, action: "pause" })');
     expect(stopBlock.indexOf("return;")).toBeLessThan(stopBlock.indexOf("requestAgentStop({"));
   });

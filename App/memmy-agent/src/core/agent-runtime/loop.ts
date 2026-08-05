@@ -2609,6 +2609,9 @@ export class AgentLoop {
           }
         : null,
     });
+    ctx.stopReason = stopReason;
+    ctx.errorCategory = errorCategory;
+    ctx.usage = usage;
     if (ctx.abortSignal?.aborted || stopReason === "cancelled") {
       throw createTaskCancelledError();
     }
@@ -2622,14 +2625,36 @@ export class AgentLoop {
     );
     ctx.toolsUsed = toolsUsed;
     ctx.allMessages = allMessages;
-    ctx.stopReason = stopReason;
     ctx.hadInjections = hadInjections;
     ctx.finalContentStreamed = finalContentStreamed;
     ctx.actualModelProvider = actualModelProvider;
     ctx.actualModel = actualModel;
-    ctx.errorCategory = errorCategory;
-    ctx.usage = usage;
     return "ok";
+  }
+
+  private async settleCancelledGoalTurn(ctx: TurnContext): Promise<void> {
+    const goalId = ctx.goalIdForTurn ?? this.goalRuntime.goalIdForTurn(ctx.sessionKey, ctx.turnId);
+    if (!goalId) return;
+    ctx.goalIdForTurn = goalId;
+    ctx.turnLatencyMs = Math.max(0, Math.trunc((Date.now() / 1000 - ctx.turnWallStartedAt) * 1000));
+    const settlement = await this.goalRuntime.settleTurn({
+      sessionKey: ctx.sessionKey,
+      turnId: ctx.turnId,
+      goalId,
+      usage: ctx.usage,
+      latencyMs: ctx.turnLatencyMs,
+      stopReason: "cancelled",
+      errorCategory: ctx.errorCategory,
+    });
+    ctx.goalOutcome = settlement.goal?.status ?? null;
+    if (settlement.goal) {
+      ctx.dagGoalContext = {
+        goalId: settlement.goal.goalId,
+        objective: settlement.goal.objective,
+        status: settlement.goal.status,
+      };
+    }
+    await this.goalRuntime.flushEffects(ctx.sessionKey);
   }
 
   async stateSave(ctx: TurnContext): Promise<string> {
@@ -3020,6 +3045,19 @@ export class AgentLoop {
       await this.stateSave(ctx);
       await this.stateRespond(ctx);
       return ctx.outbound;
+    } catch (error) {
+      if (isTaskCancelledError(error)) {
+        try {
+          await this.settleCancelledGoalTurn(ctx);
+        } catch (settlementError) {
+          console.warn("[goal] cancelled turn settlement failed", {
+            sessionKey: ctx.sessionKey,
+            turnId: ctx.turnId,
+            error: settlementError,
+          });
+        }
+      }
+      throw error;
     } finally {
       if (ctx.mirrorTurn) {
         this.guiTranscriptMirror?.ended(

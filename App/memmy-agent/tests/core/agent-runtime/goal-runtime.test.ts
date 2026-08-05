@@ -329,12 +329,7 @@ describe("GoalRuntime transaction and settlement guarantees", () => {
       errorCategory: null,
     });
     cancellation.resolve(1);
-    await expect(clearing).rejects.toMatchObject({ code: "goal_turn_settling" });
-    expect(runtime.get(SESSION_KEY)).toMatchObject({ status: "paused", tokensUsed: 7 });
-    expect(runtime.inbox(SESSION_KEY)).toHaveLength(1);
-
-    runtime.releaseTurn(SESSION_KEY, "turn-clear");
-    await runtime.clear(SESSION_KEY, goal.goalId);
+    await expect(clearing).resolves.toBeUndefined();
     expect(runtime.get(SESSION_KEY)).toBeNull();
     expect(runtime.inbox(SESSION_KEY)).toHaveLength(1);
   });

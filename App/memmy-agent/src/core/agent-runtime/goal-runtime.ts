@@ -171,6 +171,17 @@ function normalizeUsageValue(value: unknown): number {
   return Math.floor(value);
 }
 
+function isClearablePausedGoal(current: GoalState, snapshot: GoalState): boolean {
+  return current.goalId === snapshot.goalId
+    && current.objective === snapshot.objective
+    && current.status === "paused"
+    && current.tokenBudget === snapshot.tokenBudget
+    && current.createdAt === snapshot.createdAt
+    && current.tokensUsed >= snapshot.tokensUsed
+    && current.timeUsedSeconds >= snapshot.timeUsedSeconds
+    && Date.parse(current.updatedAt) >= Date.parse(snapshot.updatedAt);
+}
+
 export function normalizeGoalUsage(usage: Record<string, number>): Record<string, number> {
   return {
     prompt_tokens: normalizeUsageValue(usage.prompt_tokens),
@@ -689,10 +700,9 @@ export class GoalRuntime {
         const goal = readGoalState(session.metadata);
         if (!goal) throw new GoalRuntimeError("goal_not_found");
         if (goal.goalId !== goalId) throw new GoalRuntimeError("goal_id_mismatch");
-        if (
-          pausedSnapshot
-          && (goal.status !== "paused" || goal.updatedAt !== pausedSnapshot.updatedAt)
-        ) throw new GoalRuntimeError("goal_turn_settling");
+        if (pausedSnapshot && !isClearablePausedGoal(goal, pausedSnapshot)) {
+          throw new GoalRuntimeError("goal_turn_settling");
+        }
         const route = readGoalRoute(session.metadata);
         delete session.metadata[GOAL_STATE_KEY];
         delete session.metadata[GOAL_ROUTE_KEY];

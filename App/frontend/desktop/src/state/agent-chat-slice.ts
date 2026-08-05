@@ -137,6 +137,13 @@ export interface AgentRetryWaitStatus {
   stoppedByUser?: boolean;
 }
 
+export type AgentGoalRunClock = {
+  goalId: string;
+  turnId: string | null;
+  startedAt: number;
+  baseSeconds: number;
+};
+
 export interface AgentState {
   connectionStatus: AgentConnectionStatus;
   connectionError: string | null;
@@ -190,6 +197,7 @@ export interface AgentState {
   lastTaskCompletion: { chatId: string; at: number } | null;
   goalStatesByChatId: Record<string, AgentGoalState>;
   goalState: AgentGoalState | null;
+  goalRunClockByChatId: Record<string, AgentGoalRunClock | null>;
   goalMutationPendingByChatId: Record<string, {
     requestId: string;
     goalId: string;
@@ -336,6 +344,7 @@ export const initialAgentState: AgentState = {
   lastTaskCompletion: null,
   goalStatesByChatId: {},
   goalState: null,
+  goalRunClockByChatId: {},
   goalMutationPendingByChatId: {},
   composerDraftsByScope: {},
   composerPendingAttachmentsByScope: {},
@@ -1192,7 +1201,13 @@ function completeSessionSnapshotLoad(
     && !snapshot.sessions.some((session) => session.key === loaded.currentSessionKey)
     && !(loaded.currentChatId && loaded.optimisticTasksByChatId[loaded.currentChatId])
   ) {
-    return enterBlankDraft(loaded, loaded.newChatRequestId + 1);
+    const removedChatId = loaded.currentChatId;
+    return enterBlankDraft({
+      ...loaded,
+      ...(removedChatId
+        ? { goalRunClockByChatId: { ...loaded.goalRunClockByChatId, [removedChatId]: null } }
+        : {})
+    }, loaded.newChatRequestId + 1);
   }
   return loaded;
 }
@@ -1235,6 +1250,7 @@ function completeSessionsLoad(state: AgentState, sessions: MemmyAgentSessionSumm
     retryWaitStatusByChatId: pruneOptionalMap(state.retryWaitStatusByChatId, knownChatIds),
     completedUnseenByChatId: pruneNumberMap(state.completedUnseenByChatId, knownChatIds),
     runStartedAtByChatId: reconcileSessionRunStartedOverrides(state.runStartedAtByChatId, sessions, knownChatIds, preserveRunChatIds),
+    goalRunClockByChatId: pruneNullableMap(state.goalRunClockByChatId, knownChatIds),
     runStatusVersionByChatId: pruneNumberMap(state.runStatusVersionByChatId, knownChatIds),
     currentSessionsRequestRunStatusVersionByChatId: null,
     stopInFlightByChatId: pruneBooleanMap(state.stopInFlightByChatId, knownChatIds),
@@ -1678,6 +1694,16 @@ function pruneOptionalMap<T>(values: Record<string, T | undefined>, keepChatIds:
   const next: Record<string, T | undefined> = {};
   for (const [chatId, value] of Object.entries(values)) {
     if (keepChatIds.has(chatId) && value !== undefined) {
+      next[chatId] = value;
+    }
+  }
+  return next;
+}
+
+function pruneNullableMap<T>(values: Record<string, T | null>, keepChatIds: Set<string>): Record<string, T | null> {
+  const next: Record<string, T | null> = {};
+  for (const [chatId, value] of Object.entries(values)) {
+    if (keepChatIds.has(chatId)) {
       next[chatId] = value;
     }
   }
@@ -3506,12 +3532,93 @@ function bumpRunStatusVersion(state: AgentState, chatId: string): Record<string,
   };
 }
 
+function goalStateForChat(state: AgentState, chatId: string): AgentGoalState | null {
+  return state.goalStatesByChatId[chatId]
+    ?? (state.currentChatId === chatId ? state.goalState : null);
+}
+
+function sameGoalRun(
+  clock: AgentGoalRunClock,
+  goalId: string,
+  startedAt: number,
+  turnId: string | null
+): boolean {
+  if (clock.goalId !== goalId) return false;
+  if (clock.turnId && turnId) return clock.turnId === turnId;
+  return clock.startedAt === startedAt;
+}
+
+function updateGoalRunClockForRunning(
+  state: AgentState,
+  chatId: string,
+  startedAt: number,
+  turnId: string | null
+): Record<string, AgentGoalRunClock | null> {
+  const current = state.goalRunClockByChatId[chatId] ?? null;
+  const goal = goalStateForChat(state, chatId);
+  const goalId = goal?.goal_id ?? null;
+  if (current && goalId && sameGoalRun(current, goalId, startedAt, turnId)) {
+    const resolved = turnId && current.turnId !== turnId ? { ...current, turnId } : current;
+    return resolved === current
+      ? state.goalRunClockByChatId
+      : { ...state.goalRunClockByChatId, [chatId]: resolved };
+  }
+  if (!goalId || goal?.status !== "active") {
+    return current
+      ? { ...state.goalRunClockByChatId, [chatId]: null }
+      : state.goalRunClockByChatId;
+  }
+  return {
+    ...state.goalRunClockByChatId,
+    [chatId]: {
+      goalId,
+      turnId,
+      startedAt,
+      baseSeconds: goal.time_used_seconds
+    }
+  };
+}
+
+function updateGoalRunClockForGoalState(
+  state: AgentState,
+  chatId: string,
+  goal: AgentGoalState
+): Record<string, AgentGoalRunClock | null> {
+  const current = state.goalRunClockByChatId[chatId] ?? null;
+  const goalId = goal.goal_id;
+  if (!goalId || goal.status === "completed") {
+    return current
+      ? { ...state.goalRunClockByChatId, [chatId]: null }
+      : state.goalRunClockByChatId;
+  }
+  const startedAt = effectiveRunStartedAtForChat(state, chatId);
+  const turnId = state.activeTurnIdByChatId[chatId] ?? null;
+  if (current && startedAt !== null && sameGoalRun(current, goalId, startedAt, turnId)) {
+    return state.goalRunClockByChatId;
+  }
+  if (goal.status !== "active" || startedAt === null) {
+    return current
+      ? { ...state.goalRunClockByChatId, [chatId]: null }
+      : state.goalRunClockByChatId;
+  }
+  return {
+    ...state.goalRunClockByChatId,
+    [chatId]: {
+      goalId,
+      turnId,
+      startedAt,
+      baseSeconds: goal.time_used_seconds
+    }
+  };
+}
+
 function markChatRunning(state: AgentState, chatId: string, startedAt: number, turnId: string | null = null): AgentState {
   const optimisticSendingByChatId = { ...state.optimisticSendingByChatId };
   delete optimisticSendingByChatId[chatId];
   return {
     ...state,
     runStartedAtByChatId: { ...state.runStartedAtByChatId, [chatId]: startedAt },
+    goalRunClockByChatId: updateGoalRunClockForRunning(state, chatId, startedAt, turnId),
     runStatusVersionByChatId: bumpRunStatusVersion(state, chatId),
     activeTurnIdByChatId: turnId ? { ...state.activeTurnIdByChatId, [chatId]: turnId } : state.activeTurnIdByChatId,
     optimisticSendingByChatId,
@@ -3588,6 +3695,7 @@ function markChatIdle(state: AgentState, chatId: string, options: {
   const nextState = deriveTasks({
     ...suppressionClearedState,
     runStartedAtByChatId: { ...suppressionClearedState.runStartedAtByChatId, [chatId]: null },
+    goalRunClockByChatId: { ...suppressionClearedState.goalRunClockByChatId, [chatId]: null },
     runStatusVersionByChatId: bumpRunStatusVersion(suppressionClearedState, chatId),
     activeTurnIdByChatId,
     optimisticSendingByChatId,
@@ -3706,6 +3814,7 @@ function releaseUnconfirmedStop(state: AgentState, chatId: string): AgentState {
     ...suppressionClearedState,
     stopInFlightByChatId,
     runStartedAtByChatId: { ...suppressionClearedState.runStartedAtByChatId, [chatId]: null },
+    goalRunClockByChatId: { ...suppressionClearedState.goalRunClockByChatId, [chatId]: null },
     runStatusVersionByChatId: bumpRunStatusVersion(suppressionClearedState, chatId),
     ...(chatId === state.currentChatId ? { isSending: false } : {})
   });
@@ -3727,10 +3836,12 @@ function updateGoalState(state: AgentState, chatId: string | null | undefined, r
   }
 
   const goalState: AgentGoalState = rawGoalState;
+  const goalRunClockByChatId = updateGoalRunClockForGoalState(state, chatId, goalState);
   return {
     ...state,
     goalStatesByChatId: { ...state.goalStatesByChatId, [chatId]: goalState },
-    goalState: chatId === state.currentChatId ? goalState : state.goalState
+    goalState: chatId === state.currentChatId ? goalState : state.goalState,
+    goalRunClockByChatId
   };
 }
 

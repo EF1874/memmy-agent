@@ -4,6 +4,7 @@ import type {
   AgentGoalState
 } from "../api/memmy-agent-client.js";
 import { useTranslation } from "../i18n/use-translation.js";
+import type { AgentGoalRunClock } from "../state/agent-chat-slice.js";
 
 export type AgentGoalControlRequest = {
   chatId: string;
@@ -16,6 +17,7 @@ export type AgentGoalControlRequest = {
 export interface AgentGoalBarProps {
   chatId: string;
   goal: AgentGoalState;
+  clock: AgentGoalRunClock | null;
   pending: boolean;
   onControl: (request: AgentGoalControlRequest) => void;
 }
@@ -26,11 +28,24 @@ type GoalForm =
 
 const OBJECTIVE_MAX_LENGTH = 12_000;
 
+export function displayedGoalTimeSeconds(
+  goal: AgentGoalState,
+  clock: AgentGoalRunClock | null,
+  nowMs = Date.now()
+): number {
+  if (!goal.goal_id || !clock || clock.goalId !== goal.goal_id) {
+    return goal.time_used_seconds;
+  }
+  const elapsedSeconds = Math.max(0, Math.floor(nowMs / 1000 - clock.startedAt));
+  return Math.max(goal.time_used_seconds, clock.baseSeconds + elapsedSeconds);
+}
+
 export function AgentGoalBar(props: AgentGoalBarProps) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   const [form, setForm] = useState<GoalForm | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const status = props.goal.status;
   const goalId = props.goal.goal_id;
 
@@ -41,11 +56,19 @@ export function AgentGoalBar(props: AgentGoalBarProps) {
     }
   }, [form, goalId, props.chatId]);
 
+  useEffect(() => {
+    if (!status || status === "completed" || !goalId || props.clock?.goalId !== goalId) return;
+    setNowMs(Date.now());
+    const intervalId = window.setInterval(() => setNowMs(Date.now()), 1_000);
+    return () => window.clearInterval(intervalId);
+  }, [goalId, props.clock?.goalId, props.clock?.startedAt, props.clock?.turnId, status]);
+
   if (!status || !goalId || status === "completed") return null;
 
   const canResume = status === "paused" || status === "blocked" || status === "usage_limited";
   const canEdit = status !== "active";
   const objectiveIsLong = props.goal.objective.length > 320 || props.goal.objective.includes("\n");
+  const timeUsedSeconds = displayedGoalTimeSeconds(props.goal, props.clock, nowMs);
 
   const control = (action: AgentGoalControlAction) => {
     props.onControl({ chatId: props.chatId, goalId, action });
@@ -112,7 +135,7 @@ export function AgentGoalBar(props: AgentGoalBarProps) {
             budget: props.goal.token_budget ?? t("home.goal.noLimit")
           })}
           {" · "}
-          {t("home.goal.time", { seconds: props.goal.time_used_seconds })}
+          {t("home.goal.time", { seconds: timeUsedSeconds })}
         </span>
       </div>
 
