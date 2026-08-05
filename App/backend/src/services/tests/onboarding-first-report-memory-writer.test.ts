@@ -53,15 +53,22 @@ describe("onboarding first-report memory writer", () => {
       reportMarkdown: "## 你的偏好\n- 喜欢中文回答。\n\n## 接下来可以做\n1. 运行测试。",
       projects: ["Memmy"],
       keywords: ["onboarding", "Memory"],
+      taskContext: {
+        topic: "Memmy 初见报告接续",
+        userGoal: "让其他 Agent 准确接续最近任务。",
+        latestRequest: "把任务历史整理成通用轨迹摘要后写入记忆。",
+        status: "active",
+        currentState: "存储结构已确定，正在修改生成链路。",
+        agentActions: ["已调整初见报告 prompt 和记忆格式。"],
+        verifiedResults: ["初见报告记忆会在写入后立即完成摘要和索引。"],
+        unresolvedItems: ["需要验证跨 Agent 召回效果。"],
+        continuationPoint: "运行相关测试后模拟一次 Hermes 接续。",
+        trajectorySummary: "用户从原始对话接续方案转向通用轨迹摘要；Agent 已开始调整生成和存储，下一步是验证召回。"
+      },
       latestConversation: {
         agentSource: "Codex",
         conversationId: "conversation-123",
-        workspacePath: "/Users/jiang/MyProject/memmy-agent-jiang",
-        messages: [
-          { role: "user", createdAt: "2026-08-05T09:00:00.000Z", text: "修改初见报告。" },
-          { role: "assistant", createdAt: "2026-08-05T09:01:00.000Z", text: "已经修改 prompt。" },
-          { role: "tool", createdAt: "2026-08-05T09:02:00.000Z", text: "npm test: success" }
-        ]
+        workspacePath: "/Users/jiang/MyProject/memmy-agent-jiang"
       }
     });
 
@@ -70,29 +77,35 @@ describe("onboarding first-report memory writer", () => {
       adapterId: "agent-source:memmy-onboarding",
       source: "memmy-onboarding",
       layer: "L1",
+      title: "Memmy 初见报告 — Memmy 初见报告接续",
       deferProcessing: true,
       tags: expect.arrayContaining([
         "agent-source",
         "memmy",
         "初见报告",
-        "memmy-first-report",
         "first-encounter-report",
-        "onboarding-report",
-        "continue-from-first-report",
         "cross-agent-handoff",
         "Memmy",
         "onboarding",
         "Memory"
       ])
     });
-    expect(added?.content).toContain("## user\n\nMemmy 初见报告 / Memmy First Encounter Report / Onboarding Report");
-    expect(added?.content).toContain("Memmy first report, first encounter report, onboarding report");
+    expect(added?.content).toContain("## user\n\nMemmy 初见报告：跨 Agent 任务接续记忆");
+    expect(added?.content).toContain("语言：中文");
+    expect(added?.content).toContain("检索关键词：Memmy、初见报告、首次登录报告");
     expect(added?.content).toContain("请接着我刚才在 Memmy 里的初见报告继续聊天");
-    expect(added?.content).toContain("Please continue from the first report I just had in Memmy");
-    expect(added?.content).toContain("【User query / 用户请求");
-    expect(added?.content).toContain("【Agent reply / Agent 回复");
-    expect(added?.content).toContain("【Tool call or result / 简略工具调用");
-    expect(added?.content).toContain("## assistant\n\nMemmy 初见报告 / Memmy First Encounter Report / Onboarding Report");
+    expect(added?.content).toContain("任务上下文（由最近会话轨迹归纳，不含原始对话流水）");
+    expect(added?.content).toContain("用户目标：让其他 Agent 准确接续最近任务。");
+    expect(added?.content).toContain("任务状态：进行中");
+    expect(added?.content).toContain("Agent 已执行：\n- 已调整初见报告 prompt 和记忆格式。");
+    expect(added?.content).toContain("已验证结果：\n- 初见报告记忆会在写入后立即完成摘要和索引。");
+    expect(added?.content).toContain("轨迹总结：");
+    expect(added?.content).not.toContain("First Encounter Report");
+    expect(added?.content).not.toContain("User goal");
+    expect(added?.content).not.toContain("【User query / 用户请求");
+    expect(added?.content).not.toContain("【Agent reply / Agent 回复");
+    expect(added?.content).not.toContain("【Tool call or result / 简略工具调用");
+    expect(added?.content).toContain("## assistant\n\nMemmy 初见报告");
     expect(added?.content).toContain("## 接下来可以做\n1. 运行测试。");
     expect(enqueueImportSummaries).toHaveBeenCalledWith(["memory-first-report"]);
     expect(runWorker).toHaveBeenCalledTimes(2);

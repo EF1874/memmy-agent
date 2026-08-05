@@ -70,7 +70,7 @@ describe("MemoryService / retrieval / injected context", () => {
     const latestReport = addFirstReport({
       requestId: "latest",
       createdAt: "2026-08-05T10:00:00.000Z",
-      userText: `SCANNED_TRANSCRIPT_MUST_NOT_BE_INJECTED ${"history ".repeat(2_000)}`,
+      userText: `语言：中文\nSCANNED_TRANSCRIPT_MUST_NOT_BE_INJECTED ${"history ".repeat(2_000)}`,
       report: fullReport
     });
     service.addMemory({
@@ -121,11 +121,13 @@ describe("MemoryService / retrieval / injected context", () => {
       expect(searchOutput.candidates).toEqual([
         expect.objectContaining({
           refId: latestReport.id,
-          content: expect.stringContaining("User query / 用户请求:")
+          content: expect.stringContaining("用户请求：")
         })
       ]);
       expect(searchOutput.candidates?.[0]?.content).toContain("SCANNED_TRANSCRIPT_MUST_NOT_BE_INJECTED");
-      expect(searchOutput.candidates?.[0]?.content).toContain("Assistant response / Assistant 回复:");
+      expect(searchOutput.candidates?.[0]?.content).toContain("助手回复：");
+      expect(searchOutput.candidates?.[0]?.content).not.toContain("User query");
+      expect(searchOutput.candidates?.[0]?.content).not.toContain("Assistant response");
       expect(searchOutput.candidates?.[0]?.content).toContain("FINAL_NEXT_STEP_MARKER");
       expect(searchOutput.candidates?.[0]?.content).not.toContain("...[truncated]");
     }

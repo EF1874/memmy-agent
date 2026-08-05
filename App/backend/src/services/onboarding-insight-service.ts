@@ -12,18 +12,18 @@ import type {
   OnboardingConversationWindowReader,
   OnboardingInsightSampler,
   OnboardingSampleResult,
-  OnboardingSampledMessage,
   OnboardingSampledQuery
 } from "../adapters/outbound/agent-source/insight-sampler-types.js";
 import { stripInlineMediaPayloads } from "../shared/inline-media-sanitizer.js";
 import type { OnboardingFirstReportMemoryWriter } from "./onboarding-first-report-memory-writer.js";
+import type { OnboardingTaskContextSummary, OnboardingTaskStatus } from "./onboarding-task-context.js";
 
 const DEFAULT_SAMPLE_OPTIONS = {
   maxSessionFiles: 6,
   maxQueries: 12,
   maxQueryChars: 600,
   maxBytesPerFile: 768 * 1024,
-  deadlineMs: 10_000
+  deadlineMs: 3_000
 } as const;
 
 const FIRST_LOGIN_SCAN_DEADLINE_MS = DEFAULT_SAMPLE_OPTIONS.deadlineMs;
@@ -34,6 +34,12 @@ const DEFAULT_LLM_TIMEOUT_MS = 90_000;
 const DEFAULT_LLM_MAX_TOKENS = 2_000;
 const MEMMY_ACCOUNT_AGENT_CHAT_THINKING_BUDGET = 500;
 const MAX_GENERATED_OUTPUT_CHARS = 12_000;
+const GENERATED_REPORT_OPEN = "<memmy_report>";
+const GENERATED_REPORT_CLOSE = "</memmy_report>";
+const GENERATED_TASK_CONTEXT_OPEN = "<memmy_task_context>";
+const GENERATED_TASK_CONTEXT_CLOSE = "</memmy_task_context>";
+const GENERATED_NAKED_JSON_OPEN = "\n{";
+const GENERATED_JSON_FENCE_OPEN = "\n```json";
 
 const TOPIC_PATTERNS: ReadonlyArray<{ keyword: string; pattern: RegExp }> = [
   { keyword: "TypeScript", pattern: /\btypescript\b|\bts\b/i },
@@ -134,6 +140,11 @@ export interface OnboardingInsightGenerationInput {
   profile: OnboardingInsightProfileSignals;
   sample: OnboardingInsightSampleSummary;
   signal?: AbortSignal;
+}
+
+interface GeneratedFirstReport {
+  reportMarkdown: string;
+  taskContext: OnboardingTaskContextSummary;
 }
 
 export interface OnboardingInsightSampleSummary {
@@ -700,14 +711,16 @@ async function buildReportResponse(input: {
     };
   }
 
-  const generatedReport = await generateReportSafely(input.reportGenerator, {
+  const generationInput: OnboardingInsightGenerationInput = {
     locale: input.locale,
     profile: input.profile,
     sample: toSampleSummary(input.sample),
     signal: input.signal
-  });
-  const reportMarkdown = generatedReport ?? renderFallbackReport(input.profile, input.sample, input.locale);
-  await persistFirstReportMemory(input.memoryWriter, input.profile, input.sample, input.locale, reportMarkdown);
+  };
+  const generatedReport = await generateReportSafely(input.reportGenerator, generationInput);
+  const reportMarkdown = generatedReport?.reportMarkdown ?? renderFallbackReport(input.profile, input.sample, input.locale);
+  const taskContext = generatedReport?.taskContext ?? buildFallbackTaskContext(generationInput);
+  await persistFirstReportMemory(input.memoryWriter, input.sample, input.locale, reportMarkdown, taskContext);
 
   return {
     status: "ready",
@@ -746,6 +759,7 @@ async function* streamReportResponse(input: {
     signal: input.signal
   };
   let rawOutput = "";
+  const streamParser = new FirstReportStreamParser();
 
   if (input.reportGenerator?.streamReport) {
     try {
@@ -754,7 +768,16 @@ async function* streamReportResponse(input: {
           continue;
         }
         rawOutput += delta;
-        yield { type: "chunk", delta };
+        for (const reportDelta of streamParser.push(delta)) {
+          if (reportDelta) {
+            yield { type: "chunk", delta: reportDelta };
+          }
+        }
+      }
+      for (const reportDelta of streamParser.finish()) {
+        if (reportDelta) {
+          yield { type: "chunk", delta: reportDelta };
+        }
       }
     } catch {
       rawOutput = "";
@@ -762,10 +785,11 @@ async function* streamReportResponse(input: {
   }
 
   const generatedReport = input.reportGenerator?.streamReport
-    ? sanitizeGeneratedReport(normalizeGeneratedOutput(rawOutput))
+    ? parseGeneratedFirstReport(rawOutput, generationInput)
     : await generateReportSafely(input.reportGenerator, generationInput);
-  const reportMarkdown = generatedReport ?? renderFallbackReport(input.profile, input.sample, input.locale);
-  await persistFirstReportMemory(input.memoryWriter, input.profile, input.sample, input.locale, reportMarkdown);
+  const reportMarkdown = generatedReport?.reportMarkdown ?? renderFallbackReport(input.profile, input.sample, input.locale);
+  const taskContext = generatedReport?.taskContext ?? buildFallbackTaskContext(generationInput);
+  await persistFirstReportMemory(input.memoryWriter, input.sample, input.locale, reportMarkdown, taskContext);
 
   yield {
     type: "done",
@@ -798,9 +822,9 @@ function renderEmptyHistoryReport(locale: "zh-CN" | "en-US"): string {
 async function generateReportSafely(
   reportGenerator: OnboardingInsightReportGenerator | null | undefined,
   input: OnboardingInsightGenerationInput
-): Promise<string | null> {
+): Promise<GeneratedFirstReport | null> {
   try {
-    return sanitizeGeneratedReport(normalizeGeneratedOutput(await reportGenerator?.generateReport(input) ?? null));
+    return parseGeneratedFirstReport(await reportGenerator?.generateReport(input) ?? null, input);
   } catch {
     return null;
   }
@@ -808,10 +832,10 @@ async function generateReportSafely(
 
 async function persistFirstReportMemory(
   memoryWriter: OnboardingFirstReportMemoryWriter | null | undefined,
-  profile: OnboardingInsightProfileSignals,
   sample: SampleBundle,
   locale: "zh-CN" | "en-US",
-  reportMarkdown: string
+  reportMarkdown: string,
+  taskContext: OnboardingTaskContextSummary
 ): Promise<void> {
   const latestConversation = toSampleSummary(sample).latestConversation;
   if (!memoryWriter || !latestConversation) {
@@ -820,15 +844,336 @@ async function persistFirstReportMemory(
   await memoryWriter.write({
     locale,
     reportMarkdown,
-    projects: profile.topProjects,
-    keywords: profile.topKeywords,
-    latestConversation
+    projects: latestConversation.workspacePath
+      ? [basename(latestConversation.workspacePath)]
+      : taskContext.topic ? [taskContext.topic] : [],
+    keywords: extractTaskContextKeywords(taskContext),
+    taskContext,
+    latestConversation: {
+      agentSource: latestConversation.agentSource,
+      conversationId: latestConversation.conversationId,
+      workspacePath: latestConversation.workspacePath
+    }
   });
 }
 
 function normalizeGeneratedOutput(output: string | null): string | null {
   const trimmed = (output ?? "").trim();
   return trimmed ? trimmed.slice(0, MAX_GENERATED_OUTPUT_CHARS) : null;
+}
+
+function parseGeneratedFirstReport(
+  output: string | null,
+  input: OnboardingInsightGenerationInput
+): GeneratedFirstReport | null {
+  const normalized = normalizeGeneratedOutput(output);
+  if (!normalized) {
+    return null;
+  }
+
+  const reportStart = normalized.indexOf(GENERATED_REPORT_OPEN);
+  const reportContentStart = reportStart >= 0 ? reportStart + GENERATED_REPORT_OPEN.length : 0;
+  const contextSection = findGeneratedTaskContext(normalized);
+  const reportClose = normalized.indexOf(GENERATED_REPORT_CLOSE, reportContentStart);
+  const reportEnd = [reportClose, contextSection?.start ?? -1]
+    .filter((index) => index >= reportContentStart)
+    .sort((left, right) => left - right)[0] ?? normalized.length;
+
+  const reportMarkdown = sanitizeGeneratedReport(normalized.slice(
+    reportContentStart,
+    reportEnd
+  ));
+  if (!reportMarkdown) {
+    return null;
+  }
+
+  const taskContext = contextSection?.taskContext ?? buildFallbackTaskContext(input);
+
+  return { reportMarkdown, taskContext };
+}
+
+function findGeneratedTaskContext(output: string): { start: number; taskContext: OnboardingTaskContextSummary | null } | null {
+  const taggedStart = output.indexOf(GENERATED_TASK_CONTEXT_OPEN);
+  if (taggedStart >= 0) {
+    const contentStart = taggedStart + GENERATED_TASK_CONTEXT_OPEN.length;
+    const taggedEnd = output.indexOf(GENERATED_TASK_CONTEXT_CLOSE, contentStart);
+    return {
+      start: taggedStart,
+      taskContext: parseGeneratedTaskContext(output.slice(contentStart, taggedEnd >= 0 ? taggedEnd : output.length))
+    };
+  }
+
+  const candidates = [GENERATED_JSON_FENCE_OPEN, GENERATED_NAKED_JSON_OPEN]
+    .flatMap((marker) => {
+      const indexes: number[] = [];
+      let index = output.indexOf(marker);
+      while (index >= 0) {
+        indexes.push(index);
+        index = output.indexOf(marker, index + marker.length);
+      }
+      return indexes;
+    })
+    .sort((left, right) => left - right);
+  for (const start of candidates) {
+    const taskContext = parseGeneratedTaskContext(output.slice(start + 1));
+    if (taskContext) {
+      return { start, taskContext };
+    }
+  }
+  return null;
+}
+
+function parseGeneratedTaskContext(rawContext: string): OnboardingTaskContextSummary | null {
+  const json = rawContext.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  try {
+    return normalizeGeneratedTaskContext(JSON.parse(json));
+  } catch {
+    return null;
+  }
+}
+
+function normalizeGeneratedTaskContext(value: unknown): OnboardingTaskContextSummary | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const normalized: OnboardingTaskContextSummary = {
+    topic: contextString(record.topic, 160),
+    userGoal: contextString(record.userGoal, 320),
+    latestRequest: contextString(record.latestRequest, 320),
+    status: normalizeTaskStatus(record.status),
+    currentState: contextString(record.currentState, 400),
+    agentActions: contextStringList(record.agentActions, 3, 260),
+    verifiedResults: contextStringList(record.verifiedResults, 3, 260),
+    unresolvedItems: contextStringList(record.unresolvedItems, 3, 260),
+    continuationPoint: contextString(record.continuationPoint, 320),
+    trajectorySummary: contextString(record.trajectorySummary, 800)
+  };
+  return normalized.topic || normalized.userGoal || normalized.latestRequest || normalized.currentState ||
+    normalized.trajectorySummary ? normalized : null;
+}
+
+function normalizeTaskStatus(value: unknown): OnboardingTaskStatus {
+  return value === "pending" || value === "active" || value === "waiting" ||
+    value === "completed" || value === "uncertain" ? value : "uncertain";
+}
+
+function contextString(value: unknown, maxChars: number): string {
+  if (typeof value !== "string") {
+    return "";
+  }
+  return stripInlineMediaPayloads(value).replace(/\s+/g, " ").trim().slice(0, maxChars);
+}
+
+function contextStringList(value: unknown, maxItems: number, maxChars: number): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return uniqueStrings(value.map((item) => contextString(item, maxChars))).slice(0, maxItems);
+}
+
+function extractTaskContextKeywords(context: OnboardingTaskContextSummary): string[] {
+  const text = [
+    context.topic,
+    context.userGoal,
+    context.latestRequest,
+    context.currentState,
+    context.continuationPoint,
+    context.trajectorySummary
+  ].join(" ");
+  return TOPIC_PATTERNS.filter((topic) => topic.pattern.test(text)).map((topic) => topic.keyword).slice(0, 8);
+}
+
+function buildFallbackTaskContext(input: OnboardingInsightGenerationInput): OnboardingTaskContextSummary {
+  const conversation = input.sample.latestConversation;
+  const messages = conversation?.messages ?? [];
+  const userMessages = messages.filter((message) => message.role === "user");
+  const assistantMessages = messages.filter((message) => message.role === "assistant");
+  const toolMessages = messages.filter((message) => message.role === "tool");
+  const firstUser = userMessages[0]?.text ?? "";
+  const latestUser = userMessages.at(-1)?.text ?? "";
+  const latestAssistant = assistantMessages.at(-1)?.text ?? "";
+  const latestTool = toolMessages.at(-1)?.text ?? "";
+  const topic = conversation?.workspacePath
+    ? basename(conversation.workspacePath)
+    : input.profile.taskCandidates[0]?.project ?? input.profile.topProjects[0] ?? input.profile.topKeywords.slice(0, 3).join(", ");
+  const latestRequest = summarizeContextMessage(latestUser, 240);
+  const userGoal = summarizeContextMessage(input.profile.taskCandidates[0]?.summary || firstUser || latestUser, 280);
+  const agentAction = summarizeContextMessage(latestAssistant, 220);
+  const verifiedResult = summarizeContextMessage(latestTool, 220);
+  const status = inferFallbackTaskStatus(messages);
+  const currentState = verifiedResult || agentAction || latestRequest;
+  const continuationPoint = status === "pending" || status === "active"
+    ? (input.locale === "zh-CN" ? `从最近请求继续：${latestRequest}` : `Continue from the latest request: ${latestRequest}`)
+    : status === "waiting"
+      ? (input.locale === "zh-CN" ? "先确认当前等待用户决定的事项，再继续任务。" : "Resolve the item awaiting the user's decision, then continue the task.")
+      : "";
+
+  return {
+    topic,
+    userGoal,
+    latestRequest,
+    status,
+    currentState,
+    agentActions: agentAction ? [agentAction] : [],
+    verifiedResults: verifiedResult ? [verifiedResult] : [],
+    unresolvedItems: [],
+    continuationPoint,
+    trajectorySummary: renderFallbackTrajectory({
+      locale: input.locale,
+      firstUser: summarizeContextMessage(firstUser, 180),
+      latestRequest,
+      agentAction,
+      verifiedResult
+    })
+  };
+}
+
+function summarizeContextMessage(text: string, maxChars: number): string {
+  const normalized = stripInlineMediaPayloads(text)
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (normalized.length <= maxChars) {
+    return normalized;
+  }
+  const sentence = normalized.slice(0, maxChars).replace(/[，,；;：:\s]+\S*$/, "").trim();
+  return `${sentence || normalized.slice(0, maxChars).trim()}…`;
+}
+
+function inferFallbackTaskStatus(
+  messages: ReadonlyArray<{ role: "user" | "assistant" | "tool"; text: string }>
+): OnboardingTaskStatus {
+  let latestUserIndex = -1;
+  let latestAssistantIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const role = messages[index]?.role;
+    if (latestUserIndex < 0 && role === "user") latestUserIndex = index;
+    if (latestAssistantIndex < 0 && role === "assistant") latestAssistantIndex = index;
+    if (latestUserIndex >= 0 && latestAssistantIndex >= 0) break;
+  }
+  if (latestUserIndex < 0) {
+    return "uncertain";
+  }
+  if (latestUserIndex > latestAssistantIndex) {
+    return "pending";
+  }
+  const latestAssistant = latestAssistantIndex >= 0 ? messages[latestAssistantIndex]?.text ?? "" : "";
+  if (/等待|待用户|需要你|请确认|waiting|need your|please confirm/i.test(latestAssistant)) {
+    return "waiting";
+  }
+  if (/已完成|已实现|测试通过|验证通过|已推送|\bdone\b|\bcompleted\b|\bimplemented\b|\btests? passed\b|\bpushed\b/i.test(latestAssistant) &&
+    !/未完成|失败|没有通过|not completed|failed|did not pass/i.test(latestAssistant)) {
+    return "completed";
+  }
+  return "active";
+}
+
+function renderFallbackTrajectory(input: {
+  locale: "zh-CN" | "en-US";
+  firstUser: string;
+  latestRequest: string;
+  agentAction: string;
+  verifiedResult: string;
+}): string {
+  const parts = input.locale === "zh-CN"
+    ? [
+      input.firstUser && input.firstUser !== input.latestRequest ? `任务起点：${input.firstUser}` : "",
+      input.latestRequest ? `最近要求：${input.latestRequest}` : "",
+      input.agentAction ? `Agent 最近反馈：${input.agentAction}` : "",
+      input.verifiedResult ? `最近验证：${input.verifiedResult}` : ""
+    ]
+    : [
+      input.firstUser && input.firstUser !== input.latestRequest ? `Starting point: ${input.firstUser}` : "",
+      input.latestRequest ? `Latest request: ${input.latestRequest}` : "",
+      input.agentAction ? `Latest Agent update: ${input.agentAction}` : "",
+      input.verifiedResult ? `Latest verification: ${input.verifiedResult}` : ""
+    ];
+  return parts.filter(Boolean).join(input.locale === "zh-CN" ? "；" : "; ");
+}
+
+class FirstReportStreamParser {
+  private mode: "prefix" | "report" | "hidden" | "plain" = "prefix";
+  private buffer = "";
+
+  push(delta: string): string[] {
+    if (this.mode === "hidden") {
+      return [];
+    }
+    this.buffer += delta;
+    if (this.mode === "prefix") {
+      const candidate = this.buffer.trimStart();
+      if (!candidate || GENERATED_REPORT_OPEN.startsWith(candidate)) {
+        return [];
+      }
+      if (!candidate.startsWith(GENERATED_REPORT_OPEN)) {
+        this.mode = "plain";
+        return this.drainVisibleText([
+          GENERATED_TASK_CONTEXT_OPEN,
+          GENERATED_REPORT_CLOSE,
+          GENERATED_JSON_FENCE_OPEN,
+          GENERATED_NAKED_JSON_OPEN
+        ]);
+      }
+      this.mode = "report";
+      this.buffer = candidate.slice(GENERATED_REPORT_OPEN.length);
+    }
+    return this.mode === "plain"
+      ? this.drainVisibleText([
+          GENERATED_TASK_CONTEXT_OPEN,
+          GENERATED_REPORT_CLOSE,
+          GENERATED_JSON_FENCE_OPEN,
+          GENERATED_NAKED_JSON_OPEN
+        ])
+      : this.drainVisibleText([
+          GENERATED_REPORT_CLOSE,
+          GENERATED_TASK_CONTEXT_OPEN,
+          GENERATED_JSON_FENCE_OPEN,
+          GENERATED_NAKED_JSON_OPEN
+        ]);
+  }
+
+  finish(): string[] {
+    if (this.mode === "prefix" || this.mode === "report" || this.mode === "plain") {
+      const remainder = this.buffer;
+      this.buffer = "";
+      const isPartialInternalMarker = [
+        GENERATED_REPORT_CLOSE,
+        GENERATED_TASK_CONTEXT_OPEN,
+        GENERATED_JSON_FENCE_OPEN,
+        GENERATED_NAKED_JSON_OPEN
+      ].some((marker) => marker.startsWith(remainder));
+      return remainder && !isPartialInternalMarker ? [remainder] : [];
+    }
+    return [];
+  }
+
+  private drainVisibleText(delimiters: readonly string[]): string[] {
+    const delimiterIndex = delimiters
+      .map((delimiter) => this.buffer.indexOf(delimiter))
+      .filter((index) => index >= 0)
+      .sort((left, right) => left - right)[0];
+    if (delimiterIndex !== undefined) {
+      const report = this.buffer.slice(0, delimiterIndex);
+      this.buffer = "";
+      this.mode = "hidden";
+      return report ? [report] : [];
+    }
+    const retainedChars = Math.max(...delimiters.map((delimiter) => matchingDelimiterSuffixLength(this.buffer, delimiter)));
+    const report = this.buffer.slice(0, this.buffer.length - retainedChars);
+    this.buffer = this.buffer.slice(this.buffer.length - retainedChars);
+    return report ? [report] : [];
+  }
+}
+
+function matchingDelimiterSuffixLength(value: string, delimiter: string): number {
+  const maxLength = Math.min(value.length, delimiter.length - 1);
+  for (let length = maxLength; length > 0; length -= 1) {
+    if (value.endsWith(delimiter.slice(0, length))) {
+      return length;
+    }
+  }
+  return 0;
 }
 
 function renderChineseReport(profile: OnboardingInsightProfileSignals, sample: SampleBundle): string {
@@ -845,20 +1190,18 @@ function renderChineseReport(profile: OnboardingInsightProfileSignals, sample: S
   lines.push(`## 你的偏好\n${preferenceLines.length > 0 ? preferenceLines.map((line) => `- ${line}`).join("\n") : "目前只有少量用户表达，我还不会替你下偏好结论。"}`);
 
   const conversation = sample.latestConversation;
-  const latestUser = latestConversationMessage(conversation, "user");
-  const latestAssistant = latestConversationMessage(conversation, "assistant");
-  const latestTool = latestConversationMessage(conversation, "tool");
-  const task = profile.taskCandidates[0] ?? null;
+  const context = buildFallbackTaskContext({ locale: "zh-CN", profile, sample: toSampleSummary(sample) });
   const memoryLines = [
-    conversation ? `最近一次会话来自 ${conversation.displayName}${task ? `，主要在推进 ${task.title}` : ""}。` : null,
-    latestUser ? `你最近的目标是：${trimSentence(latestUser.text, 180)}` : null,
-    latestAssistant ? `Agent 最近表示：${trimSentence(latestAssistant.text, 180)}` : null,
-    latestTool ? `最近的工具验证记录：${trimSentence(latestTool.text, 140)}` : "当前没有明确的工具验证记录。"
+    conversation ? `最近一次会话来自 ${conversation.displayName}${conversation.workspacePath ? `，项目路径是 ${conversation.workspacePath}` : ""}。` : null,
+    context.userGoal ? `用户目标：${context.userGoal}` : null,
+    context.currentState ? `当前状态：${context.currentState}` : null,
+    context.agentActions.length > 0 ? `Agent 已做：${context.agentActions.join("；")}` : null,
+    context.verifiedResults.length > 0 ? `已验证结果：${context.verifiedResults.join("；")}` : "目前没有明确的验证结果。",
+    context.unresolvedItems.length > 0 ? `仍待处理：${context.unresolvedItems.join("；")}` : null
   ].filter((line): line is string => Boolean(line));
   lines.push(`## 最近项目记忆\n${memoryLines.join("\n\n")}`);
 
-  const taskText = latestUser ? trimSentence(latestUser.text, 100) : "最近任务";
-  lines.push(`## 接下来可以做\n1. 明确“${taskText}”当前尚未完成的最小步骤和验收标准。\n2. 核对 Agent 已说明的进度与实际文件、构建或测试结果是否一致。\n3. 执行最小验证，记录成功结果或第一个可复现的阻塞点。`);
+  lines.push(`## 接下来可以做\n${context.continuationPoint ? `1. ${context.continuationPoint}` : "当前记录中没有明确的未完成待办。"}`);
 
   return lines.join("\n\n");
 }
@@ -877,29 +1220,20 @@ function renderEnglishReport(profile: OnboardingInsightProfileSignals, sample: S
   lines.push(`## Your preferences\n${preferenceLines.length > 0 ? preferenceLines.map((line) => `- ${line}`).join("\n") : "I only have a few user-authored signals, so I will not overstate your preferences yet."}`);
 
   const conversation = sample.latestConversation;
-  const latestUser = latestConversationMessage(conversation, "user");
-  const latestAssistant = latestConversationMessage(conversation, "assistant");
-  const latestTool = latestConversationMessage(conversation, "tool");
-  const task = profile.taskCandidates[0] ?? null;
+  const context = buildFallbackTaskContext({ locale: "en-US", profile, sample: toSampleSummary(sample) });
   const memoryLines = [
-    conversation ? `Your newest conversation is from ${conversation.displayName}${task ? ` and focuses on ${renderEnglishTaskTitle(task)}` : ""}.` : null,
-    latestUser ? `Your latest goal: ${trimSentence(latestUser.text, 180)}` : null,
-    latestAssistant ? `The Agent most recently reported: ${trimSentence(latestAssistant.text, 180)}` : null,
-    latestTool ? `Latest tool verification: ${trimSentence(latestTool.text, 140)}` : "There is no explicit tool verification in the selected window."
+    conversation ? `Your newest conversation is from ${conversation.displayName}${conversation.workspacePath ? `, at ${conversation.workspacePath}` : ""}.` : null,
+    context.userGoal ? `User goal: ${context.userGoal}` : null,
+    context.currentState ? `Current state: ${context.currentState}` : null,
+    context.agentActions.length > 0 ? `Agent actions: ${context.agentActions.join("; ")}` : null,
+    context.verifiedResults.length > 0 ? `Verified results: ${context.verifiedResults.join("; ")}` : "There is no explicit verified result yet.",
+    context.unresolvedItems.length > 0 ? `Still unresolved: ${context.unresolvedItems.join("; ")}` : null
   ].filter((line): line is string => Boolean(line));
   lines.push(`## Latest project memory\n${memoryLines.join("\n\n")}`);
 
-  const taskText = latestUser ? trimSentence(latestUser.text, 100) : "the latest task";
-  lines.push(`## What to do next\n1. Define the smallest unfinished step and acceptance criteria for “${taskText}”.\n2. Check the Agent-reported progress against actual files, build output, or tests.\n3. Run the smallest verification and record either a successful result or the first reproducible blocker.`);
+  lines.push(`## What to do next\n${context.continuationPoint ? `1. ${context.continuationPoint}` : "There is no explicit unfinished action in the current record."}`);
 
   return lines.join("\n\n");
-}
-
-function latestConversationMessage(
-  conversation: OnboardingConversationWindow | null,
-  role: OnboardingSampledMessage["role"]
-): OnboardingSampledMessage | null {
-  return [...(conversation?.messages ?? [])].reverse().find((message) => message.role === role) ?? null;
 }
 
 function renderChineseNameLine(hints: NameHints): string | null {
@@ -967,29 +1301,6 @@ function formatNameForGreeting(value: string): string {
     return `${trimmed.charAt(0).toLocaleUpperCase()}${trimmed.slice(1)}`;
   }
   return trimmed;
-}
-
-function renderEnglishTaskTitle(task: TaskCandidate): string {
-  const project = task.project;
-  if (project) {
-    if (/mindock-agent|memmy/i.test(project) || /onboarding|扫描|记忆|memory/i.test(task.title)) {
-      return `${project} memory scanning and first-login experience`;
-    }
-    if (/bitrade/i.test(project)) {
-      return `${project} engineering architecture and stability work`;
-    }
-    return `${project} current task`;
-  }
-  if (/首次登录|onboarding/i.test(task.title)) {
-    return "first-login lightweight scan experience";
-  }
-  if (/扫描|记忆|memory/i.test(task.title)) {
-    return "memory scanning and cross-agent synthesis";
-  }
-  if (/排错|debug|problem/i.test(task.title)) {
-    return "recent debugging task";
-  }
-  return "recent continuing task";
 }
 
 function renderContextLanguagePreference(
@@ -1414,12 +1725,20 @@ function buildLlmMessages(input: OnboardingInsightGenerationInput): Array<{ role
         "latestConversation 是所有已扫描 Agent 中时间最新的一个会话，只允许依据这个会话总结最近项目、任务、Bug 或关键词及其当前进度。",
         "latestConversation.messages 已按首 2 个和尾 12 个对话轮次截取。user 是用户请求，assistant 是 Agent 回复，tool 是脱敏后的简短工具执行信息。",
         "区分三类进度证据：用户要求做什么、Agent 表示做了什么、工具结果实际验证了什么。只有明确成功的 tool 结果才能写成已验证；只有 assistant 自述时应写成“Agent 表示/对话中提到”，不能当成确定事实。",
+        "把 latestConversation 看作一条随时间演进的任务轨迹：合并重复要求，保留关键转折，并让较新的决定、修复和验证覆盖较早的猜测、失败或阻塞。不要逐条复述消息，不要照抄工具日志。",
         "正文必须包含三个 Markdown 小节：『你的偏好』『最近项目记忆』『接下来可以做』。可以使用短段落和列表，不要使用表格或代码块。",
         "『你的偏好』只总结用户本人有证据支持的语言、沟通方式、输出形式、方案取舍、实现约束或验证要求，最多 3-5 条；不要混入项目进度、Agent 行为、工具结果或空泛性格标签。",
-        "『最近项目记忆』说明最新会话来自哪个 Agent、涉及什么项目或关键词、用户目标、已讨论或已完成内容、当前进度、关键决策、失败/阻塞和待确认问题。没有的项不要硬凑。",
-        "『接下来可以做』列出 3-5 条按执行顺序排列的具体待办。第一条应是当前最小且可立即执行的下一步，每条都要有明确动作和预期结果。",
-        "正文长度要求：中文 450-700 字，英文 250-400 words。重点是准确提炼最近一个项目现场，不要扩展成跨项目年度总结。",
-        "只输出报告正文。不要生成按钮、行动卡片、CTA、内部标记、JSON、Markdown 代码块或表格，不暴露任何密钥。"
+        "『最近项目记忆』说明最新会话来自哪个 Agent、用户目标、已做事项、已验证结果、当前状态、仍待处理内容。workspacePath 有值时必须写清项目具体路径。只写当前有效结论，不展开冗长历史。",
+        "『接下来可以做』只列证据支持且尚未完成的 0-3 条待办，按执行顺序排列。第一条应是当前最小且可立即执行的下一步；任务已完成或没有明确待办时，直接说明暂时没有明确待办，不要补通用建议。",
+        "正文长度要求：中文 300-500 字，英文 180-300 words。重点是准确提炼最近一个项目现场，不要扩展成跨项目年度总结。",
+        "你必须一次输出两个区块，严格使用以下顺序和标签；标签前后不要添加其他文字：",
+        `${GENERATED_REPORT_OPEN}\n这里放给用户看的 Markdown 报告正文\n${GENERATED_REPORT_CLOSE}`,
+        `${GENERATED_TASK_CONTEXT_OPEN}\n这里放一个合法 JSON 对象\n${GENERATED_TASK_CONTEXT_CLOSE}`,
+        "任务上下文 JSON 必须包含且只需包含：topic、userGoal、latestRequest、status、currentState、agentActions、verifiedResults、unresolvedItems、continuationPoint、trajectorySummary。status 只能是 pending、active、waiting、completed、uncertain；后三个集合字段必须是字符串数组。",
+        "任务上下文使用 locale 对应语言，面向任意类型任务，不要使用仅适合 Coding 的固定分类。它只总结最新任务，不得包含用户偏好，也不得复制原始 query、assistant 回复或工具流水。agentActions 写 Agent 已采取的动作，verifiedResults 只写有结果证据支持的结论，unresolvedItems 只写仍然有效的问题，continuationPoint 写其他 Agent 接手时应从哪里继续。",
+        "trajectorySummary 用一个紧凑段落总结：用户目标如何演进、Agent 做了什么、得到什么结果、现在停在哪里。最终状态优先；已经被后续解决的问题不能继续写成当前阻塞。",
+        "任务上下文要短：JSON 必须单行输出、不要缩进、不要代码块；每个普通字段最多一句，三个数组各最多 3 项，trajectorySummary 中文 80-160 字或英文 60-100 words；不要为了填满字段而重复同一事实。",
+        "报告正文不要生成按钮、行动卡片、CTA、JSON、Markdown 代码块或表格；任务上下文区块只放 JSON 对象。不要暴露任何密钥。"
       ].join("\n")
     },
     {
@@ -1429,8 +1748,8 @@ function buildLlmMessages(input: OnboardingInsightGenerationInput): Array<{ role
         reportGoal: {
           primary: "user_preferences_latest_project_memory_and_actionable_todos",
           lengthConstraint: input.locale === "zh-CN"
-            ? "450-700 Chinese characters"
-            : "250-400 English words",
+            ? "300-500 Chinese characters"
+            : "180-300 English words",
           requiredSections: [
             "opening_with_name_or_safe_greeting",
             "user_preferences",
@@ -1441,8 +1760,24 @@ function buildLlmMessages(input: OnboardingInsightGenerationInput): Array<{ role
             "用户有哪些有证据支持的稳定偏好",
             "全局最新会话对应什么项目、任务、Bug 或关键词",
             "用户要求、Agent 自述和工具验证分别说明了什么进度",
-            "接下来最可行的 3-5 个待办是什么"
-          ]
+            "接下来尚未完成且最可行的 0-3 个待办是什么"
+          ],
+          outputEnvelope: {
+            reportTag: GENERATED_REPORT_OPEN,
+            taskContextTag: GENERATED_TASK_CONTEXT_OPEN,
+            taskContextFields: [
+              "topic",
+              "userGoal",
+              "latestRequest",
+              "status",
+              "currentState",
+              "agentActions",
+              "verifiedResults",
+              "unresolvedItems",
+              "continuationPoint",
+              "trajectorySummary"
+            ]
+          }
         },
         profile: toLlmProfile(input.profile, input.sample.activeAgents),
         nameDecisionRequirement: buildNameDecisionRequirement(input.profile, input.locale),
@@ -1791,7 +2126,11 @@ function extractLlmDelta(body: unknown): string | null {
 }
 
 function sanitizeGeneratedReport(report: string | null): string | null {
-  const trimmed = stripActionCopyFromReport(report ?? "").trim();
+  const withoutInternalContext = (report ?? "")
+    .replaceAll(GENERATED_REPORT_OPEN, "")
+    .split(GENERATED_REPORT_CLOSE, 1)[0]
+    ?.split(GENERATED_TASK_CONTEXT_OPEN, 1)[0] ?? "";
+  const trimmed = stripActionCopyFromReport(withoutInternalContext).trim();
   return trimmed ? trimmed.slice(0, 4_000) : null;
 }
 

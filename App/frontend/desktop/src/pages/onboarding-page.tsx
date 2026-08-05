@@ -448,13 +448,14 @@ export function OnboardingPage() {
         onAgents: (sampledAgents) => {
           setFirstScanAgents(sampledAgents);
         },
-        onChunk: (_delta) => {
+        onChunk: (_delta, payload) => {
           setFirstReportIsStreaming(true);
-          setFirstReportShouldSimulate(true);
+          setFirstReportShouldSimulate(false);
+          setFirstReportPayload(payload);
         },
-        onDone: (payload, _meta) => {
+        onDone: (payload, meta) => {
           setFirstReportIsStreaming(false);
-          setFirstReportShouldSimulate(true);
+          setFirstReportShouldSimulate(!meta.streamed);
           setFirstReportPayload(payload);
           writeFirstEncounterRelayPrompt(
             typeof window === "undefined" ? undefined : window.sessionStorage,

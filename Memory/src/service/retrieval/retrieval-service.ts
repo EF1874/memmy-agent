@@ -262,7 +262,7 @@ function onboardingFirstReportRecallHit(memory: MemoryRow): RecallHit | null {
     kind: kindFromMemory(memory),
     memoryLayer: memory.memoryLayer,
     status: memory.status,
-    title: stringValue(memory.info.title) ?? "Memmy 初见报告 / First Encounter Report",
+    title: localizedFirstReportTitle(trace),
     snippet: trace.summary.trim() || clip(trace.agentText, 500),
     score: 1,
     tags: memory.tags,
@@ -602,7 +602,7 @@ function renderInjectedSnippet(
     if (memory && isOnboardingFirstReportMemory(memory)) {
       return {
         refKind: "trace",
-        title: "Memmy 初见报告 / First Encounter Report",
+        title: localizedFirstReportTitle(trace),
         body: renderInjectedOnboardingFirstReportBody(hit, trace)
       };
     }
@@ -689,20 +689,23 @@ function isOnboardingFirstReportMemory(memory: MemoryRow): boolean {
 }
 
 function renderInjectedOnboardingFirstReportBody(hit: RecallHit, trace: TraceMeta): string {
+  const language = onboardingFirstReportLanguage(trace);
   const summary = trace.summary.trim() || "(not provided)";
   const report = trace.agentText.trim() || "(not provided)";
   const prefix = [
     `id: ${hit.id}`,
     `timestamp: ${formatInjectedTimestamp(trace.ts, hit.updatedAt)}`,
     "",
-    ...labeledInjectedBlock("Summary", summary),
+    ...localizedFirstReportBlock(language === "zh" ? "摘要" : "Summary", summary, language),
     "",
-    "First report / 初见报告:"
+    language === "zh" ? "初见报告：" : "First report:"
   ].join("\n");
   const suffix = [
     "",
-    "Scanned source conversation / 扫描原始对话:",
-    `If source details are needed, use \`memmy_memory_get(id)\` with id \`${hit.id}\`.`
+    language === "zh" ? "完整记忆：" : "Full memory:",
+    language === "zh"
+      ? `如需更多细节，使用 \`memmy_memory_get(id)\` 查询 id \`${hit.id}\`。`
+      : `If more detail is needed, use \`memmy_memory_get(id)\` with id \`${hit.id}\`.`
   ].join("\n");
   const reportBudget = ONBOARDING_FIRST_REPORT_MAX_SNIPPET_BODY_CHARS - prefix.length - suffix.length - 2;
   const renderedReport = report.length <= reportBudget
@@ -714,14 +717,30 @@ function renderInjectedOnboardingFirstReportBody(hit: RecallHit, trace: TraceMet
 function renderOnboardingFirstReportSearchLogBody(hit: RecallHit, memory: MemoryRow): string {
   const trace = traceMetaFromMemory(memory);
   if (!trace) return "";
+  const language = onboardingFirstReportLanguage(trace);
   return [
     `id: ${hit.id}`,
     `timestamp: ${formatInjectedTimestamp(trace.ts, hit.updatedAt)}`,
     "",
-    ...labeledInjectedBlock("User query / 用户请求", trace.userText || "(empty)"),
+    ...localizedFirstReportBlock(language === "zh" ? "用户请求" : "User query", trace.userText || "(empty)", language),
     "",
-    ...labeledInjectedBlock("Assistant response / Assistant 回复", trace.agentText || "(empty)")
+    ...localizedFirstReportBlock(language === "zh" ? "助手回复" : "Assistant response", trace.agentText || "(empty)", language)
   ].join("\n");
+}
+
+function onboardingFirstReportLanguage(trace: TraceMeta): "zh" | "en" {
+  if (/语言[：:]\s*中文/.test(trace.userText)) return "zh";
+  if (/Language:\s*English/i.test(trace.userText)) return "en";
+  return /\p{Script=Han}/u.test(`${trace.userText}\n${trace.agentText}`) ? "zh" : "en";
+}
+
+function localizedFirstReportTitle(trace: TraceMeta): string {
+  return onboardingFirstReportLanguage(trace) === "zh" ? "Memmy 初见报告" : "Memmy First Encounter Report";
+}
+
+function localizedFirstReportBlock(label: string, value: string, language: "zh" | "en"): string[] {
+  const body = value.trim();
+  return [`${label}${language === "zh" ? "：" : ":"}`, body || (language === "zh" ? "（空）" : "(empty)")];
 }
 
 function renderInjectedEpisodeBody(hit: RecallHit): string {

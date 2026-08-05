@@ -39,7 +39,7 @@ export interface FirstEncounterReportStreamDoneMeta {
 
 export interface FirstEncounterReportStreamHandlers {
   onAgents?: (agents: DiscoveredAgent[]) => void;
-  onChunk: (delta: string) => void;
+  onChunk: (delta: string, payload: FirstEncounterReportPayload) => void;
   onDone: (payload: FirstEncounterReportPayload, meta: FirstEncounterReportStreamDoneMeta) => void;
 }
 
@@ -84,12 +84,26 @@ export async function streamFirstEncounterReport(
     }
 
     let streamed = false;
+    let streamedBody = "";
+    let latestDiagnostics: OnboardingInsightDiagnostics | null = null;
     for await (const event of readInsightReportStreamEvents(response.body)) {
       if (event.type === "sampled") {
+        latestDiagnostics = event.diagnostics;
         handlers.onAgents?.(toDiscoveredAgents(event.diagnostics));
       } else if (event.type === "chunk") {
+        streamedBody += event.delta;
+        const payload = latestDiagnostics
+          ? toFirstEncounterReportPayload({
+              status: "ready",
+              reportMarkdown: streamedBody,
+              diagnostics: latestDiagnostics
+            }, request.language)
+          : null;
+        if (!payload) {
+          continue;
+        }
         streamed = true;
-        handlers.onChunk(event.delta);
+        handlers.onChunk(event.delta, payload);
       } else {
         handlers.onAgents?.(toDiscoveredAgents(event.response.diagnostics));
         const payload = toFirstEncounterReportPayload(event.response, request.language);
