@@ -1597,6 +1597,54 @@ describe("agent chat slice", () => {
     expect(traceTexts).not.toContain('write_file({"path": "/tmp/a.txt", "content": "草泥马"})');
   });
 
+  it("keeps a no-op file edit terminal and its unchanged marker", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-noop" } });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "file_edit",
+        chat_id: "chat-noop",
+        edits: [{
+          call_id: "call-noop",
+          ui_tool_call_id: "ui-noop",
+          tool: "edit_file",
+          path: "/tmp/same.txt",
+          phase: "start",
+          status: "editing",
+          added: 1,
+        }],
+      },
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "file_edit",
+        chat_id: "chat-noop",
+        edits: [{
+          call_id: "call-noop",
+          ui_tool_call_id: "ui-noop",
+          tool: "edit_file",
+          path: "/tmp/same.txt",
+          phase: "end",
+          status: "done",
+          added: 0,
+          deleted: 0,
+          unchanged: true,
+        }],
+      },
+    });
+
+    const fileEdits = state.messages.flatMap((message) => message.fileEdits ?? []);
+    expect(fileEdits).toHaveLength(1);
+    expect(fileEdits[0]).toMatchObject({
+      phase: "end",
+      status: "done",
+      unchanged: true,
+      added: 0,
+      deleted: 0,
+    });
+  });
+
   it("keeps one file row across stale hydrate and final Provider call ids", () => {
     let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
     state = agentReducer(state, {

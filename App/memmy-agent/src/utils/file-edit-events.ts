@@ -291,7 +291,23 @@ export function buildFileEditStartEvent(tracker: FileEditTracker, params?: Recor
   return eventPayload(tracker, { phase: "start", status: "editing", added, deleted, approximate: true });
 }
 
-export function buildFileEditEndEvent(tracker: FileEditTracker, params?: Record<string, any> | null): Record<string, any> {
+export function buildFileEditEndEvent(
+  tracker: FileEditTracker,
+  params?: Record<string, any> | null,
+  outcome?: { changed: boolean } | null,
+): Record<string, any> {
+  if (outcome?.changed === false) {
+    return {
+      ...eventPayload(tracker, {
+        phase: "end",
+        status: "done",
+        added: 0,
+        deleted: 0,
+        approximate: false,
+      }),
+      unchanged: true,
+    };
+  }
   const after = readFileSnapshot(tracker.path);
   let counted = false;
   let added = 0;

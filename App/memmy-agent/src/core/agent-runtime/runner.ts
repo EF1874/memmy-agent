@@ -1,7 +1,8 @@
+import path from "node:path";
 import { LLMProvider, LLMResponse, ToolCallRequest } from "../../providers/base.js";
 import { CONTEXT_SAFETY_BUFFER_TOKENS } from "../../token-budget.js";
 import { ToolRegistry } from "./tools/registry.js";
-import type { ToolExecutionContext } from "./tools/base.js";
+import type { FileMutationOutcome, ToolExecutionContext } from "./tools/base.js";
 import { AgentHook, AgentHookContext } from "./hook.js";
 import {
   buildFinalizationRetryMessage,
@@ -616,11 +617,18 @@ export class AgentRunner {
 
     try {
       let raw: any;
+      const fileMutationOutcomes = new Map<string, FileMutationOutcome>();
       await spec.hook?.beforeToolCall(new AgentHookContext({ spec, toolCalls: [call] }), call);
       const toolContext: ToolExecutionContext = {
         abortSignal: spec.abortSignal ?? null,
         toolName: call.name,
         callId: call.id ?? null,
+        reportFileMutation: (outcome) => {
+          fileMutationOutcomes.set(path.resolve(outcome.path), {
+            path: path.resolve(outcome.path),
+            changed: outcome.changed,
+          });
+        },
       };
       const run = tool && typeof tool.execute === "function"
         ? tool.execute(params, toolContext)
@@ -655,6 +663,7 @@ export class AgentRunner {
           fileEditTrackers.map((tracker) => buildFileEditEndEvent(
             tracker,
             params && typeof params === "object" && !Array.isArray(params) ? params : null,
+            event.status === "ok" ? fileMutationOutcomes.get(path.resolve(tracker.path)) : undefined,
           )),
         );
       }

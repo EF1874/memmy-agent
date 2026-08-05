@@ -37,6 +37,7 @@ export interface AgentFileEdit {
   deleted?: number;
   approximate?: boolean;
   binary?: boolean;
+  unchanged?: boolean;
   pending?: boolean;
   error?: string;
   [key: string]: unknown;
@@ -544,7 +545,8 @@ export function normalizeFileEdits(edits: unknown): AgentFileEdit[] {
       ...(typeof edit.error === "string" ? { error: edit.error } : {}),
       ...(pending ? { pending: true } : {}),
       ...(edit.approximate === true ? { approximate: true } : {}),
-      ...(edit.binary === true ? { binary: true } : {})
+      ...(edit.binary === true ? { binary: true } : {}),
+      ...(edit.unchanged === true ? { unchanged: true } : {})
     };
     return [normalized];
   });

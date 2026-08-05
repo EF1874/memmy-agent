@@ -3,6 +3,7 @@ import { AgentRunner, AgentRunSpec } from "../../../src/core/agent-runtime/runne
 import { Tool, type ToolExecutionContext } from "../../../src/core/agent-runtime/tools/base.js";
 import { ToolRegistry } from "../../../src/core/agent-runtime/tools/registry.js";
 import { ToolCallRequest } from "../../../src/providers/base.js";
+import { withProgressCapabilities } from "../../../src/utils/progress-events.js";
 
 class DelayTool extends Tool {
   constructor(
@@ -71,6 +72,76 @@ describe("AgentRunner tool execution", () => {
     expect(result.result).toBe(content);
     expect(result.error).toBeNull();
     expect(result.event).toMatchObject({ name: "write_file", status: "ok" });
+  });
+
+  it("keeps no-change tool results successful when failOnToolError is enabled", async () => {
+    const runner = new AgentRunner();
+    const content = "No changes made to /workspace/same.txt: existing content is identical.";
+    const call = new ToolCallRequest({ id: "c-noop", name: "write_file", arguments: {} });
+    const spec = new AgentRunSpec({
+      failOnToolError: true,
+      tools: { execute: async () => content, get: () => ({ readOnly: false }) } as any,
+    });
+
+    const [result] = await runner.executeTools(spec, [call]);
+
+    expect(result.result).toBe(content);
+    expect(result.error).toBeNull();
+    expect(result.event).toMatchObject({ name: "write_file", status: "ok" });
+  });
+
+  it("publishes unchanged file outcomes only for the reporting tool call", async () => {
+    class MutationOutcomeTool extends Tool {
+      get name(): string {
+        return "write_file";
+      }
+
+      get description(): string {
+        return "test file mutation outcomes";
+      }
+
+      get parameters(): Record<string, any> {
+        return {
+          type: "object",
+          properties: { path: { type: "string" }, unchanged: { type: "boolean" } },
+          required: ["path"],
+        };
+      }
+
+      async execute(params: Record<string, any>, context?: ToolExecutionContext): Promise<string> {
+        if (params.unchanged) {
+          context?.reportFileMutation?.({ path: `/workspace/${params.path}`, changed: false });
+          return `No changes made to /workspace/${params.path}: existing content is identical.`;
+        }
+        return `Successfully wrote /workspace/${params.path}`;
+      }
+    }
+
+    const tools = new ToolRegistry();
+    tools.register(new MutationOutcomeTool());
+    const fileEditEvents: Record<string, any>[] = [];
+    const progressCallback = withProgressCapabilities(
+      (_content, options) => fileEditEvents.push(...(options?.fileEditEvents ?? [])),
+      { fileEditEvents: true },
+    );
+
+    const results = await new AgentRunner().executeTools(
+      new AgentRunSpec({ tools, workspace: "/workspace", progressCallback }),
+      [
+        new ToolCallRequest({ id: "noop-call", name: "write_file", arguments: { path: "same.txt", unchanged: true } }),
+        new ToolCallRequest({ id: "write-call", name: "write_file", arguments: { path: "changed.txt", unchanged: false } }),
+      ],
+    );
+
+    expect(results.map((result) => result.event.status)).toEqual(["ok", "ok"]);
+    const noopEvents = fileEditEvents.filter((event) => event.call_id === "noop-call");
+    const writeEvents = fileEditEvents.filter((event) => event.call_id === "write-call");
+    expect(noopEvents).toHaveLength(2);
+    expect(noopEvents[1]).toMatchObject({ phase: "end", status: "done", unchanged: true, added: 0, deleted: 0 });
+    expect(noopEvents[0]?.ui_tool_call_id).toBe(noopEvents[1]?.ui_tool_call_id);
+    expect(writeEvents).toHaveLength(2);
+    expect(writeEvents[1]).toMatchObject({ phase: "end", status: "done" });
+    expect(writeEvents[1]).not.toHaveProperty("unchanged");
   });
 
   it("returns SSRF and workspace boundary errors as recoverable tool results", async () => {

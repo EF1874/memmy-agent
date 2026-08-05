@@ -109,6 +109,36 @@ describe("file edit event helpers", () => {
     expect([end.added, end.deleted]).toEqual([2, 1]);
   });
 
+  it("builds an explicit completed event for a confirmed no-op", () => {
+    const root = tmpRoot();
+    const target = path.join(root, "same.txt");
+    fs.writeFileSync(target, "same\n", "utf8");
+    const tracker = prepareFileEditTracker({
+      callId: "call-noop",
+      toolName: "write_file",
+      tool: null,
+      workspace: root,
+      params: { path: "same.txt", content: "same\n" },
+    });
+
+    const event = buildFileEditEndEvent(
+      tracker!,
+      { path: "same.txt", content: "same\n" },
+      { changed: false },
+    );
+
+    expect(event).toMatchObject({
+      call_id: "call-noop",
+      phase: "end",
+      status: "done",
+      added: 0,
+      deleted: 0,
+      approximate: false,
+      unchanged: true,
+    });
+    expect(event.binary).toBeUndefined();
+  });
+
   it("reports binary files without line counts", () => {
     const root = tmpRoot();
     const target = path.join(root, "data.bin");

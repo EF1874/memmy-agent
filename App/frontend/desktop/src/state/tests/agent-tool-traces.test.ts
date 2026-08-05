@@ -109,6 +109,39 @@ describe("agent tool trace helpers", () => {
     expect(normalizeFileEdits({ tool: "edit_file", path: "src/a.ts", phase: "end" })[0]?.call_id).toBe("");
   });
 
+  it("preserves unchanged through normalization and terminal event merging", () => {
+    const started = normalizeFileEdits({
+      call_id: "call-noop",
+      ui_tool_call_id: "ui-noop",
+      tool: "edit_file",
+      path: "src/a.ts",
+      phase: "start",
+      status: "editing",
+      added: 1,
+    });
+    const completed = normalizeFileEdits({
+      call_id: "call-noop",
+      ui_tool_call_id: "ui-noop",
+      tool: "edit_file",
+      path: "src/a.ts",
+      phase: "end",
+      status: "done",
+      added: 0,
+      deleted: 0,
+      unchanged: true,
+    });
+
+    expect(mergeFileEdits(started, completed)).toEqual([
+      expect.objectContaining({
+        phase: "end",
+        status: "done",
+        added: 0,
+        deleted: 0,
+        unchanged: true,
+      }),
+    ]);
+  });
+
   it("appends only new trace lines", () => {
     expect(mergeUniqueToolTraceLines(["Read app.tsx"], ["Read app.tsx", "Searched web for Memmy"])).toEqual({
       traces: ["Read app.tsx", "Searched web for Memmy"],

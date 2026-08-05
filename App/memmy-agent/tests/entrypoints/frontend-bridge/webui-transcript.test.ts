@@ -1086,6 +1086,56 @@ describe("webui transcript replay", () => {
     expect(fileRows[1].fileEdits).toEqual([expect.objectContaining({ ui_tool_call_id: "ui-2", added: 2 })]);
   });
 
+  it("replays unchanged file edit terminals without changing their call identity", () => {
+    const messages = replayTranscriptToUiMessages([
+      {
+        event: "file_edit",
+        turn_id: "turn-noop",
+        edits: [{
+          call_id: "call-noop",
+          ui_tool_call_id: "ui-noop",
+          tool: "edit_file",
+          path: "src/same.ts",
+          absolute_path: "/workspace/src/same.ts",
+          phase: "start",
+          status: "editing",
+          added: 1,
+          approximate: true,
+        }],
+      },
+      {
+        event: "file_edit",
+        turn_id: "turn-noop",
+        edits: [{
+          call_id: "call-noop",
+          ui_tool_call_id: "ui-noop",
+          tool: "edit_file",
+          path: "src/same.ts",
+          absolute_path: "/workspace/src/same.ts",
+          phase: "end",
+          status: "done",
+          added: 0,
+          deleted: 0,
+          approximate: false,
+          unchanged: true,
+        }],
+      },
+    ]);
+
+    const fileRows = messages.filter((message) => message.fileEdits);
+    expect(fileRows).toHaveLength(1);
+    expect(fileRows[0].turnId).toBe("turn-noop");
+    expect(fileRows[0].fileEdits).toEqual([
+      expect.objectContaining({
+        call_id: "call-noop",
+        ui_tool_call_id: "ui-noop",
+        phase: "end",
+        status: "done",
+        unchanged: true,
+      }),
+    ]);
+  });
+
   it("partitions automatic Goal continuation activity by turn id", () => {
     const lines = [
       { event: "user", turn_id: "turn-a", text: "完成目标" },
