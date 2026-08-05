@@ -3877,6 +3877,7 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
   const clauses = ["deleted_at IS NULL"];
   const params: SqlValue[] = [];
 
+  addValueClause("user_id", filter.userId);
   addValueClause("session_id", filter.sessionId);
   addValueClause("conversation_id", filter.conversationId);
   addAgentIdClause(filter.agentId, filter.excludedAgentIds);

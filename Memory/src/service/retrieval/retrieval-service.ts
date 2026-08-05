@@ -100,6 +100,12 @@ const QUERY_REWRITE_PER_QUERY_MIN_KEEP = 3;
 
 const TIME_FILTERED_TRACE_LIMIT = 20;
 
+const ONBOARDING_FIRST_REPORT_AGENT_ID = "memmy-onboarding";
+
+const ONBOARDING_FIRST_REPORT_TAG = "first-encounter-report";
+
+const ONBOARDING_FIRST_REPORT_MAX_SNIPPET_BODY_CHARS = 5_000;
+
 const pipelineLogger = createMemoryLogger("pipeline");
 
 const QUERY_REWRITE_SYSTEM_PROMPT = `You rewrite a user's memory search request into exactly 3 complementary retrieval queries.
@@ -178,10 +184,14 @@ function searchCandidateFromHit(
   memory?: MemoryRow,
   contentOverride?: string
 ): Record<string, unknown> {
-  const content = contentOverride ?? renderInjectedSnippet(hit, memory, {
-    skillInjectionMode: "summary",
-    skillSummaryChars: MEMORY_PACKET_SKILL_SUMMARY_CHARS
-  })?.body ?? "";
+  const content = contentOverride ?? (
+    memory && isOnboardingFirstReportMemory(memory)
+      ? renderOnboardingFirstReportSearchLogBody(hit, memory)
+      : renderInjectedSnippet(hit, memory, {
+          skillInjectionMode: "summary",
+          skillSummaryChars: MEMORY_PACKET_SKILL_SUMMARY_CHARS
+        })?.body ?? ""
+  );
   return {
     refKind: hit.kind,
     refId: hit.id,
@@ -223,6 +233,41 @@ function emptyRetrievalResult(): RetrievalResult {
       topRelevance: 0,
       droppedByThreshold: 0
     }
+  };
+}
+
+function isOnboardingFirstReportContinuationQuery(query: string): boolean {
+  return /memmy/i.test(query) &&
+    /(?:初见报告|首次登录报告|first\s+(?:encounter\s+)?report|onboarding\s+report)/i.test(query) &&
+    /(?:接着|继续|接续|刚才|continue|resume|pick\s+up)/i.test(query);
+}
+
+function directRetrievalResult(hit: RecallHit): RetrievalResult {
+  return {
+    hits: [hit],
+    debug: {
+      tierSizes: { tier1: 0, tier2: 1, tier3: 0 },
+      kept: { tier1: 0, tier2: 1, tier3: 0 },
+      topRelevance: hit.score,
+      droppedByThreshold: 0
+    }
+  };
+}
+
+function onboardingFirstReportRecallHit(memory: MemoryRow): RecallHit | null {
+  const trace = traceMetaFromMemory(memory);
+  if (!trace) return null;
+  return {
+    id: memory.id,
+    kind: kindFromMemory(memory),
+    memoryLayer: memory.memoryLayer,
+    status: memory.status,
+    title: stringValue(memory.info.title) ?? "Memmy 初见报告 / First Encounter Report",
+    snippet: trace.summary.trim() || clip(trace.agentText, 500),
+    score: 1,
+    tags: memory.tags,
+    updatedAt: memory.updatedAt,
+    source: "search"
   };
 }
 
@@ -554,6 +599,13 @@ function renderInjectedSnippet(
   if (hit.kind === "trace" || hit.memoryLayer === "L1") {
     const trace = memory ? traceMetaFromMemory(memory) : null;
     if (!trace) return null;
+    if (memory && isOnboardingFirstReportMemory(memory)) {
+      return {
+        refKind: "trace",
+        title: "Memmy 初见报告 / First Encounter Report",
+        body: renderInjectedOnboardingFirstReportBody(hit, trace)
+      };
+    }
     return {
       refKind: "trace",
       title: "Trace",
@@ -628,6 +680,47 @@ function renderInjectedTraceBody(hit: RecallHit, trace: TraceMeta): string {
     ...labeledInjectedBlock("Historical user statement", trace.userText || "(empty)"),
     "",
     ...labeledInjectedBlock("Historical assistant response", trace.agentText || "(empty)")
+  ].join("\n");
+}
+
+function isOnboardingFirstReportMemory(memory: MemoryRow): boolean {
+  return (memory.agentId ?? "").trim().toLowerCase() === ONBOARDING_FIRST_REPORT_AGENT_ID &&
+    memory.tags.some((tag) => tag.trim().toLowerCase() === ONBOARDING_FIRST_REPORT_TAG);
+}
+
+function renderInjectedOnboardingFirstReportBody(hit: RecallHit, trace: TraceMeta): string {
+  const summary = trace.summary.trim() || "(not provided)";
+  const report = trace.agentText.trim() || "(not provided)";
+  const prefix = [
+    `id: ${hit.id}`,
+    `timestamp: ${formatInjectedTimestamp(trace.ts, hit.updatedAt)}`,
+    "",
+    ...labeledInjectedBlock("Summary", summary),
+    "",
+    "First report / 初见报告:"
+  ].join("\n");
+  const suffix = [
+    "",
+    "Scanned source conversation / 扫描原始对话:",
+    `If source details are needed, use \`memmy_memory_get(id)\` with id \`${hit.id}\`.`
+  ].join("\n");
+  const reportBudget = ONBOARDING_FIRST_REPORT_MAX_SNIPPET_BODY_CHARS - prefix.length - suffix.length - 2;
+  const renderedReport = report.length <= reportBudget
+    ? report
+    : `${report.slice(0, Math.max(0, reportBudget - 16))}\n...[truncated]`;
+  return `${prefix}\n${renderedReport}\n${suffix}`;
+}
+
+function renderOnboardingFirstReportSearchLogBody(hit: RecallHit, memory: MemoryRow): string {
+  const trace = traceMetaFromMemory(memory);
+  if (!trace) return "";
+  return [
+    `id: ${hit.id}`,
+    `timestamp: ${formatInjectedTimestamp(trace.ts, hit.updatedAt)}`,
+    "",
+    ...labeledInjectedBlock("User query / 用户请求", trace.userText || "(empty)"),
+    "",
+    ...labeledInjectedBlock("Assistant response / Assistant 回复", trace.agentText || "(empty)")
   ].join("\n");
 }
 
@@ -1371,6 +1464,21 @@ export class RetrievalService {
     if (episode) {
       this.deps.assertEpisodeInScope(episode, request.namespace);
     }
+    const onboardingFirstReportSearchHit = isOnboardingFirstReportContinuationQuery(request.query)
+      ? this.deps.repos.memories.search("", {
+          userId: context.userId,
+          agentId: ONBOARDING_FIRST_REPORT_AGENT_ID,
+          memoryLayer: "L1",
+          status: ["activated", "resolving"],
+          tags: [ONBOARDING_FIRST_REPORT_TAG]
+        }, 1)[0]
+      : undefined;
+    const onboardingFirstReportMemory = onboardingFirstReportSearchHit
+      ? this.deps.repos.memories.getMany([onboardingFirstReportSearchHit.id])[0]
+      : undefined;
+    const onboardingFirstReportHit = onboardingFirstReportMemory
+      ? onboardingFirstReportRecallHit(onboardingFirstReportMemory)
+      : null;
     const recentRawTurnIds = retrievalMode === "turn_start" && request.sessionId
       ? new Set(
           this.deps.repos.runtime
@@ -1384,21 +1492,30 @@ export class RetrievalService {
       ? allowedLayers
       : request.layers.filter((layer) => allowedLayers.includes(layer));
     const searchAt = Date.now();
-    const candidateCount = semanticLayers.length === 0
+    const candidateCount = onboardingFirstReportHit
+      ? 1
+      : semanticLayers.length === 0
       ? 0
       : this.candidatePool.retrievalCandidateCount({
           layers: semanticLayers,
           tags: request.tags
         });
     const retrievalQuery = focusResearchRetrievalQuery(request.query, tuning.domain).text;
-    const queryExtract = candidateCount > 0 ? await this.extractRetrievalQuery(retrievalQuery) : null;
+    const queryExtract = candidateCount > 0 && !onboardingFirstReportHit
+      ? await this.extractRetrievalQuery(retrievalQuery)
+      : null;
     const queryVectorText = queryExtract?.queryVecText?.trim() || retrievalQuery;
     const timeFilter = semanticLayers.includes("L1") ? queryExtract?.timeFilter : undefined;
-    const layers: MemoryLayer[] = timeFilter ? ["L1"] : semanticLayers;
+    const layers: MemoryLayer[] = onboardingFirstReportHit || timeFilter ? ["L1"] : semanticLayers;
     const retrievalLimit = timeFilter
       ? TIME_FILTERED_TRACE_LIMIT
       : request.limit ?? this.deps.turnStartRetrievalLimit();
-    const retrievalOutput = timeFilter
+    const retrievalOutput = onboardingFirstReportHit && onboardingFirstReportMemory
+      ? {
+          retrieval: directRetrievalResult(onboardingFirstReportHit),
+          memories: [onboardingFirstReportMemory]
+        }
+      : timeFilter
       ? this.retrieveTimeFilteredTraceMemories({
           timeFilter,
           tags: request.tags,
@@ -1418,10 +1535,12 @@ export class RetrievalService {
     const retrieval = retrievalOutput.retrieval;
     const memories = retrievalOutput.memories;
     const rerankAt = Date.now();
-    const filteredHits = timeFilter
+    const filteredHits = onboardingFirstReportHit
+      ? { hits: retrieval.hits, status: ["first_report_handoff:latest_only"] }
+      : timeFilter
       ? { hits: retrieval.hits, status: ["time_filter:l1"] }
       : await this.filterRecallHits(queryVectorText, retrieval.hits);
-    const hits = timeFilter
+    const hits = onboardingFirstReportHit || timeFilter
       ? filteredHits.hits
       : filterL1TraceSpanRecallHits(filteredHits.hits,memories);
     const contextPacket = timeFilter

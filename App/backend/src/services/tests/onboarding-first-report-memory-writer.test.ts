@@ -4,7 +4,7 @@ import { createOnboardingFirstReportMemoryWriter } from "../onboarding-first-rep
 
 type FirstReportMemoryClient = Pick<
   MemoryClient,
-  "addMemory" | "enqueueImportSummaries" | "getMemoryProcessingStatus" | "runWorker"
+  "addMemory" | "enqueueImportSummaries" | "getMemoryProcessingStatus" | "runWorker" | "search"
 >;
 
 describe("onboarding first-report memory writer", () => {
@@ -36,11 +36,15 @@ describe("onboarding first-report memory writer", () => {
       jobs: [],
       embeddingRetries: { leased: 0, succeeded: 0, failed: 0, items: [] }
     }) as Awaited<ReturnType<MemoryClient["runWorker"]>>);
+    const search = vi.fn(async () => ({
+      injectedContext: ""
+    }) as Awaited<ReturnType<MemoryClient["search"]>>);
     const memoryClient = {
       addMemory,
       enqueueImportSummaries,
       getMemoryProcessingStatus,
-      runWorker
+      runWorker,
+      search
     } satisfies FirstReportMemoryClient;
     const writer = createOnboardingFirstReportMemoryWriter(memoryClient);
 
@@ -98,7 +102,15 @@ describe("onboarding first-report memory writer", () => {
       priorityCohortOnly: true,
       timeoutMs: 180_000
     });
+    expect(search).toHaveBeenCalledWith({
+      requestId: expect.stringMatching(/^first-report-search-log:/),
+      adapterId: "agent-source:memmy-onboarding",
+      source: "memmy-onboarding",
+      query: "请接着我刚才在 Memmy 里的初见报告继续聊天。最近任务的项目路径是：/Users/jiang/MyProject/memmy-agent-jiang。请先在这个路径下查看项目，再告诉我我们已经确定了什么，并给出一个最合适的下一步。",
+      layers: ["L1"]
+    });
     expect(addMemory.mock.invocationCallOrder[0]).toBeLessThan(enqueueImportSummaries.mock.invocationCallOrder[0] ?? 0);
     expect(enqueueImportSummaries.mock.invocationCallOrder[0]).toBeLessThan(runWorker.mock.invocationCallOrder[0] ?? 0);
+    expect(runWorker.mock.invocationCallOrder.at(-1) ?? 0).toBeLessThan(search.mock.invocationCallOrder[0] ?? 0);
   });
 });

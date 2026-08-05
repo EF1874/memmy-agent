@@ -4,6 +4,8 @@ import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
 
 const FIRST_REPORT_SOURCE = "memmy-onboarding";
 const FIRST_REPORT_PROCESSING_TIMEOUT_MS = 180_000;
+const FIRST_REPORT_HANDOFF_QUERY_ZH = "请接着我刚才在 Memmy 里的初见报告继续聊天。先告诉我我们已经确定了什么，再给出一个最合适的下一步。";
+const FIRST_REPORT_HANDOFF_QUERY_EN = "Please continue from the first report I just had in Memmy. First tell me what we already decided, then give me the single best next step.";
 const FIRST_REPORT_TAGS = [
   "agent-source",
   "memmy",
@@ -40,7 +42,7 @@ export interface OnboardingFirstReportMemoryWriter {
 export function createOnboardingFirstReportMemoryWriter(
   memoryClient: Pick<
     MemoryClient,
-    "addMemory" | "enqueueImportSummaries" | "getMemoryProcessingStatus" | "runWorker"
+    "addMemory" | "enqueueImportSummaries" | "getMemoryProcessingStatus" | "runWorker" | "search"
   >,
   now: () => number = Date.now
 ): OnboardingFirstReportMemoryWriter {
@@ -61,6 +63,13 @@ export function createOnboardingFirstReportMemoryWriter(
 
       await memoryClient.enqueueImportSummaries([memory.id]);
       await processFirstReportMemory(memoryClient, memory.id, now);
+      await memoryClient.search({
+        requestId: `first-report-search-log:${shortHash(`${stableId}:${input.reportMarkdown}`)}`,
+        adapterId: `agent-source:${FIRST_REPORT_SOURCE}`,
+        source: FIRST_REPORT_SOURCE,
+        query: firstReportHandoffQuery(input.locale, input.latestConversation.workspacePath),
+        layers: ["L1"]
+      });
     }
   };
 }
@@ -86,8 +95,8 @@ function renderMemoryContent(input: OnboardingFirstReportMemoryInput): string {
     `Projects / 项目: ${projects}`,
     `Keywords / 关键词: ${keywords}`,
     "Retrieval aliases / 检索别名: Memmy 初见报告, Memmy first report, first encounter report, onboarding report, 首次登录报告, 最近项目, recent project, 最近任务, latest task, current bug, continue task, cross-agent handoff",
-    "Continuation trigger / 中文接续触发词: 请接着我刚才在 Memmy 里的初见报告继续聊天。先告诉我我们已经确定了什么，再给出一个最合适的下一步。",
-    "Continuation trigger / English handoff query: Please continue from the first report I just had in Memmy. First tell me what we already decided, then give me the single best next step.",
+    `Continuation trigger / 中文接续触发词: ${FIRST_REPORT_HANDOFF_QUERY_ZH}`,
+    `Continuation trigger / English handoff query: ${FIRST_REPORT_HANDOFF_QUERY_EN}`,
     `Latest request / 最近请求: ${latestUserQuery}`,
     "The following is the scanned first 2 and latest 12 conversation turns, including compact tool calls. Treat the whole block as the user query for cross-Agent continuation.",
     "以下是扫描到的前 2 轮与最近 12 轮对话及简略工具调用；请把整段作为跨 Agent 接续所需的用户请求上下文。",
@@ -134,6 +143,16 @@ function firstReportTitle(input: OnboardingFirstReportMemoryInput): string {
   return topic
     ? `Memmy 初见报告 / First Encounter Report — ${topic}`
     : "Memmy 初见报告 / First Encounter Report";
+}
+
+function firstReportHandoffQuery(locale: "zh-CN" | "en-US", workspacePath: string | null): string {
+  const path = workspacePath?.trim();
+  if (!path) {
+    return locale === "zh-CN" ? FIRST_REPORT_HANDOFF_QUERY_ZH : FIRST_REPORT_HANDOFF_QUERY_EN;
+  }
+  return locale === "zh-CN"
+    ? `请接着我刚才在 Memmy 里的初见报告继续聊天。最近任务的项目路径是：${path}。请先在这个路径下查看项目，再告诉我我们已经确定了什么，并给出一个最合适的下一步。`
+    : `Please continue from the first report I just had in Memmy. The project path for the latest task is: ${path}. First inspect the project at that path, then tell me what we already decided and give me the single best next step.`;
 }
 
 function shortHash(value: string): string {

@@ -366,6 +366,8 @@ export const OnboardingInsightDiagnosticsSchema = z.object({
     sampledQueryCount: z.number().int().nonnegative(),
     usedLlm: z.boolean(),
     elapsedMs: z.number().int().nonnegative(),
+    reportLanguage: z.enum(["zh-CN", "en-US"]).optional(),
+    latestWorkspacePath: z.string().nullable().optional(),
     agents: z.array(z.object({
         sourceId: z.string().min(1),
         displayName: z.string().min(1),

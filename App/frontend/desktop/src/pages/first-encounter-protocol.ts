@@ -8,7 +8,8 @@ import {
 } from "@memmy/local-api-contracts";
 import { requestJson } from "../api/http.js";
 import { getRuntimeConfig } from "../api/runtime-config.js";
-import type { ResolvedLanguage } from "../i18n/messages.js";
+import { enUSMessages, zhCNMessages, type ResolvedLanguage } from "../i18n/messages.js";
+import { buildFirstEncounterRelayPrompt } from "./first-encounter-relay-prompt.js";
 
 export interface DiscoveredAgent {
   sourceId: string;
@@ -26,6 +27,10 @@ export interface FirstEncounterReportPayload {
   body: string;
   agents: DiscoveredAgent[];
   emptyHistory: boolean;
+  language: ResolvedLanguage;
+  workspacePath: string | null;
+  reportPrompt: string;
+  relayPrompt: string;
 }
 
 export interface FirstEncounterReportStreamDoneMeta {
@@ -48,7 +53,7 @@ export async function loadFirstEncounterReport(request: FirstEncounterReportRequ
       locale: request.language
     })
   });
-  const payload = toFirstEncounterReportPayload(response);
+  const payload = toFirstEncounterReportPayload(response, request.language);
   if (!payload) {
     throw new Error("first encounter report response is empty");
   }
@@ -87,7 +92,7 @@ export async function streamFirstEncounterReport(
         handlers.onChunk(event.delta);
       } else {
         handlers.onAgents?.(toDiscoveredAgents(event.response.diagnostics));
-        const payload = toFirstEncounterReportPayload(event.response);
+        const payload = toFirstEncounterReportPayload(event.response, request.language);
         if (!payload) {
           throw new Error("first encounter report response is empty");
         }
@@ -169,13 +174,23 @@ function parseInsightReportStreamFrame(frame: string): OnboardingInsightReportSt
   }
 }
 
-function toFirstEncounterReportPayload(response: OnboardingInsightReportResponse): FirstEncounterReportPayload | null {
+function toFirstEncounterReportPayload(
+  response: OnboardingInsightReportResponse,
+  fallbackLanguage: ResolvedLanguage
+): FirstEncounterReportPayload | null {
   const body = response.reportMarkdown.trim();
+  const language = response.diagnostics.reportLanguage ?? fallbackLanguage;
+  const workspacePath = response.diagnostics.latestWorkspacePath?.trim() || null;
+  const messages = language === "zh-CN" ? zhCNMessages : enUSMessages;
 
   return body ? {
     body,
     agents: toDiscoveredAgents(response.diagnostics),
-    emptyHistory: response.diagnostics.sampledQueryCount === 0
+    emptyHistory: response.diagnostics.sampledQueryCount === 0,
+    language,
+    workspacePath,
+    reportPrompt: messages["onboarding.report.userPrompt"],
+    relayPrompt: buildFirstEncounterRelayPrompt(language, workspacePath)
   } : null;
 }
 

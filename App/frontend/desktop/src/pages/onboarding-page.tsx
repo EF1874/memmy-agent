@@ -44,6 +44,7 @@ import {
 import {
   armFirstEncounterRelayChat,
   writeFirstEncounterRelayChat,
+  writeFirstEncounterRelayPrompt,
   writeFirstEncounterRelayReadyChat,
   writePendingFirstEncounterTaskLaunch
 } from "./first-encounter-task-launch.js";
@@ -455,11 +456,15 @@ export function OnboardingPage() {
           setFirstReportIsStreaming(false);
           setFirstReportShouldSimulate(true);
           setFirstReportPayload(payload);
+          writeFirstEncounterRelayPrompt(
+            typeof window === "undefined" ? undefined : window.sessionStorage,
+            payload.relayPrompt
+          );
           setFirstScanAgents(payload.agents.length > 0 ? payload.agents : seedAgents);
           firstScanVisualComplete.current = true;
           // Persist into a real chat as soon as the report exists, so later
           // navigation / WS timing cannot drop the generated content.
-          void seedFirstEncounterReportChat(payload.body);
+          void seedFirstEncounterReportChat(payload);
         }
       }
     ).catch((error) => {
@@ -530,9 +535,9 @@ export function OnboardingPage() {
     void completeReportFlow(true);
   }
 
-  function seedFirstEncounterReportChat(reportBody: string): Promise<{ chatId: string; sessionKey: string } | null> {
-    const assistantContent = reportBody.trim();
-    const prompt = t("onboarding.report.userPrompt");
+  function seedFirstEncounterReportChat(payload: FirstEncounterReportPayload): Promise<{ chatId: string; sessionKey: string } | null> {
+    const assistantContent = payload.body.trim();
+    const prompt = payload.reportPrompt;
     const storage = typeof window === "undefined" ? undefined : window.sessionStorage;
     if (!assistantContent) {
       return Promise.resolve(null);
@@ -580,12 +585,12 @@ export function OnboardingPage() {
 
     writePreferredMode(localStorageRef, "full");
     if (createConversation) {
-      const prompt = t("onboarding.report.userPrompt");
+      const prompt = firstReportPayload?.reportPrompt ?? t("onboarding.report.userPrompt");
       const assistantContent = firstReportPayload?.body?.trim() || undefined;
       // Prefer the chat seeded at report-done; wait if still in flight, then retry once.
       const seeded = firstReportSeededChatRef.current
         ?? (await firstReportSeedPromiseRef.current)
-        ?? (assistantContent ? await seedFirstEncounterReportChat(assistantContent) : null);
+        ?? (firstReportPayload ? await seedFirstEncounterReportChat(firstReportPayload) : null);
       writePendingFirstEncounterTaskLaunch(storage, prompt, {
         ...(assistantContent ? { assistantContent } : {}),
         ...(seeded ? { chatId: seeded.chatId, sessionKey: seeded.sessionKey } : {})

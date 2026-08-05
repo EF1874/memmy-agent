@@ -6,7 +6,8 @@ import type {
 import {
   createAgentTaskModelOnboardingInsightReportGenerator,
   createOnboardingInsightService,
-  createOpenAiCompatibleOnboardingInsightReportGenerator
+  createOpenAiCompatibleOnboardingInsightReportGenerator,
+  type OnboardingInsightGenerationInput
 } from "../onboarding-insight-service.js";
 
 afterEach(() => {
@@ -138,6 +139,8 @@ describe("onboarding insight service", () => {
           sampledQueryCount: 0,
           usedLlm: false,
           elapsedMs: 0,
+          reportLanguage: "en-US",
+          latestWorkspacePath: null,
           agents: []
         }
       },
@@ -855,7 +858,56 @@ describe("onboarding insight service", () => {
 
     const report = await service.generateReport({ locale: "en-US" });
 
-    expect(report.reportMarkdown).toContain("Language preference: recent conversations lean Chinese");
+    expect(report.reportMarkdown).toContain("语言偏好：最近对话更常使用中文");
+    expect(report.diagnostics).toMatchObject({
+      reportLanguage: "zh-CN",
+      latestWorkspacePath: "/Users/test/Memmy"
+    });
+  });
+
+  it("uses the scanned response-language preference instead of the App locale for generation and storage", async () => {
+    const generateReport = vi.fn(async (input: OnboardingInsightGenerationInput) => (
+      input.locale === "en-US" ? "English preferred-language report." : "中文报告。"
+    ));
+    const write = vi.fn(async () => undefined);
+    const service = createOnboardingInsightService({
+      samplers: [
+        sampler("codex", "Codex", [
+          query("codex", "1", "Please keep the report concise and continue the latest implementation task."),
+          query("codex", "2", "Use English for the response and include concrete next steps."),
+          query("codex", "3", "Verify the build before giving me the final answer.")
+        ])
+      ],
+      reportGenerator: { generateReport },
+      memoryWriter: { write },
+      now: () => 100
+    });
+
+    const report = await service.generateReport({ locale: "zh-CN" });
+    const events = await collectStreamEvents(service.streamReport({ locale: "zh-CN" }));
+
+    expect(report.reportMarkdown).toBe("English preferred-language report.");
+    expect(generateReport).toHaveBeenCalledWith(expect.objectContaining({ locale: "en-US" }));
+    expect(write).toHaveBeenCalledWith(expect.objectContaining({
+      locale: "en-US",
+      latestConversation: expect.objectContaining({ workspacePath: "/Users/test/Memmy" })
+    }));
+    expect(report.diagnostics).toMatchObject({
+      reportLanguage: "en-US",
+      latestWorkspacePath: "/Users/test/Memmy"
+    });
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "done",
+        response: expect.objectContaining({
+          reportMarkdown: "English preferred-language report.",
+          diagnostics: expect.objectContaining({
+            reportLanguage: "en-US",
+            latestWorkspacePath: "/Users/test/Memmy"
+          })
+        })
+      })
+    ]));
   });
 
   it("uses only the globally latest conversation in the report", async () => {

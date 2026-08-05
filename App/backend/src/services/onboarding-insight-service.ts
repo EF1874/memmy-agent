@@ -253,8 +253,8 @@ export function createOnboardingInsightService(options: CreateOnboardingInsightS
     async generateReport(input = {}, signal) {
       const startedAt = now();
       const sample = await sampleRecentQueries(options.samplers, options.conversationWindowReader, signal, now);
-      const locale = input.locale ?? inferLocale(sample.queries);
       const profile = buildProfileSignals(sample);
+      const locale = profile.preferredResponseLanguage ?? input.locale ?? inferLocale(sample.queries);
       const response = await buildReportResponse({
         profile,
         sample,
@@ -270,12 +270,12 @@ export function createOnboardingInsightService(options: CreateOnboardingInsightS
     async *streamReport(input = {}, signal) {
       const startedAt = now();
       const sample = await sampleRecentQueries(options.samplers, options.conversationWindowReader, signal, now);
+      const profile = buildProfileSignals(sample);
+      const locale = profile.preferredResponseLanguage ?? input.locale ?? inferLocale(sample.queries);
       yield {
         type: "sampled",
-        diagnostics: diagnostics(sample, false, Math.max(0, now() - startedAt))
+        diagnostics: diagnostics(sample, false, Math.max(0, now() - startedAt), locale)
       };
-      const locale = input.locale ?? inferLocale(sample.queries);
-      const profile = buildProfileSignals(sample);
       const elapsedMs = Math.max(0, now() - startedAt);
       yield* streamReportResponse({
         profile,
@@ -696,7 +696,7 @@ async function buildReportResponse(input: {
     return {
       status: "ready",
       reportMarkdown: renderEmptyHistoryReport(input.locale),
-      diagnostics: diagnostics(input.sample, false, Math.max(0, input.now() - input.startedAt))
+      diagnostics: diagnostics(input.sample, false, Math.max(0, input.now() - input.startedAt), input.locale)
     };
   }
 
@@ -712,7 +712,7 @@ async function buildReportResponse(input: {
   return {
     status: "ready",
     reportMarkdown,
-    diagnostics: diagnostics(input.sample, Boolean(generatedReport), Math.max(0, input.now() - input.startedAt))
+    diagnostics: diagnostics(input.sample, Boolean(generatedReport), Math.max(0, input.now() - input.startedAt), input.locale)
   };
 }
 
@@ -733,7 +733,7 @@ async function* streamReportResponse(input: {
       response: {
         status: "ready",
         reportMarkdown: renderEmptyHistoryReport(input.locale),
-        diagnostics: diagnostics(input.sample, false, input.elapsedMs)
+        diagnostics: diagnostics(input.sample, false, input.elapsedMs, input.locale)
       }
     };
     return;
@@ -772,7 +772,7 @@ async function* streamReportResponse(input: {
     response: {
       status: "ready",
       reportMarkdown,
-      diagnostics: diagnostics(input.sample, Boolean(generatedReport), Math.max(input.elapsedMs, input.now() - input.startedAt))
+      diagnostics: diagnostics(input.sample, Boolean(generatedReport), Math.max(input.elapsedMs, input.now() - input.startedAt), input.locale)
     }
   };
 }
@@ -1863,12 +1863,19 @@ function trimSentence(text: string, maxChars: number): string {
   return normalized.length <= maxChars ? normalized : `${normalized.slice(0, maxChars)}...`;
 }
 
-function diagnostics(sample: SampleBundle, usedLlm: boolean, elapsedMs: number): OnboardingInsightReportResponse["diagnostics"] {
+function diagnostics(
+  sample: SampleBundle,
+  usedLlm: boolean,
+  elapsedMs: number,
+  reportLanguage?: "zh-CN" | "en-US"
+): OnboardingInsightReportResponse["diagnostics"] {
   return {
     discoveredAgentCount: sample.discovered.length,
     sampledQueryCount: sample.queries.length,
     usedLlm,
     elapsedMs: Math.max(elapsedMs, sample.elapsedMs),
+    ...(reportLanguage ? { reportLanguage } : {}),
+    latestWorkspacePath: sample.latestConversation?.workspacePath ?? null,
     agents: sample.discovered.map((result) => ({
       sourceId: result.sourceId,
       displayName: result.displayName,
