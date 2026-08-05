@@ -766,13 +766,11 @@ function renderFallbackReport(profile: OnboardingInsightProfileSignals, locale: 
 
 function renderEmptyHistoryReport(locale: "zh-CN" | "en-US"): string {
   return locale === "en-US" ? [
-    "There are no records on this device that Memmy can read yet. From now on, though, Memmy will keep capturing the experience, decisions, and context that emerge from your conversations with Agents. The next time you start a new conversation or switch Agents, Memmy can inject the relevant memories directly, so you do not have to explain the background all over again.",
-    "That includes project naming conventions, your preferred implementation style, pitfalls you have already encountered, and the root cause uncovered by a debugging session—things that recur in daily work but should not need to be explained repeatedly. They will become reusable long-term memory.",
-    "If you switch between Agents such as Cursor and Codex, Memmy can also connect the context scattered across them. What moves is not merely a chat log, but a working task state that can be continued. Starting with this conversation, Memmy is officially on the job."
+    "There is no readable Agent history on this device yet, so there is nothing useful to pretend I already know.",
+    "Tell Memmy about one real task. It will preserve the useful background, decisions, and next step so a new conversation—or another Agent such as Cursor or Codex—can continue without making you explain it again."
   ].join("\n\n") : [
-    "这台设备上还没有 Memmy 可以读取的记录，不过从现在开始，你和 Agent 对话中产生的经验、决策和上下文，Memmy 会帮你持续沉淀下来。下一次开新对话或者切换 Agent 时，Memmy 可以直接注入相关记忆，不用你每次重新解释背景。",
-    "比如项目里的命名约定、你偏好的实现方式、某个问题踩过的坑、一次排查最终定位到的原因——这些在日常工作中反复出现却不该反复解释的东西，之后都会变成可复用的长期记忆。",
-    "如果你在 Cursor、Codex 等不同 Agent 之间切换工作，Memmy 也能把分散的上下文串起来——迁移的不是聊天记录，而是可以继续执行的任务现场。从这次对话开始，Memmy 就正式上班了。"
+    "这台设备上还没有可读取的 Agent 历史，所以我不会假装已经了解你。",
+    "先告诉 Memmy 一件你正在做的真实任务。它会记住有用的背景、决策和下一步；之后新开对话，或换到 Cursor、Codex，也不用再从头解释。"
   ].join("\n\n");
 }
 
@@ -1111,8 +1109,8 @@ function buildAction(
     if (type === "cross_agent_synthesis") {
       return {
         type,
-        buttonLabel: "Alright, pull it together",
-        description: agents.length > 1 ? `Merge related threads from ${agents.join(", ")}` : "Merge recent related threads",
+        buttonLabel: "Recover and merge this task",
+        description: agents.length > 1 ? `Recover one task across ${agents.join(", ")}` : "Recover the task context and unfinished work",
         contextSummary,
         relatedAgents: agents,
         topicKeywords: keywords,
@@ -1123,8 +1121,8 @@ function buildAction(
     if (type === "problem_diagnosis") {
       return {
         type,
-        buttonLabel: "Continue debugging",
-        description: "Pick up the recent error, build, or debugging context",
+        buttonLabel: "Recall how this was debugged",
+        description: "Recap what was tried and continue from the last useful result",
         contextSummary,
         relatedAgents: agents,
         topicKeywords: keywords,
@@ -1135,8 +1133,8 @@ function buildAction(
     if (type === "decision_doc") {
       return {
         type,
-        buttonLabel: "Summarize the decisions",
-        description: "Turn recent tradeoffs into a clean decision record",
+        buttonLabel: "Recover the key decisions",
+        description: "Turn previous options and tradeoffs into a usable decision record",
         contextSummary,
         relatedAgents: agents,
         topicKeywords: keywords,
@@ -1146,8 +1144,8 @@ function buildAction(
 
     return {
       type: "continue_task",
-      buttonLabel: "Continue this task",
-      description: "Pick up the current work from recent conversations",
+      buttonLabel: "Continue the unfinished task",
+      description: "Recover the latest state and take the next concrete step",
       contextSummary,
       relatedAgents: agents,
       topicKeywords: keywords,
@@ -1158,8 +1156,8 @@ function buildAction(
   if (type === "cross_agent_synthesis") {
     return {
       type,
-      buttonLabel: "好，帮我整合",
-      description: agents.length > 1 ? `整合 ${agents.join("、")} 中的相关讨论` : "整合最近的相关讨论",
+      buttonLabel: "找回并合并这项任务",
+      description: agents.length > 1 ? `找回 ${agents.join("、")} 里的同一项任务` : "找回任务背景、结论和未完成项",
       contextSummary,
       relatedAgents: agents,
       topicKeywords: keywords,
@@ -1170,8 +1168,8 @@ function buildAction(
   if (type === "problem_diagnosis") {
     return {
       type,
-      buttonLabel: "继续排查问题",
-      description: "接续最近的报错、构建或调试上下文",
+      buttonLabel: "复盘上次怎么解决",
+      description: "找回已尝试的方法和最后一个有效结果",
       contextSummary,
       relatedAgents: agents,
       topicKeywords: keywords,
@@ -1182,8 +1180,8 @@ function buildAction(
   if (type === "decision_doc") {
     return {
       type,
-      buttonLabel: "整理技术决策",
-      description: "把最近讨论过的方案和取舍整理成决策记录",
+      buttonLabel: "找回之前的关键决策",
+      description: "把讨论过的方案、取舍和结论整理成记录",
       contextSummary,
       relatedAgents: agents,
       topicKeywords: keywords,
@@ -1193,8 +1191,8 @@ function buildAction(
 
   return {
     type: "continue_task",
-    buttonLabel: "继续这个任务",
-    description: "基于最近对话接续当前工作",
+    buttonLabel: "继续最近未完成的任务",
+    description: "找回最近进度并执行一个明确的下一步",
     contextSummary,
     relatedAgents: agents,
     topicKeywords: keywords,
@@ -2120,7 +2118,7 @@ function isActionCopyParagraph(paragraph: string): boolean {
     /^(主按钮|主要按钮|次级按钮|备选按钮|也可以|其他选项|可选项|行动按钮|按钮文案)\b/.test(normalized) ||
     /\b(main button|also available|button label|keep moving)\b/.test(normalized) ||
     /(?:主按钮|次级按钮|按钮文案)/.test(normalized) ||
-    /^(好，帮我整合|继续这个任务|整理技术决策)\s*[:：-]?\s*$/.test(normalized);
+    /^(好，帮我整合|继续这个任务|整理技术决策|找回并合并这项任务|继续最近未完成的任务|找回之前的关键决策|复盘上次怎么解决)\s*[:：-]?\s*$/.test(normalized);
 }
 
 function chatCompletionsUrl(baseUrl: string): string {
