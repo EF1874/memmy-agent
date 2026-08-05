@@ -219,7 +219,7 @@ describe("OnboardingPage source", () => {
     expect(scanSource).toContain("isPending={agent.conversations === null}");
   });
 
-  it("初见报告下一步后由主页直接发送待办 prompt，不落到输入框草稿", () => {
+  it("初见报告生成完成后立刻 seed-chat，主页只打开已写入会话", () => {
     const onboardingSource = readFileSync(onboardingPageSourcePath, "utf8");
     const homeSource = readFileSync(fileURLToPath(new URL("../home-page.tsx", import.meta.url)), "utf8");
     const taskLaunchSource = readFileSync(firstEncounterTaskLaunchSourcePath, "utf8");
@@ -227,11 +227,19 @@ describe("OnboardingPage source", () => {
     expect(taskLaunchSource).toContain("PENDING_FIRST_ENCOUNTER_TASK_LAUNCH_KEY");
     expect(taskLaunchSource).toContain("writePendingFirstEncounterTaskLaunch");
     expect(taskLaunchSource).toContain("consumePendingFirstEncounterTaskLaunch");
-    expect(onboardingSource).toContain('writePendingFirstEncounterTaskLaunch(storage, t("onboarding.report.userPrompt"))');
+    expect(taskLaunchSource).toContain("assistantContent");
+    expect(taskLaunchSource).toContain("chatId");
+    expect(onboardingSource).toContain("function seedFirstEncounterReportChat(reportBody: string)");
+    expect(onboardingSource).toContain("void seedFirstEncounterReportChat(payload.body)");
+    expect(onboardingSource).toContain("seedWebuiChat({");
+    expect(onboardingSource).toContain("writeFirstEncounterRelayChat(storage, seeded.chatId)");
     expect(onboardingSource).toContain("armFirstEncounterRelayChat(storage)");
     expect(onboardingSource).not.toContain("composerDraftUpdated(agentChatScopeKey");
     expect(homeSource).toContain("consumePendingFirstEncounterTaskLaunch");
-    expect(homeSource).toContain("content: pendingPrompt");
+    expect(homeSource).toContain("pendingLaunch.chatId");
+    expect(homeSource).toContain("seedWebuiChat({");
+    expect(homeSource).toContain("writeFirstEncounterRelayReadyChat(storage, seeded.chat_id)");
+    expect(homeSource).toContain("content: pendingLaunch.prompt");
     expect(homeSource).toContain("chatId: null");
     expect(homeSource).toContain("void submitAgentComposerMessage({");
   });
@@ -239,7 +247,7 @@ describe("OnboardingPage source", () => {
   it("初见报告继续后创建可接续对话，拒绝授权完成引导不写 pending task", () => {
     const onboardingSource = readFileSync(onboardingPageSourcePath, "utf8");
     const reportSource = readFileSync(firstEncounterReportSourcePath, "utf8");
-    const completeReportIndex = onboardingSource.indexOf("function completeReportFlow(createConversation: boolean)");
+    const completeReportIndex = onboardingSource.indexOf("async function completeReportFlow(createConversation: boolean)");
     const completeOnboardingIndex = onboardingSource.indexOf("async function completeOnboarding(mode: PreferredMode)");
 
     expect(reportSource).toContain("onContinue: () => void;");
