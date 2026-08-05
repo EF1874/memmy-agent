@@ -12,7 +12,15 @@ import {
   type MainWindowActionResolution,
   type PetGuideChoice
 } from "./pet-guide.js";
-import { ProductTourGuide, productTourMemorySubPage, productTourTabRoute, type ProductTourTab } from "./product-tour.js";
+import {
+  ProductTourGuide,
+  productTourIncludesLogs,
+  productTourMemorySubPage,
+  productTourTabRoute,
+  type ProductTourDismissResult,
+  type ProductTourStepInfo,
+  type ProductTourTab
+} from "./product-tour.js";
 import { GlobalUpdateDialog } from "./update-coordinator.js";
 import {
   clearDeferredGuidanceStep,
@@ -34,6 +42,11 @@ import { persistNickname } from "./nickname.js";
 import { useOptionalApiClients } from "./providers.js";
 import { useAppState } from "../state/app-state.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
+import {
+  buildOnboardingCompletedEvent,
+  buildOnboardingStepCompletedEvent,
+  buildProductTourStepEvent
+} from "../analytics/onboarding-analytics.js";
 import { buildRoutePageViewEvent, shouldDeferRoutePageView } from "../analytics/page-view.js";
 import { appActions } from "../state/app-actions.js";
 import { NicknameModal } from "../components/nickname-modal.js";
@@ -168,8 +181,21 @@ export function AppRouter(props: { onRetry: () => void }) {
     track(buildRoutePageViewEvent(currentPath, referrer));
   }, [currentPath, track, analyticsReady]);
 
-  function dismissProductTour() {
+  function dismissProductTour(result: ProductTourDismissResult, info: ProductTourStepInfo) {
     const storage = typeof window === "undefined" ? undefined : window.sessionStorage;
+    const scanPermission = state.bootstrap?.onboarding.scanPermission;
+    // Intermediate steps only emit viewed. Skip adds one skipped on the current step;
+    // finishing the last CTA does not emit completed (nickname / onboarding_completed mark done).
+    if (result === "skipped") {
+      const tourEvent = buildProductTourStepEvent({
+        tab: info.tourTab,
+        choice: "skipped",
+        scanPermission
+      });
+      if (tourEvent) {
+        track(tourEvent);
+      }
+    }
     clearProductTourStep(storage);
     // Persist nickname step before navigating so the path-change effect does not
     // re-read stale `product_tour` and remount the tour on /tools.
@@ -188,7 +214,13 @@ export function AppRouter(props: { onRetry: () => void }) {
       current: state.account,
       updateProfile: (nickname) => clients?.account.updateProfile({ nickname }) ?? Promise.resolve(null)
     }).then((update) => dispatch(appActions.accountUpdated(update)));
-    track({ name: "onboarding_step_completed", params: { step: "nickname", step_index: 0 }, consentTier: "basic" });
+    const scanPermission = state.bootstrap?.onboarding.scanPermission;
+    track(buildOnboardingStepCompletedEvent({
+      step: "nickname",
+      scanPermission
+    }));
+    // Full product guidance finished (permission → report? → tour → nickname).
+    track(buildOnboardingCompletedEvent(scanPermission));
     writeGuidanceCompleted(typeof window === "undefined" ? undefined : window.localStorage);
     clearDeferredGuidanceStep(typeof window === "undefined" ? undefined : window.sessionStorage);
     setWorkspaceGuidanceStep(null);
@@ -218,7 +250,18 @@ export function AppRouter(props: { onRetry: () => void }) {
       {windowDragRegion}
       {workspaceGuidanceStep === "product_tour" && (
         <ProductTourGuide
+          includeLogs={productTourIncludesLogs(state.bootstrap?.onboarding.scanPermission)}
           onDismiss={dismissProductTour}
+          onStepViewed={(info) => {
+            const tourEvent = buildProductTourStepEvent({
+              tab: info.tourTab,
+              choice: "viewed",
+              scanPermission: state.bootstrap?.onboarding.scanPermission
+            });
+            if (tourEvent) {
+              track(tourEvent);
+            }
+          }}
           onTabChange={(tab: ProductTourTab) => {
             const memorySubPage = productTourMemorySubPage(tab);
             if (memorySubPage) {

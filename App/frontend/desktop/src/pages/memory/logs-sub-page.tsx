@@ -272,9 +272,22 @@ export function LogsSubPageView(props: LogsSubPageViewProps) {
         </div>
       </div>
 
-      {props.state.status === "loading" && <StateBox message={t("memory.logs.loading")} />}
-      {props.state.status === "error" && <StateBox message={props.state.message} tone="error" />}
-      {props.state.status === "ready" && filteredLogs.length === 0 && <StateBox message={t("memory.logs.empty")} />}
+      {/* Keep the tour list anchor mounted even when empty/loading so step 1/5 can resolve layout. */}
+      {props.state.status === "loading" && (
+        <div data-tour-anchor={PRODUCT_TOUR_MEMORY_LOGS_LIST_ANCHOR}>
+          <StateBox message={t("memory.logs.loading")} />
+        </div>
+      )}
+      {props.state.status === "error" && (
+        <div data-tour-anchor={PRODUCT_TOUR_MEMORY_LOGS_LIST_ANCHOR}>
+          <StateBox message={props.state.message} tone="error" />
+        </div>
+      )}
+      {props.state.status === "ready" && filteredLogs.length === 0 && (
+        <div data-tour-anchor={PRODUCT_TOUR_MEMORY_LOGS_LIST_ANCHOR}>
+          <StateBox message={t("memory.logs.empty")} />
+        </div>
+      )}
       {props.state.status === "ready" && filteredLogs.length > 0 && (
         <div className="memory-list">
           <div data-tour-anchor={PRODUCT_TOUR_MEMORY_LOGS_LIST_ANCHOR}>

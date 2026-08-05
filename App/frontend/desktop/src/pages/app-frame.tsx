@@ -1,9 +1,15 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import {
+  productTourIncludesLogs,
+  productTourStartMemorySubPage,
+  productTourStartRoute
+} from "../app/product-tour.js";
 import { PRODUCT_TOUR_CHAT_CONTENT_ANCHOR, PRODUCT_TOUR_MEMORY_NAV_ANCHOR, PRODUCT_TOUR_TOOLS_NAV_ANCHOR } from "../app/product-tour-layout.js";
 import type { AppRoutePath } from "../app/routes.js";
 import { clearFocusedAgentTarget, clearProductTourStep, readDeferredGuidanceStep, readGuidanceCompleted, routeTable, writeDeferredGuidanceStep } from "../app/routes.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
+import { buildOnboardingStepCompletedEvent } from "../analytics/onboarding-analytics.js";
 import {
   useOptionalAgentRuntimeBridge,
   type AgentTaskStateCoordinator,
@@ -537,9 +543,10 @@ export function AppFrame(props: AppFrameProps) {
     const storage = typeof window === "undefined" ? undefined : window.sessionStorage;
     const firstStep = state.bootstrap?.app.userMode !== "byok" && state.bootstrap?.onboarding.improvementProgram === "unset" ? "improvement" : "product_tour";
     if (firstStep === "product_tour") {
+      const includeLogs = productTourIncludesLogs(state.bootstrap?.onboarding.scanPermission);
       clearProductTourStep(storage);
-      writeMemorySubPage(storage, "logs");
-      dispatch(appActions.navigate("/memory"));
+      writeMemorySubPage(storage, productTourStartMemorySubPage(includeLogs));
+      dispatch(appActions.navigate(productTourStartRoute(includeLogs)));
     }
     writeDeferredGuidanceStep(storage, firstStep);
     setDeferredGuidanceStep(firstStep);
@@ -549,15 +556,20 @@ export function AppFrame(props: AppFrameProps) {
     const onboardingPatch = { improvementProgram: accepted ? "accepted" : "declined" } as const;
     const privacyPatch = { allowMemoryImprovementUpload: accepted };
     const storage = typeof window === "undefined" ? undefined : window.sessionStorage;
+    const includeLogs = productTourIncludesLogs(state.bootstrap?.onboarding.scanPermission);
 
     clearProductTourStep(storage);
-    writeMemorySubPage(storage, "logs");
+    writeMemorySubPage(storage, productTourStartMemorySubPage(includeLogs));
     writeDeferredGuidanceStep(storage, "product_tour");
     setDeferredGuidanceStep("product_tour");
-    dispatch(appActions.navigate("/memory"));
+    dispatch(appActions.navigate(productTourStartRoute(includeLogs)));
     dispatch(appActions.onboardingUpdated(onboardingPatch));
     dispatch(appActions.privacyUpdated(privacyPatch));
-    track({ name: "onboarding_step_completed", params: { step: "improvement_program", step_index: 2, choice: accepted ? "accepted" : "declined" }, consentTier: "basic" });
+    track(buildOnboardingStepCompletedEvent({
+      step: "improvement_program",
+      choice: accepted ? "accepted" : "declined",
+      scanPermission: state.bootstrap?.onboarding.scanPermission
+    }));
 
     void clients?.config
       .setImprovementProgram(accepted)

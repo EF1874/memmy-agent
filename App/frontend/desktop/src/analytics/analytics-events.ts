@@ -73,26 +73,45 @@ export interface ByokCompletedEvent {
   consentTier: "basic";
 }
 
+export type OnboardingFlow = "deny" | "scan_only" | "full";
+
+export type OnboardingStepName =
+  | "nickname"
+  | "scan_permission"
+  | "first_report"
+  | "improvement_program"
+  | "product_tour_logs"
+  | "product_tour_agents"
+  | "product_tour_agents_scan"
+  | "product_tour_overview"
+  | "product_tour_tools";
+
 export interface OnboardingStepCompletedEvent {
   name: "onboarding_step_completed";
   params: {
-    step: "nickname" | "scan_permission" | "improvement_program" | "mode_selection";
+    step: OnboardingStepName;
     step_index: number;
     choice?: string;
+    /** deny | scan_only | full — maps scan_permission for funnel branching */
+    flow?: OnboardingFlow;
+    scan_permission?: string;
+    /** Present when step=first_report */
+    empty_history?: boolean;
   };
   consentTier: "basic";
 }
 
 export interface OnboardingCompletedEvent {
   name: "onboarding_completed";
-  params: Record<string, never>;
+  params: {
+    flow?: OnboardingFlow;
+    scan_permission?: string;
+  };
   consentTier: "basic";
 }
 
 export interface OnboardingActivationEvent {
   name:
-    | "onboarding_report_viewed"
-    | "onboarding_report_action_clicked"
     | "onboarding_first_task_completed"
     | "onboarding_relay_clicked"
     | "onboarding_external_memory_verified";
@@ -100,8 +119,9 @@ export interface OnboardingActivationEvent {
     page_path: string;
     action?: string;
     source_id?: string;
-    empty_history?: boolean;
     duration_ms?: number;
+    flow?: OnboardingFlow;
+    scan_permission?: string;
   };
   consentTier: "basic";
 }
