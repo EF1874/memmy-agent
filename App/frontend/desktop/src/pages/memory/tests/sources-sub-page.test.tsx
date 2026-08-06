@@ -22,6 +22,7 @@ import {
   resolveManagedAgentSourceSyncButtonState,
   resolveAgentSourceStatusLabelKey,
   resolveScanContinueSourceId,
+  MANUAL_AGENT_NAME_PRESETS,
   visibleAgentSources
 } from "../../memory-sources-page.js";
 import { SourcesSubPage } from "../sources-sub-page.js";
@@ -120,7 +121,17 @@ describe("SourcesSubPage", () => {
     expect(source).toContain("open={state.modals.manualSource}");
     expect(source).toContain('variant="soft"');
     expect(source).toContain("manual-source-modal__footer");
+    expect(source).toContain("options={MANUAL_AGENT_NAME_PRESETS}");
+    expect(source).toContain('import { Select } from "../components/Select.js";');
+    expect(source).toContain('className="select-control--subtle"');
+    expect(source).not.toContain("<datalist");
     expect(source).not.toContain("fixed inset-0 z-50 flex items-center justify-center bg-text-ink/25 backdrop-blur-sm");
+  });
+
+  it("手动添加 Agent 可以从预设列表选择或继续自由输入", () => {
+    expect(MANUAL_AGENT_NAME_PRESETS).toEqual(["kimi code", "zcode", "minimax code", "coder"]);
+    expect(zhCNMessages["memory.addOtherAgentDescription"]).toContain("选择或输入");
+    expect(enUSMessages["memory.addOtherAgentDescription"]).toContain("Choose or enter");
   });
 
   it("新增 Agent 立即写入页面状态，并在重新进入页面时从后端刷新", () => {

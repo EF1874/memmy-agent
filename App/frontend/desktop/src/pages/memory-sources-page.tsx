@@ -17,6 +17,7 @@ import { useTranslation } from "../i18n/use-translation.js";
 import { Button } from "../components/button.js";
 import { Banner } from "../components/banner.js";
 import { Modal } from "../components/modal.js";
+import { Select } from "../components/Select.js";
 import {
   AGENT_SOURCE_SCAN_COMPLETION_FEEDBACK_MS,
   agentActions,
@@ -57,6 +58,8 @@ type MemoryServiceStatus = "checking" | "ok" | "unavailable";
 export interface MemorySourcesContentProps {
   embedded?: boolean;
 }
+
+export const MANUAL_AGENT_NAME_PRESETS = ["kimi code", "zcode", "minimax code", "coder"] as const;
 
 export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
   const { state, dispatch } = useAppState();
@@ -1013,7 +1016,15 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
         )}
       >
         <p className="text-xs leading-relaxed text-text-ink/55">{t("memory.manualAgentAiHint")}</p>
-        <ManualField label={t("memory.name")} value={manualName} onChange={(value) => { setManualName(value); setManualError(""); }} placeholder={t("memory.manualNamePlaceholder")} />
+        <ManualAgentNameField
+          label={t("memory.name")}
+          customLabel={t("memory.manualCustomName")}
+          value={manualName}
+          onChange={(value) => { setManualName(value); setManualError(""); }}
+          placeholder={t("memory.manualNamePlaceholder")}
+          selectPlaceholder={t("memory.manualPresetPlaceholder")}
+          options={MANUAL_AGENT_NAME_PRESETS}
+        />
         {manualError && (
           <div className="flex items-center gap-2 text-xs text-status-error">
             <AlertCircle size={13} />
@@ -1683,18 +1694,37 @@ function Divider() {
  * @param props.hint The field description.
  * @returns The manual-add field node.
  */
-function ManualField(props: { label: string; value: string; onChange: (value: string) => void; placeholder: string; mono?: boolean; hint?: string }) {
+function ManualAgentNameField(props: {
+  label: string;
+  customLabel: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+  selectPlaceholder: string;
+  options: readonly string[];
+}) {
+  const selectedPreset = props.options.includes(props.value) ? props.value : "";
+
   return (
-    <div>
-      <label className="block text-xs text-text-ink/65 mb-1.5 font-normal">{props.label}</label>
-      <input
-        type="text"
-        placeholder={props.placeholder}
-        value={props.value}
-        onChange={(event) => props.onChange(event.target.value)}
-        className={`w-full px-4 py-2.5 border border-border-stone rounded-input text-sm bg-background-paper focus:outline-none placeholder:text-text-ink/40 ${props.mono ? "font-mono" : ""}`}
+    <div className="space-y-3.5">
+      <Select
+        label={props.label}
+        value={selectedPreset}
+        placeholder={props.selectPlaceholder}
+        onValueChange={props.onChange}
+        className="select-control--subtle"
+        options={props.options.map((option) => ({ value: option, label: option }))}
       />
-      {props.hint && <p className="text-[10px] text-text-ink/45 mt-1.5">{props.hint}</p>}
+      <div>
+        <label className="block text-xs text-text-ink/65 mb-1.5 font-normal">{props.customLabel}</label>
+        <input
+          type="text"
+          placeholder={props.placeholder}
+          value={props.value}
+          onChange={(event) => props.onChange(event.target.value)}
+          className="w-full px-4 py-2.5 border border-border-stone rounded-input text-sm bg-background-paper focus:outline-none placeholder:text-text-ink/40"
+        />
+      </div>
     </div>
   );
 }
