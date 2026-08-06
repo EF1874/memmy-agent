@@ -3877,6 +3877,7 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
   const clauses = ["deleted_at IS NULL"];
   const params: SqlValue[] = [];
 
+  addValueClause("user_id", filter.userId);
   addValueClause("session_id", filter.sessionId);
   addValueClause("conversation_id", filter.conversationId);
   addAgentIdClause(filter.agentId, filter.excludedAgentIds);
@@ -4869,11 +4870,14 @@ function evolutionJobOrderSql(): string {
 }
 
 function evolutionJobPrioritySql(): string {
+  const onboardingFirstReportTarget = targetMemoryMatchesSql(onboardingFirstReportMemorySql("memories"));
   const importedTarget = targetMemoryMatchesSql(agentSourceMemorySql("memories"));
   const interactiveL1Target = targetMemoryMatchesSql(
     `memories.memory_layer = 'L1' AND NOT (${agentSourceMemorySql("memories")})`
   );
   return `CASE
+             WHEN job_type IN ('trace_summary', 'import_summary', 'embedding')
+               AND ${onboardingFirstReportTarget} THEN -100
              WHEN json_extract(payload_json, '$.source') = 'memory.processing.manual_retry' THEN 0
              WHEN job_type = 'trace_summary'
                OR (job_type = 'embedding' AND ${interactiveL1Target}) THEN 1
@@ -4913,9 +4917,22 @@ function agentSourceMemorySql(alias: string): string {
   )`;
 }
 
+function onboardingFirstReportMemorySql(alias: string): string {
+  return `(
+    lower(COALESCE(${alias}.agent_id, '')) = 'memmy-onboarding'
+    OR EXISTS (
+      SELECT 1
+      FROM json_each(${alias}.tags_json)
+      WHERE lower(json_each.value) IN ('first-encounter-report', 'onboarding-report')
+    )
+  )`;
+}
+
 function embeddingRetryOrderSql(): string {
+  const onboardingFirstReport = onboardingFirstReportMemorySql("m");
   const importedMemory = agentSourceMemorySql("m");
   return `CASE
+             WHEN ${onboardingFirstReport} THEN -100
              WHEN q.target_kind = 'trace' AND m.memory_layer = 'L1' AND NOT (${importedMemory}) THEN 0
              WHEN q.target_kind = 'trace' AND m.memory_layer = 'L1' AND ${importedMemory} THEN 1
              ELSE 2

@@ -161,7 +161,7 @@ agents:
   defaults:
     model: openai/gpt-4.1
     provider: openai
-    timezone: Asia/Shanghai
+    timezone: "+08:00"
 providers:
   openai:
     apiKey: ${OPENAI_API_KEY}   # Supports ${ENV_NAME}-style environment variable references
