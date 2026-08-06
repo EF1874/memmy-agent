@@ -90,7 +90,7 @@ Memmy 从设计上保证用户对个人数据和记忆的控制权。
 
 安装 Memmy 后，它可以自动扫描已有 AI Agent 的历史记录。几分钟内，你过去几个月积累的项目上下文、工作习惯和偏好会被转换为个人长期记忆，并生成个性化的「初见报告」。
 
-现已支持：Cursor、Claude Code、Codex、OpenCode、OpenClaw、Hermes Agent。
+现已支持：Cursor、Claude Code、Codex、OpenCode、OpenClaw、Hermes、WorkBuddy、Pi、千问办公 Agent。
 
 查看详细支持列表 → 链接到 docs/import-agent-memory.md
 
