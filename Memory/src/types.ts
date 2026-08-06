@@ -69,6 +69,8 @@ export interface RequestEnvelope {
   adapterId?: string;
   source?: string;
   namespace?: RuntimeNamespace;
+  /** IANA timezone for user-facing calendar and relative-time semantics. */
+  timeZone?: string;
 }
 
 export interface ApiErrorBody {
