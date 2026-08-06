@@ -415,7 +415,9 @@ describe("CLI command helpers", () => {
 
   it("runs memmy config set app.userId", async () => {
     const root = tempRoot("memmy-config-set-cli-");
-    const configPath = writeConfig(root, {});
+    const configPath = writeConfig(root, {
+      agents: { defaults: { workspace: path.join(root, "workspace") } },
+    });
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
 
     await main(["node", "memmy", "config", "set", "app.userId", "user_cli_123", "-c", configPath]);

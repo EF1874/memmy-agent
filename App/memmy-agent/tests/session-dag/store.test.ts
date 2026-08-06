@@ -2,11 +2,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { estimateMessageTokens } from "../../src/core/session/manager.js";
 import { safeSessionDagKey, sessionDagDbPath } from "../../src/session-dag/paths.js";
 import { renderHistoryDagSummary, buildHistoryDagPayload } from "../../src/session-dag/render.js";
-import { DagSnapshotBuilder } from "../../src/session-dag/snapshot.js";
+import { buildDagSnapshotText, DagSnapshotBuilder } from "../../src/session-dag/snapshot.js";
 import { deriveActivePath, deriveActivePathSelection, SessionDagStore } from "../../src/session-dag/store.js";
-import type { DagEdge, DagNode } from "../../src/session-dag/types.js";
+import type { DagEdge, DagGraph, DagNode } from "../../src/session-dag/types.js";
 
 const roots: string[] = [];
 
@@ -558,6 +559,127 @@ describe("SessionDagStore", () => {
     expect(deriveActivePath(nodes, edges)).toEqual(selection.nodeIds);
   });
 
+  it("renders only the active path and terminal task summaries in deterministic sections", () => {
+    const graph: DagGraph = {
+      sessionKey: "websocket:snapshot-projection",
+      nodes: [
+        dagNode("failed-child", "subtask", "failed", { importance: 100 }),
+        dagNode("done-task", "task", "done", { importance: 90, updatedAt: "2026-07-10T09:00:00.000Z" }),
+        dagNode("outside-active", "subtask", "active", { importance: 100 }),
+        dagNode("active-task", "task", "active", { importance: 95 }),
+        dagNode("frozen-child", "decision", "frozen", { importance: 100 }),
+        dagNode("path-blocked", "subtask", "blocked", { importance: 82 }),
+        dagNode("failed-task", "task", "failed", { importance: 80 }),
+        dagNode("done-child", "decision", "done", { importance: 100 }),
+        dagNode("frozen-task", "task", "frozen", { importance: 90, updatedAt: "2026-07-10T10:00:00.000Z" }),
+        dagNode("path-decision", "decision", "done", { importance: 85 }),
+      ],
+      edges: [
+        dagEdge("path-task-decision", "active-task", "path-decision", "decomposes"),
+        dagEdge("path-decision-blocked", "path-decision", "path-blocked", "continues"),
+        dagEdge("done-child-edge", "done-task", "done-child", "decomposes"),
+        dagEdge("failed-child-edge", "failed-task", "failed-child", "decomposes"),
+        dagEdge("frozen-child-edge", "frozen-task", "frozen-child", "decomposes"),
+      ],
+      activePathNodeIds: ["active-task", "path-decision", "path-blocked"],
+      activePathEdgeIds: ["path-task-decision", "path-decision-blocked"],
+    };
+
+    const snapshot = buildDagSnapshotText(graph);
+
+    expect(snapshot.text.match(/^[a-z_]+:$/gm)).toEqual([
+      "current_active_path:",
+      "completed_tasks:",
+      "frozen_or_failed_tasks:",
+    ]);
+    expect(snapshot.text).not.toContain("frozen_or_failed_branches:");
+    expect(snapshot.text).not.toContain("additional_important_nodes:");
+    expect(snapshot.text.indexOf("active-task")).toBeLessThan(snapshot.text.indexOf("path-decision"));
+    expect(snapshot.text.indexOf("path-decision")).toBeLessThan(snapshot.text.indexOf("path-blocked"));
+    expect(snapshot.text).toContain("[task done importance=90] done-task");
+    expect(snapshot.text).toContain("[task frozen importance=90] frozen-task");
+    expect(snapshot.text).toContain("[task failed importance=80] failed-task");
+    for (const excluded of ["done-child", "failed-child", "frozen-child", "outside-active"]) {
+      expect(snapshot.text).not.toContain(excluded);
+    }
+    expect(snapshot.json).toEqual({
+      sessionKey: graph.sessionKey,
+      nodeIds: ["active-task", "path-decision", "path-blocked", "frozen-task", "done-task", "failed-task"],
+      activePathNodeIds: graph.activePathNodeIds,
+      activePathEdgeIds: graph.activePathEdgeIds,
+    });
+    expect(snapshot.tokenEstimate).toBe(estimateMessageTokens({ role: "system", content: snapshot.text }));
+  });
+
+  it("keeps snapshot node ids valid without changing the original active path metadata", () => {
+    const graph: DagGraph = {
+      sessionKey: "websocket:snapshot-dangling-path",
+      nodes: [
+        dagNode("terminal-on-path", "task", "failed"),
+        dagNode("old-frozen", "task", "frozen", { importance: 60 }),
+      ],
+      edges: [],
+      activePathNodeIds: ["missing-node", "terminal-on-path"],
+      activePathEdgeIds: ["missing-edge"],
+    };
+
+    const snapshot = buildDagSnapshotText(graph);
+
+    expect(snapshot.text).not.toContain("missing-node");
+    expect(snapshot.text.match(/^- \[task failed importance=70\] terminal-on-path$/gm)).toHaveLength(1);
+    expect(snapshot.json).toEqual({
+      sessionKey: graph.sessionKey,
+      nodeIds: ["terminal-on-path", "old-frozen"],
+      activePathNodeIds: ["missing-node", "terminal-on-path"],
+      activePathEdgeIds: ["missing-edge"],
+    });
+  });
+
+  it("uses a global terminal-task ranking and stops at the first over-budget candidate", () => {
+    const graph = snapshotRankingGraph();
+    const firstAndShortCandidate: DagGraph = {
+      ...graph,
+      nodes: graph.nodes.filter((node) =>
+        node.id === "active-task" || node.id === "done-high" || node.id === "failed-short",
+      ),
+    };
+    const tokenBudget = buildDagSnapshotText(firstAndShortCandidate).tokenEstimate;
+
+    const snapshot = buildDagSnapshotText(graph, tokenBudget);
+
+    expect(snapshot.json.nodeIds).toEqual(["active-task", "done-high"]);
+    expect(snapshot.text).toContain("done-high");
+    expect(snapshot.text).not.toContain("frozen-new");
+    expect(snapshot.text).not.toContain("failed-short");
+    expect(buildDagSnapshotText(firstAndShortCandidate, tokenBudget).json.nodeIds).toEqual([
+      "active-task",
+      "done-high",
+      "failed-short",
+    ]);
+
+    const activePathOverBudget = buildDagSnapshotText(graph, 1);
+    expect(activePathOverBudget.json.nodeIds).toEqual(["active-task"]);
+    expect(activePathOverBudget.tokenEstimate).toBeGreaterThan(1);
+  });
+
+  it.each([
+    ["omitted", undefined],
+    ["zero", 0],
+    ["negative", -1],
+  ])("includes every terminal task when the token budget is %s", (_label, tokenBudget) => {
+    const snapshot = buildDagSnapshotText(snapshotRankingGraph(), tokenBudget);
+
+    expect(snapshot.json.nodeIds).toEqual([
+      "active-task",
+      "done-high",
+      "frozen-new",
+      "done-old",
+      "task-a",
+      "task-b",
+      "failed-short",
+    ]);
+  });
+
   it("does not enforce reachability when this patch adds no child node", () => {
     const store = makeStore();
     try {
@@ -632,7 +754,7 @@ function dagNode(
   id: string,
   kind: DagNode["kind"],
   status: DagNode["status"],
-  options: { importance?: number; lastMessageIndex?: number; updatedAt?: string } = {},
+  options: { importance?: number; lastMessageIndex?: number; summary?: string; updatedAt?: string } = {},
 ): DagNode {
   const updatedAt = options.updatedAt ?? "2026-07-10T08:00:00.000Z";
   return {
@@ -641,7 +763,7 @@ function dagNode(
     kind,
     status,
     title: id,
-    summary: `${id} summary`,
+    summary: options.summary ?? `${id} summary`,
     detail_json: {},
     importance: options.importance ?? 70,
     created_turn_id: "turn-1",
@@ -653,6 +775,29 @@ function dagNode(
     updated_by: "llm_patch",
     created_at: updatedAt,
     updated_at: updatedAt,
+  };
+}
+
+function snapshotRankingGraph(): DagGraph {
+  return {
+    sessionKey: "websocket:snapshot-ranking",
+    nodes: [
+      dagNode("task-b", "task", "frozen", { importance: 85, updatedAt: "2026-07-10T08:30:00.000Z" }),
+      dagNode("failed-short", "task", "failed", { importance: 80, summary: "x" }),
+      dagNode("done-old", "task", "done", { importance: 90, updatedAt: "2026-07-10T09:00:00.000Z" }),
+      dagNode("outside-decision", "decision", "done", { importance: 100 }),
+      dagNode("active-task", "task", "active", { importance: 70 }),
+      dagNode("task-a", "task", "done", { importance: 85, updatedAt: "2026-07-10T08:30:00.000Z" }),
+      dagNode("frozen-new", "task", "frozen", {
+        importance: 90,
+        summary: "large terminal summary ".repeat(200),
+        updatedAt: "2026-07-10T10:00:00.000Z",
+      }),
+      dagNode("done-high", "task", "done", { importance: 95 }),
+    ],
+    edges: [],
+    activePathNodeIds: ["active-task"],
+    activePathEdgeIds: [],
   };
 }
 

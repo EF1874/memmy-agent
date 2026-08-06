@@ -202,14 +202,12 @@ describe("config schema validation", () => {
     expect(fs.readFileSync(file, "utf8")).toBe(contents);
   });
 
-  it("keeps the existing fallback behavior for unrelated invalid sections", () => {
-    const file = configFile("sessionDag:\n  debugLog: \"true\"\n");
-    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  it("fails loudly for invalid unrelated sections without rewriting the config", () => {
+    const contents = "sessionDag:\n  debugLog: \"true\"\n";
+    const file = configFile(contents);
 
-    const loaded = loadConfig(file);
-
-    expect(loaded.sessionDag.debugLog).toBe(true);
-    expect(loaded.fileMemory.enabled).toBe(false);
+    expect(() => loadConfig(file)).toThrow(/sessionDag\.debugLog/);
+    expect(fs.readFileSync(file, "utf8")).toBe(contents);
   });
 
   it("validates AgentDefaults numeric bounds and enums", () => {
