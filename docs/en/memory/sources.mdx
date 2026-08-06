@@ -1,10 +1,10 @@
 ---
 title: Agent Sources & Scanning
-description: Learn how Memmy scans local history from six built-in Agents and which Hooks, plugins, and live-memory behaviors it installs.
+description: Learn how Memmy scans local history from nine built-in Agents and which Hooks, plugins, Skills, and live-memory behaviors it installs.
 icon: ScanSearch
 ---
 
-An Agent Source is Memmy's adapter for reading local history from an external Agent. Source scanning imports conversations that already exist; Hooks and plugins handle automatic recall and capture in new conversations.
+An Agent Source is Memmy's adapter for reading local history from an external Agent. Source scanning imports conversations that already exist; supported live integrations use Hooks and plugins for automatic recall and capture in new conversations.
 
 <Callout type="warn" icon={false}>
   <div className="mb-2 flex items-center gap-2 text-[1.0625rem] font-semibold leading-6 text-fd-card-foreground">
@@ -12,7 +12,7 @@ An Agent Source is Memmy's adapter for reading local history from an external Ag
     <span>History scanning and live integration are separate</span>
   </div>
 
-  “Sync new” reads data the Agent has already written locally. A Hook or plugin handles automatic recall, automatic turn capture, and task resumption in new conversations. Scanning alone does not modify Agent configuration; installing a Hook or plugin writes the files listed below.
+  “Sync new” reads data the Agent has already written locally. A Hook or plugin handles automatic recall, automatic turn capture, and task resumption in new conversations. Scanning alone does not modify Agent configuration; installing a Hook, plugin, or Skill writes the files listed below.
 </Callout>
 
 ## Built-in sources
@@ -25,6 +25,9 @@ An Agent Source is Memmy's adapter for reading local history from an external Ag
 | OpenCode | `~/.local/share/opencode/opencode.db` | Native plugin |
 | OpenClaw | Conversation and memory SQLite databases under `~/.openclaw` | Memory plugin |
 | Hermes | `~/.hermes/sessions/**/*.jsonl` and `~/.hermes/state.db` | Memory Provider plugin |
+| WorkBuddy | `~/.workbuddy/projects/**/*.jsonl` | Skill (on-demand memory access) |
+| Pi | `~/.pi/agent/sessions/**/*.jsonl` | Skill (on-demand memory access) |
+| QwenWork | `~/.qwenworkcn/projects/**/*.jsonl` | Skill (on-demand memory access) |
 
 ## Incremental sync
 
@@ -69,13 +72,13 @@ Attachment contents, file text, tool output, or other long text may still become
 | Auto-sync conversations | Automatically collect new conversations from connected Agents (on startup and on a schedule)—no need to click Sync new |
 | Auto-connect newly found Agents | Installs the integration for a newly detected built-in Agent; the compact Skill is installed with it |
 
-When auto-install is disabled, the Agent still appears in the list and you can click **Install Hook** or **Install plugin** manually.
+When auto-install is disabled, a detected Agent still appears in the list and you can click **Install Hook**, **Install plugin**, or **Install Skill** manually.
 
 ## Data processing and local management
 
 - Each successfully written complete turn first becomes one raw L1 memory, then receives its summary and search index in the background.
 - You can view the local data path (default `~/.memmy/memory-service`), open the directory, export `memory.sqlite`, or wipe local memory data after a second confirmation.
-- Removing a Hook or plugin does not delete imported history. Clearing local data is a separate explicit action.
+- Removing a Hook, plugin, or Skill does not delete imported history. Clearing local data is a separate explicit action.
 
 ## Hook and plugin integrations
 
@@ -91,6 +94,9 @@ Memmy connects to live Agent conversations through each host's native **Hooks** 
 | OpenCode | Native plugin | Message, tool, text-completion, and session events | Recalls memory, captures responses and tool traces, and exposes native memory tools and `/memmy-resume` |
 | OpenClaw | Memory plugin | `before_prompt_build`, `agent_end` | Injects memory while building the prompt, captures the completed turn, and exposes native memory tools |
 | Hermes | Memory Provider plugin | Provider lifecycle methods such as `prefetch` and `sync_turn` | Recalls and captures automatically, mirrors explicit Hermes memory writes, and exposes native memory tools |
+| WorkBuddy | Skill | Agent invokes `memmy-memory` | Searches, reads, and writes shared memory on demand |
+| Pi | Skill | Agent invokes `memmy-memory` | Searches, reads, and writes shared memory on demand |
+| QwenWork | Skill | Agent invokes `memmy-memory` | Searches, reads, and writes shared memory on demand |
 
 ### What happens during a turn
 
@@ -241,7 +247,7 @@ Hermes likewise allows one active Memory Provider. Memmy asks for confirmation b
 ### Install, verify, and remove
 
 1. Open **Memory → Cross-Agent access**.
-2. For Cursor, Claude Code, and Codex, click **Install Hook**. For OpenCode, OpenClaw, and Hermes, click **Install plugin**.
+2. For Cursor, Claude Code, and Codex, click **Install Hook**. For OpenCode, OpenClaw, and Hermes, click **Install plugin**. For WorkBuddy, Pi, and QwenWork, click **Install Skill**.
 3. If the Agent is already running, restart it or open a new session so it reloads its configuration.
 4. Complete a normal turn, then confirm that the corresponding source appears in Memmy's memory or log views.
 5. Enter `/memmy-resume <keywords>`, confirm that candidates appear, and select an episode with `1`–`5`.

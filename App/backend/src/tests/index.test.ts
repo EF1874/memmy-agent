@@ -1009,7 +1009,7 @@ describe("local api", () => {
     }
   });
 
-  it("exposes the seven built-in agent sources in registry order", async () => {
+  it("exposes the nine built-in agent sources in registry order", async () => {
     backend = await createTempBackend();
 
     const response = await fetch(`${backend.runtimeConfig.baseUrl}/api/agent-sources`, {
@@ -1027,7 +1027,9 @@ describe("local api", () => {
       expect.objectContaining({ sourceId: "opencode", displayName: "Opencode" }),
       expect.objectContaining({ sourceId: "openclaw", displayName: "OpenClaw" }),
       expect.objectContaining({ sourceId: "hermes", displayName: "Hermes" }),
-      expect.objectContaining({ sourceId: "workbuddy", displayName: "WorkBuddy" })
+      expect.objectContaining({ sourceId: "workbuddy", displayName: "WorkBuddy" }),
+      expect.objectContaining({ sourceId: "pi", displayName: "Pi" }),
+      expect.objectContaining({ sourceId: "qwenwork", displayName: "千问办公" })
     ]);
   });
 });

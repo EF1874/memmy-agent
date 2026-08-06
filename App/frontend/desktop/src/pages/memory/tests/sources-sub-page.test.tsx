@@ -21,7 +21,8 @@ import {
   resolveAgentSourceConnectionAction,
   resolveManagedAgentSourceSyncButtonState,
   resolveAgentSourceStatusLabelKey,
-  resolveScanContinueSourceId
+  resolveScanContinueSourceId,
+  visibleAgentSources
 } from "../../memory-sources-page.js";
 import { SourcesSubPage } from "../sources-sub-page.js";
 
@@ -38,7 +39,7 @@ describe("SourcesSubPage", () => {
   });
 
   it("同步按钮在扫描中旋转，完成后进入不可重复点击的勾选状态", () => {
-    const sourceIds = ["cursor", "claude_code", "codex", "opencode", "openclaw", "hermes", "workbuddy"];
+    const sourceIds = ["cursor", "claude_code", "codex", "opencode", "openclaw", "hermes", "workbuddy", "pi", "qwenwork"];
     for (const sourceId of sourceIds) {
       const otherSourceId = sourceIds.find((candidate) => candidate !== sourceId)!;
       expect(resolveAgentSourceScanButtonState(sourceId, true, sourceId, new Set())).toBe("running");
@@ -62,6 +63,19 @@ describe("SourcesSubPage", () => {
     expect(agentSourceLogoUrl("workbuddy")).toContain("workbuddy.png");
   });
 
+  it("使用用户提供的 Pi 和千问办公图标", () => {
+    expect(agentSourceLogoUrl("pi")).toContain("%3ctitle%3ePi%3c/title%3e");
+    expect(agentSourceLogoUrl("qwenwork")).toContain("%3ctitle%3eQwen%3c/title%3e");
+  });
+
+  it("隐藏未安装的内置 Agent，并保留手动添加的来源", () => {
+    expect(visibleAgentSources([
+      createSource("codex", "not_connected"),
+      { ...createSource("workbuddy", "not_connected"), available: false },
+      { ...createSource("manual-1", "not_connected"), builtin: false, available: false }
+    ]).map((source) => source.sourceId)).toEqual(["codex", "manual-1"]);
+  });
+
   it("复用跨 Agent 接入源主体内容", () => {
     const html = renderToString(
       <AppProviders>
@@ -71,7 +85,7 @@ describe("SourcesSubPage", () => {
 
     expect(html).toContain("跨Agent接入");
     expect(html).toContain("memory-sources-page");
-    expect(html).toContain("各 Agent 通过 Hook 或插件接入 memmy-memory，并自动安装 Skill");
+    expect(html).toContain("各 Agent 通过 Hook、插件或 Skill 接入 memmy-memory");
     expect(html).toContain("发现新 Agent 时自动接入");
     expect(html).toContain("自动安装接入组件；关闭后只出现在下方列表，由你手动接入");
     expect(html).toContain("~/.local/bin/memmy-memory");
@@ -273,6 +287,8 @@ describe("SourcesSubPage", () => {
     expect(resolveAgentSourceConnectionAction(createSource("opencode", "skill_installed"))).toBe("install_plugin");
     expect(resolveAgentSourceConnectionAction(createSource("workbuddy", "not_connected"))).toBe("install_skill");
     expect(resolveAgentSourceConnectionAction(createSource("workbuddy", "skill_installed"))).toBe("remove_skill");
+    expect(resolveAgentSourceConnectionAction(createSource("pi", "not_connected"))).toBe("install_skill");
+    expect(resolveAgentSourceConnectionAction(createSource("qwenwork", "skill_installed"))).toBe("remove_skill");
     expect(resolveAgentSourceConnectionAction({
       ...createSource("manual-1", "not_connected"),
       builtin: false
@@ -302,6 +318,8 @@ describe("SourcesSubPage", () => {
     expect(resolveAgentSourceStatusLabelKey(createSource("hermes", "plugin_installed"))).toBe("memory.pluginInstalled");
     expect(resolveAgentSourceStatusLabelKey(createSource("opencode", "plugin_installed"))).toBe("memory.pluginInstalled");
     expect(resolveAgentSourceStatusLabelKey(createSource("workbuddy", "not_connected"))).toBe("memory.skillNotInstalled");
+    expect(resolveAgentSourceStatusLabelKey(createSource("pi", "not_connected"))).toBe("memory.skillNotInstalled");
+    expect(resolveAgentSourceStatusLabelKey(createSource("qwenwork", "skill_installed"))).toBe("memory.skillInstalled");
     expect(source).toContain('props.source.status === "skill_installed" || props.source.status === "plugin_installed"');
     expect(source).not.toContain("memory.notConnected");
   });

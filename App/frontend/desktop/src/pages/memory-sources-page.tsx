@@ -91,7 +91,8 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
   const showScanProgress = isScanning || scanStopped;
   const hasDeterminateScanProgress = Boolean(scanProgress && scanProgress.phase !== "scan" && scanProgress.phase !== "stopped" && scanProgress.total > 0);
   const memoryUnavailable = memoryServiceStatus === "unavailable";
-  const connectedNames = new Set(state.agentSources.items.map((source) => source.displayName.trim().toLocaleLowerCase()));
+  const visibleSources = visibleAgentSources(state.agentSources.items);
+  const connectedNames = new Set(visibleSources.map((source) => source.displayName.trim().toLocaleLowerCase()));
   const scanPercent = scanProgress && hasDeterminateScanProgress ? formatActiveScanPercent(scanProgress.current, scanProgress.total) : 0;
   const scannableSources = state.agentSources.items.filter((source) => source.available);
   const memoryServiceAddress = formatMemoryServiceAddress(clients?.runtimeConfig.memory?.baseUrl);
@@ -735,7 +736,7 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
       <div data-tour-anchor={PRODUCT_TOUR_MEMORY_AGENTS_LIST_ANCHOR}>
       <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
         <div className="min-w-0">
-          <div className="text-xs font-semibold text-text-ink/60">{t("memory.sources", { count: state.agentSources.items.length })}</div>
+          <div className="text-xs font-semibold text-text-ink/60">{t("memory.sources", { count: visibleSources.length })}</div>
           <p className="mt-1 text-xs text-text-ink/45">{t("memory.sourcesDescription")}</p>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
@@ -759,7 +760,7 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
         </div>
       </div>
       <div className="space-y-2.5">
-        {state.agentSources.items.map((source) => {
+        {visibleSources.map((source) => {
           const displayPath = source.dataPath === MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH
             ? t("memory.agentDiscoveryPending")
             : formatSourceDataPath(source.dataPath);
@@ -1262,6 +1263,10 @@ function SourceStatusBadge(props: { source: Pick<AgentSourceView, "sourceId" | "
 
 const NATIVE_PLUGIN_AGENT_SOURCE_IDS = new Set(["opencode", "openclaw", "hermes"]);
 const HOOK_AGENT_SOURCE_IDS = new Set(["codex", "claude_code", "cursor"]);
+
+export function visibleAgentSources<T extends Pick<AgentSourceView, "builtin" | "available">>(sources: readonly T[]): T[] {
+  return sources.filter((source) => !source.builtin || source.available);
+}
 
 export function resolveAgentSourceStatusLabelKey(source: Pick<AgentSourceView, "sourceId" | "status">): MessageKey {
   if (source.status === "skill_installed") {

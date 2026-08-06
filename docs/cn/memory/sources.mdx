@@ -1,10 +1,10 @@
 ---
 title: Agent 来源与扫描
-description: 了解 Memmy 如何扫描六种内置 Agent 的本地历史，以及安装的 Hook、插件和实时记忆效果。
+description: 了解 Memmy 如何扫描九种内置 Agent 的本地历史，以及安装的 Hook、插件、Skill 和实时记忆效果。
 icon: ScanSearch
 ---
 
-Agent Source 是 Memmy 读取外部 Agent 本地历史的适配器。来源扫描负责导入已经存在的对话；新对话中的自动召回和采集由 Hook 或插件接入负责。
+Agent Source 是 Memmy 读取外部 Agent 本地历史的适配器。来源扫描负责导入已经存在的对话；支持实时接入的 Agent 由 Hook 或插件负责新对话中的自动召回和采集。
 
 <Callout type="warn" icon={false}>
   <div className="mb-2 flex items-center gap-2 text-[1.0625rem] font-semibold leading-6 text-fd-card-foreground">
@@ -12,7 +12,7 @@ Agent Source 是 Memmy 读取外部 Agent 本地历史的适配器。来源扫�
     <span>历史扫描和实时接入是两件事</span>
   </div>
 
-  “同步新增”读取 Agent 已写入本地的数据；Hook 或插件负责新对话中的自动召回、自动采集和任务接续。只扫描不会修改 Agent 配置，安装 Hook 或插件才会写入下文列出的配置和文件。
+  “同步新增”读取 Agent 已写入本地的数据；Hook 或插件负责新对话中的自动召回、自动采集和任务接续。只扫描不会修改 Agent 配置；安装 Hook、插件或 Skill 才会写入下文列出的配置和文件。
 </Callout>
 
 ## 内置来源
@@ -25,6 +25,9 @@ Agent Source 是 Memmy 读取外部 Agent 本地历史的适配器。来源扫�
 | OpenCode | `~/.local/share/opencode/opencode.db` | 原生插件 |
 | OpenClaw | `~/.openclaw` 下的 conversation / memory SQLite | Memory 插件 |
 | Hermes | `~/.hermes/sessions/**/*.jsonl` 和 `~/.hermes/state.db` | Memory Provider 插件 |
+| WorkBuddy | `~/.workbuddy/projects/**/*.jsonl` | Skill（按需调用记忆） |
+| Pi | `~/.pi/agent/sessions/**/*.jsonl` | Skill（按需调用记忆） |
+| 千问办公 | `~/.qwenworkcn/projects/**/*.jsonl` | Skill（按需调用记忆） |
 
 ## 增量同步
 
@@ -69,13 +72,13 @@ Agent Source 是 Memmy 读取外部 Agent 本地历史的适配器。来源扫�
 | 自动同步会话 | 自动从已接入的 Agent 采集新对话（启动时与定时），无需手动点「同步新增」 |
 | 发现新 Agent 时自动接入 | 为新发现的内置 Agent 自动安装接入组件；精简 Skill 会随接入一并安装 |
 
-关闭自动安装后，Agent 仍会出现在列表中，你可以手动点击 **安装 Hook** 或 **安装插件**。
+关闭自动安装后，已检测到的 Agent 仍会出现在列表中，你可以手动点击 **安装 Hook**、**安装插件**或 **安装 Skill**。
 
 ## 数据处理与本地管理
 
 - 每个成功写入的完整回合先成为一条 L1 原始记忆，再在后台生成摘要并建立索引。
 - 可以查看本地数据路径（默认 `~/.memmy/memory-service`）、打开目录、导出 `memory.sqlite`，或在二次确认后清空本地记忆数据。
-- 移除 Hook 或插件不会删除已经导入的历史；清空本地数据是单独的显式操作。
+- 移除 Hook、插件或 Skill 不会删除已经导入的历史；清空本地数据是单独的显式操作。
 
 ## Hook 与插件接入
 
@@ -91,6 +94,9 @@ Memmy 通过 Agent 原生支持的 **Hook** 或**插件**接入实时对话。�
 | OpenCode | 原生插件 | 消息、工具、文本完成和会话事件 | 自动召回、采集回复与工具轨迹，并提供原生记忆工具和 `/memmy-resume` |
 | OpenClaw | Memory 插件 | `before_prompt_build`、`agent_end` | 构建提示词前注入记忆，Agent 结束时采集完整回合，并提供原生记忆工具 |
 | Hermes | Memory Provider 插件 | `prefetch`、`sync_turn` 等 Provider 生命周期 | 自动召回和采集，镜像 Hermes 的显式记忆写入，并提供原生记忆工具 |
+| WorkBuddy | Skill | Agent 主动调用 `memmy-memory` | 按需搜索、读取和写入共享记忆 |
+| Pi | Skill | Agent 主动调用 `memmy-memory` | 按需搜索、读取和写入共享记忆 |
+| 千问办公 | Skill | Agent 主动调用 `memmy-memory` | 按需搜索、读取和写入共享记忆 |
 
 ### 一次对话中会发生什么
 
@@ -241,12 +247,12 @@ Hermes 同样只允许一个活动的 Memory Provider；检测到其他 Provider
 ### 安装、验证与移除
 
 1. 打开 **记忆管理 → 跨Agent接入**。
-2. Cursor、Claude Code、Codex 点击 **安装 Hook**；OpenCode、OpenClaw、Hermes 点击 **安装插件**。
+2. Cursor、Claude Code、Codex 点击 **安装 Hook**；OpenCode、OpenClaw、Hermes 点击 **安装插件**；WorkBuddy、Pi、千问办公点击 **安装 Skill**。
 3. 如果 Agent 正在运行，重启 Agent 或新建会话，让它重新加载配置。
 4. 完成一轮普通对话，再到 Memmy 的记忆或日志页面确认对应来源出现新记录。
 5. 输入 `/memmy-resume <关键词>`，确认能看到候选并用 `1`–`5` 选择一个 episode。
 
-点击 **移除 Hook** 或 **移除插件** 时，Memmy 会停用并清理自己管理的实时接入和附带 Skill；其他 Hook 配置会保留，已经进入 Memmy 的历史记忆不会被删除。
+点击 **移除 Hook**、**移除插件** 或 **移除 Skill** 时，Memmy 会清理自己管理的接入内容；其他配置会保留，已经进入 Memmy 的历史记忆不会被删除。
 
 ### 本地访问与失败行为
 
