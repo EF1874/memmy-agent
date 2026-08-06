@@ -76,6 +76,14 @@ jobs:
           git checkout --detach "$TARGET_SHA"
           test "$(git rev-parse HEAD)" = "$TARGET_SHA"
 
+      - name: Verify repository version metadata
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          test "$(node -p "require('./package.json').version")" = "$VERSION"
+          npm run version:check
+
       - name: Resolve previous stable release tag
         id: previous
         env:
@@ -186,8 +194,9 @@ jobs:
 
           Verify downloads with `MD5SUMS.txt` or `SHA256SUMS.txt` attached to this release. The workflow also verifies every OSS object against its `Content-MD5` header before publishing.
 
+          <!-- doc-agent: source-id=memmy-official-changelog-v2 -->
           <!-- memmy-release-evidence
-          schema_version: 1
+          schema_version: 2
           source_id: $GITHUB_REPOSITORY@$TAG
           previous_tag: $PREVIOUS_TAG
           target_sha: $TARGET_SHA
@@ -195,20 +204,133 @@ jobs:
           -->
           EOF
 
+      - name: Build auditable release evidence
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          TAG: ${{ steps.release.outputs.tag }}
+          TARGET_SHA: ${{ steps.release.outputs.target_sha }}
+          PREVIOUS_TAG: ${{ steps.previous.outputs.previous_tag }}
+        run: |
+          set -euo pipefail
+
+          compare_base="$PREVIOUS_TAG"
+          if [[ -z "$compare_base" ]]; then
+            compare_base="$(git rev-list --max-parents=0 "$TARGET_SHA" | head -n 1)"
+          fi
+          test -n "$compare_base"
+
+          gh api "repos/${GITHUB_REPOSITORY}/compare/${compare_base}...${TARGET_SHA}" \
+            > release-assets/COMPARE.json
+
+          total_commits="$(jq -r '.total_commits // (.commits | length)' release-assets/COMPARE.json)"
+          received_commits="$(jq -r '.commits | length' release-assets/COMPARE.json)"
+          changed_file_count="$(jq -r '.files | length' release-assets/COMPARE.json)"
+          compare_head="$(jq -r '.head_commit.sha // empty' release-assets/COMPARE.json)"
+          test "$total_commits" = "$received_commits"
+          test "$changed_file_count" -lt 300
+          test "$compare_head" = "$TARGET_SHA"
+
+          : > release-assets/PULL_REQUESTS.jsonl
+          while IFS= read -r commit_sha; do
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              "repos/${GITHUB_REPOSITORY}/commits/${commit_sha}/pulls" \
+              --jq '.[] | {
+                number,
+                title,
+                htmlUrl: .html_url,
+                mergedAt: .merged_at,
+                baseRef: .base.ref,
+                headRef: .head.ref
+              }' >> release-assets/PULL_REQUESTS.jsonl
+          done < <(jq -r '.commits[].sha' release-assets/COMPARE.json)
+          jq -s 'unique_by(.number) | sort_by(.number)' \
+            release-assets/PULL_REQUESTS.jsonl > release-assets/PULL_REQUESTS.json
+
+          jq -Rn '
+            [inputs
+              | select(length > 0)
+              | capture("^(?<sha256>[0-9a-f]{64})  (?<name>.+)$")
+            ]
+          ' < release-assets/SHA256SUMS.txt > release-assets/ARTIFACTS.json
+
+          root_version="$(node -p "require('./package.json').version")"
+          memory_version="$(node -p "require('./Memory/package.json').version")"
+          memory_cli_version="$(node -p "require('./Memory/src/cli/npm/package.json').version")"
+          agent_version="$(node -p "require('./App/memmy-agent/package.json').version")"
+          desktop_version="$(node -p "require('./App/shell/desktop/package.json').version")"
+          generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          release_notes_sha256="$(sha256sum release-assets/RELEASE_NOTES.md | awk '{print $1}')"
+
           jq -n \
             --arg repository "$GITHUB_REPOSITORY" \
+            --arg version "$VERSION" \
             --arg tag "$TAG" \
             --arg previousTag "$PREVIOUS_TAG" \
             --arg targetSha "$TARGET_SHA" \
+            --arg generatedAt "$generated_at" \
+            --arg releaseNotesSha256 "$release_notes_sha256" \
+            --arg rootVersion "$root_version" \
+            --arg memoryVersion "$memory_version" \
+            --arg memoryCliVersion "$memory_cli_version" \
+            --arg agentVersion "$agent_version" \
+            --arg desktopVersion "$desktop_version" \
+            --slurpfile compare release-assets/COMPARE.json \
+            --slurpfile pullRequests release-assets/PULL_REQUESTS.json \
+            --slurpfile artifacts release-assets/ARTIFACTS.json \
             '{
-              schemaVersion: 1,
+              schema: "memmy.release.evidence.v2",
+              schemaVersion: 2,
               sourceId: ($repository + "@" + $tag),
               repository: $repository,
+              version: $version,
               tag: $tag,
               previousTag: $previousTag,
               targetSha: $targetSha,
-              artifactManifest: "SHA256SUMS.txt"
+              generatedAt: $generatedAt,
+              compare: {
+                url: $compare[0].html_url,
+                status: $compare[0].status,
+                aheadBy: $compare[0].ahead_by,
+                behindBy: $compare[0].behind_by,
+                totalCommits: $compare[0].total_commits
+              },
+              commits: ($compare[0].commits | map({
+                sha,
+                shortSha: .sha[0:8],
+                htmlUrl: .html_url,
+                message: .commit.message
+              })),
+              pullRequests: $pullRequests[0],
+              changedFiles: ($compare[0].files | map({
+                path: .filename,
+                previousPath: (.previous_filename // null),
+                status,
+                additions,
+                deletions,
+                changes
+              })),
+              versionFiles: [
+                {path: "package.json", version: $rootVersion},
+                {path: "Memory/package.json", version: $memoryVersion},
+                {path: "Memory/src/cli/npm/package.json", version: $memoryCliVersion},
+                {path: "App/memmy-agent/package.json", version: $agentVersion},
+                {path: "App/shell/desktop/package.json", version: $desktopVersion}
+              ],
+              releaseNotesSha256: $releaseNotesSha256,
+              artifactManifest: "SHA256SUMS.txt",
+              artifacts: $artifacts[0]
             }' > release-assets/RELEASE_EVIDENCE.json
+
+          {
+            echo "## Release evidence"
+            echo
+            echo "- Compare: $PREVIOUS_TAG...$TARGET_SHA"
+            echo "- Commits: $received_commits"
+            echo "- Changed files: $changed_file_count"
+            echo "- Pull requests: $(jq 'length' release-assets/PULL_REQUESTS.json)"
+            echo "- Version metadata: $VERSION"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Create draft release and upload every asset
         env:
@@ -216,14 +338,27 @@ jobs:
           TARGET_SHA: ${{ steps.release.outputs.target_sha }}
         run: |
           set -euo pipefail
+          draft_created=0
+          cleanup_draft_release() {
+            status="$?"
+            if [[ "$status" -ne 0 && "$draft_created" == "1" ]]; then
+              echo "Draft Release asset upload failed; deleting $TAG and its tag so the workflow can be safely re-run." >&2
+              gh release delete "$TAG" --cleanup-tag --yes --repo "$GITHUB_REPOSITORY" || true
+            fi
+            exit "$status"
+          }
+          trap cleanup_draft_release EXIT
+
           gh release create "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$TARGET_SHA" \
             --title "Memmy $TAG" \
             --notes-file release-assets/RELEASE_NOTES.md \
             --draft
+          draft_created=1
           gh release upload "$TAG" release-assets/Memmy-* release-assets/MD5SUMS.txt release-assets/SHA256SUMS.txt release-assets/RELEASE_EVIDENCE.json \
             --repo "$GITHUB_REPOSITORY"
+          trap - EXIT
 
       - name: Record the manual publish boundary
         env:

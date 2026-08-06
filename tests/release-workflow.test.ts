@@ -5,6 +5,10 @@ import { describe, expect, it } from "vitest";
 import YAML from "yaml";
 
 const workflowPath = resolve(import.meta.dirname, "../.github/workflows/github-release.yml");
+const draftWorkflowPath = resolve(
+  import.meta.dirname,
+  "../.github/workflows/github-draft-release-v2.yml",
+);
 const repoRoot = resolve(import.meta.dirname, "..");
 const source = readFileSync(workflowPath, "utf8");
 const workflow = YAML.parse(source);
@@ -167,5 +171,62 @@ describe("GitHub release workflow", () => {
       expect(packagingSource).toMatch(/from:\s+\.\.\/\.\.\/\.\.\/\.env(?:\s|$)/);
       expect(packagingSource).toMatch(/to:\s+\.env(?:\s|$)/);
     }
+  });
+});
+
+describe("GitHub Draft Release v2 workflow", () => {
+  const draftSource = readFileSync(draftWorkflowPath, "utf8");
+  const draftWorkflow = YAML.parse(draftSource);
+  const draftJob = draftWorkflow.jobs.release;
+  const draftSteps = draftJob.steps as Array<Record<string, unknown>>;
+  const draftScript = (name: string) =>
+    String(draftSteps.find((step) => step.name === name)?.run ?? "");
+
+  it("is manual-only and stops at a Draft Release", () => {
+    expect(draftWorkflow.on.workflow_dispatch.inputs.version.required).toBe(true);
+    expect(draftWorkflow.on.pull_request).toBeUndefined();
+    expect(draftWorkflow.on.pull_request_target).toBeUndefined();
+    expect(draftSource).toContain("gh release create");
+    expect(draftSource).toContain("--draft");
+    expect(draftSource).not.toContain("--draft=false");
+    expect(draftSource).not.toContain("Publish release as latest");
+  });
+
+  it("requires the requested version to match every release manifest", () => {
+    const verify = draftScript("Verify repository version metadata");
+    expect(verify).toContain("require('./package.json').version");
+    expect(verify).toContain('= "$VERSION"');
+    expect(verify).toContain("npm run version:check");
+  });
+
+  it("records independently auditable commits, PRs, files, versions, and assets", () => {
+    const evidence = draftScript("Build auditable release evidence");
+    expect(evidence).toContain("compare/${compare_base}...${TARGET_SHA}");
+    expect(evidence).toContain("commits/${commit_sha}/pulls");
+    expect(evidence).toContain("memmy.release.evidence.v2");
+    expect(evidence).toContain("changedFiles");
+    expect(evidence).toContain("versionFiles");
+    expect(evidence).toContain("releaseNotesSha256");
+    expect(evidence).toContain("artifacts");
+    expect(draftScript("Build release notes")).toContain(
+      "doc-agent: source-id=memmy-official-changelog-v2",
+    );
+    expect(draftScript("Create draft release and upload every asset")).toContain(
+      "RELEASE_EVIDENCE.json",
+    );
+  });
+
+  it("cleans up a half-created Draft Release if asset upload fails", () => {
+    const create = draftScript("Create draft release and upload every asset");
+    expect(create).toContain("cleanup_draft_release()");
+    expect(create).toContain('draft_created=1');
+    expect(create).toContain('gh release delete "$TAG" --cleanup-tag --yes');
+    expect(create.indexOf("gh release create")).toBeLessThan(
+      create.indexOf("draft_created=1"),
+    );
+    expect(create.indexOf("draft_created=1")).toBeLessThan(
+      create.indexOf("gh release upload"),
+    );
+    expect(create).toContain("trap - EXIT");
   });
 });
