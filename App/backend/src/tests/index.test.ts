@@ -1029,7 +1029,7 @@ describe("local api", () => {
       expect.objectContaining({ sourceId: "hermes", displayName: "Hermes" }),
       expect.objectContaining({ sourceId: "workbuddy", displayName: "WorkBuddy" }),
       expect.objectContaining({ sourceId: "pi", displayName: "Pi" }),
-      expect.objectContaining({ sourceId: "qwenwork", displayName: "千问办公" })
+      expect.objectContaining({ sourceId: "qwenwork", displayName: "qwenwork" })
     ]);
   });
 });

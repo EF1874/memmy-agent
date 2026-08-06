@@ -27,7 +27,7 @@ Agent Source 是 Memmy 读取外部 Agent 本地历史的适配器。来源扫�
 | Hermes | `~/.hermes/sessions/**/*.jsonl` 和 `~/.hermes/state.db` | Memory Provider 插件 |
 | WorkBuddy | `~/.workbuddy/projects/**/*.jsonl` | Skill（按需调用记忆） |
 | Pi | `~/.pi/agent/sessions/**/*.jsonl` | Skill（按需调用记忆） |
-| 千问办公 | `~/.qwenworkcn/projects/**/*.jsonl` | Skill（按需调用记忆） |
+| qwenwork | `~/.qwenworkcn/projects/**/*.jsonl` | Skill（按需调用记忆） |
 
 ## 增量同步
 
@@ -96,7 +96,7 @@ Memmy 通过 Agent 原生支持的 **Hook** 或**插件**接入实时对话。�
 | Hermes | Memory Provider 插件 | `prefetch`、`sync_turn` 等 Provider 生命周期 | 自动召回和采集，镜像 Hermes 的显式记忆写入，并提供原生记忆工具 |
 | WorkBuddy | Skill | Agent 主动调用 `memmy-memory` | 按需搜索、读取和写入共享记忆 |
 | Pi | Skill | Agent 主动调用 `memmy-memory` | 按需搜索、读取和写入共享记忆 |
-| 千问办公 | Skill | Agent 主动调用 `memmy-memory` | 按需搜索、读取和写入共享记忆 |
+| qwenwork | Skill | Agent 主动调用 `memmy-memory` | 按需搜索、读取和写入共享记忆 |
 
 ### 一次对话中会发生什么
 
@@ -247,7 +247,7 @@ Hermes 同样只允许一个活动的 Memory Provider；检测到其他 Provider
 ### 安装、验证与移除
 
 1. 打开 **记忆管理 → 跨Agent接入**。
-2. Cursor、Claude Code、Codex 点击 **安装 Hook**；OpenCode、OpenClaw、Hermes 点击 **安装插件**；WorkBuddy、Pi、千问办公点击 **安装 Skill**。
+2. Cursor、Claude Code、Codex 点击 **安装 Hook**；OpenCode、OpenClaw、Hermes 点击 **安装插件**；WorkBuddy、Pi、qwenwork 点击 **安装 Skill**。
 3. 如果 Agent 正在运行，重启 Agent 或新建会话，让它重新加载配置。
 4. 完成一轮普通对话，再到 Memmy 的记忆或日志页面确认对应来源出现新记录。
 5. 输入 `/memmy-resume <关键词>`，确认能看到候选并用 `1`–`5` 选择一个 episode。

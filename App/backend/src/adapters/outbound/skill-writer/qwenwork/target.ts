@@ -9,7 +9,7 @@ export interface CreateQwenworkSkillTargetDeps {
 export function createQwenworkSkillTarget(deps: CreateQwenworkSkillTargetDeps = {}): SkillTarget {
   return createSkillOnlyTarget({
     targetId: "qwenwork",
-    displayName: "千问办公",
+    displayName: "qwenwork",
     rootDirectory: deps.rootDirectory ?? resolveQwenworkHomeDirectory()
   });
 }
