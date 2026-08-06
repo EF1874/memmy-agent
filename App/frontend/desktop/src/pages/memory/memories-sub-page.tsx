@@ -754,7 +754,9 @@ function MemoryProcessingFailureCard(props: {
           ? t("memory.memories.processing.retrySucceeded")
           : retryInProgress
             ? t("memory.memories.processing.retrying")
-            : t("memory.memories.processing.failureTitle")}</h5>
+            : processing?.errorCode === "40309"
+              ? t("memory.memories.processing.quotaExhaustedTitle")
+              : t("memory.memories.processing.failureTitle")}</h5>
       </div>
       {displayedErrorMessage && (
         <dl className="memory-detail-grid" role={retryError ? "alert" : undefined}>
