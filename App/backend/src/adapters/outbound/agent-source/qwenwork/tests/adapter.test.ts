@@ -11,7 +11,7 @@ afterEach(() => {
   tempDir = undefined;
 });
 
-describe("QwenWork source adapter", () => {
+describe("qwenwork source adapter", () => {
   it("reads human-visible messages and skips thinking, tool results, and sidechains", async () => {
     const fixture = createFixture([
       { type: "user", uuid: "user-1", sessionId: "qwen-session", timestamp: "2026-08-01T00:00:01.000Z", cwd: "WORKSPACE", message: { role: "user", content: [{ type: "text", text: "Remember OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN" }] } },
@@ -41,7 +41,7 @@ describe("QwenWork source adapter", () => {
     });
   });
 
-  it("detects an installed QwenWork root before it has history", async () => {
+  it("detects an installed qwenwork root before it has history", async () => {
     tempDir = mkdtempSync(join(tmpdir(), "memmy-qwenwork-empty-"));
     const rootDirectory = join(tempDir, ".qwenworkcn");
     mkdirSync(rootDirectory, { recursive: true });

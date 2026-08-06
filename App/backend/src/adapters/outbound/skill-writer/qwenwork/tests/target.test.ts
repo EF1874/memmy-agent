@@ -11,8 +11,8 @@ afterEach(() => {
   tempDir = undefined;
 });
 
-describe("QwenWork skill target", () => {
-  it("installs and removes the Memmy skill in QwenWork's global skill directory", async () => {
+describe("qwenwork skill target", () => {
+  it("installs and removes the Memmy skill in qwenwork's global skill directory", async () => {
     tempDir = mkdtempSync(join(tmpdir(), "memmy-qwenwork-skill-"));
     const rootDirectory = join(tempDir, ".qwenworkcn");
     mkdirSync(rootDirectory, { recursive: true });

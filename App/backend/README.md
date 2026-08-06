@@ -26,7 +26,7 @@ npm run db:migrate
 - `adapters/inbound/local-api`: Fastify routes, runtime-token authentication,
   CORS, SSE, and the Composio MCP bridge.
 - `adapters/outbound/agent-source`: built-in history readers for Cursor, Claude
-  Code, Codex, OpenCode, OpenClaw, Hermes, WorkBuddy, Pi, and QwenWork.
+  Code, Codex, OpenCode, OpenClaw, Hermes, WorkBuddy, Pi, and qwenwork.
 - `adapters/outbound/skill-writer`: Memory skill, hook, command, and plugin
   installation for the supported agents.
 - `adapters/outbound/agent-adapter`: manifest, loader, and registry contracts
@@ -119,7 +119,7 @@ Every route in this table requires the local runtime token.
 | Hermes      | `~/.hermes/sessions/**/*.jsonl` and `~/.hermes/state.db`                                                                                                                                                    | `~/.hermes/SOUL.md`, `skills/memmy-memory/`, and Memory/resume plugins                                 |
 | WorkBuddy   | `~/.workbuddy/projects/**/*.jsonl`                                                                                                                                                                          | `~/.workbuddy/skills/memmy-memory/`                                                                    |
 | Pi          | `~/.pi/agent/sessions/**/*.jsonl`                                                                                                                                                                           | `~/.pi/agent/skills/memmy-memory/`                                                                     |
-| QwenWork    | `~/.qwenworkcn/projects/**/*.jsonl`                                                                                                                                                                         | `~/.qwenworkcn/skills/memmy-memory/`                                                                   |
+| qwenwork    | `~/.qwenworkcn/projects/**/*.jsonl`                                                                                                                                                                         | `~/.qwenworkcn/skills/memmy-memory/`                                                                   |
 
 Agent roots can be overridden with `CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
 `OPENCODE_CONFIG_DIR`, `OPENCLAW_STATE_DIR`, `HERMES_HOME`,

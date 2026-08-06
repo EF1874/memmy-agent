@@ -33,7 +33,7 @@ const AGENT_SOURCE_DISPLAY_NAMES: Record<string, string> = {
   hermes: "Hermes",
   workbuddy: "WorkBuddy",
   pi: "Pi",
-  qwenwork: "\u5343\u95EE\u529E\u516C"
+  qwenwork: "qwenwork"
 };
 
 export const AGENT_SOURCE_LOGOS: Partial<Record<string, string>> = {

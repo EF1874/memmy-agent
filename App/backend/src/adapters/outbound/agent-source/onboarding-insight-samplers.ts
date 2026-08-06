@@ -150,7 +150,7 @@ export function createPiInsightSampler(input: { root: string }): OnboardingInsig
 export function createQwenworkInsightSampler(input: { root: string }): OnboardingInsightSampler {
   return createJsonlInsightSampler({
     sourceId: "qwenwork",
-    displayName: "千问办公",
+    displayName: "qwenwork",
     root: input.root,
     matchesFile: (name) => name.endsWith(".jsonl"),
     shouldParseLine: (line) => /"type"\s*:\s*"(?:user|assistant|system)"/u.test(line),
