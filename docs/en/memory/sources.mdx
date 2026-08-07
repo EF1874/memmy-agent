@@ -29,12 +29,16 @@ An Agent Source is Memmy's adapter for reading local history from an external Ag
 | Pi | `~/.pi/agent/sessions/**/*.jsonl` | Skill (on-demand memory access) |
 | qwenwork | `~/.qwenworkcn/projects/**/*.jsonl` | Skill (on-demand memory access) |
 
+Cross-Agent access only shows built-in Agents whose local configuration or history source is currently detected. Undetected built-in Agents do not occupy space in the list.
+
 ## Incremental sync
 
 - **Sync new** scans every detected source; each source can also be synced individually.
 - Scans can be paused, resumed, or stopped; progress streams in real time over SSE.
 - **Deep scan** uses `full` mode to backfill older history and requires a second confirmation.
-- You can manually add an Agent outside the built-in list with a name and local data path. Manual sources support scanning only and do not receive a Hook or plugin automatically.
+- Under **Advanced actions → Add another Agent**, you can select `kimi code`, `zcode`, `minimax code`, or `coder`, or enter another Agent name.
+- Adding another Agent does not require a local path. Memmy starts a discovery task that locates the history directory, identifies the message format, installs the full `memmy-memory` Skill, imports the latest 500 complete conversation turns, and saves a rule for later syncs. This flow does not install a native Hook or plugin for an unknown Agent.
+- The discovery task first verifies the Agent identity against an executable, `.app`, or installed package product name. During automatic discovery, matching only ignores case, spaces, hyphens, and underscores; it does not translate, infer aliases, or match semantically. If no installed product matches, Memmy reports that the Agent was not found and stops. The user can continue by supplying absolute paths to the installation artifact, native history file or directory, and optional Skill directory so Memmy can validate only those scoped paths. Memmy does not substitute another Agent or its own history.
 
 ### Why scanned-message and added-memory counts differ
 
@@ -57,7 +61,7 @@ Memmy maintains a separate date-time watermark for each source. This is not simp
 3. The inclusive `>=` boundary intentionally allows the boundary message to be read again. Before import, a conversation checkpoint compares the last message timestamp, message ID, and content hash. Stable source message IDs and turn IDs then make the import itself idempotent.
 4. The watermark advances to the newest observed timestamp only when scanning and import finish without errors and there are no incomplete or failed conversations. After a scan error or an unfinished turn, the watermark stays in place so the next run can retry. The displayed “last scanned” time may still change and is not the incremental cursor.
 
-For a manually added Agent whose format Memmy discovers, the first import stores a sync boundary. Later syncs select complete turns whose starting user message is strictly later than that boundary, then use stable message and turn IDs to remove repeats.
+For an Agent connected through “Add another Agent” whose format Memmy discovers, the first import stores a sync boundary. Later syncs select complete turns whose starting user message is strictly later than that boundary, then use stable message and turn IDs to remove repeats.
 
 ### Images, files, and oversized turns
 
@@ -248,11 +252,12 @@ Hermes likewise allows one active Memory Provider. Memmy asks for confirmation b
 
 1. Open **Memory → Cross-Agent access**.
 2. For Cursor, Claude Code, and Codex, click **Install Hook**. For OpenCode, OpenClaw, and Hermes, click **Install plugin**. For WorkBuddy, Pi, and qwenwork, click **Install Skill**.
-3. If the Agent is already running, restart it or open a new session so it reloads its configuration.
-4. Complete a normal turn, then confirm that the corresponding source appears in Memmy's memory or log views.
-5. Enter `/memmy-resume <keywords>`, confirm that candidates appear, and select an episode with `1`–`5`.
+3. For another Agent, expand **Advanced actions → Add another Agent**, select a preset or enter its name, and let Memmy complete discovery and the first import.
+4. If the Agent is already running, restart it or open a new session so it reloads its configuration.
+5. Complete a normal turn, then confirm that the corresponding source appears in Memmy's memory or log views.
+6. Enter `/memmy-resume <keywords>`, confirm that candidates appear, and select an episode with `1`–`5`.
 
-When you click **Remove Hook** or **Remove plugin**, Memmy disables and cleans up the live integration and bundled Skill it manages. Other Hook configuration is preserved, and memories already stored in Memmy are not deleted.
+When you click **Remove Hook**, **Remove plugin**, or **Remove Skill**, Memmy cleans up the integration content it manages. Other configuration is preserved, and memories already stored in Memmy are not deleted.
 
 ### Local access and failure behavior
 

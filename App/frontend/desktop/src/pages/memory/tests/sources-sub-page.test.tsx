@@ -152,6 +152,7 @@ describe("SourcesSubPage", () => {
     expect(prompt).toContain("$agent-memory-onboarding");
     expect(prompt).toContain("Use $agent-memory-onboarding for this cross-Agent memory task.");
     expect(prompt).toContain("This is an on-demand task launched by the cross-Agent button.");
+    expect(prompt).toContain("If it is absent, report that the Agent was not found");
     expect(prompt).not.toMatch(/[\u3400-\u9fff]/u);
     expect(prompt).toContain('"operation": "connect"');
     expect(prompt).toContain('"source_id": "manual-1"');
