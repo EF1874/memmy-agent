@@ -21,6 +21,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import YAML from "yaml";
+import { systemUtcOffset } from "../../utils/time-zone.js";
 
 const ACCOUNT_PROVIDER = "memmy_account";
 const ACCOUNT_PRESET = "memmy-account";
@@ -221,6 +222,7 @@ function mergeModelConfig(config: ConfigRecord, input: ModelConfigInput): Config
     delete defaults.provider;
     delete defaults.model;
   }
+  defaults.timezone ??= systemUtcOffset();
   agents.defaults = defaults;
 
   const next: ConfigRecord = {

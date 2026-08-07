@@ -9,6 +9,7 @@ import {
   readModelConfigCatalog,
   writeModelConfigCatalog
 } from "../model-config-catalog.js";
+import { systemUtcOffset } from "../../../utils/time-zone.js";
 
 const temporaryRoots: string[] = [];
 
@@ -221,6 +222,7 @@ describe("model config catalog", () => {
     });
     expect(raw.agents.defaults).toMatchObject({
       modelPreset: generated,
+      timezone: systemUtcOffset(),
       maxToolIterations: 77,
       fallbackModels: ["work-gpt"]
     });

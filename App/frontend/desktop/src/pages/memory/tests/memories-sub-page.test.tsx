@@ -71,7 +71,9 @@ describe("MemoriesSubPage", () => {
       "OpenCode",
       "OpenClaw",
       "Hermes",
-      "WorkBuddy"
+      "WorkBuddy",
+      "Pi",
+      "qwenwork"
     ]);
     expect(agentSourceDisplayName("MEMMY_AGENT")).toBe("Memmy");
     expect(agentSourceDisplayName("claude-code")).toBe("Claude Code");
@@ -338,12 +340,44 @@ describe("MemoriesSubPage", () => {
     });
 
     expect(html).toContain("处理失败");
+    expect(html).toContain("这条记忆处理失败");
+    expect(html).not.toContain("当前模型 Token 余额不足");
     expect(html).toContain("摘要总结");
     expect(html).toContain("摘要模型未配置");
     expect(html).toContain("重试");
     expect(html).toContain("检查模型设置");
     expect(html).toContain("memory-pill--failed");
     expect(html).not.toContain("已尝试次数");
+  });
+
+  it("收到 40309 错误码时提示模型 Token 余额不足", () => {
+    const processing = {
+      memoryId: memoryListItemFixture.id,
+      state: "failed" as const,
+      stage: "summary" as const,
+      activeJobId: null,
+      attemptCount: 3,
+      manualRetryCount: 0,
+      retryAction: "open_settings" as const,
+      errorCode: "40309",
+      errorMessage: "account quota exhausted",
+      failedAt: "2026-06-03T09:30:00.000Z",
+      updatedAt: "2026-06-03T09:30:00.000Z"
+    };
+    const html = renderMemories({
+      status: "ready",
+      data: panelItemsOutput([{ ...memoryListItemFixture, processing }]),
+      detail: {
+        status: "ready",
+        data: {
+          ...memoryDetailFixture,
+          item: { ...memoryDetailFixture.item, processing }
+        }
+      }
+    });
+
+    expect(html).toContain("当前模型 Token 余额不足，记忆处理失败，请更换模型后重试");
+    expect(html).not.toContain("这条记忆处理失败");
   });
 
   it("重试处理中持续展示上次失败原因", () => {

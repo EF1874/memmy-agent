@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { resolveTimeZone } from "../utils/time.js";
 
 export type LlmProviderName =
   | ""
@@ -241,6 +242,7 @@ export interface MemmyConfig {
     evolution: MemoryRoleRoutingName;
   };
   userId?: string;
+  timeZone?: string;
   storage: StorageConfig;
   summary: LlmConfig;
   evolution: LlmConfig;
@@ -469,6 +471,7 @@ export function loadMemmyConfig(configPath?: string): {
   const rootConfig = selectedPath && existsSync(selectedPath)
     ? parseConfigFile(selectedPath)
     : {};
+  const configuredTimeZone = optionalString(asRecord(asRecord(rootConfig.agents).defaults).timezone);
   const memmyMemoryConfig = asRecord(rootConfig.memmyMemory);
   const fileConfig = resolveRuntimeMemmyMemoryConfig(memmyMemoryConfig, rootConfig);
   const envConfig = configFromEnv();
@@ -478,7 +481,10 @@ export function loadMemmyConfig(configPath?: string): {
     envConfig
   ));
   return {
-    config: merged,
+    config: {
+      ...merged,
+      ...(configuredTimeZone ? { timeZone: resolveTimeZone(configuredTimeZone) } : {})
+    },
     path: selectedPath
   };
 }

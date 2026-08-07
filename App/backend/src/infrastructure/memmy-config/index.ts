@@ -27,6 +27,7 @@ export {
   readModelConfigCatalog,
   writeModelConfigCatalog
 } from "./model-config-catalog.js";
+import { normalizeTimeZoneOffset, systemUtcOffset } from "../../utils/time-zone.js";
 
 const MEMMY_ACCOUNT_PROVIDER = "memmy_account";
 const MEMMY_ACCOUNT_MODEL = "agent_chat";
@@ -231,6 +232,24 @@ export async function readRuntimeMemmyConfigState(
   }
 
   return deriveRuntimeMemmyConfigState(parsed, configPath);
+}
+
+/** Reads agents.defaults.timezone without inventing a configured value. */
+export async function readConfiguredAgentTimeZone(
+  configPath = resolveDefaultMemmyConfigPath()
+): Promise<string | undefined> {
+  const content = await readMemmyConfigContent(configPath);
+  if (!content?.trim()) return undefined;
+  const parsed = YAML.parse(content) as unknown;
+  const agents = asRecord(asRecord(parsed)?.agents);
+  const defaults = asRecord(agents?.defaults);
+  const timeZone = existingString(defaults?.timezone);
+  if (!timeZone) return undefined;
+  try {
+    return normalizeTimeZoneOffset(timeZone);
+  } catch {
+    throw new Error(`invalid agents.defaults.timezone: ${timeZone}`);
+  }
 }
 
 /**
@@ -634,6 +653,7 @@ export async function writeByokModelProjectionToMemmyConfig(
       const agents = isRecord(config.agents) ? { ...config.agents } : {};
       const defaults = isRecord(agents.defaults) ? { ...agents.defaults } : {};
       defaults.modelPreset = presetName;
+      defaults.timezone ??= systemUtcOffset();
       delete defaults.provider;
       delete defaults.model;
       agents.defaults = defaults;
@@ -774,27 +794,14 @@ export async function patchMcpServerConfigInMemmyConfig(
   await writeMemmyConfig(config, configPath);
 }
 
-/**
- * Patch the agent default primary model config.
- *
- * @param config the Memmy main config object.
- * @param input the agent default provider/model.
- */
-function patchAgentDefaults(config: Record<string, unknown>, input: { provider: string; model: string }): void {
-  const agents = isRecord(config.agents) ? { ...config.agents } : {};
-  const defaults = isRecord(agents.defaults) ? { ...agents.defaults } : {};
-  defaults.provider = input.provider;
-  defaults.model = input.model;
-  agents.defaults = defaults;
-  config.agents = agents;
-}
-
+/** Ensure the active default preset and timezone are valid. */
 function ensureValidDefaultOrUse(config: Record<string, unknown>, fallbackPreset: string): void {
   const agents = isRecord(config.agents) ? { ...config.agents } : {};
   const defaults = isRecord(agents.defaults) ? { ...agents.defaults } : {};
   if (!validDefaultPresetName(config, defaults)) {
     defaults.modelPreset = fallbackPreset;
   }
+  defaults.timezone ??= systemUtcOffset();
   agents.defaults = defaults;
   config.agents = agents;
 }

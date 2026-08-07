@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { GetMemoryOutput, MemoryProcessingRecord, PanelItemsInput, PanelItemsOutput } from "@memmy/local-api-contracts";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
+import { formatUserDateTime } from "../../lib/user-time-zone.js";
 import {
   buildMemoryUiDeletedEvent,
   buildMemoryUiDetailOpenedEvent,
@@ -753,7 +754,9 @@ function MemoryProcessingFailureCard(props: {
           ? t("memory.memories.processing.retrySucceeded")
           : retryInProgress
             ? t("memory.memories.processing.retrying")
-            : t("memory.memories.processing.failureTitle")}</h5>
+            : processing?.errorCode === "40309"
+              ? t("memory.memories.processing.quotaExhaustedTitle")
+              : t("memory.memories.processing.failureTitle")}</h5>
       </div>
       {displayedErrorMessage && (
         <dl className="memory-detail-grid" role={retryError ? "alert" : undefined}>
@@ -1067,12 +1070,7 @@ function MemoryToolPayload(props: { label: string; value: string; open?: boolean
  * @returns Local time text.
  */
 function formatDateTime(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-
-  return date.toLocaleString();
+  return formatUserDateTime(value);
 }
 
 function formatMemoryScore(metrics: MemoryDetailOutput["item"]["metrics"] | undefined): string {

@@ -10,6 +10,7 @@ import type { CloudClient } from "../adapters/outbound/cloud-client/index.js";
 import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
 import { createLocalBackend, readMemoryLayerConfig, type LocalBackend } from "../index.js";
 import { createAppStateStore } from "../infrastructure/app-state-store/index.js";
+import { systemUtcOffset } from "../utils/time-zone.js";
 import { createMockCloudClient } from "./support/mock-cloud-client.js";
 import { createMockMemoryClient } from "./support/mock-memory-client.js";
 
@@ -404,6 +405,7 @@ describe("local api", () => {
       expect(modelConfigResponse.status).toBe(200);
       const parsedConfig = YAML.parse(readFileSync(memmyConfigPath, "utf8")) as any;
       expect(parsedConfig.agents.defaults.modelPreset).toMatch(/^desktop-openai-gpt-4-1-mini-/);
+      expect(parsedConfig.agents.defaults.timezone).toBe(systemUtcOffset());
       expect(parsedConfig.modelPresets[parsedConfig.agents.defaults.modelPreset]).toMatchObject({
         provider: "openai",
         model: "gpt-4.1-mini"
@@ -1044,7 +1046,7 @@ describe("local api", () => {
     }
   });
 
-  it("exposes the seven built-in agent sources in registry order", async () => {
+  it("exposes the nine built-in agent sources in registry order", async () => {
     backend = await createTempBackend();
 
     const response = await fetch(`${backend.runtimeConfig.baseUrl}/api/agent-sources`, {
@@ -1062,7 +1064,9 @@ describe("local api", () => {
       expect.objectContaining({ sourceId: "opencode", displayName: "Opencode" }),
       expect.objectContaining({ sourceId: "openclaw", displayName: "OpenClaw" }),
       expect.objectContaining({ sourceId: "hermes", displayName: "Hermes" }),
-      expect.objectContaining({ sourceId: "workbuddy", displayName: "WorkBuddy" })
+      expect.objectContaining({ sourceId: "workbuddy", displayName: "WorkBuddy" }),
+      expect.objectContaining({ sourceId: "pi", displayName: "Pi" }),
+      expect.objectContaining({ sourceId: "qwenwork", displayName: "qwenwork" })
     ]);
   });
 });

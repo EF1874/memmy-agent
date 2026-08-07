@@ -8,6 +8,7 @@ import {
   clearAccountModelProjectionFromMemmyConfig,
   createMemmyConfigWriter,
   mapModelProtocol,
+  readConfiguredAgentTimeZone,
   readAgentGatewayBootstrapSecret,
   readRuntimeMemmyConfigState,
   resolveDefaultMemmyConfigPath,
@@ -19,6 +20,13 @@ import {
 
 const ACCOUNT_API_BASE = `${process.env.MEMMY_CLOUD_SERVICE}/api/agentExternal/v1`;
 
+function currentUtcOffset(): string {
+  const minutes = -new Date().getTimezoneOffset();
+  const sign = minutes < 0 ? "-" : "+";
+  const absolute = Math.abs(minutes);
+  return `${sign}${String(Math.floor(absolute / 60)).padStart(2, "0")}:${String(absolute % 60).padStart(2, "0")}`;
+}
+
 let tempDir: string | undefined;
 
 afterEach(() => {
@@ -26,6 +34,19 @@ afterEach(() => {
     rmSync(tempDir, { recursive: true, force: true });
     tempDir = undefined;
   }
+});
+
+describe("readConfiguredAgentTimeZone", () => {
+  it("returns only an explicitly configured timezone", async () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-config-timezone-"));
+    const configPath = resolveDefaultMemmyConfigPath(tempDir);
+    mkdirSync(join(tempDir, ".memmy"), { recursive: true });
+    writeFileSync(configPath, "agents:\n  defaults:\n    timezone: UTC\n", "utf8");
+
+    await expect(readConfiguredAgentTimeZone(configPath)).resolves.toBe("+00:00");
+    writeFileSync(configPath, "agents:\n  defaults: {}\n", "utf8");
+    await expect(readConfiguredAgentTimeZone(configPath)).resolves.toBeUndefined();
+  });
 });
 
 describe("writeAppCloudUuidToMemmyConfig", () => {
@@ -912,6 +933,7 @@ describe("writeByokModelProjectionToMemmyConfig", () => {
       memoryConfigAffected: true
     });
     expect(parsed.agents.defaults.modelPreset).toMatch(/^desktop-openai-gpt-4o-/);
+    expect(parsed.agents.defaults.timezone).toBe(currentUtcOffset());
     expect(parsed.modelPresets[parsed.agents.defaults.modelPreset]).toEqual({
       provider: "openai",
       model: "gpt-4o"
