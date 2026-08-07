@@ -36,7 +36,7 @@ describe("ProductTourGuide interactions", () => {
     });
 
     expect(firstOnTabChange).toHaveBeenCalledOnce();
-    expect(firstOnTabChange).toHaveBeenCalledWith("memory");
+    expect(firstOnTabChange).toHaveBeenCalledWith("logs");
 
     act(() => {
       root.render(renderGuide(nextOnTabChange));
