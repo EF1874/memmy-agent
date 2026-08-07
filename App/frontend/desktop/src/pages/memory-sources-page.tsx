@@ -1275,8 +1275,11 @@ function SourceStatusBadge(props: { source: Pick<AgentSourceView, "sourceId" | "
 const NATIVE_PLUGIN_AGENT_SOURCE_IDS = new Set(["opencode", "openclaw", "hermes"]);
 const HOOK_AGENT_SOURCE_IDS = new Set(["codex", "claude_code", "cursor"]);
 
-export function visibleAgentSources<T extends Pick<AgentSourceView, "builtin" | "available">>(sources: readonly T[]): T[] {
-  return sources.filter((source) => !source.builtin || source.available);
+export function visibleAgentSources<T extends Pick<AgentSourceView, "builtin" | "available" | "dataPath">>(sources: readonly T[]): T[] {
+  return sources.filter((source) => source.builtin
+    ? source.available
+    : source.dataPath !== MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH
+  );
 }
 
 export function resolveAgentSourceStatusLabelKey(source: Pick<AgentSourceView, "sourceId" | "status">): MessageKey {
