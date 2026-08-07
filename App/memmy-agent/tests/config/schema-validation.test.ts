@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import YAML from "yaml";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { loadConfig, saveConfig } from "../../src/config/loader.js";
+import { ConfigLoadError, loadConfig, saveConfig } from "../../src/config/loader.js";
 import { WebSocketConfig } from "../../src/integrations/channels/websocket.js";
 import { DEFAULT_MAX_TOKENS } from "../../src/token-budget.js";
 import {
@@ -206,6 +206,7 @@ describe("config schema validation", () => {
     const contents = "sessionDag:\n  debugLog: \"true\"\n";
     const file = configFile(contents);
 
+    expect(() => loadConfig(file)).toThrow(ConfigLoadError);
     expect(() => loadConfig(file)).toThrow(/sessionDag\.debugLog/);
     expect(fs.readFileSync(file, "utf8")).toBe(contents);
   });

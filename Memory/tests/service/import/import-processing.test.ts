@@ -1298,6 +1298,78 @@ describe("MemoryService / import / processing", () => {
     db.close();
   });
 
+  it("finishes the Memmy first-report memory before interactive and scanned-memory work", async () => {
+    const root = createTestRoot("mindock-memory-first-report-priority-");
+    const db = new MemoryDb({
+      path: join(root, "memory.sqlite")
+    });
+    const service = createTestMemoryService({
+      db,
+      mode: "dev",
+      llm: createBatchReflectionLlm([]),
+      embedder: createCapturingEmbedder([])
+    });
+    const namespace = {
+      source: "memmy",
+      profileId: "jiang",
+      userId: "user-first-report-priority"
+    };
+
+    const scanned = addAgentSourceImport(
+      service,
+      namespace,
+      "background scanned memory",
+      "first-report-priority-scan"
+    );
+    const session = service.openSession({ namespace });
+    const live = service.completeTurn("turn-first-report-priority-live", {
+      sessionId: session.sessionId,
+      query: "Remember this interactive task.",
+      answer: "The interactive task is queued."
+    });
+    const firstReport = service.addMemory({
+      namespace,
+      adapterId: "agent-source:memmy-onboarding",
+      requestId: "first-report-priority",
+      layer: "L1",
+      source: "memmy-onboarding",
+      tags: [
+        "agent-source",
+        "memmy",
+        "初见报告",
+        "first-encounter-report",
+        "onboarding-report",
+        "cross-agent-handoff"
+      ],
+      title: "Memmy 初见报告 / First Encounter Report",
+      turnId: "first-report:priority",
+      deferProcessing: true,
+      content: [
+        "## user\n\nMemmy 初见报告 / Memmy First Encounter Report latest task context",
+        "## assistant\n\nThe report and next step are ready."
+      ].join("\n\n")
+    });
+    service.enqueuePendingImportSummaries(10_000, [firstReport.id]);
+
+    const reportSummaryRun = await service.runWorkerOnce(4, { priorityCohortOnly: true });
+    const reportEmbeddingRun = await service.runWorkerOnce(4, { priorityCohortOnly: true });
+    const liveSummaryRun = await service.runWorkerOnce(4, { priorityCohortOnly: true });
+
+    expect(reportSummaryRun.jobs).toEqual([
+      expect.objectContaining({ jobType: "import_summary", targetMemoryId: firstReport.id })
+    ]);
+    expect(reportEmbeddingRun.jobs).toEqual([
+      expect.objectContaining({ jobType: "embedding", targetMemoryId: firstReport.id })
+    ]);
+    expect(liveSummaryRun.jobs).toEqual([
+      expect.objectContaining({ jobType: "trace_summary", targetMemoryId: live.l1MemoryId })
+    ]);
+    expect(liveSummaryRun.jobs.map((job) => job.targetMemoryId)).not.toContain(scanned.id);
+    expect(service.memoryProcessingStatus([firstReport.id], { namespace }).items[0]?.state).toBe("ready");
+
+    db.close();
+  });
+
   it("guards imported trace embedding until a real summary job has run", async () => {
     const root = createTestRoot("mindock-memory-import-embedding-guard-");
     const db = new MemoryDb({

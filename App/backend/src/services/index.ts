@@ -5,7 +5,10 @@ import {
   type MemmyConfigWriter
 } from "../infrastructure/memmy-config/index.js";
 import type { AgentAdapterRegistry } from "../adapters/outbound/agent-adapter/index.js";
-import { createBuiltinOnboardingInsightSamplers } from "../adapters/outbound/agent-source/onboarding-insight-samplers.js";
+import {
+  createBuiltinOnboardingInsightSamplers,
+  createSourceRegistryOnboardingConversationWindowReader
+} from "../adapters/outbound/agent-source/onboarding-insight-samplers.js";
 import type { SourceRegistry } from "../adapters/outbound/agent-source/source-registry.js";
 import { createHttpMemmyAgentAdminClient } from "../adapters/outbound/memmy-agent-admin-client/http-memmy-agent-admin-client.js";
 import type { MemmyAgentAdminClient } from "../adapters/outbound/memmy-agent-admin-client/index.js";
@@ -51,6 +54,7 @@ import {
   type OnboardingInsightAgentTaskModelResolver,
   type OnboardingInsightService
 } from "./onboarding-insight-service.js";
+import { createOnboardingFirstReportMemoryWriter } from "./onboarding-first-report-memory-writer.js";
 import { createPanelService, type PanelService } from "./panel-service.js";
 import { createProgressBus, type ProgressBus } from "./progress-bus.js";
 import { createSearchService, type SearchService } from "./search-service.js";
@@ -208,6 +212,8 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     }),
     onboardingInsight: createOnboardingInsightService({
       samplers: createBuiltinOnboardingInsightSamplers(),
+      conversationWindowReader: createSourceRegistryOnboardingConversationWindowReader(sourceRegistry),
+      memoryWriter: createOnboardingFirstReportMemoryWriter(options.memoryClient),
       agentModelResolver: createAppStateAgentTaskModelResolver(options.appStateStore)
     }),
     progressBus,

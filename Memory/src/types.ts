@@ -129,6 +129,7 @@ export interface MemoryRow {
 }
 
 export interface MemoryFilter {
+  userId?: string;
   sessionId?: string;
   conversationId?: string;
   agentId?: string;

@@ -232,7 +232,6 @@ function createServer(): FastifyInstance {
         return {
           status: "ready",
           reportMarkdown: "初见报告",
-          secondaryActions: [],
           diagnostics: {
             discoveredAgentCount: 1,
             sampledQueryCount: 1,
@@ -248,7 +247,6 @@ function createServer(): FastifyInstance {
           response: {
             status: "ready",
             reportMarkdown: "初见报告",
-            secondaryActions: [],
             diagnostics: {
               discoveredAgentCount: 1,
               sampledQueryCount: 1,
