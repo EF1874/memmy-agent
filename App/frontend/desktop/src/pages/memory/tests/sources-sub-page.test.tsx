@@ -69,11 +69,16 @@ describe("SourcesSubPage", () => {
     expect(agentSourceLogoUrl("qwenwork")).toContain("%3ctitle%3eQwen%3c/title%3e");
   });
 
-  it("隐藏未安装的内置 Agent，并保留手动添加的来源", () => {
+  it("隐藏未安装的内置 Agent 和尚未验证的自定义 Agent 草稿", () => {
     expect(visibleAgentSources([
       createSource("codex", "not_connected"),
       { ...createSource("workbuddy", "not_connected"), available: false },
-      { ...createSource("manual-1", "not_connected"), builtin: false, available: false }
+      { ...createSource("manual-1", "not_connected"), builtin: false, available: false },
+      {
+        ...createSource("manual-pending", "not_connected"),
+        builtin: false,
+        dataPath: MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH
+      }
     ]).map((source) => source.sourceId)).toEqual(["codex", "manual-1"]);
   });
 
