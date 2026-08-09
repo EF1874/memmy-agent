@@ -8,9 +8,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentGoalState, AgentGoalStatus } from "../../api/memmy-agent-client.js";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import {
+  formatMessage,
+  messageCatalogs,
+  type MessageKey,
+  type MessageValues,
+  type ResolvedLanguage
+} from "../../i18n/messages.js";
+import {
   AgentGoalBar,
   displayedGoalTimeSeconds,
   formatCompactGoalTokenCount,
+  formatGoalDuration,
   type AgentGoalBarProps
 } from "../agent-goal-bar.js";
 
@@ -64,6 +72,11 @@ describe("AgentGoalBar", () => {
         <AgentGoalBar {...resolved} />
       </I18nProvider>
     ));
+  }
+
+  function translate(language: ResolvedLanguage) {
+    return (key: MessageKey, values?: MessageValues) =>
+      formatMessage(messageCatalogs[language][key], values);
   }
 
   function actionLabels(): string[] {
@@ -187,22 +200,37 @@ describe("AgentGoalBar", () => {
     expect(displayedGoalTimeSeconds(activeGoal, null, 1_754_352_003_900)).toBe(42);
   });
 
-  it("refreshes the displayed Goal time once per second while a Turn is running", () => {
+  it.each([
+    ["en-US", 0, "0s"],
+    ["en-US", 59, "59s"],
+    ["en-US", 60, "1m 0s"],
+    ["en-US", 3_599, "59m 59s"],
+    ["en-US", 3_600, "1h 0m 0s"],
+    ["en-US", 3_661, "1h 1m 1s"],
+    ["zh-CN", 531, "8 分 51 秒"],
+    ["zh-CN", 3_661, "1 小时 1 分 1 秒"]
+  ] as const)("formats %s Goal duration %s as %s", (language, totalSeconds, expected) => {
+    expect(formatGoalDuration(totalSeconds, translate(language))).toBe(expected);
+    render({ goal: goal("paused", { time_used_seconds: totalSeconds }) }, language);
+    expect(container.querySelector(".agent-goal-bar__time")?.textContent).toBe(expected);
+  });
+
+  it("refreshes the displayed Goal time once per second across a unit boundary", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2025-08-05T00:00:00.000Z"));
     render({
-      goal: goal("active", { time_used_seconds: 42 }),
+      goal: goal("active", { time_used_seconds: 58 }),
       clock: {
         goalId: GOAL_ID,
         turnId: "turn-1",
         startedAt: Date.now() / 1000,
-        baseSeconds: 42
+        baseSeconds: 58
       }
     });
-    expect(container.querySelector(".agent-goal-bar__usage-full")?.textContent).toContain("42s");
+    expect(container.querySelector(".agent-goal-bar__usage-full")?.textContent).toContain("58s");
 
     act(() => vi.advanceTimersByTime(3_000));
-    expect(container.querySelector(".agent-goal-bar__usage-full")?.textContent).toContain("45s");
+    expect(container.querySelector(".agent-goal-bar__usage-full")?.textContent).toContain("1m 1s");
   });
 
   it("uses compact localized token values without losing the full accessible usage", () => {

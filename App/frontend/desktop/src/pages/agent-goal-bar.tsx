@@ -11,6 +11,7 @@ import type {
   AgentGoalState
 } from "../api/memmy-agent-client.js";
 import { Tooltip } from "../components/tooltip.js";
+import type { I18nContextValue } from "../i18n/i18n-provider.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import type { AgentGoalRunClock } from "../state/agent-chat-slice.js";
 
@@ -55,6 +56,23 @@ export function formatCompactGoalTokenCount(value: number, language: "zh-CN" | "
   }).format(value);
 }
 
+export function formatGoalDuration(totalSeconds: number, t: I18nContextValue["t"]): string {
+  const normalizedSeconds = Number.isFinite(totalSeconds)
+    ? Math.max(0, Math.floor(totalSeconds))
+    : 0;
+  const hours = Math.floor(normalizedSeconds / 3_600);
+  const minutes = Math.floor(normalizedSeconds % 3_600 / 60);
+  const seconds = normalizedSeconds % 60;
+
+  if (hours > 0) {
+    return t("home.goal.time.hours", { hours, minutes, seconds });
+  }
+  if (minutes > 0) {
+    return t("home.goal.time.minutes", { minutes, seconds });
+  }
+  return t("home.goal.time.seconds", { seconds });
+}
+
 export function AgentGoalBar(props: AgentGoalBarProps) {
   const { language, t } = useTranslation();
   const [form, setForm] = useState<GoalForm | null>(null);
@@ -92,7 +110,7 @@ export function AgentGoalBar(props: AgentGoalBarProps) {
     used: props.goal.tokens_used,
     budget: props.goal.token_budget ?? t("home.goal.noLimit")
   });
-  const timeLabel = t("home.goal.time", { seconds: timeUsedSeconds });
+  const timeLabel = formatGoalDuration(timeUsedSeconds, t);
   const compactUsageLabel = [
     formatCompactGoalTokenCount(props.goal.tokens_used, language),
     props.goal.token_budget === null
