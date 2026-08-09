@@ -9501,32 +9501,39 @@ input[type="checkbox"].check-sky:checked::after {
   }
 }
 .agent-goal-bar {
+  position: relative;
+  container-type: inline-size;
   margin-bottom: 0.5rem;
   border: 1px solid color-mix(in srgb, var(--color-border-stone) 35%, transparent);
   border-radius: 0.75rem;
   background: color-mix(in srgb, var(--color-background-paper) 96%, transparent);
-  padding: 0.75rem;
+  padding: 0.5rem 0.625rem;
 }
 
-.agent-goal-bar__header,
-.agent-goal-bar__actions,
-.agent-goal-bar__form-actions {
+.agent-goal-bar__row {
   display: flex;
+  min-width: 0;
   align-items: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 0.5rem;
 }
 
-.agent-goal-bar__header {
-  justify-content: space-between;
-}
-
 .agent-goal-bar__status {
+  flex: 0 0 auto;
+  overflow: hidden;
   border-radius: 9999px;
   background: color-mix(in srgb, var(--color-canvas-oat) 80%, transparent);
   padding: 0.2rem 0.55rem;
   font-size: 0.7rem;
   font-weight: 600;
+  line-height: 1rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-goal-bar__status:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-action-sky) 40%, transparent);
+  outline-offset: 2px;
 }
 
 .agent-goal-bar__status--active,
@@ -9540,64 +9547,148 @@ input[type="checkbox"].check-sky:checked::after {
   color: var(--color-status-error);
 }
 
+.agent-goal-bar__objective-viewport {
+  display: block;
+  width: 16rem;
+  max-width: 16rem;
+  min-width: 0;
+  flex: 0 1 16rem;
+  overflow: hidden;
+  color: color-mix(in srgb, var(--color-text-ink) 82%, transparent);
+  font-size: 0.8rem;
+  line-height: 1.25rem;
+}
+
+.agent-goal-bar__objective-viewport:focus-visible {
+  border-radius: 0.25rem;
+  outline: 2px solid color-mix(in srgb, var(--color-action-sky) 32%, transparent);
+  outline-offset: 2px;
+}
+
+.agent-goal-bar__objective-text {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  white-space: nowrap;
+}
+
+.agent-goal-bar__objective-viewport:hover .agent-goal-bar__objective-text[data-overflow="true"],
+.agent-goal-bar__objective-viewport:focus-within .agent-goal-bar__objective-text[data-overflow="true"] {
+  max-width: none;
+  overflow: visible;
+  animation: agent-goal-marquee var(--agent-goal-marquee-duration, 3s) ease-in-out infinite alternate;
+  text-overflow: clip;
+}
+
+@keyframes agent-goal-marquee {
+  0%,
+  14% {
+    transform: translateX(0);
+  }
+
+  86%,
+  100% {
+    transform: translateX(calc(-1 * var(--agent-goal-marquee-distance, 0px)));
+  }
+}
+
 .agent-goal-bar__usage,
-.agent-goal-bar__hint,
-.agent-goal-bar__link {
+.agent-goal-bar__usage-full,
+.agent-goal-bar__usage-compact {
+  align-items: center;
+  white-space: nowrap;
+}
+
+.agent-goal-bar__usage {
+  display: inline-flex;
+  flex: 0 0 auto;
   color: color-mix(in srgb, var(--color-text-ink) 58%, transparent);
   font-size: 0.72rem;
 }
 
-.agent-goal-bar__objective {
-  margin-top: 0.55rem;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  color: color-mix(in srgb, var(--color-text-ink) 82%, transparent);
-  font-size: 0.8rem;
+.agent-goal-bar__usage-full {
+  display: inline-flex;
+  gap: 0.3rem;
 }
 
-.agent-goal-bar__objective--collapsed {
-  display: -webkit-box;
-  overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
+.agent-goal-bar__usage-compact {
+  display: none;
+  gap: 0.25rem;
 }
 
-.agent-goal-bar__link {
-  margin-top: 0.25rem;
-  cursor: pointer;
-}
-
-.agent-goal-bar__hint {
-  margin-top: 0.5rem;
+.agent-goal-bar__separator {
+  color: color-mix(in srgb, var(--color-text-ink) 34%, transparent);
 }
 
 .agent-goal-bar__actions {
-  margin-top: 0.65rem;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.25rem;
 }
 
-.agent-goal-bar__button {
-  border: 1px solid color-mix(in srgb, var(--color-border-stone) 45%, transparent);
+.agent-goal-bar__icon-button {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 0;
   border-radius: 0.5rem;
-  padding: 0.28rem 0.6rem;
-  color: color-mix(in srgb, var(--color-text-ink) 75%, transparent);
-  font-size: 0.72rem;
+  background: transparent;
+  color: color-mix(in srgb, var(--color-text-ink) 55%, transparent);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) ease,
+    color var(--duration-fast) ease;
 }
 
-.agent-goal-bar__button:hover:not(:disabled) {
+.agent-goal-bar__icon-button svg {
+  width: 15px;
+  height: 15px;
+}
+
+.agent-goal-bar__icon-button:hover:not(:disabled) {
   background: color-mix(in srgb, var(--color-canvas-oat) 70%, transparent);
+  color: var(--color-action-sky-hover);
 }
 
-.agent-goal-bar__button:disabled {
+.agent-goal-bar__icon-button:focus-visible,
+.agent-goal-bar__form-button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-action-sky) 36%, transparent);
+  outline-offset: 1px;
+}
+
+.agent-goal-bar__icon-button:disabled,
+.agent-goal-bar__form-button:disabled {
   cursor: not-allowed;
   opacity: 0.45;
 }
 
-.agent-goal-bar__button--danger {
+.agent-goal-bar__icon-button--danger {
+  color: color-mix(in srgb, var(--color-status-error) 68%, var(--color-text-ink));
+}
+
+.agent-goal-bar__icon-button--danger:hover:not(:disabled),
+.agent-goal-bar__icon-button--danger:focus-visible {
+  background: color-mix(in srgb, var(--color-status-error) 9%, transparent);
   color: var(--color-status-error);
 }
 
 .agent-goal-bar__form {
-  margin-top: 0.65rem;
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 0.5rem);
+  z-index: 50;
+  width: min(360px, 100%);
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 45%, transparent);
+  border-radius: 0.75rem;
+  background: var(--color-background-paper);
+  box-shadow: var(--shadow-popover);
+  padding: 0.75rem;
 }
 
 .agent-goal-bar__form textarea,
@@ -9613,15 +9704,83 @@ input[type="checkbox"].check-sky:checked::after {
 
 .agent-goal-bar__form textarea {
   min-height: 5.5rem;
+  max-height: min(30dvh, 11rem);
   resize: vertical;
 }
 
 .agent-goal-bar__form-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
   margin-top: 0.45rem;
+}
+
+.agent-goal-bar__form-button {
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 45%, transparent);
+  border-radius: 0.5rem;
+  padding: 0.28rem 0.6rem;
+  color: color-mix(in srgb, var(--color-text-ink) 75%, transparent);
+  font-size: 0.72rem;
+}
+
+.agent-goal-bar__form-button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-canvas-oat) 70%, transparent);
 }
 
 .agent-goal-bar__validation {
   margin-top: 0.35rem;
   color: var(--color-status-error);
   font-size: 0.72rem;
+}
+
+@container (max-width: 560px) {
+  .agent-goal-bar__row {
+    gap: 0.25rem;
+  }
+
+  .agent-goal-bar__status {
+    max-width: 72px;
+    padding-right: 0.4rem;
+    padding-left: 0.4rem;
+  }
+
+  .agent-goal-bar__objective-viewport {
+    width: 7rem;
+    max-width: 7rem;
+    flex-basis: 7rem;
+  }
+
+  .agent-goal-bar__usage-full {
+    display: none;
+  }
+
+  .agent-goal-bar__usage-compact {
+    display: inline-flex;
+  }
+
+  .agent-goal-bar__actions {
+    gap: 2px;
+  }
+
+  .agent-goal-bar__icon-button {
+    width: 24px;
+    height: 24px;
+  }
+
+  .agent-goal-bar__icon-button svg {
+    width: 14px;
+    height: 14px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-goal-bar__objective-viewport:hover .agent-goal-bar__objective-text[data-overflow="true"],
+  .agent-goal-bar__objective-viewport:focus-within .agent-goal-bar__objective-text[data-overflow="true"] {
+    max-width: 100%;
+    overflow: hidden;
+    animation: none;
+    text-overflow: ellipsis;
+    transform: none;
+  }
 }

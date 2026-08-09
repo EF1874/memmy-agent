@@ -1,8 +1,16 @@
-import { useEffect, useState } from "react";
+import { Gauge, Pause, Pencil, Play, Trash2, type LucideIcon } from "lucide-react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type CSSProperties
+} from "react";
 import type {
   AgentGoalControlAction,
   AgentGoalState
 } from "../api/memmy-agent-client.js";
+import { Tooltip } from "../components/tooltip.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import type { AgentGoalRunClock } from "../state/agent-chat-slice.js";
 
@@ -40,9 +48,15 @@ export function displayedGoalTimeSeconds(
   return Math.max(goal.time_used_seconds, clock.baseSeconds + elapsedSeconds);
 }
 
+export function formatCompactGoalTokenCount(value: number, language: "zh-CN" | "en-US"): string {
+  return new Intl.NumberFormat(language, {
+    notation: "compact",
+    maximumFractionDigits: 1
+  }).format(value);
+}
+
 export function AgentGoalBar(props: AgentGoalBarProps) {
-  const { t } = useTranslation();
-  const [expanded, setExpanded] = useState(false);
+  const { language, t } = useTranslation();
   const [form, setForm] = useState<GoalForm | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -67,8 +81,24 @@ export function AgentGoalBar(props: AgentGoalBarProps) {
 
   const canResume = status === "paused" || status === "blocked" || status === "usage_limited";
   const canEdit = status !== "active";
-  const objectiveIsLong = props.goal.objective.length > 320 || props.goal.objective.includes("\n");
   const timeUsedSeconds = displayedGoalTimeSeconds(props.goal, props.clock, nowMs);
+  const statusLabel = t(`home.goal.status.${status}`);
+  const statusHint = status === "usage_limited"
+    ? t("home.goal.usageLimitedHint")
+    : status === "budget_limited"
+      ? t("home.goal.budgetLimitedHint")
+      : null;
+  const usageLabel = t("home.goal.usage", {
+    used: props.goal.tokens_used,
+    budget: props.goal.token_budget ?? t("home.goal.noLimit")
+  });
+  const timeLabel = t("home.goal.time", { seconds: timeUsedSeconds });
+  const compactUsageLabel = [
+    formatCompactGoalTokenCount(props.goal.tokens_used, language),
+    props.goal.token_budget === null
+      ? "∞"
+      : formatCompactGoalTokenCount(props.goal.token_budget, language)
+  ].join("/");
 
   const control = (action: AgentGoalControlAction) => {
     props.onControl({ chatId: props.chatId, goalId, action });
@@ -125,38 +155,70 @@ export function AgentGoalBar(props: AgentGoalBarProps) {
 
   return (
     <section className="agent-goal-bar" aria-label={t("home.goal.title")}>
-      <div className="agent-goal-bar__header">
-        <span className={`agent-goal-bar__status agent-goal-bar__status--${status}`}>
-          {t(`home.goal.status.${status}`)}
+      <div className="agent-goal-bar__row">
+        <Tooltip content={statusHint ? `${statusLabel} · ${statusHint}` : statusLabel}>
+          <span
+            className={`agent-goal-bar__status agent-goal-bar__status--${status}`}
+            tabIndex={0}
+          >
+            {statusLabel}
+          </span>
+        </Tooltip>
+
+        <GoalObjectiveMarquee objective={props.goal.objective} />
+
+        <span className="agent-goal-bar__usage" aria-label={`${usageLabel} · ${timeLabel}`}>
+          <span className="agent-goal-bar__usage-full" aria-hidden="true">
+            <span className="agent-goal-bar__tokens">{usageLabel}</span>
+            <span className="agent-goal-bar__separator">·</span>
+            <span className="agent-goal-bar__time">{timeLabel}</span>
+          </span>
+          <span className="agent-goal-bar__usage-compact" aria-hidden="true">
+            <span className="agent-goal-bar__tokens">{compactUsageLabel}</span>
+            <span className="agent-goal-bar__separator">·</span>
+            <span className="agent-goal-bar__time">{timeLabel}</span>
+          </span>
         </span>
-        <span className="agent-goal-bar__usage">
-          {t("home.goal.usage", {
-            used: props.goal.tokens_used,
-            budget: props.goal.token_budget ?? t("home.goal.noLimit")
-          })}
-          {" · "}
-          {t("home.goal.time", { seconds: timeUsedSeconds })}
-        </span>
-      </div>
 
-      <p className={expanded ? "agent-goal-bar__objective" : "agent-goal-bar__objective agent-goal-bar__objective--collapsed"}>
-        {props.goal.objective}
-      </p>
-      {objectiveIsLong ? (
-        <button type="button" className="agent-goal-bar__link" onClick={() => setExpanded((value) => !value)}>
-          {expanded ? t("home.goal.collapse") : t("home.goal.expand")}
-        </button>
-      ) : null}
-
-      {status === "usage_limited" ? <p className="agent-goal-bar__hint">{t("home.goal.usageLimitedHint")}</p> : null}
-      {status === "budget_limited" ? <p className="agent-goal-bar__hint">{t("home.goal.budgetLimitedHint")}</p> : null}
-
-      <div className="agent-goal-bar__actions">
-        {status === "active" ? <GoalButton disabled={props.pending} onClick={() => control("pause")}>{t("home.goal.pause")}</GoalButton> : null}
-        {canResume ? <GoalButton disabled={props.pending} onClick={() => control("resume")}>{t("home.goal.resume")}</GoalButton> : null}
-        {canEdit ? <GoalButton disabled={props.pending} onClick={openEdit}>{t("common.edit")}</GoalButton> : null}
-        <GoalButton disabled={props.pending} onClick={openBudget}>{t("home.goal.budget")}</GoalButton>
-        <GoalButton disabled={props.pending} danger onClick={() => control("clear")}>{t("home.goal.clear")}</GoalButton>
+        <div className="agent-goal-bar__actions">
+          {status === "active" ? (
+            <GoalIconButton
+              icon={Pause}
+              label={t("home.goal.pause")}
+              disabled={props.pending}
+              onClick={() => control("pause")}
+            />
+          ) : null}
+          {canResume ? (
+            <GoalIconButton
+              icon={Play}
+              label={t("home.goal.resume")}
+              disabled={props.pending}
+              onClick={() => control("resume")}
+            />
+          ) : null}
+          {canEdit ? (
+            <GoalIconButton
+              icon={Pencil}
+              label={t("common.edit")}
+              disabled={props.pending}
+              onClick={openEdit}
+            />
+          ) : null}
+          <GoalIconButton
+            icon={Gauge}
+            label={t("home.goal.budget")}
+            disabled={props.pending}
+            onClick={openBudget}
+          />
+          <GoalIconButton
+            icon={Trash2}
+            label={t("home.goal.clear")}
+            disabled={props.pending}
+            danger
+            onClick={() => control("clear")}
+          />
+        </div>
       </div>
 
       {form ? (
@@ -187,9 +249,9 @@ export function AgentGoalBar(props: AgentGoalBarProps) {
           )}
           {validationError ? <p role="alert" className="agent-goal-bar__validation">{validationError}</p> : null}
           <div className="agent-goal-bar__form-actions">
-            <GoalButton disabled={props.pending} onClick={submitForm}>{t("common.save")}</GoalButton>
+            <GoalFormButton disabled={props.pending} onClick={submitForm}>{t("common.save")}</GoalFormButton>
             {form.kind === "budget" ? (
-              <GoalButton
+              <GoalFormButton
                 disabled={props.pending}
                 onClick={() => props.onControl({
                   chatId: form.chatId,
@@ -199,9 +261,9 @@ export function AgentGoalBar(props: AgentGoalBarProps) {
                 })}
               >
                 {t("home.goal.removeLimit")}
-              </GoalButton>
+              </GoalFormButton>
             ) : null}
-            <GoalButton disabled={props.pending} onClick={() => setForm(null)}>{t("common.cancel")}</GoalButton>
+            <GoalFormButton disabled={props.pending} onClick={() => setForm(null)}>{t("common.cancel")}</GoalFormButton>
           </div>
         </div>
       ) : null}
@@ -209,17 +271,87 @@ export function AgentGoalBar(props: AgentGoalBarProps) {
   );
 }
 
-function GoalButton(props: {
-  children: string;
+function GoalObjectiveMarquee(props: { objective: string }) {
+  const viewportRef = useRef<HTMLSpanElement>(null);
+  const textRef = useRef<HTMLSpanElement>(null);
+  const [distance, setDistance] = useState(0);
+  const objective = props.objective.replace(/\s+/gu, " ").trim();
+
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    const text = textRef.current;
+    if (!viewport || !text) return;
+
+    const update = () => {
+      setDistance(Math.max(0, text.scrollWidth - viewport.clientWidth));
+    };
+    update();
+    if (typeof ResizeObserver === "undefined") return;
+
+    const observer = new ResizeObserver(update);
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, [objective]);
+
+  const marqueeStyle = {
+    "--agent-goal-marquee-distance": `${distance}px`,
+    "--agent-goal-marquee-duration": `${Math.min(8, Math.max(2.2, distance / 28))}s`
+  } as CSSProperties;
+
+  return (
+    <span
+      ref={viewportRef}
+      className="agent-goal-bar__objective-viewport"
+      aria-label={objective}
+      tabIndex={distance > 1 ? 0 : undefined}
+    >
+      <span
+        ref={textRef}
+        className="agent-goal-bar__objective-text"
+        data-overflow={distance > 1 ? "true" : undefined}
+        style={marqueeStyle}
+      >
+        {objective}
+      </span>
+    </span>
+  );
+}
+
+function GoalIconButton(props: {
+  icon: LucideIcon;
+  label: string;
   disabled: boolean;
   danger?: boolean;
+  onClick: () => void;
+}) {
+  const Icon = props.icon;
+  return (
+    <Tooltip content={props.label}>
+      <button
+        type="button"
+        aria-label={props.label}
+        disabled={props.disabled}
+        className={props.danger
+          ? "agent-goal-bar__icon-button agent-goal-bar__icon-button--danger"
+          : "agent-goal-bar__icon-button"}
+        onClick={props.onClick}
+      >
+        <Icon aria-hidden="true" />
+      </button>
+    </Tooltip>
+  );
+}
+
+function GoalFormButton(props: {
+  children: string;
+  disabled: boolean;
   onClick: () => void;
 }) {
   return (
     <button
       type="button"
       disabled={props.disabled}
-      className={props.danger ? "agent-goal-bar__button agent-goal-bar__button--danger" : "agent-goal-bar__button"}
+      className="agent-goal-bar__form-button"
       onClick={props.onClick}
     >
       {props.children}

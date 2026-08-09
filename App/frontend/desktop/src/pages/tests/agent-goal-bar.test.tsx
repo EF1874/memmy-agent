@@ -1,15 +1,23 @@
 // @vitest-environment happy-dom
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentGoalState, AgentGoalStatus } from "../../api/memmy-agent-client.js";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
-import { AgentGoalBar, displayedGoalTimeSeconds, type AgentGoalBarProps } from "../agent-goal-bar.js";
+import {
+  AgentGoalBar,
+  displayedGoalTimeSeconds,
+  formatCompactGoalTokenCount,
+  type AgentGoalBarProps
+} from "../agent-goal-bar.js";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const GOAL_ID = "8f59f58a-7295-4c34-8e03-55e7035a5a8d";
+const stylesSourcePath = resolve(__dirname, "..", "..", "styles.css");
 
 function goal(status: AgentGoalStatus, overrides: Partial<AgentGoalState> = {}): AgentGoalState {
   return {
@@ -37,11 +45,12 @@ describe("AgentGoalBar", () => {
 
   afterEach(() => {
     act(() => root.unmount());
-    document.body.replaceChildren();
+    container.remove();
+    vi.restoreAllMocks();
     vi.useRealTimers();
   });
 
-  function render(props: Partial<AgentGoalBarProps> = {}): void {
+  function render(props: Partial<AgentGoalBarProps> = {}, language = "en-US"): void {
     const resolved: AgentGoalBarProps = {
       chatId: "chat-a",
       goal: goal("active"),
@@ -51,19 +60,20 @@ describe("AgentGoalBar", () => {
       ...props
     };
     act(() => root.render(
-      <I18nProvider language="en-US">
+      <I18nProvider language={language}>
         <AgentGoalBar {...resolved} />
       </I18nProvider>
     ));
   }
 
-  function buttons(): string[] {
-    return [...container.querySelectorAll("button")].map((button) => button.textContent ?? "");
+  function actionLabels(): string[] {
+    return [...container.querySelectorAll<HTMLButtonElement>(".agent-goal-bar__icon-button")]
+      .map((button) => button.getAttribute("aria-label") ?? "");
   }
 
   function click(label: string): void {
     const button = [...container.querySelectorAll<HTMLButtonElement>("button")]
-      .find((item) => item.textContent === label);
+      .find((item) => item.getAttribute("aria-label") === label || item.textContent === label);
     expect(button, `button ${label}`).toBeTruthy();
     act(() => button!.click());
   }
@@ -78,21 +88,90 @@ describe("AgentGoalBar", () => {
     });
   }
 
+  function mockMarqueeWidths(viewportWidth: number, textWidth: number): void {
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains("agent-goal-bar__objective-viewport") ? viewportWidth : 0;
+    });
+    vi.spyOn(HTMLElement.prototype, "scrollWidth", "get").mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains("agent-goal-bar__objective-text") ? textWidth : 0;
+    });
+  }
+
   it.each([
     ["active", ["Pause", "Budget", "Clear"]],
     ["paused", ["Resume", "Edit", "Budget", "Clear"]],
     ["blocked", ["Resume", "Edit", "Budget", "Clear"]],
     ["usage_limited", ["Resume", "Edit", "Budget", "Clear"]],
     ["budget_limited", ["Edit", "Budget", "Clear"]]
-  ] as const)("renders the %s action matrix", (status, expected) => {
+  ] as const)("renders the %s icon action matrix", (status, expected) => {
     render({ goal: goal(status) });
-    expect(buttons()).toEqual(expected);
+    expect(actionLabels()).toEqual(expected);
+    expect([...container.querySelectorAll(".agent-goal-bar__icon-button")]
+      .every((button) => button.textContent === "")).toBe(true);
+  });
+
+  it("renders the persistent controls in one ordered row", () => {
+    render();
+    const row = container.querySelector(".agent-goal-bar__row")!;
+    expect([...row.children].map((element) => element.className)).toEqual([
+      "agent-goal-bar__status agent-goal-bar__status--active",
+      "agent-goal-bar__objective-viewport",
+      "agent-goal-bar__usage",
+      "agent-goal-bar__actions"
+    ]);
+    expect(container.querySelector(".agent-goal-bar__hint")).toBeNull();
+    expect(container.querySelector(".agent-goal-bar__link")).toBeNull();
+    expect(container.querySelector(".agent-goal-bar__objective--collapsed")).toBeNull();
+  });
+
+  it("dispatches the unchanged direct control requests from icon buttons", () => {
+    const onControl = vi.fn();
+    render({ onControl });
+    click("Pause");
+    click("Clear");
+    expect(onControl.mock.calls).toEqual([
+      [{ chatId: "chat-a", goalId: GOAL_ID, action: "pause" }],
+      [{ chatId: "chat-a", goalId: GOAL_ID, action: "clear" }]
+    ]);
   });
 
   it("does not render a completed Goal", () => {
     render({ goal: goal("completed") });
     expect(container.querySelector(".agent-goal-bar")).toBeNull();
     expect(container.textContent).toBe("");
+  });
+
+  it("normalizes multiline objective display without changing the edit value", () => {
+    const objective = "  First line\n\nSecond\tline  ";
+    render({ goal: goal("paused", { objective }) });
+    expect(container.querySelector(".agent-goal-bar__objective-text")?.textContent)
+      .toBe("First line Second line");
+
+    click("Edit");
+    expect(container.querySelector<HTMLTextAreaElement>('textarea[aria-label="Objective"]')?.value)
+      .toBe(objective);
+  });
+
+  it("measures real objective overflow and exposes the marquee distance and duration", () => {
+    mockMarqueeWidths(100, 240);
+    render();
+
+    const viewport = container.querySelector<HTMLElement>(".agent-goal-bar__objective-viewport")!;
+    const text = container.querySelector<HTMLElement>(".agent-goal-bar__objective-text")!;
+    expect(text.dataset.overflow).toBe("true");
+    expect(text.style.getPropertyValue("--agent-goal-marquee-distance")).toBe("140px");
+    expect(text.style.getPropertyValue("--agent-goal-marquee-duration")).toBe("5s");
+    expect(viewport.tabIndex).toBe(0);
+  });
+
+  it("does not enable marquee animation when the objective fits", () => {
+    mockMarqueeWidths(180, 180);
+    render();
+
+    const viewport = container.querySelector<HTMLElement>(".agent-goal-bar__objective-viewport")!;
+    const text = container.querySelector<HTMLElement>(".agent-goal-bar__objective-text")!;
+    expect(text.dataset.overflow).toBeUndefined();
+    expect(viewport.tabIndex).toBe(-1);
   });
 
   it("adds the live Turn elapsed time to the persisted Goal total", () => {
@@ -120,25 +199,42 @@ describe("AgentGoalBar", () => {
         baseSeconds: 42
       }
     });
-    expect(container.querySelector(".agent-goal-bar__usage")?.textContent).toContain("42s");
+    expect(container.querySelector(".agent-goal-bar__usage-full")?.textContent).toContain("42s");
 
     act(() => vi.advanceTimersByTime(3_000));
-    expect(container.querySelector(".agent-goal-bar__usage")?.textContent).toContain("45s");
+    expect(container.querySelector(".agent-goal-bar__usage-full")?.textContent).toContain("45s");
   });
 
-  it("shows distinct Provider quota and Goal budget recovery guidance", () => {
+  it("uses compact localized token values without losing the full accessible usage", () => {
+    expect(formatCompactGoalTokenCount(1_250, "en-US")).toBe("1.3K");
+    expect(formatCompactGoalTokenCount(20_000, "en-US")).toBe("20K");
+    render({ goal: goal("active", { token_budget: null }) });
+    expect(container.querySelector(".agent-goal-bar__usage-compact")?.textContent).toContain("1.3K/∞");
+    expect(container.querySelector(".agent-goal-bar__usage")?.getAttribute("aria-label"))
+      .toContain("1250 / No limit tokens");
+  });
+
+  it("moves distinct recovery guidance into the status tooltip", () => {
     render({ goal: goal("usage_limited") });
-    expect(container.textContent).toContain("Restore the Provider quota before resuming");
+    expect(container.textContent).not.toContain("Restore the Provider quota before resuming");
+    const status = container.querySelector<HTMLElement>(".agent-goal-bar__status")!;
+    act(() => status.dispatchEvent(new MouseEvent("mouseover", { bubbles: true })));
+    expect(document.querySelector("#app-tooltip-singleton")?.textContent)
+      .toContain("Restore the Provider quota before resuming");
 
     render({ goal: goal("budget_limited") });
-    expect(container.textContent).toContain("Increase or remove the Goal budget");
-    expect(container.textContent).not.toContain("Restore the Provider quota before resuming");
+    const nextStatus = container.querySelector<HTMLElement>(".agent-goal-bar__status")!;
+    act(() => nextStatus.dispatchEvent(new MouseEvent("mouseover", { bubbles: true })));
+    expect(document.querySelector("#app-tooltip-singleton")?.textContent)
+      .toContain("Increase or remove the Goal budget");
+    expect(container.querySelector(".agent-goal-bar__hint")).toBeNull();
   });
 
   it("allows active Goal budget changes and validates positive safe integers", () => {
     const onControl = vi.fn();
     render({ onControl });
     click("Budget");
+    expect(container.querySelector(".agent-goal-bar__form")).toBeTruthy();
     const input = container.querySelector<HTMLInputElement>('input[aria-label="Budget"]')!;
     inputValue(input, "0");
     click("Save");
@@ -153,6 +249,19 @@ describe("AgentGoalBar", () => {
       goalId: GOAL_ID,
       action: "set_budget",
       tokenBudget: 25_000
+    });
+  });
+
+  it("removes a Goal budget with the unchanged null control request", () => {
+    const onControl = vi.fn();
+    render({ onControl });
+    click("Budget");
+    click("Remove limit");
+    expect(onControl).toHaveBeenCalledWith({
+      chatId: "chat-a",
+      goalId: GOAL_ID,
+      action: "set_budget",
+      tokenBudget: null
     });
   });
 
@@ -193,7 +302,22 @@ describe("AgentGoalBar", () => {
 
   it("disables every Goal mutation while the chat has one pending request", () => {
     render({ pending: true });
-    expect([...container.querySelectorAll<HTMLButtonElement>("button")].every((button) => button.disabled))
-      .toBe(true);
+    expect([...container.querySelectorAll<HTMLButtonElement>(".agent-goal-bar__icon-button")]
+      .every((button) => button.disabled)).toBe(true);
+  });
+
+  it("locks the single-line, compact, popover, and reduced-motion style boundaries", () => {
+    const styles = readFileSync(stylesSourcePath, "utf8");
+    const goalStyles = styles.slice(styles.indexOf(".agent-goal-bar {"));
+    expect(goalStyles).toContain("flex-wrap: nowrap;");
+    expect(goalStyles).toContain("flex: 0 1 16rem;");
+    expect(goalStyles).toContain('text-overflow: ellipsis;');
+    expect(goalStyles).toContain('@container (max-width: 560px)');
+    expect(goalStyles).toContain("flex-basis: 7rem;");
+    expect(goalStyles).toContain('@media (prefers-reduced-motion: reduce)');
+    expect(goalStyles).toContain("bottom: calc(100% + 0.5rem);");
+    expect(goalStyles).not.toContain(".agent-goal-bar__objective--collapsed");
+    expect(goalStyles).not.toContain(".agent-goal-bar__hint");
+    expect(goalStyles).not.toContain(".agent-goal-bar__link");
   });
 });
