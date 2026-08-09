@@ -237,6 +237,239 @@ describe("WebSocket channel", () => {
     expect(duplicate.send.mock.calls.map(([payload]) => JSON.parse(payload).event)).toContain("message_accepted");
   });
 
+  it("broadcasts visible composer queue items while leaving unmarked requests transport-only", async () => {
+    const bus = new MessageBus();
+    const channel = webuiChannel(bus);
+    const first = connection();
+    const second = connection();
+    const duplicate = connection();
+    const chatId = "chat-visible-queue";
+    const sessionKey = `websocket:${chatId}`;
+    const clientRequestId = "66666666-6666-4666-8666-666666666666";
+    channel.attachConnection(first, chatId);
+    channel.attachConnection(second, chatId);
+    const request = {
+      type: "message",
+      chat_id: chatId,
+      content: "visible queued work",
+      webui: true,
+      queue_surface: "chat_composer",
+      client_request_id: clientRequestId,
+      target: { kind: "standalone" },
+    };
+
+    await channel.dispatchEnvelope(first, "client-1", request);
+    const inbound = await bus.nextInbound();
+    expect(inbound.metadata).toMatchObject({
+      client_request_id: clientRequestId,
+      webui_queue_surface: "chat_composer",
+    });
+    await channel.send(new OutboundMessage({
+      channel: "websocket",
+      chatId,
+      content: "",
+      metadata: {
+        webuiMessageQueued: true,
+        webuiRequestSessionKey: sessionKey,
+        clientRequestId,
+        webuiQueueItem: {
+          clientRequestId,
+          content: "visible queued work",
+          media: [],
+          queuedAt: "2026-08-09T12:00:00.000Z",
+          sessionKey,
+        },
+      },
+    }));
+
+    const expectedItem = {
+      client_request_id: clientRequestId,
+      text: "visible queued work",
+      media_urls: [],
+      queued_at: "2026-08-09T12:00:00.000Z",
+    };
+    for (const ws of [first, second]) {
+      expect(ws.send.mock.calls.map(([payload]) => JSON.parse(payload))).toContainEqual({
+        event: "message_queued",
+        chat_id: chatId,
+        client_request_id: clientRequestId,
+        item: expectedItem,
+      });
+    }
+
+    await channel.dispatchEnvelope(duplicate, "client-3", request);
+    expect(duplicate.send.mock.calls.map(([payload]) => JSON.parse(payload))).toContainEqual({
+      event: "message_queued",
+      chat_id: chatId,
+      client_request_id: clientRequestId,
+      item: expectedItem,
+    });
+
+    const invalid = connection();
+    await channel.dispatchEnvelope(invalid, "client-invalid", { ...request, queue_surface: "pet" });
+    expect(invalid.send.mock.calls.map(([payload]) => JSON.parse(payload))).toContainEqual(expect.objectContaining({
+      event: "error",
+      reason: "queue_surface_invalid",
+    }));
+  });
+
+  it("serializes attach snapshots before a concurrent dequeue event", async () => {
+    const bus = new MessageBus();
+    const channel = webuiChannel(bus);
+    const ws = connection();
+    const chatId = "chat-queue-snapshot";
+    const sessionKey = `websocket:${chatId}`;
+    const clientRequestId = "77777777-7777-4777-8777-777777777777";
+    const startedRequestId = "99999999-9999-4999-8999-999999999999";
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    const descriptor = {
+      clientRequestId,
+      content: "snapshot item",
+      media: [],
+      queuedAt: "2026-08-09T12:00:00.000Z",
+      sessionKey,
+    };
+    const startedDescriptor = {
+      ...descriptor,
+      clientRequestId: startedRequestId,
+      content: "already started",
+      queuedAt: "2026-08-09T12:00:01.000Z",
+    };
+    channel.getWebuiQueueSnapshot = vi.fn(async () => {
+      entered.resolve(undefined);
+      await release.promise;
+      return { items: [descriptor], startedItems: [startedDescriptor] };
+    });
+
+    const attaching = channel.dispatchEnvelope(ws, "client-1", { type: "attach", chat_id: chatId });
+    await entered.promise;
+    const dequeuing = channel.send(new OutboundMessage({
+      channel: "websocket",
+      chatId,
+      content: "",
+      metadata: {
+        webuiMessageDequeued: true,
+        webuiRequestSessionKey: sessionKey,
+        clientRequestId,
+        webuiQueueItem: descriptor,
+      },
+    }));
+    await Promise.resolve();
+    expect(ws.send.mock.calls.map(([payload]) => JSON.parse(payload).event)).not.toContain("message_dequeued");
+
+    release.resolve(undefined);
+    await Promise.all([attaching, dequeuing]);
+    const events = ws.send.mock.calls.map(([payload]) => JSON.parse(payload));
+    const snapshotIndex = events.findIndex((event) => event.event === "message_queue_snapshot");
+    const dequeuedIndex = events.findIndex((event) => event.event === "message_dequeued");
+    expect(snapshotIndex).toBeGreaterThan(events.findIndex((event) => event.event === "run_status_snapshot"));
+    expect(dequeuedIndex).toBeGreaterThan(snapshotIndex);
+    expect(events[snapshotIndex]).toMatchObject({
+      chat_id: chatId,
+      items: [expect.objectContaining({ client_request_id: clientRequestId })],
+      started_items: [expect.objectContaining({ client_request_id: startedRequestId })],
+    });
+    expect(events[dequeuedIndex]).toMatchObject({
+      chat_id: chatId,
+      client_request_id: clientRequestId,
+      item: expect.objectContaining({ client_request_id: clientRequestId }),
+    });
+
+    const repeated = connection();
+    await channel.dispatchEnvelope(repeated, "client-2", { type: "attach", chat_id: chatId });
+    expect(repeated.send.mock.calls.map(([payload]) => JSON.parse(payload))).toContainEqual(expect.objectContaining({
+      event: "message_queue_snapshot",
+      items: [expect.objectContaining({ client_request_id: clientRequestId })],
+      started_items: [expect.objectContaining({ client_request_id: startedRequestId })],
+    }));
+    expect(channel.getWebuiQueueSnapshot).toHaveBeenCalledTimes(2);
+  });
+
+  it("removes one queued idempotent request, broadcasts it, and preserves started Turns", async () => {
+    const bus = new MessageBus();
+    const channel = webuiChannel(bus);
+    const first = connection();
+    const second = connection();
+    const chatId = "chat-queue-remove";
+    const clientRequestId = "88888888-8888-4888-8888-888888888888";
+    const missingRequestId = "99999999-9999-4999-8999-999999999999";
+    const startedRequestId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    channel.attachConnection(first, chatId);
+    channel.attachConnection(second, chatId);
+    const removeQueuedWebuiMessage = vi.fn()
+      .mockResolvedValueOnce("removed")
+      .mockResolvedValueOnce("missing")
+      .mockResolvedValueOnce("already_dequeued");
+    channel.removeQueuedWebuiMessage = removeQueuedWebuiMessage;
+    await channel.dispatchEnvelope(first, "client-message", {
+      type: "message",
+      chat_id: chatId,
+      content: "remove me",
+      webui: true,
+      queue_surface: "chat_composer",
+      client_request_id: clientRequestId,
+      target: { kind: "standalone" },
+    });
+    await bus.nextInbound();
+
+    const remove = async (ws: ReturnType<typeof connection>, requestId: string, targetId: string) => {
+      await channel.dispatchEnvelope(ws, "client-remove", {
+        type: "queue_remove",
+        chat_id: chatId,
+        request_id: requestId,
+        client_request_id: targetId,
+      });
+    };
+    await remove(first, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", clientRequestId);
+    expect(channel.inflightWebuiMessageRequests.size).toBe(0);
+    for (const ws of [first, second]) {
+      expect(ws.send.mock.calls.map(([payload]) => JSON.parse(payload))).toContainEqual({
+        event: "message_queue_removed",
+        chat_id: chatId,
+        client_request_id: clientRequestId,
+      });
+    }
+    expect(first.send.mock.calls.map(([payload]) => JSON.parse(payload))).toContainEqual(expect.objectContaining({
+      event: "queue_remove_result",
+      client_request_id: clientRequestId,
+      ok: true,
+      outcome: "removed",
+    }));
+
+    await remove(second, "cccccccc-cccc-4ccc-8ccc-cccccccccccc", missingRequestId);
+    expect(first.send.mock.calls.map(([payload]) => JSON.parse(payload))).toContainEqual({
+      event: "message_queue_removed",
+      chat_id: chatId,
+      client_request_id: missingRequestId,
+    });
+    await remove(first, "dddddddd-dddd-4ddd-8ddd-dddddddddddd", startedRequestId);
+    expect(first.send.mock.calls.map(([payload]) => JSON.parse(payload))).toContainEqual(expect.objectContaining({
+      event: "queue_remove_result",
+      client_request_id: startedRequestId,
+      ok: true,
+      outcome: "already_dequeued",
+    }));
+    expect(second.send.mock.calls.map(([payload]) => JSON.parse(payload))).not.toContainEqual(expect.objectContaining({
+      event: "message_queue_removed",
+      client_request_id: startedRequestId,
+    }));
+
+    const callsBeforeInvalid = removeQueuedWebuiMessage.mock.calls.length;
+    await channel.dispatchEnvelope(first, "client-invalid", {
+      type: "queue_remove",
+      chat_id: chatId,
+      request_id: "not-a-uuid",
+      client_request_id: clientRequestId,
+    });
+    expect(removeQueuedWebuiMessage).toHaveBeenCalledTimes(callsBeforeInvalid);
+    expect(first.send.mock.calls.map(([payload]) => JSON.parse(payload)).at(-1)).toMatchObject({
+      event: "queue_remove_result",
+      ok: false,
+      error: "invalid_request",
+    });
+  });
+
   it("rejects new chat creation when no usable default model exists", async () => {
     const channel = new WebSocketChannel({}, new MessageBus(), {
       modelSelectionResolver: () => null,

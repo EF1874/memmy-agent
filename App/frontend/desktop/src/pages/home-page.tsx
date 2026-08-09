@@ -63,6 +63,7 @@ import {
 } from "./agent-command-palette.js";
 import { AgentAttachmentCard, splitAgentAttachmentName } from "./agent-file-attachment-chip.js";
 import { AgentGoalBar, type AgentGoalControlRequest } from "./agent-goal-bar.js";
+import { AgentQueuedMessageList } from "./agent-queued-message-list.js";
 import { AgentThreadMessages, ChatImageLightbox } from "./agent-thread-messages.js";
 import { AppFrame } from "./app-frame.js";
 import { mergeVoiceTranscript, useAsrRecorder } from "./asr-recorder.js";
@@ -90,6 +91,17 @@ export type { PendingAttachment, PendingAttachmentBase, PendingFileAttachment, P
 const COMPOSER_MEDIA_STRIP_STYLE = { maxHeight: "min(7.5rem, 28vh)" } satisfies CSSProperties;
 const AGENT_WS_SAFE_FRAME_BYTES = 1024 * 1024;
 const COMPOSER_HEIGHT_EPSILON = 2;
+
+export function updateAgentComposerOverlayHeight(
+  panel: HTMLElement,
+  composer: HTMLElement,
+  previousHeight = -1
+): number {
+  const nextHeight = Math.ceil(composer.getBoundingClientRect().height);
+  if (Math.abs(nextHeight - previousHeight) < COMPOSER_HEIGHT_EPSILON) return previousHeight;
+  panel.style.setProperty("--agent-composer-overlay-height", `${nextHeight}px`);
+  return nextHeight;
+}
 const COMPOSER_SINGLE_LINE_HEIGHT_PX = 52;
 const COMPOSER_GOAL_COMMAND = "/goal" as const;
 const AGENT_CONVERSATION_BOTTOM_EPSILON_PX = 4;
@@ -145,7 +157,8 @@ const TRANSLATABLE_AGENT_ERROR_KEYS = new Set<MessageKey>([
   "home.agent.executionInterrupted",
   "home.agent.recoveryTimeout",
   "home.goal.controlUnknown",
-  "home.project.desktopRequired"
+  "home.project.desktopRequired",
+  "home.queue.removeFailed"
 ]);
 export const AGENT_ATTACHMENT_ACCEPT = agentAttachmentAccept();
 export const AGENT_MEDIA_ACCEPT = AGENT_ATTACHMENT_ACCEPT;
@@ -230,9 +243,9 @@ export interface SubmitAgentComposerMessageInput {
       modelPreset?: string | null,
       clientRequestId?: string
     ): Promise<{ chatId: string; modelPreset: string }>;
-    sendMessage(
-      ...args: Parameters<MemmyAgentWebSocketConnection["sendMessage"]>
-    ): ReturnType<MemmyAgentWebSocketConnection["sendMessage"]> | void;
+    submitMessage(
+      ...args: Parameters<MemmyAgentWebSocketConnection["submitMessage"]>
+    ): ReturnType<MemmyAgentWebSocketConnection["submitMessage"]>;
   } | null;
   ensureChatSubscription?: (chatId: string) => void;
   content: string;
@@ -459,7 +472,7 @@ export function agentComposerPrimaryAction(input: {
   isGoalActive: boolean;
   hasIntent: boolean;
 }): "send" | "stop" {
-  return input.isRunning && !(input.isGoalActive && input.hasIntent) ? "stop" : "send";
+  return input.isRunning && !input.hasIntent ? "stop" : "send";
 }
 
 /** Displays the selected slash command as a removable composer token. */
@@ -667,6 +680,7 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
     chat_id: chatId,
     content: text,
     webui: true,
+    queue_surface: "chat_composer",
     client_request_id: clientRequestId,
     ...(capturedTarget ? { target: capturedTarget } : {}),
     ...(input.language ? { language: input.language } : {}),
@@ -685,8 +699,9 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
   if (focus) {
     input.ensureChatSubscription?.(chatId);
   }
+  let submission: Awaited<ReturnType<MemmyAgentWebSocketConnection["submitMessage"]>>;
   try {
-    await input.connection.sendMessage({
+    submission = await input.connection.submitMessage({
       chatId,
       content: text,
       clientRequestId,
@@ -720,13 +735,16 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
   if (createdNewChat && focus) {
     input.dispatch(agentActions.newChatCreated(chatId));
   }
-  input.dispatch(agentActions.userMessageQueued({
-    chatId,
-    content: displayText,
-    media: uploadedAttachments.map((item) => ({ url: item.url, name: item.name, kind: item.kind, path: item.path })),
-    focus,
-    ...(capturedTarget ? { target: capturedTarget } : {})
-  }));
+  if (submission.status === "accepted") {
+    input.dispatch(agentActions.userMessageQueued({
+      chatId,
+      content: displayText,
+      media: uploadedAttachments.map((item) => ({ url: item.url, name: item.name, kind: item.kind, path: item.path })),
+      focus,
+      clientRequestId,
+      ...(capturedTarget ? { target: capturedTarget } : {})
+    }));
+  }
   input.clearComposer();
   if (input.scopeKey) {
     input.dispatch(agentActions.pendingModelPresetCleared(input.scopeKey));
@@ -778,6 +796,8 @@ export function HomePage() {
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const conversationPanelRef = useRef<HTMLElement | null>(null);
+  const composerOverlayRef = useRef<HTMLDivElement | null>(null);
   const pendingStatusChatRef = useRef<string | null>(null);
   const pendingLastCompactionChatRef = useRef<string | null>(null);
   const pendingHistoryDagChatRef = useRef<string | null>(null);
@@ -794,6 +814,7 @@ export function HomePage() {
   const stopRequestLocksRef = useRef<Set<string>>(new Set());
   const goalMutationLocksRef = useRef<Set<string>>(new Set());
   const messageSendLocksRef = useRef<Set<string>>(new Set());
+  const queueRemoveLocksRef = useRef<Set<string>>(new Set());
   const draftTargetRevisionRef = useRef(state.agent.draftTargetRevisionByScope);
   draftTargetRevisionRef.current = state.agent.draftTargetRevisionByScope;
   const asrRecorder = useAsrRecorder(clients?.asr, { emptyAudioMessage: t("home.asrEmptyAudio") });
@@ -823,6 +844,9 @@ export function HomePage() {
   const currentHistoryVersion = state.agent.currentChatId
     ? state.agent.historyVersionByChatId[state.agent.currentChatId] ?? 0
     : state.agent.newChatRequestId;
+  const currentQueuedMessages = state.agent.currentChatId
+    ? state.agent.queuedMessagesByChatId[state.agent.currentChatId] ?? []
+    : [];
   const hasActiveConversation = hasActiveAgentConversation(state.agent.currentChatId, state.agent.messages.length);
   const activeConversationTitle = state.agent.currentSessionKey
     ? state.agent.tasks.find((task) => task.sessionKey === state.agent.currentSessionKey)?.title.trim() || t("home.title")
@@ -1479,6 +1503,61 @@ export function HomePage() {
     }
   }, [chatScopeKey, firstEncounterRelayAnchorMessageId, state.agent.messages]);
 
+  useLayoutEffect(() => {
+    const panel = conversationPanelRef.current;
+    const composer = composerOverlayRef.current;
+    if (!panel || !composer) return;
+    let frameId: number | null = null;
+    let measuredHeight = -1;
+    const measure = () => {
+      const nextHeight = updateAgentComposerOverlayHeight(panel, composer, measuredHeight);
+      if (nextHeight === measuredHeight) return;
+      measuredHeight = nextHeight;
+      if (!shouldAutoScrollAgentConversationRef.current) return;
+      if (frameId !== null) window.cancelAnimationFrame(frameId);
+      frameId = window.requestAnimationFrame(() => {
+        frameId = null;
+        scrollAgentConversationToBottom();
+      });
+    };
+
+    measure();
+    if (typeof ResizeObserver !== "undefined") {
+      const observer = new ResizeObserver(measure);
+      observer.observe(composer);
+      return () => {
+        observer.disconnect();
+        if (frameId !== null) window.cancelAnimationFrame(frameId);
+      };
+    }
+
+    window.addEventListener("resize", measure);
+    return () => {
+      window.removeEventListener("resize", measure);
+      if (frameId !== null) window.cancelAnimationFrame(frameId);
+    };
+  }, [chatScopeKey, hasActiveConversation]);
+
+  useLayoutEffect(() => {
+    if (typeof ResizeObserver !== "undefined") return;
+    const panel = conversationPanelRef.current;
+    const composer = composerOverlayRef.current;
+    if (!panel || !composer) return;
+    updateAgentComposerOverlayHeight(panel, composer);
+    if (!shouldAutoScrollAgentConversationRef.current) return;
+    const frameId = window.requestAnimationFrame(scrollAgentConversationToBottom);
+    return () => window.cancelAnimationFrame(frameId);
+  }, [
+    agentError,
+    chatScopeKey,
+    composerInput,
+    currentGoal,
+    currentQueuedMessages.length,
+    currentSessionProjectBlocked,
+    hasActiveConversation,
+    pendingAttachments.length
+  ]);
+
   function scrollAgentConversationToBottom() {
     const element = scrollRef.current;
     if (!element) {
@@ -1554,6 +1633,31 @@ export function HomePage() {
     } finally {
       messageSendLocksRef.current.delete(sendScopeKey);
       dispatch(agentActions.messageSendLockUpdated(sendScopeKey, null));
+    }
+  }
+
+  async function removeQueuedMessage(clientRequestId: string) {
+    const chatId = state.agent.currentChatId;
+    const generation = connection?.getReadyGeneration() ?? null;
+    if (!chatId || !connection || generation === null || queueRemoveLocksRef.current.has(clientRequestId)) {
+      return;
+    }
+    queueRemoveLocksRef.current.add(clientRequestId);
+    dispatch(agentActions.queueItemRemoveStarted(chatId, clientRequestId));
+    try {
+      await connection.removeQueuedMessage(chatId, clientRequestId, generation);
+    } catch {
+      dispatch(agentActions.queueItemRemoveFailed(
+        chatId,
+        clientRequestId,
+        createAgentOperationError({
+          source: "queue",
+          message: "home.queue.removeFailed",
+          chatId
+        })
+      ));
+    } finally {
+      queueRemoveLocksRef.current.delete(clientRequestId);
     }
   }
 
@@ -2408,7 +2512,7 @@ export function HomePage() {
           </div>
         </section>
       ) : (
-        <section className="agent-conversation-panel flex flex-col h-full">
+        <section ref={conversationPanelRef} className="agent-conversation-panel flex flex-col h-full">
           <div
             ref={scrollRef}
             className="app-frame-page-content agent-conversation-scroll flex-1 overflow-y-auto"
@@ -2451,45 +2555,26 @@ export function HomePage() {
               <ArrowDown size={16} aria-hidden="true" />
             </button>
           ) : null}
-          <div className="agent-conversation-composer">
+          <div ref={composerOverlayRef} className="agent-conversation-composer">
             <div className="max-w-3xl mx-auto">
-              {currentSessionProjectBlocked ? (
-                <p className="mx-auto mb-2 w-fit rounded-tag border border-status-error/20 bg-status-error/5 px-3 py-1 text-xs text-status-error" role="status">
-                  {t("home.project.registryUnavailable")}
-                </p>
-              ) : null}
-              {state.agent.currentChatId && currentGoal ? (
-                <AgentGoalBar
-                  chatId={state.agent.currentChatId}
-                  goal={currentGoal}
-                  clock={state.agent.goalRunClockByChatId[state.agent.currentChatId] ?? null}
-                  pending={Boolean(goalMutationPending)}
-                  onControl={(request) => void controlGoal(request)}
-                />
-              ) : null}
-              <AgentOperationErrorSlot message={agentError} />
-              <div
-                className="relative agent-composer-shell rounded-card-lg"
-                onDragOver={handleComposerDragOver}
-                onDrop={handleComposerDrop}
-              >
+              <div className="agent-composer-flow">
                 {slashMenuOpen && (
-                  <div className="absolute left-0 bottom-full mb-3 z-40" style={{ width: "min(448px, 100%)" }}>
+                  <div className="agent-composer-popover absolute left-0 bottom-full mb-3 z-40" style={{ width: "min(448px, 100%)" }}>
                     <AgentCommandPalette commands={filteredSlashCommands} heading={t("home.commandPalette.commands")} selectedIndex={selectedCommandIndex} onSelect={selectSlashCommand} />
                   </div>
                 )}
                 {statusPanel.open && !slashMenuOpen && (
-                  <div className="absolute left-0 bottom-full mb-3 z-30 w-full" style={{ right: 0 }}>
+                  <div className="agent-composer-popover absolute left-0 bottom-full mb-3 z-30 w-full" style={{ right: 0 }}>
                     <AgentStatusPanel state={statusPanel} closeLabel={t("common.close")} loadingLabel={t("home.agent.connecting")} onClose={() => setStatusPanel({ open: false })} />
                   </div>
                 )}
                 {lastCompactionPanel.open && !statusPanel.open && !slashMenuOpen && (
-                  <div className="absolute left-0 right-0 bottom-full mb-3 z-30 w-full">
+                  <div className="agent-composer-popover absolute left-0 right-0 bottom-full mb-3 z-30 w-full">
                     <AgentStatusPanel state={lastCompactionPanel} closeLabel={t("common.close")} loadingLabel={t("home.agent.connecting")} onClose={closeLastCompactionPanel} />
                   </div>
                 )}
                 {historyDagPanel.open && !statusPanel.open && !lastCompactionPanel.open && !slashMenuOpen && (
-                  <div className="absolute left-0 right-0 bottom-full mb-3 z-30 w-full">
+                  <div className="agent-composer-popover absolute left-0 right-0 bottom-full mb-3 z-30 w-full">
                     <HistoryDagPanel
                       state={historyDagPanel}
                       closeLabel={t("common.close")}
@@ -2510,72 +2595,102 @@ export function HomePage() {
                     />
                   </div>
                 )}
-                <ComposerMediaPreviewStrip
-                  items={pendingAttachments}
-                  onRemove={removePendingMedia}
-                  removeLabel={t("common.remove")}
-                  selectedLabel={t("home.media.addPhotoFile")}
-                  t={t}
-                />
-                {selectedComposerCommand ? (
-                  <div className={`composer-command-chip-slot composer-command-chip-slot--conversation ${centerComposerControls ? "top-1/2 -translate-y-1/2" : "bottom-2"}`}>
-                    <ComposerCommandChip
-                      command={selectedComposerCommand}
-                      removeLabel={t("common.remove")}
-                      onRemove={clearSelectedComposerCommand}
-                    />
-                  </div>
+                {currentSessionProjectBlocked ? (
+                  <p className="mx-auto mb-2 w-fit rounded-tag border border-status-error/20 bg-status-error/5 px-3 py-1 text-xs text-status-error" role="status">
+                    {t("home.project.registryUnavailable")}
+                  </p>
                 ) : null}
-                <textarea
-                  ref={inputRef}
-                  value={composerInput}
-                  placeholder={t("home.input")}
-                  rows={1}
-                  onChange={(event) => {
-                    updateComposerInput(event.target.value);
-                    resizeComposerInput(event.target);
-                  }}
-                  onKeyDown={handleComposerKeyDown}
-                  onPaste={handleComposerPaste}
-                  className={`${isComposerSingleLine ? "agent-composer-input--single " : ""}${selectedComposerCommand ? "agent-composer-input--command-selected " : ""}block w-full pl-4 pr-20 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40`}
-                />
-                <div className={`absolute right-2.5 flex items-center gap-1 z-10 ${centerComposerControls ? "top-1/2 -translate-y-1/2" : "bottom-2"}`}>
-                  <ChatModelSelector
-                    presets={state.agent.modelPresets}
-                    value={selectedModelPreset}
-                    disabled={isCurrentAgentRunning || messageSendInFlight}
-                    label={t("home.modelSelect")}
-                    onChange={(preset) => dispatch(
-                      agentActions.pendingModelPresetUpdated(chatScopeKey, preset)
-                    )}
+                {state.agent.currentChatId && currentGoal ? (
+                  <AgentGoalBar
+                    chatId={state.agent.currentChatId}
+                    goal={currentGoal}
+                    clock={state.agent.goalRunClockByChatId[state.agent.currentChatId] ?? null}
+                    pending={Boolean(goalMutationPending)}
+                    onControl={(request) => void controlGoal(request)}
                   />
-                  <button
-                    type="button"
-                    aria-label={t("home.media.menu")}
-                    title={t("home.media.menu")}
-                    onClick={openMediaFilePicker}
-                    className="p-1.5 text-text-ink/45 hover:text-text-ink/65 hover:bg-canvas-oat/60 rounded-lg transition-all cursor-pointer"
-                  >
-                    <Plus size={15} />
-                  </button>
-                  <button
-                    type="button"
-                    aria-label={t("home.voiceInput")}
-                    title={t("home.voiceInput")}
-                    disabled={asrRecorder.isTranscribing || asrRecorder.isStarting}
-                    onClick={toggleVoiceInput}
-                    className={`p-1.5 hover:bg-canvas-oat/60 rounded-lg transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${asrRecorder.isRecording ? "text-action-sky" : "text-text-ink/45 hover:text-text-ink/65"}`}
-                  >
-                    {asrRecorder.isRecording ? <Pause size={15} /> : <Mic size={15} />}
-                  </button>
-                  <ComposerSubmitButton
-                    isSending={composerPrimaryAction === "stop"}
-                    disabled={composerSubmitDisabled}
-                    sendLabel={t("home.send")}
-                    stopLabel={t("home.stop")}
-                    variant="compact"
-                    onClick={composerPrimaryAction === "stop" ? stopCurrentTurn : () => void sendMessage()}
+                ) : null}
+                <AgentOperationErrorSlot message={agentError} />
+                <div className="agent-composer-stack">
+                  <AgentQueuedMessageList
+                    items={currentQueuedMessages}
+                    label={t("home.queue.label")}
+                    removeLabel={t("home.queue.remove")}
+                    attachmentOnlyLabel={(count) => t("home.queue.attachmentOnly", { count })}
+                    onRemove={(clientRequestId) => void removeQueuedMessage(clientRequestId)}
                   />
+                  <div
+                    className="relative agent-composer-shell rounded-card-lg"
+                    onDragOver={handleComposerDragOver}
+                    onDrop={handleComposerDrop}
+                  >
+                    <ComposerMediaPreviewStrip
+                      items={pendingAttachments}
+                      onRemove={removePendingMedia}
+                      removeLabel={t("common.remove")}
+                      selectedLabel={t("home.media.addPhotoFile")}
+                      t={t}
+                    />
+                    {selectedComposerCommand ? (
+                      <div className={`composer-command-chip-slot composer-command-chip-slot--conversation ${centerComposerControls ? "top-1/2 -translate-y-1/2" : "bottom-2"}`}>
+                        <ComposerCommandChip
+                          command={selectedComposerCommand}
+                          removeLabel={t("common.remove")}
+                          onRemove={clearSelectedComposerCommand}
+                        />
+                      </div>
+                    ) : null}
+                    <textarea
+                      ref={inputRef}
+                      value={composerInput}
+                      placeholder={t("home.input")}
+                      rows={1}
+                      onChange={(event) => {
+                        updateComposerInput(event.target.value);
+                        resizeComposerInput(event.target);
+                      }}
+                      onKeyDown={handleComposerKeyDown}
+                      onPaste={handleComposerPaste}
+                      className={`${isComposerSingleLine ? "agent-composer-input--single " : ""}${selectedComposerCommand ? "agent-composer-input--command-selected " : ""}block w-full pl-4 pr-20 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40`}
+                    />
+                    <div className={`absolute right-2.5 flex items-center gap-1 z-10 ${centerComposerControls ? "top-1/2 -translate-y-1/2" : "bottom-2"}`}>
+                      <ChatModelSelector
+                        presets={state.agent.modelPresets}
+                        value={selectedModelPreset}
+                        disabled={isCurrentAgentRunning || messageSendInFlight}
+                        label={t("home.modelSelect")}
+                        onChange={(preset) => dispatch(
+                          agentActions.pendingModelPresetUpdated(chatScopeKey, preset)
+                        )}
+                      />
+                      <button
+                        type="button"
+                        aria-label={t("home.media.menu")}
+                        title={t("home.media.menu")}
+                        onClick={openMediaFilePicker}
+                        className="p-1.5 text-text-ink/45 hover:text-text-ink/65 hover:bg-canvas-oat/60 rounded-lg transition-all cursor-pointer"
+                      >
+                        <Plus size={15} />
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={t("home.voiceInput")}
+                        title={t("home.voiceInput")}
+                        disabled={asrRecorder.isTranscribing || asrRecorder.isStarting}
+                        onClick={toggleVoiceInput}
+                        className={`p-1.5 hover:bg-canvas-oat/60 rounded-lg transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${asrRecorder.isRecording ? "text-action-sky" : "text-text-ink/45 hover:text-text-ink/65"}`}
+                      >
+                        {asrRecorder.isRecording ? <Pause size={15} /> : <Mic size={15} />}
+                      </button>
+                      <ComposerSubmitButton
+                        isSending={composerPrimaryAction === "stop"}
+                        disabled={composerSubmitDisabled}
+                        sendLabel={t("home.send")}
+                        stopLabel={t("home.stop")}
+                        variant="compact"
+                        onClick={composerPrimaryAction === "stop" ? stopCurrentTurn : () => void sendMessage()}
+                      />
+                    </div>
+                  </div>
                 </div>
               </div>
               <p className="text-center text-[11px] text-text-ink/40 mt-2">{t("home.notice")}</p>

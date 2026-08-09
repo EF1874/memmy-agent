@@ -1048,6 +1048,10 @@ export async function gateway({
     cancelActiveTasks: cancelSessionTasks,
     closeBrowserChat: (channel, chatId) => loop.closeBrowserChat(channel, chatId),
     goalControlHandler: (request) => loop.goalRuntime.control(request),
+    getWebuiQueueSnapshot: (sessionKey) => loop.getWebuiQueueSnapshot(sessionKey),
+    removeQueuedWebuiMessage: (sessionKey, clientRequestId) => (
+      loop.removeQueuedWebuiMessage(sessionKey, clientRequestId)
+    ),
     activeGoalStopHandler: async (sessionKey) => {
       const goal = loop.goalRuntime.get(sessionKey);
       if (goal?.status !== "active") return false;

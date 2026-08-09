@@ -237,6 +237,252 @@ describe("AgentLoop Turn admission", () => {
     await running;
   });
 
+  it("projects visible composer slots, removes only the selected queued Turn, and dequeues on start", async () => {
+    const loop = makeLoop();
+    const started: string[] = [];
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    loop.processMessageInternal = vi.fn(async (message: InboundMessage, _key, options: any) => {
+      started.push(message.content);
+      if (message.content === "running") await firstGate;
+      if (message.metadata?.client_request_id) {
+        await loop.publishWebuiMessageAccepted(message, options.slot);
+      }
+      return null;
+    }) as any;
+    const cancelAll = vi.spyOn(loop, "cancelActiveTasks");
+    const sessionKey = "websocket:visible-queue";
+    const requests = [
+      ["11111111-1111-4111-8111-111111111111", "first queued", "2026-08-09T12:00:01.000Z"],
+      ["22222222-2222-4222-8222-222222222222", "remove queued", "2026-08-09T12:00:02.000Z"],
+      ["33333333-3333-4333-8333-333333333333", "last queued", "2026-08-09T12:00:03.000Z"],
+    ] as const;
+    const running = loop.run();
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "websocket",
+      chatId: "visible-queue",
+      senderId: "user",
+      content: "running",
+    }));
+    await waitUntil(() => started.length === 1);
+    for (const [clientRequestId, content, timestamp] of requests) {
+      await loop.bus.publishInbound(new InboundMessage({
+        channel: "websocket",
+        chatId: "visible-queue",
+        senderId: "user",
+        content,
+        timestamp: new Date(timestamp),
+        metadata: {
+          webui: true,
+          client_request_id: clientRequestId,
+          webui_queue_surface: "chat_composer",
+        },
+      }));
+    }
+    await waitUntil(() => loop.getWebuiQueueSnapshot(sessionKey).items.length === 3);
+    expect(loop.getWebuiQueueSnapshot(sessionKey).items.map((item) => item.clientRequestId))
+      .toEqual(requests.map(([id]) => id));
+    await expect(loop.removeQueuedWebuiMessage(sessionKey, requests[1][0])).resolves.toBe("removed");
+    expect(cancelAll).not.toHaveBeenCalled();
+    expect(loop.getWebuiQueueSnapshot(sessionKey).items.map((item) => item.clientRequestId))
+      .toEqual([requests[0][0], requests[2][0]]);
+
+    releaseFirst();
+    await waitUntil(() => started.length === 3);
+    await waitUntil(() => !loop.isSessionBusy(sessionKey));
+    expect(started).toEqual(["running", "first queued", "last queued"]);
+    const outbound = [];
+    while (loop.bus.outboundSize) outbound.push(await loop.bus.consumeOutbound());
+    expect(outbound.filter((message) => message.metadata?.webuiQueueItem && message.metadata?.webuiMessageQueued))
+      .toHaveLength(3);
+    expect(outbound.filter((message) => message.metadata?.webuiMessageDequeued)
+      .map((message) => message.metadata?.clientRequestId))
+      .toEqual([requests[0][0], requests[2][0]]);
+    expect(loop.getWebuiQueueSnapshot(sessionKey)).toEqual({ items: [], startedItems: [] });
+    loop.stop();
+    await running;
+  });
+
+  it("cancels a visible queued Turn while its queue announcement is still publishing", async () => {
+    const loop = makeLoop();
+    const started: string[] = [];
+    let releaseRunning!: () => void;
+    let releaseAnnouncement!: () => void;
+    const runningGate = new Promise<void>((resolve) => {
+      releaseRunning = resolve;
+    });
+    const announcementGate = new Promise<void>((resolve) => {
+      releaseAnnouncement = resolve;
+    });
+    loop.processMessageInternal = vi.fn(async (message: InboundMessage) => {
+      started.push(message.content);
+      if (message.content === "running") await runningGate;
+      return null;
+    }) as any;
+    const originalPublishOutbound = loop.bus.publishOutbound.bind(loop.bus);
+    let announcementEntered = false;
+    loop.bus.publishOutbound = vi.fn(async (message) => {
+      if (message.metadata?.webuiMessageQueued && message.metadata?.webuiQueueItem) {
+        announcementEntered = true;
+        await announcementGate;
+      }
+      await originalPublishOutbound(message);
+    });
+    const running = loop.run();
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "websocket",
+      chatId: "announcement-gate",
+      content: "running",
+    }));
+    await waitUntil(() => started.length === 1);
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "websocket",
+      chatId: "announcement-gate",
+      content: "queued",
+      metadata: {
+        webui: true,
+        client_request_id: "44444444-4444-4444-8444-444444444444",
+        webui_queue_surface: "chat_composer",
+      },
+    }));
+    await waitUntil(() => announcementEntered);
+    releaseRunning();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(started).toEqual(["running"]);
+
+    await expect(loop.removeQueuedWebuiMessage(
+      "websocket:announcement-gate",
+      "44444444-4444-4444-8444-444444444444",
+    )).resolves.toBe("removed");
+
+    releaseAnnouncement();
+    await waitUntil(() => !loop.isSessionBusy("websocket:announcement-gate"));
+    expect(started).toEqual(["running"]);
+    expect(loop.getWebuiQueueSnapshot("websocket:announcement-gate"))
+      .toEqual({ items: [], startedItems: [] });
+    loop.stop();
+    await running;
+  });
+
+  it("drops a visible queued Turn when its queue announcement fails", async () => {
+    const loop = makeLoop();
+    const started: string[] = [];
+    let releaseRunning!: () => void;
+    const runningGate = new Promise<void>((resolve) => {
+      releaseRunning = resolve;
+    });
+    loop.processMessageInternal = vi.fn(async (message: InboundMessage) => {
+      started.push(message.content);
+      if (message.content === "running") await runningGate;
+      return null;
+    }) as any;
+    const originalPublishOutbound = loop.bus.publishOutbound.bind(loop.bus);
+    loop.bus.publishOutbound = vi.fn(async (message) => {
+      if (message.metadata?.webuiMessageQueued && message.metadata?.webuiQueueItem) {
+        throw new Error("queue announcement failed");
+      }
+      await originalPublishOutbound(message);
+    });
+    const running = loop.run();
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "websocket",
+      chatId: "announcement-failure",
+      content: "running",
+    }));
+    await waitUntil(() => started.length === 1);
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "websocket",
+      chatId: "announcement-failure",
+      content: "must not start",
+      metadata: {
+        webui: true,
+        client_request_id: "55555555-5555-4555-8555-555555555555",
+        webui_queue_surface: "chat_composer",
+      },
+    }));
+    await waitUntil(() => loop.bus.outboundSize > 0);
+    const rejected = await loop.bus.consumeOutbound();
+    expect(rejected.metadata).toMatchObject({
+      webuiMessageRejected: true,
+      clientRequestId: "55555555-5555-4555-8555-555555555555",
+      reason: "turn_start_failed",
+    });
+    expect(loop.getWebuiQueueSnapshot("websocket:announcement-failure"))
+      .toEqual({ items: [], startedItems: [] });
+
+    releaseRunning();
+    await waitUntil(() => !loop.isSessionBusy("websocket:announcement-failure"));
+    expect(started).toEqual(["running"]);
+    loop.stop();
+    await running;
+  });
+
+  it("publishes Goal inbox queued, accepted, and dequeued events at their distinct lifecycle boundaries", async () => {
+    const loop = makeLoop();
+    const sessionKey = "websocket:goal-queue";
+    const clientRequestId = "55555555-5555-4555-8555-555555555555";
+    loop.sessions.getOrCreate(sessionKey);
+    const goal = await loop.goalRuntime.create({
+      sessionKey,
+      objective: "keep working",
+      tokenBudget: 1_000,
+      route: { channel: "websocket", chatId: "goal-queue" },
+      turnId: "turn-create",
+    });
+    while (loop.bus.outboundSize) await loop.bus.consumeOutbound();
+    let releaseInboxTurn!: () => void;
+    const inboxTurnGate = new Promise<void>((resolve) => {
+      releaseInboxTurn = resolve;
+    });
+    loop.processMessageInternal = vi.fn(async (message: InboundMessage) => {
+      if (message.metadata?.client_request_id === clientRequestId) await inboxTurnGate;
+      return null;
+    }) as any;
+    const running = loop.run();
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "websocket",
+      chatId: "goal-queue",
+      content: "persisted inbox question",
+      timestamp: new Date("2026-08-09T12:00:00.000Z"),
+      metadata: {
+        webui: true,
+        client_request_id: clientRequestId,
+        webui_request_digest: "goal-queue-digest",
+        webui_queue_surface: "chat_composer",
+      },
+    }));
+    await waitUntil(() => loop.getWebuiQueueSnapshot(sessionKey).items.length === 1);
+    const beforeStart = [];
+    while (loop.bus.outboundSize) beforeStart.push(await loop.bus.consumeOutbound());
+    expect(beforeStart.filter((message) => (
+      message.metadata?.webuiMessageQueued || message.metadata?.webuiMessageAccepted
+    )).map((message) => (
+      message.metadata?.webuiMessageQueued ? "queued" : "accepted"
+    ))).toEqual(["queued", "accepted"]);
+
+    loop.goalRuntime.releaseTurn(sessionKey, "turn-create");
+    await (loop as any).dispatchNextGoalWork(sessionKey);
+    await waitUntil(() => (loop.processMessageInternal as any).mock.calls.length === 1);
+    expect(loop.getWebuiQueueSnapshot(sessionKey)).toMatchObject({
+      items: [],
+      startedItems: [expect.objectContaining({ clientRequestId })],
+    });
+    const afterStart = [];
+    while (loop.bus.outboundSize) afterStart.push(await loop.bus.consumeOutbound());
+    expect(afterStart.some((message) => (
+      message.metadata?.webuiMessageDequeued
+      && message.metadata?.clientRequestId === clientRequestId
+    ))).toBe(true);
+
+    releaseInboxTurn();
+    await waitUntil(() => !loop.isSessionBusy(sessionKey));
+    expect(loop.goalRuntime.get(sessionKey)).toMatchObject({ goalId: goal.goalId, status: "active" });
+    loop.stop();
+    await running;
+  });
+
   it("converts deletion-barrier input to queue and emits one queued acknowledgement", async () => {
     const loop = makeLoop();
     loop.processMessageInternal = vi.fn(async () => null) as any;

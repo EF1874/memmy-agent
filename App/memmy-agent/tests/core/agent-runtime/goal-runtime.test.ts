@@ -571,6 +571,39 @@ describe("GoalRuntime control and inbox arbitration", () => {
     ]);
   });
 
+  it("removes only an unreserved visible WebUI inbox entry and persists the result", async () => {
+    const { runtime, root } = createRuntime();
+    const goal = await createGoal(runtime);
+    for (const [id, content] of [["remove-me", "delete this"], ["keep-me", "keep this"]] as const) {
+      await runtime.enqueueUserMessage(SESSION_KEY, new InboundMessage({
+        channel: "websocket",
+        chatId: ROUTE.chatId,
+        senderId: "user",
+        content,
+        metadata: {
+          client_request_id: id,
+          webui_request_digest: `digest-${id}`,
+          webui_queue_surface: "chat_composer",
+          webui: true,
+        },
+      }));
+    }
+
+    expect(runtime.inbox(SESSION_KEY)[0]?.metadata.webui_queue_surface).toBe("chat_composer");
+    await expect(runtime.removeUnreservedInboxEntry(SESSION_KEY, "remove-me")).resolves.toBe("removed");
+    expect(runtime.inbox(SESSION_KEY).map((entry) => entry.id)).toEqual(["keep-me"]);
+    expect(runtime.get(SESSION_KEY)).toMatchObject({ goalId: goal.goalId, status: "active" });
+    expect(new SessionManager(root).get(SESSION_KEY)?.metadata.goalTurnInbox)
+      .toEqual([expect.objectContaining({ id: "keep-me" })]);
+
+    runtime.releaseTurn(SESSION_KEY, "turn-create");
+    await expect(runtime.reserveInboxEntry(SESSION_KEY, "turn-reserved"))
+      .resolves.toMatchObject({ id: "keep-me", turnId: "turn-reserved" });
+    await expect(runtime.removeUnreservedInboxEntry(SESSION_KEY, "keep-me")).resolves.toBe("reserved");
+    await expect(runtime.removeUnreservedInboxEntry(SESSION_KEY, "missing")).resolves.toBe("missing");
+    expect(runtime.inbox(SESSION_KEY)).toHaveLength(1);
+  });
+
   it("rejects missing WebUI dedupe fields and drops unsupported metadata", () => {
     expect(() => sanitizeGoalInboxMetadata("websocket", { webui: true }))
       .toThrowError(expect.objectContaining({ code: "goal_inbox_metadata_invalid" }));

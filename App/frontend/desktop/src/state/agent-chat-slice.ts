@@ -18,6 +18,7 @@ import type {
   AgentGoalState,
   AgentGoalControlAction,
   WebuiSessionTarget,
+  WebuiQueuedMessage,
   ChatModelPreset
 } from "../api/memmy-agent-client.js";
 import {
@@ -39,7 +40,7 @@ import {
 
 export type AgentConnectionStatus = "idle" | "bootstrapping" | "connecting" | "connected" | "reconnecting" | "error";
 export type AgentOperationSurface = "chat" | "sidebar";
-export type AgentOperationErrorSource = "sessions" | "sidebar" | "history" | "new-chat" | "send" | "gateway-command" | "recovery";
+export type AgentOperationErrorSource = "sessions" | "sidebar" | "history" | "new-chat" | "send" | "gateway-command" | "recovery" | "queue";
 export interface AgentOperationError {
   id: string;
   source: AgentOperationErrorSource;
@@ -123,7 +124,16 @@ export interface AgentChatMessage {
   isStreaming?: boolean;
   stoppedByUser?: boolean;
   modelError?: MemmyAgentModelError;
+  clientRequestId?: string;
 }
+
+export type AgentQueuedMessage = {
+  clientRequestId: string;
+  content: string;
+  media: AgentChatMediaAttachment[];
+  queuedAt: number;
+  status: "queued" | "removing";
+};
 
 export interface AgentRetryWaitStatus {
   id: string;
@@ -175,6 +185,7 @@ export interface AgentState {
   tasks: AgentTaskView[];
   messages: AgentChatMessage[];
   messagesByChatId: Record<string, AgentChatMessage[]>;
+  queuedMessagesByChatId: Record<string, AgentQueuedMessage[]>;
   retryWaitStatusByChatId: Record<string, AgentRetryWaitStatus | undefined>;
   historyVersionByChatId: Record<string, number>;
   pendingCanonicalHydrateByChatId: Record<string, boolean>;
@@ -256,7 +267,9 @@ export type AgentAction =
   | { type: "agent/blankDraftReopened" }
   | { type: "agent/newChatCreated"; chatId: string }
   | { type: "agent/transientSendFailed"; chatId: string }
-  | { type: "agent/userMessageQueued"; chatId: string; content: string; media?: AgentChatMediaAttachment[]; focus?: boolean; deliveryUncertain?: boolean; target?: WebuiSessionTarget }
+  | { type: "agent/userMessageQueued"; chatId: string; content: string; media?: AgentChatMediaAttachment[]; focus?: boolean; deliveryUncertain?: boolean; target?: WebuiSessionTarget; clientRequestId?: string }
+  | { type: "agent/queueItemRemoveStarted"; chatId: string; clientRequestId: string }
+  | { type: "agent/queueItemRemoveFailed"; chatId: string; clientRequestId: string; error: AgentOperationError }
   | { type: "agent/composerDraftUpdated"; scopeKey: string; value: string }
   | { type: "agent/composerPendingAttachmentsUpdated"; scopeKey: string; attachments: PendingAttachment[] }
   | { type: "agent/draftTargetUpdated"; scopeKey: string; target: WebuiSessionTarget }
@@ -324,6 +337,7 @@ export const initialAgentState: AgentState = {
   tasks: [],
   messages: [],
   messagesByChatId: {},
+  queuedMessagesByChatId: {},
   retryWaitStatusByChatId: {},
   historyVersionByChatId: {},
   pendingCanonicalHydrateByChatId: {},
@@ -521,6 +535,14 @@ export function agentReducer(state: AgentState, action: AgentAction): AgentState
       return clearTransientSend(state, action.chatId);
     case "agent/userMessageQueued":
       return queueOptimisticUserMessage(state, action);
+    case "agent/queueItemRemoveStarted":
+      return updateQueuedMessageStatus(state, action.chatId, action.clientRequestId, "removing");
+    case "agent/queueItemRemoveFailed":
+      return setOperationError(
+        updateQueuedMessageStatus(state, action.chatId, action.clientRequestId, "queued"),
+        "chat",
+        action.error
+      );
     case "agent/composerDraftUpdated":
       return updateComposerDraft(state, action.scopeKey, action.value);
     case "agent/composerPendingAttachmentsUpdated":
@@ -651,6 +673,149 @@ function operationErrorFromEvent(event: MemmyAgentWsEvent, source: AgentOperatio
   };
 }
 
+function queuedMessageFromWire(item: WebuiQueuedMessage): AgentQueuedMessage | null {
+  if (
+    typeof item.client_request_id !== "string"
+    || !item.client_request_id
+    || typeof item.text !== "string"
+  ) return null;
+  const queuedAt = Date.parse(item.queued_at);
+  if (!Number.isFinite(queuedAt)) return null;
+  return {
+    clientRequestId: item.client_request_id,
+    content: item.text,
+    media: normalizeMedia(Array.isArray(item.media_urls) ? item.media_urls : []),
+    queuedAt,
+    status: "queued"
+  };
+}
+
+function sortedQueuedMessages(items: AgentQueuedMessage[]): AgentQueuedMessage[] {
+  return [...items].sort((left, right) => (
+    left.queuedAt - right.queuedAt
+    || left.clientRequestId.localeCompare(right.clientRequestId)
+  ));
+}
+
+function setQueuedMessagesForChat(
+  state: AgentState,
+  chatId: string,
+  items: AgentQueuedMessage[]
+): AgentState {
+  return {
+    ...state,
+    queuedMessagesByChatId: items.length
+      ? { ...state.queuedMessagesByChatId, [chatId]: items }
+      : clearChatMapValue(state.queuedMessagesByChatId, chatId)
+  };
+}
+
+function removeQueuedMessageFromChat(
+  state: AgentState,
+  chatId: string,
+  clientRequestId: string
+): { state: AgentState; item: AgentQueuedMessage | null } {
+  const items = state.queuedMessagesByChatId[chatId] ?? [];
+  const item = items.find((candidate) => candidate.clientRequestId === clientRequestId) ?? null;
+  if (!item) return { state, item: null };
+  return {
+    state: setQueuedMessagesForChat(
+      state,
+      chatId,
+      items.filter((candidate) => candidate.clientRequestId !== clientRequestId)
+    ),
+    item
+  };
+}
+
+function updateQueuedMessageStatus(
+  state: AgentState,
+  chatId: string,
+  clientRequestId: string,
+  status: AgentQueuedMessage["status"]
+): AgentState {
+  const items = state.queuedMessagesByChatId[chatId] ?? [];
+  let changed = false;
+  const next = items.map((item) => {
+    if (item.clientRequestId !== clientRequestId || item.status === status) return item;
+    changed = true;
+    return { ...item, status };
+  });
+  return changed ? setQueuedMessagesForChat(state, chatId, next) : state;
+}
+
+function promoteQueuedMessage(
+  state: AgentState,
+  chatId: string,
+  item: AgentQueuedMessage
+): AgentState {
+  const removed = removeQueuedMessageFromChat(state, chatId, item.clientRequestId).state;
+  if (chatMessagesForId(removed, chatId).some(
+    (message) => message.clientRequestId === item.clientRequestId
+  )) return removed;
+  return queueOptimisticUserMessage(removed, {
+    type: "agent/userMessageQueued",
+    chatId,
+    content: item.content,
+    media: item.media,
+    focus: false,
+    clientRequestId: item.clientRequestId
+  });
+}
+
+function applyQueueSnapshot(state: AgentState, event: MemmyAgentWsEvent): AgentState {
+  if (!event.chat_id || !Array.isArray(event.items) || !Array.isArray(event.started_items)) {
+    return state;
+  }
+  const started = event.started_items
+    .map(queuedMessageFromWire)
+    .filter((item): item is AgentQueuedMessage => item !== null);
+  const startedIds = new Set(started.map((item) => item.clientRequestId));
+  const waiting = event.items
+    .map(queuedMessageFromWire)
+    .filter((item): item is AgentQueuedMessage => item !== null && !startedIds.has(item.clientRequestId));
+  let nextState = setQueuedMessagesForChat(state, event.chat_id, sortedQueuedMessages(waiting));
+  for (const item of sortedQueuedMessages(started)) {
+    nextState = promoteQueuedMessage(nextState, event.chat_id, item);
+  }
+  return nextState;
+}
+
+function rejectQueuedMessage(state: AgentState, event: MemmyAgentWsEvent): AgentState | null {
+  const chatId = event.chat_id;
+  const clientRequestId = event.client_request_id;
+  if (!chatId || !clientRequestId) return null;
+  const queued = state.queuedMessagesByChatId[chatId]?.some(
+    (item) => item.clientRequestId === clientRequestId
+  ) === true;
+  const messages = chatMessagesForId(state, chatId);
+  const optimistic = messages.some((message) => message.clientRequestId === clientRequestId);
+  if (!queued && !optimistic) return null;
+  const withoutQueue = removeQueuedMessageFromChat(state, chatId, clientRequestId).state;
+  const nextMessages = optimistic
+    ? chatMessagesForId(withoutQueue, chatId).filter(
+        (message) => message.clientRequestId !== clientRequestId
+      )
+    : chatMessagesForId(withoutQueue, chatId);
+  const messagesByChatId = { ...withoutQueue.messagesByChatId, [chatId]: nextMessages };
+  const optimisticSendingByChatId = optimistic
+    ? clearChatMapValue(withoutQueue.optimisticSendingByChatId, chatId)
+    : withoutQueue.optimisticSendingByChatId;
+  const nextState = deriveTasks({
+    ...withoutQueue,
+    messagesByChatId,
+    optimisticSendingByChatId,
+    ...(withoutQueue.currentChatId === chatId && !withoutQueue.blankDraftActive
+      ? {
+          messages: nextMessages,
+          isSending: effectiveRunStartedAtForChat(withoutQueue, chatId) !== null
+        }
+      : {})
+  });
+  if (event.reason === "turn_queue_cancelled") return nextState;
+  return setOperationError(nextState, "chat", operationErrorFromEvent(event, "gateway-command"));
+}
+
 function queueOptimisticUserMessage(
   state: AgentState,
   action: Extract<AgentAction, { type: "agent/userMessageQueued" }>
@@ -662,11 +827,16 @@ function queueOptimisticUserMessage(
   const nextState = clearSuppressAssistantStreamUntilTurnEnd(selectedState, action.chatId);
   const now = Date.now();
   const existingMessages = chatMessagesForId(nextState, action.chatId);
+  if (
+    action.clientRequestId
+    && existingMessages.some((message) => message.clientRequestId === action.clientRequestId)
+  ) return nextState;
   const message: AgentChatMessage = {
     id: nextMessageId(existingMessages, "user"),
     role: "user",
     content: action.content,
     createdAt: now,
+    ...(action.clientRequestId ? { clientRequestId: action.clientRequestId } : {}),
     ...(action.media?.length ? { media: action.media } : {})
   };
   const messages = [...existingMessages, message];
@@ -1226,6 +1396,10 @@ function completeSessionsLoad(state: AgentState, sessions: MemmyAgentSessionSumm
       : null;
   }
   const optimisticTasksByChatId = pruneOptimisticTasks(state.optimisticTasksByChatId, canonicalChatIds);
+  const queuedMessagesByChatId = pruneChatMap(
+    state.queuedMessagesByChatId,
+    new Set([...canonicalChatIds, ...Object.keys(optimisticTasksByChatId)])
+  );
   const knownChatIds = new Set([
     ...canonicalChatIds,
     ...Object.keys(optimisticTasksByChatId),
@@ -1247,6 +1421,7 @@ function completeSessionsLoad(state: AgentState, sessions: MemmyAgentSessionSumm
     sessions,
     committedPresetByScope,
     optimisticTasksByChatId,
+    queuedMessagesByChatId,
     retryWaitStatusByChatId: pruneOptionalMap(state.retryWaitStatusByChatId, knownChatIds),
     completedUnseenByChatId: pruneNumberMap(state.completedUnseenByChatId, knownChatIds),
     runStartedAtByChatId: reconcileSessionRunStartedOverrides(state.runStartedAtByChatId, sessions, knownChatIds, preserveRunChatIds),
@@ -1686,6 +1861,14 @@ function pruneBooleanMap(values: Record<string, boolean>, keepChatIds: Set<strin
     if (keepChatIds.has(chatId)) {
       next[chatId] = value;
     }
+  }
+  return next;
+}
+
+function pruneChatMap<T>(values: Record<string, T>, keepChatIds: Set<string>): Record<string, T> {
+  const next: Record<string, T> = {};
+  for (const [chatId, value] of Object.entries(values)) {
+    if (keepChatIds.has(chatId)) next[chatId] = value;
   }
   return next;
 }
@@ -2142,7 +2325,50 @@ function reduceWsEvent(state: AgentState, event: MemmyAgentWsEvent): AgentState 
     }
     case "attached":
       return handleAttached(state, event.chat_id ?? null);
-    case "error":
+    case "message_queued": {
+      if (!event.chat_id || !event.item) return state;
+      const item = queuedMessageFromWire(event.item);
+      if (!item) return state;
+      const current = state.queuedMessagesByChatId[event.chat_id] ?? [];
+      const index = current.findIndex(
+        (candidate) => candidate.clientRequestId === item.clientRequestId
+      );
+      if (index < 0) {
+        return setQueuedMessagesForChat(state, event.chat_id, [...current, item]);
+      }
+      const next = [...current];
+      next[index] = { ...item, status: current[index]!.status };
+      return setQueuedMessagesForChat(state, event.chat_id, next);
+    }
+    case "message_dequeued": {
+      if (!event.chat_id || !event.client_request_id) return state;
+      const eventItem = event.item ? queuedMessageFromWire(event.item) : null;
+      const localItem = state.queuedMessagesByChatId[event.chat_id]?.find(
+        (item) => item.clientRequestId === event.client_request_id
+      ) ?? null;
+      const item = eventItem ?? localItem;
+      return item ? promoteQueuedMessage(state, event.chat_id, item) : state;
+    }
+    case "message_queue_removed":
+      return event.chat_id && event.client_request_id
+        ? removeQueuedMessageFromChat(state, event.chat_id, event.client_request_id).state
+        : state;
+    case "message_queue_snapshot":
+      return applyQueueSnapshot(state, event);
+    case "queue_remove_result": {
+      if (
+        event.outcome !== "already_dequeued"
+        || !event.chat_id
+        || !event.client_request_id
+      ) return state;
+      const item = state.queuedMessagesByChatId[event.chat_id]?.find(
+        (candidate) => candidate.clientRequestId === event.client_request_id
+      );
+      return item ? promoteQueuedMessage(state, event.chat_id, item) : state;
+    }
+    case "error": {
+      const rejectedQueue = rejectQueuedMessage(state, event);
+      if (rejectedQueue) return rejectedQueue;
       if (event.detail === "image_rejected" || event.detail === "attachment_rejected") {
         return handleMediaRejected(state, event);
       }
@@ -2153,6 +2379,7 @@ function reduceWsEvent(state: AgentState, event: MemmyAgentWsEvent): AgentState 
         return handleStopFailed(state, event);
       }
       return setOperationError(state, "chat", operationErrorFromEvent(event, "gateway-command"));
+    }
     case "transport_error":
       if (event.detail === "message_too_big") {
         return handleTransportMessageTooBig(state, event);

@@ -378,6 +378,21 @@ export type MemmyAgentMediaAttachment = {
   path?: string;
 };
 
+export type WebuiQueuedMessage = {
+  client_request_id: string;
+  text: string;
+  media_urls: MemmyAgentMediaAttachment[];
+  queued_at: string;
+};
+
+export type MemmyAgentMessageSubmissionResult = {
+  status: "accepted" | "queued";
+};
+
+export type MemmyAgentQueueRemovalResult = {
+  outcome: "removed" | "already_dequeued";
+};
+
 export type WebuiSessionTarget =
   | { kind: "standalone" }
   | { kind: "project"; projectId: string };
@@ -433,6 +448,12 @@ export type MemmyAgentWsEvent = {
   scope?: string;
   model_name?: string;
   model_preset?: string;
+  request_id?: string;
+  ok?: boolean;
+  outcome?: string;
+  item?: WebuiQueuedMessage;
+  items?: WebuiQueuedMessage[];
+  started_items?: WebuiQueuedMessage[];
   [key: string]: unknown;
 };
 
@@ -498,6 +519,16 @@ export interface MemmyAgentWebSocketConnection {
   ): Promise<MemmyAgentNewChatResult>;
   attach(chatId: string): void;
   sendMessage(input: MemmyAgentSendMessageInput, expectedGeneration: number): Promise<void>;
+  submitMessage(
+    input: MemmyAgentSendMessageInput,
+    expectedGeneration: number
+  ): Promise<MemmyAgentMessageSubmissionResult>;
+  removeQueuedMessage(
+    chatId: string,
+    clientRequestId: string,
+    expectedGeneration: number,
+    timeoutMs?: number
+  ): Promise<MemmyAgentQueueRemovalResult>;
   controlGoal(
     input: AgentGoalControlInput,
     expectedGeneration: number,
@@ -1013,6 +1044,7 @@ const MESSAGE_RESULT_TIMEOUT_MS = 30_000;
 const MAX_AUTOMATIC_MESSAGE_CONFIRMATIONS = 3;
 const GOAL_CONTROL_TIMEOUT_MS = 15_000;
 const GOAL_CONTROL_HYDRATE_TIMEOUT_MS = 5_000;
+const QUEUE_REMOVE_TIMEOUT_MS = 15_000;
 
 interface MemmyAgentWebSocketSessionInput {
   bootstrap(options?: { force?: boolean }): Promise<MemmyAgentBootstrap>;
@@ -1048,14 +1080,27 @@ interface PendingGoalControl {
 
 interface PendingMessageAttempt {
   input: MemmyAgentSendMessageInput & { clientRequestId: string };
-  promise: Promise<void>;
-  resolve: () => void;
-  reject: (error: Error) => void;
+  queueSurface: "chat_composer" | null;
+  finalPromise: Promise<void>;
+  resolveFinal: () => void;
+  rejectFinal: (error: Error) => void;
+  firstPromise: Promise<MemmyAgentMessageSubmissionResult>;
+  resolveFirst: (result: MemmyAgentMessageSubmissionResult) => void;
+  rejectFirst: (error: Error) => void;
+  firstSettled: boolean;
   acknowledgementTimer: ReturnType<typeof setTimeout> | null;
   resultTimer: ReturnType<typeof setTimeout> | null;
   reconnectConfirmations: number;
   lastSentGeneration: number | null;
   queued: boolean;
+}
+
+interface PendingQueueRemoval {
+  chatId: string;
+  clientRequestId: string;
+  resolve: (result: MemmyAgentQueueRemovalResult) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
 }
 
 interface PendingInitialReady {
@@ -1072,6 +1117,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
   private pendingInitialReady: PendingInitialReady | null = null;
   private readonly pendingRunStatusSnapshots = new Map<string, PendingRunStatusSnapshot>();
   private readonly pendingMessageAttempts = new Map<string, PendingMessageAttempt>();
+  private readonly pendingQueueRemovals = new Map<string, PendingQueueRemoval>();
   private readonly pendingGoalControls = new Map<string, PendingGoalControl>();
   private connectionGeneration = 0;
   private transportOpenGeneration: number | null = null;
@@ -1171,32 +1217,107 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
 
   sendMessage(input: MemmyAgentSendMessageInput, expectedGeneration: number): Promise<void> {
     if (!input.clientRequestId) {
-      this.sendMessageFrame(input, expectedGeneration);
+      this.sendMessageFrame(input, expectedGeneration, null);
       return Promise.resolve();
     }
+    return this.getOrCreatePendingMessageAttempt(
+      { ...input, clientRequestId: input.clientRequestId },
+      expectedGeneration,
+      null
+    ).finalPromise;
+  }
 
+  submitMessage(
+    input: MemmyAgentSendMessageInput,
+    expectedGeneration: number
+  ): Promise<MemmyAgentMessageSubmissionResult> {
+    if (!input.clientRequestId) {
+      return Promise.reject(new Error("clientRequestId is required for queued submission"));
+    }
+    return this.getOrCreatePendingMessageAttempt(
+      { ...input, clientRequestId: input.clientRequestId },
+      expectedGeneration,
+      "chat_composer"
+    ).firstPromise;
+  }
+
+  removeQueuedMessage(
+    chatId: string,
+    clientRequestId: string,
+    expectedGeneration: number,
+    timeoutMs = QUEUE_REMOVE_TIMEOUT_MS
+  ): Promise<MemmyAgentQueueRemovalResult> {
+    this.assertReadyGeneration(expectedGeneration);
+    const requestId = crypto.randomUUID();
+    return new Promise<MemmyAgentQueueRemovalResult>((resolve, reject) => {
+      const pending: PendingQueueRemoval = {
+        chatId,
+        clientRequestId,
+        resolve,
+        reject,
+        timer: setTimeout(() => {
+          if (this.pendingQueueRemovals.get(requestId) === pending) {
+            this.pendingQueueRemovals.delete(requestId);
+          }
+          reject(new Error("Queue removal timed out"));
+        }, timeoutMs)
+      };
+      this.pendingQueueRemovals.set(requestId, pending);
+      try {
+        this.sendOrdinaryFrame({
+          type: "queue_remove",
+          chat_id: chatId,
+          request_id: requestId,
+          client_request_id: clientRequestId
+        }, expectedGeneration);
+      } catch (error) {
+        this.pendingQueueRemovals.delete(requestId);
+        clearTimeout(pending.timer);
+        reject(asError(error, "Unable to remove queued message"));
+      }
+    });
+  }
+
+  private getOrCreatePendingMessageAttempt(
+    input: MemmyAgentSendMessageInput & { clientRequestId: string },
+    expectedGeneration: number,
+    queueSurface: "chat_composer" | null
+  ): PendingMessageAttempt {
     const key = messageAttemptKey(input.chatId, input.clientRequestId);
     const current = this.pendingMessageAttempts.get(key);
     if (current) {
-      if (!sameMessageAttempt(current.input, input)) {
-        return Promise.reject(new Error("clientRequestId already belongs to another message"));
+      if (!sameMessageAttempt(current.input, input) || current.queueSurface !== queueSurface) {
+        throw new Error("clientRequestId already belongs to another message");
       }
       current.reconnectConfirmations = 0;
       this.sendPendingMessageAttempt(current, expectedGeneration);
-      return current.promise;
+      return current;
     }
 
-    let resolveAttempt!: () => void;
-    let rejectAttempt!: (error: Error) => void;
-    const promise = new Promise<void>((resolve, reject) => {
-      resolveAttempt = resolve;
-      rejectAttempt = reject;
+    let resolveFinal!: () => void;
+    let rejectFinal!: (error: Error) => void;
+    const finalPromise = new Promise<void>((resolve, reject) => {
+      resolveFinal = resolve;
+      rejectFinal = reject;
     });
+    void finalPromise.catch(() => undefined);
+    let resolveFirst!: (result: MemmyAgentMessageSubmissionResult) => void;
+    let rejectFirst!: (error: Error) => void;
+    const firstPromise = new Promise<MemmyAgentMessageSubmissionResult>((resolve, reject) => {
+      resolveFirst = resolve;
+      rejectFirst = reject;
+    });
+    void firstPromise.catch(() => undefined);
     const attempt: PendingMessageAttempt = {
       input: { ...input, clientRequestId: input.clientRequestId },
-      promise,
-      resolve: resolveAttempt,
-      reject: rejectAttempt,
+      queueSurface,
+      finalPromise,
+      resolveFinal,
+      rejectFinal,
+      firstPromise,
+      resolveFirst,
+      rejectFirst,
+      firstSettled: false,
       acknowledgementTimer: null,
       resultTimer: null,
       reconnectConfirmations: 0,
@@ -1213,10 +1334,15 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
         chat_id: attempt.input.chatId,
         client_request_id: attempt.input.clientRequestId
       });
-      attempt.reject(new MemmyAgentMessageRejectedError(
+      const error = new MemmyAgentMessageRejectedError(
         "message_result_unknown",
         "result_unknown"
-      ));
+      );
+      if (!attempt.firstSettled) {
+        attempt.firstSettled = true;
+        attempt.rejectFirst(error);
+      }
+      attempt.rejectFinal(error);
     }, MESSAGE_RESULT_TIMEOUT_MS);
     try {
       this.sendPendingMessageAttempt(attempt, expectedGeneration);
@@ -1225,7 +1351,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
       if (attempt.resultTimer) clearTimeout(attempt.resultTimer);
       throw error;
     }
-    return promise;
+    return attempt;
   }
 
   controlGoal(
@@ -1446,6 +1572,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     this.rejectPendingNewChat(new Error("newChat cancelled"));
     this.rejectPendingRunStatusSnapshots(new Error("run status snapshot cancelled"));
     this.rejectPendingMessageAttempts(new Error("message confirmation cancelled"));
+    this.rejectPendingQueueRemovals(new Error("queue removal cancelled"));
     this.rejectPendingGoalControls(new Error("Goal control cancelled"));
     this.rejectInitialReady(new Error("Agent gateway connection cancelled"));
     this.clearReadyHandshakeTimer();
@@ -1532,10 +1659,14 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
       this.markPendingMessageQueued(normalized);
     } else if (normalized.event === "message_accepted") {
       this.resolvePendingMessageAttempt(normalized);
+    } else if (normalized.event === "message_queue_removed") {
+      this.resolveRemovedMessageAttempt(normalized);
     } else if (normalized.event === "error") {
       this.rejectPendingMessageAttempt(normalized);
     } else if (normalized.event === "goal_control_result") {
       this.resolvePendingGoalControl(normalized);
+    } else if (normalized.event === "queue_remove_result") {
+      this.resolvePendingQueueRemoval(normalized);
     }
 
     if (normalized.event === "attached") {
@@ -1625,6 +1756,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     }
     this.rejectPendingNewChat(new Error("newChat failed because websocket closed"));
     this.rejectPendingRunStatusSnapshots(new Error("run status snapshot failed because websocket closed"), generation);
+    this.rejectPendingQueueRemovals(new Error("queue removal failed because websocket closed"));
     if (this.intentionallyClosed) {
       return;
     }
@@ -1710,12 +1842,17 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     this.rawSend(this.socket!, expectedGeneration, frame);
   }
 
-  private sendMessageFrame(input: MemmyAgentSendMessageInput, expectedGeneration: number): void {
+  private sendMessageFrame(
+    input: MemmyAgentSendMessageInput,
+    expectedGeneration: number,
+    queueSurface: "chat_composer" | null
+  ): void {
     this.sendOrdinaryFrame({
       type: "message",
       chat_id: input.chatId,
       content: input.content,
       webui: true,
+      ...(queueSurface ? { queue_surface: queueSurface } : {}),
       ...(input.clientRequestId ? { client_request_id: input.clientRequestId } : {}),
       ...(input.target ? { target: input.target } : {}),
       ...(input.language ? { language: input.language } : {}),
@@ -1727,7 +1864,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
   }
 
   private sendPendingMessageAttempt(attempt: PendingMessageAttempt, generation: number): void {
-    this.sendMessageFrame(attempt.input, generation);
+    this.sendMessageFrame(attempt.input, generation, attempt.queueSurface);
     attempt.lastSentGeneration = generation;
     if (attempt.acknowledgementTimer) clearTimeout(attempt.acknowledgementTimer);
     if (attempt.queued) {
@@ -1760,10 +1897,15 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
           this.pendingMessageAttempts.delete(key);
           if (attempt.acknowledgementTimer) clearTimeout(attempt.acknowledgementTimer);
           if (attempt.resultTimer) clearTimeout(attempt.resultTimer);
-          attempt.reject(new MemmyAgentMessageRejectedError(
+          const error = new MemmyAgentMessageRejectedError(
             "message_result_unknown",
             "result_unknown"
-          ));
+          );
+          if (!attempt.firstSettled) {
+            attempt.firstSettled = true;
+            attempt.rejectFirst(error);
+          }
+          attempt.rejectFinal(error);
         }
         continue;
       }
@@ -1789,7 +1931,11 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     this.pendingMessageAttempts.delete(key);
     if (attempt.acknowledgementTimer) clearTimeout(attempt.acknowledgementTimer);
     if (attempt.resultTimer) clearTimeout(attempt.resultTimer);
-    attempt.resolve();
+    if (!attempt.firstSettled) {
+      attempt.firstSettled = true;
+      attempt.resolveFirst({ status: "accepted" });
+    }
+    attempt.resolveFinal();
   }
 
   private markPendingMessageQueued(event: MemmyAgentWsEvent): void {
@@ -1803,6 +1949,21 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     if (attempt.resultTimer) clearTimeout(attempt.resultTimer);
     attempt.acknowledgementTimer = null;
     attempt.resultTimer = null;
+    if (event.item && attempt.queueSurface === "chat_composer" && !attempt.firstSettled) {
+      attempt.firstSettled = true;
+      attempt.resolveFirst({ status: "queued" });
+    }
+  }
+
+  private resolveRemovedMessageAttempt(event: MemmyAgentWsEvent): void {
+    if (!event.chat_id || !event.client_request_id) return;
+    const key = messageAttemptKey(event.chat_id, event.client_request_id);
+    const attempt = this.pendingMessageAttempts.get(key);
+    if (!attempt) return;
+    this.pendingMessageAttempts.delete(key);
+    if (attempt.acknowledgementTimer) clearTimeout(attempt.acknowledgementTimer);
+    if (attempt.resultTimer) clearTimeout(attempt.resultTimer);
+    attempt.resolveFinal();
   }
 
   private rejectPendingMessageAttempt(event: MemmyAgentWsEvent): void {
@@ -1813,10 +1974,15 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     this.pendingMessageAttempts.delete(key);
     if (attempt.acknowledgementTimer) clearTimeout(attempt.acknowledgementTimer);
     if (attempt.resultTimer) clearTimeout(attempt.resultTimer);
-    attempt.reject(new MemmyAgentMessageRejectedError(
+    const error = new MemmyAgentMessageRejectedError(
       typeof event.detail === "string" ? event.detail : "message_request_rejected",
       typeof event.reason === "string" ? event.reason : "message_rejected"
-    ));
+    );
+    if (!attempt.firstSettled) {
+      attempt.firstSettled = true;
+      attempt.rejectFirst(error);
+    }
+    attempt.rejectFinal(error);
   }
 
   private rejectPendingMessageAttempts(error: Error): void {
@@ -1824,7 +1990,11 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
       this.pendingMessageAttempts.delete(key);
       if (attempt.acknowledgementTimer) clearTimeout(attempt.acknowledgementTimer);
       if (attempt.resultTimer) clearTimeout(attempt.resultTimer);
-      attempt.reject(error);
+      if (!attempt.firstSettled) {
+        attempt.firstSettled = true;
+        attempt.rejectFirst(error);
+      }
+      attempt.rejectFinal(error);
     }
   }
 
@@ -2049,6 +2219,37 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     for (const [key, pending] of this.pendingGoalControls) {
       this.pendingGoalControls.delete(key);
       if (pending.timer) clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+  }
+
+  private resolvePendingQueueRemoval(event: MemmyAgentWsEvent): void {
+    const requestId = typeof event.request_id === "string" ? event.request_id : null;
+    if (!requestId) return;
+    const pending = this.pendingQueueRemovals.get(requestId);
+    if (!pending) return;
+    if (
+      event.chat_id !== pending.chatId
+      || event.client_request_id !== pending.clientRequestId
+    ) return;
+    this.pendingQueueRemovals.delete(requestId);
+    clearTimeout(pending.timer);
+    if (
+      event.ok === true
+      && (event.outcome === "removed" || event.outcome === "already_dequeued")
+    ) {
+      pending.resolve({ outcome: event.outcome });
+      return;
+    }
+    pending.reject(new Error(
+      typeof event.error === "string" ? event.error : "Unable to remove queued message"
+    ));
+  }
+
+  private rejectPendingQueueRemovals(error: Error): void {
+    for (const [requestId, pending] of this.pendingQueueRemovals) {
+      this.pendingQueueRemovals.delete(requestId);
+      clearTimeout(pending.timer);
       pending.reject(error);
     }
   }

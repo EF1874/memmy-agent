@@ -3,6 +3,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { MessageBus, OutboundMessage } from "../../core/runtime-messages/index.js";
+import type {
+  RemoveQueuedWebuiMessageResult,
+  WebuiQueueSnapshotDescriptor,
+} from "../../core/agent-runtime/loop.js";
 import { consumeRestartNoticeFromEnv, formatRestartCompletedMessage } from "../../utils/restart.js";
 import { BaseChannel } from "./base.js";
 import { discoverChannelNames, discoverEnabled, normalizeChannelName } from "./registry.js";
@@ -58,6 +62,8 @@ export class ChannelManager {
   closeBrowserChat: ((channel: string, chatId: string) => Promise<void>) | null = null;
   goalControlHandler: ((request: any) => Promise<any>) | null = null;
   activeGoalStopHandler: ((sessionKey: string) => Promise<boolean>) | null = null;
+  getWebuiQueueSnapshot: ((sessionKey: string) => WebuiQueueSnapshotDescriptor | Promise<WebuiQueueSnapshotDescriptor>) | null = null;
+  removeQueuedWebuiMessage: ((sessionKey: string, clientRequestId: string) => RemoveQueuedWebuiMessageResult | Promise<RemoveQueuedWebuiMessageResult>) | null = null;
 
   constructor(
     configOrBus: any = defaultConfig(),
@@ -74,6 +80,8 @@ export class ChannelManager {
       closeBrowserChat?: ((channel: string, chatId: string) => Promise<void>) | null;
       goalControlHandler?: ((request: any) => Promise<any>) | null;
       activeGoalStopHandler?: ((sessionKey: string) => Promise<boolean>) | null;
+      getWebuiQueueSnapshot?: ((sessionKey: string) => WebuiQueueSnapshotDescriptor | Promise<WebuiQueueSnapshotDescriptor>) | null;
+      removeQueuedWebuiMessage?: ((sessionKey: string, clientRequestId: string) => RemoveQueuedWebuiMessageResult | Promise<RemoveQueuedWebuiMessageResult>) | null;
     } = {},
   ) {
     if (configOrBus instanceof MessageBus) {
@@ -93,6 +101,8 @@ export class ChannelManager {
     this.closeBrowserChat = options.closeBrowserChat ?? null;
     this.goalControlHandler = options.goalControlHandler ?? null;
     this.activeGoalStopHandler = options.activeGoalStopHandler ?? null;
+    this.getWebuiQueueSnapshot = options.getWebuiQueueSnapshot ?? null;
+    this.removeQueuedWebuiMessage = options.removeQueuedWebuiMessage ?? null;
     this.initChannels();
   }
 
@@ -163,6 +173,8 @@ export class ChannelManager {
     if (this.closeBrowserChat) options.closeBrowserChat = this.closeBrowserChat;
     if (this.goalControlHandler) options.goalControlHandler = this.goalControlHandler;
     if (this.activeGoalStopHandler) options.activeGoalStopHandler = this.activeGoalStopHandler;
+    if (this.getWebuiQueueSnapshot) options.getWebuiQueueSnapshot = this.getWebuiQueueSnapshot;
+    if (this.removeQueuedWebuiMessage) options.removeQueuedWebuiMessage = this.removeQueuedWebuiMessage;
     return options;
   }
 

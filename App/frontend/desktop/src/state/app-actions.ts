@@ -385,8 +385,16 @@ export const agentActions = {
     return { type: "agent/transientSendFailed", chatId };
   },
 
-  userMessageQueued(input: { chatId: string; content: string; media?: AgentChatMediaAttachment[]; focus?: boolean; deliveryUncertain?: boolean; target?: WebuiSessionTarget }): AppAction {
+  userMessageQueued(input: { chatId: string; content: string; media?: AgentChatMediaAttachment[]; focus?: boolean; deliveryUncertain?: boolean; target?: WebuiSessionTarget; clientRequestId?: string }): AppAction {
     return { type: "agent/userMessageQueued", ...input };
+  },
+
+  queueItemRemoveStarted(chatId: string, clientRequestId: string): AppAction {
+    return { type: "agent/queueItemRemoveStarted", chatId, clientRequestId };
+  },
+
+  queueItemRemoveFailed(chatId: string, clientRequestId: string, error: AgentOperationError): AppAction {
+    return { type: "agent/queueItemRemoveFailed", chatId, clientRequestId, error };
   },
 
   composerDraftUpdated(scopeKey: string, value: string): AppAction {

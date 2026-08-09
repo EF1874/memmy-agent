@@ -107,6 +107,7 @@ const GOAL_TURN_SETTLEMENT_LIMIT = 64;
 const INBOX_METADATA_KEYS = new Set([
   "client_request_id",
   "webui_request_digest",
+  "webui_queue_surface",
   "webui",
   "wantsStream",
   "webui_language",
@@ -833,6 +834,24 @@ export class GoalRuntime {
 
   inbox(sessionKey: string): GoalTurnInboxEntry[] {
     return parseInbox(this.sessions.get(sessionKey)?.metadata?.[GOAL_TURN_INBOX_KEY]);
+  }
+
+  async removeUnreservedInboxEntry(
+    sessionKey: string,
+    entryId: string,
+  ): Promise<"removed" | "reserved" | "missing"> {
+    return this.mutate(sessionKey, (session) => {
+      const inbox = parseInbox(session.metadata[GOAL_TURN_INBOX_KEY]);
+      const index = inbox.findIndex((entry) => (
+        entry.id === entryId
+        && entry.channel === "websocket"
+        && entry.metadata.webui_queue_surface === "chat_composer"
+      ));
+      if (index < 0) return { value: "missing" as const };
+      if (inbox[index]!.turnId !== null) return { value: "reserved" as const };
+      session.metadata[GOAL_TURN_INBOX_KEY] = inbox.filter((_, itemIndex) => itemIndex !== index);
+      return { value: "removed" as const };
+    });
   }
 
   async enqueueUserMessage(sessionKey: string, message: InboundMessage): Promise<GoalTurnInboxEntry> {

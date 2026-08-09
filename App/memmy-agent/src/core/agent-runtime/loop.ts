@@ -41,7 +41,7 @@ import { LLMRuntime } from "../../utils/llm-runtime.js";
 import { withProgressCapabilities } from "../../utils/progress-events.js";
 import { EMPTY_FINAL_RESPONSE_MESSAGE } from "../../utils/runtime.js";
 import { AgentRunner, AgentRunSpec, type AgentInternalTurnContext } from "./runner.js";
-import { GoalRuntime, GoalRuntimeError } from "./goal-runtime.js";
+import { GoalRuntime, GoalRuntimeError, type GoalTurnInboxEntry } from "./goal-runtime.js";
 import { resolveToolResultMaxChars, SESSION_TOOL_RESULT_MAX_CHARS_BY_NAME } from "./tool-result-budget.js";
 import { AgentProgressHook } from "./progress-hook.js";
 import { createTurnCancellationBoundary, type TurnCancellationBoundary } from "./turn-cancellation-boundary.js";
@@ -74,6 +74,13 @@ import {
 } from "../../entrypoints/frontend-bridge/projects.js";
 
 export const UNIFIED_SESSION_KEY = "unified:default";
+const WEBUI_CHAT_COMPOSER_QUEUE_SURFACE = "chat_composer";
+
+function isWebuiChatComposerQueueMessage(message: InboundMessage): boolean {
+  return message.channel === "websocket"
+    && message.metadata?.webui_queue_surface === WEBUI_CHAT_COMPOSER_QUEUE_SURFACE
+    && typeof message.metadata?.client_request_id === "string";
+}
 
 function isImmediateGoalControlCommand(raw: string): boolean {
   const command = raw.trim().toLowerCase();
@@ -429,6 +436,26 @@ type CancelActiveTasksOptions = {
   excludeSignal?: AbortSignal | null;
 };
 
+export type WebuiQueueMessageDescriptor = {
+  clientRequestId: string;
+  content: string;
+  media: string[];
+  queuedAt: string;
+  sessionKey: string;
+};
+
+export type WebuiQueueSnapshotDescriptor = {
+  items: WebuiQueueMessageDescriptor[];
+  startedItems: WebuiQueueMessageDescriptor[];
+};
+
+export type RemoveQueuedWebuiMessageResult = "removed" | "already_dequeued" | "missing";
+
+type TurnSlotAnnouncementGate = {
+  promise: Promise<void>;
+  open: () => void;
+};
+
 type TurnSlotState = "queued" | "running" | "settling" | "closed";
 type TurnRootDelivery = "pending" | "accepted" | "rejected";
 
@@ -442,7 +469,26 @@ type TurnSlot = {
   rootDelivery: TurnRootDelivery;
   owner: symbol;
   stopReason: string | null;
+  announcedToWebui: boolean;
+  dispatchTask: CancelableDispatchTask | null;
+  announcementGate: TurnSlotAnnouncementGate | null;
 };
+
+function createTurnSlotAnnouncementGate(): TurnSlotAnnouncementGate {
+  let opened = false;
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return {
+    promise,
+    open: () => {
+      if (opened) return;
+      opened = true;
+      release();
+    },
+  };
+}
 
 function makeCancelableDispatchTask(run: (isCancelled: () => boolean, signal: AbortSignal) => Promise<void>): CancelableDispatchTask {
   const controller = new AbortController();
@@ -1225,8 +1271,14 @@ export class AgentLoop {
           this.goalRuntime.releaseWork(sessionKey, turnId);
           return;
         }
-        const metadata = { ...entry.metadata, ...turnMetadata(turnId) };
-        await this.bus.publishInbound(new InboundMessage({
+        const metadata = {
+          ...entry.metadata,
+          ...turnMetadata(turnId),
+          ...(entry.metadata.webui_queue_surface === WEBUI_CHAT_COMPOSER_QUEUE_SURFACE
+            ? { webui_queue_dequeued: true }
+            : {}),
+        };
+        const inboxMessage = new InboundMessage({
           channel: entry.channel,
           chatId: entry.chatId,
           senderId: entry.senderId,
@@ -1235,7 +1287,10 @@ export class AgentLoop {
           metadata,
           timestamp: entry.receivedAt,
           sessionKeyOverride: sessionKey,
-        }));
+        });
+        const queueDescriptor = this.webuiQueueDescriptorFromInboxEntry(sessionKey, entry);
+        if (queueDescriptor) await this.publishWebuiMessageDequeued(inboxMessage, queueDescriptor);
+        await this.bus.publishInbound(inboxMessage);
       } catch (error) {
         this.goalRuntime.releaseWork(sessionKey, turnId);
         throw error;
@@ -1355,6 +1410,89 @@ export class AgentLoop {
     return hasActiveTask
       || this.pendingQueues.has(sessionKey)
       || (this.turnSlots.get(sessionKey)?.length ?? 0) > 0;
+  }
+
+  getWebuiQueueSnapshot(sessionKey: string): WebuiQueueSnapshotDescriptor {
+    const queued = new Map<string, WebuiQueueMessageDescriptor>();
+    const started = new Map<string, WebuiQueueMessageDescriptor>();
+    const add = (
+      target: Map<string, WebuiQueueMessageDescriptor>,
+      descriptor: WebuiQueueMessageDescriptor | null,
+    ) => {
+      if (!descriptor) return;
+      target.set(descriptor.clientRequestId, { ...descriptor, sessionKey });
+    };
+
+    for (const slot of this.turnSlots.get(sessionKey) ?? []) {
+      if (!slot.announcedToWebui || !isWebuiChatComposerQueueMessage(slot.root)) continue;
+      const descriptor = this.webuiQueueDescriptorFromMessage(slot.root);
+      if (slot.state === "queued") add(queued, descriptor);
+      else if (
+        (slot.state === "running" || slot.state === "settling")
+        && slot.rootDelivery === "pending"
+      ) add(started, descriptor);
+    }
+
+    for (const entry of this.goalRuntime.inbox(sessionKey)) {
+      const descriptor = this.webuiQueueDescriptorFromInboxEntry(sessionKey, entry);
+      if (entry.turnId === null) add(queued, descriptor);
+      else add(started, descriptor);
+    }
+
+    for (const clientRequestId of started.keys()) queued.delete(clientRequestId);
+    const ordered = (items: Iterable<WebuiQueueMessageDescriptor>) => [...items].sort((left, right) => (
+      left.queuedAt.localeCompare(right.queuedAt)
+      || left.clientRequestId.localeCompare(right.clientRequestId)
+    ));
+    return {
+      items: ordered(queued.values()),
+      startedItems: ordered(started.values()),
+    };
+  }
+
+  async removeQueuedWebuiMessage(
+    sessionKey: string,
+    clientRequestId: string,
+  ): Promise<RemoveQueuedWebuiMessageResult> {
+    const slot = (this.turnSlots.get(sessionKey) ?? []).find((candidate) => (
+      candidate.root.metadata?.client_request_id === clientRequestId
+      && isWebuiChatComposerQueueMessage(candidate.root)
+    ));
+    if (slot) {
+      if (slot.state !== "queued" || !slot.announcedToWebui) return "already_dequeued";
+      slot.acceptingSteer = false;
+      slot.state = "closed";
+      slot.announcementGate?.open();
+      this.removeTurnSlot(sessionKey, slot);
+      const task = slot.dispatchTask;
+      if (task) {
+        const tasks = this.activeTasks.get(sessionKey) ?? [];
+        const remaining = tasks.filter((candidate) => candidate !== task);
+        if (remaining.length) this.activeTasks.set(sessionKey, remaining);
+        else this.activeTasks.delete(sessionKey);
+        task.cancel();
+      }
+      return "removed";
+    }
+
+    let inboxResult: "removed" | "reserved" | "missing" = "missing";
+    try {
+      inboxResult = await this.goalRuntime.removeUnreservedInboxEntry(sessionKey, clientRequestId);
+    } catch (error) {
+      if (!(error instanceof GoalRuntimeError) || error.code !== "goal_not_found") throw error;
+    }
+    if (inboxResult === "removed") {
+      void this.dispatchNextGoalWork(sessionKey);
+      return "removed";
+    }
+    if (inboxResult === "reserved") return "already_dequeued";
+
+    const session = this.sessions.get(sessionKey);
+    const accepted = session?.messages.some((message) => (
+      message?.role === "user"
+      && message?.client_request_id === clientRequestId
+    ));
+    return accepted ? "already_dequeued" : "missing";
   }
 
   isSessionGoalActive(sessionKey: string): boolean {
@@ -1785,9 +1923,43 @@ export class AgentLoop {
     return true;
   }
 
-  async publishWebuiMessageQueued(msg: InboundMessage): Promise<void> {
+  private webuiQueueDescriptorFromMessage(msg: InboundMessage): WebuiQueueMessageDescriptor | null {
+    const clientRequestId = msg.metadata?.client_request_id;
+    if (typeof clientRequestId !== "string") return null;
+    return {
+      clientRequestId,
+      content: msg.content,
+      media: [...msg.media],
+      queuedAt: msg.timestamp.toISOString(),
+      sessionKey: msg.sessionKey,
+    };
+  }
+
+  private webuiQueueDescriptorFromInboxEntry(
+    sessionKey: string,
+    entry: GoalTurnInboxEntry,
+  ): WebuiQueueMessageDescriptor | null {
+    if (
+      entry.channel !== "websocket"
+      || entry.metadata.webui_queue_surface !== WEBUI_CHAT_COMPOSER_QUEUE_SURFACE
+      || typeof entry.metadata.client_request_id !== "string"
+    ) return null;
+    return {
+      clientRequestId: entry.metadata.client_request_id,
+      content: entry.content,
+      media: [...entry.media],
+      queuedAt: entry.receivedAt,
+      sessionKey,
+    };
+  }
+
+  async publishWebuiMessageQueued(
+    msg: InboundMessage,
+    { visible = false }: { visible?: boolean } = {},
+  ): Promise<void> {
     const clientRequestId = msg.metadata?.client_request_id;
     if (msg.channel !== "websocket" || typeof clientRequestId !== "string") return;
+    const item = visible ? this.webuiQueueDescriptorFromMessage(msg) : null;
     await this.bus.publishOutbound(
       new OutboundMessage({
         channel: "websocket",
@@ -1797,6 +1969,27 @@ export class AgentLoop {
           webuiMessageQueued: true,
           webuiRequestSessionKey: msg.sessionKey,
           clientRequestId,
+          ...(item ? { webuiQueueItem: item } : {}),
+        },
+      }),
+    );
+  }
+
+  async publishWebuiMessageDequeued(
+    msg: InboundMessage,
+    descriptor = this.webuiQueueDescriptorFromMessage(msg),
+  ): Promise<void> {
+    if (!descriptor) return;
+    await this.bus.publishOutbound(
+      new OutboundMessage({
+        channel: "websocket",
+        chatId: msg.chatId,
+        content: "",
+        metadata: {
+          webuiMessageDequeued: true,
+          webuiRequestSessionKey: descriptor.sessionKey,
+          clientRequestId: descriptor.clientRequestId,
+          webuiQueueItem: descriptor,
         },
       }),
     );
@@ -3304,6 +3497,9 @@ export class AgentLoop {
       rootDelivery: this.rootDeliveryFor(root),
       owner,
       stopReason: null,
+      announcedToWebui: false,
+      dispatchTask: null,
+      announcementGate: null,
     };
   }
 
@@ -3368,6 +3564,12 @@ export class AgentLoop {
       slot.state = "running";
       slot.acceptingSteer = false;
       slot.stopReason = null;
+      if (
+        slot.announcedToWebui
+        && slot.root.metadata?.webui_queue_dequeued !== true
+      ) {
+        await this.publishWebuiMessageDequeued(slot.root);
+      }
     }
     try {
       await this.withTerminalTurn(
@@ -3696,13 +3898,23 @@ export class AgentLoop {
           || this.goalRuntime.hasWorkReservation(effectiveKey)
           || this.scheduledGoalSessions.has(effectiveKey)
           || (goal?.status === "active" && (this.activeTasks.get(effectiveKey)?.length ?? 0) > 0)
-        );
+      );
       if (shouldPersistGoalInbox) {
+        let enqueuedEntry: GoalTurnInboxEntry | null = null;
         try {
-          await this.goalRuntime.enqueueUserMessage(effectiveKey, msg);
+          enqueuedEntry = await this.goalRuntime.enqueueUserMessage(effectiveKey, msg);
+          if (isWebuiChatComposerQueueMessage(msg)) {
+            await this.publishWebuiMessageQueued(msg, { visible: true });
+          }
           await this.publishWebuiMessageAccepted(msg);
           void this.dispatchNextGoalWork(effectiveKey);
         } catch (error) {
+          if (enqueuedEntry && isWebuiChatComposerQueueMessage(msg)) {
+            await this.goalRuntime.removeUnreservedInboxEntry(
+              effectiveKey,
+              enqueuedEntry.id,
+            ).catch(() => undefined);
+          }
           const reason = error instanceof GoalRuntimeError ? error.code : "goal_inbox_unavailable";
           await this.publishWebuiMessageRejected(msg, reason);
         }
@@ -3742,12 +3954,23 @@ export class AgentLoop {
       });
       const owner = Symbol("turn-slot-owner");
       const slot = this.createTurnSlot(root, route, owner);
+      const visibleQueueItem = hadEarlierSessionWork
+        && !ownsGoalReservation
+        && isWebuiChatComposerQueueMessage(root);
+      if (visibleQueueItem) slot.announcementGate = createTurnSlotAnnouncementGate();
+      if (ownsGoalReservation && isWebuiChatComposerQueueMessage(root)) {
+        slot.announcedToWebui = true;
+      }
       slots.push(slot);
       this.turnSlots.set(effectiveKey, slots);
-      if (hadEarlierSessionWork) await this.publishWebuiMessageQueued(root);
       const task = makeCancelableDispatchTask(
-        (isCancelled, signal) => this.dispatchSlot(effectiveKey, slot, isCancelled, signal),
+        async (isCancelled, signal) => {
+          if (slot.announcementGate) await slot.announcementGate.promise;
+          if (isCancelled()) return;
+          await this.dispatchSlot(effectiveKey, slot, isCancelled, signal);
+        },
       );
+      slot.dispatchTask = task;
       const list = this.activeTasks.get(effectiveKey) ?? [];
       list.push(task);
       this.activeTasks.set(effectiveKey, list);
@@ -3760,6 +3983,29 @@ export class AgentLoop {
           void this.dispatchNextGoalWork(effectiveKey);
         })
         .catch(() => undefined);
+      if (hadEarlierSessionWork) {
+        if (visibleQueueItem) slot.announcedToWebui = true;
+        try {
+          await this.publishWebuiMessageQueued(root, { visible: visibleQueueItem });
+        } catch {
+          slot.announcedToWebui = false;
+          slot.state = "closed";
+          slot.announcementGate?.open();
+          this.removeTurnSlot(effectiveKey, slot);
+          const active = this.activeTasks.get(effectiveKey) ?? [];
+          const remaining = active.filter((candidate) => candidate !== task);
+          if (remaining.length) this.activeTasks.set(effectiveKey, remaining);
+          else this.activeTasks.delete(effectiveKey);
+          task.cancel();
+          try {
+            await this.publishWebuiMessageRejected(root, "turn_start_failed", slot);
+          } catch {
+            // The original queue publication error remains the dispatch result.
+          }
+          continue;
+        }
+      }
+      slot.announcementGate?.open();
     }
   }
 

@@ -1,6 +1,6 @@
 /** Agent chat slice tests. */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { MemmyAgentSessionSummary, MemmyAgentSidebarState } from "../../api/memmy-agent-client.js";
+import type { MemmyAgentSessionSummary, MemmyAgentSidebarState, WebuiQueuedMessage } from "../../api/memmy-agent-client.js";
 import type { PendingAttachment } from "../agent-composer-state.js";
 import {
   agentReducer,
@@ -48,6 +48,19 @@ function goalState(status: "active" | "paused" | "blocked" | "usage_limited" | "
   } as const;
 }
 
+function queuedWire(
+  clientRequestId: string,
+  text: string,
+  queuedAt: string,
+): WebuiQueuedMessage {
+  return {
+    client_request_id: clientRequestId,
+    text,
+    media_urls: [],
+    queued_at: queuedAt
+  };
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
 });
@@ -65,6 +78,151 @@ describe("agent chat slice", () => {
     });
 
     expect(next).toBe(state);
+  });
+
+  it("projects only visible queued items without changing messages or task state", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/sessionsLoaded", sessions });
+    const first = queuedWire("queue-1", "第一条", "2026-08-09T12:00:00.000Z");
+    const second = queuedWire("queue-2", "第二条", "2026-08-09T12:00:01.000Z");
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "message_queued", chat_id: "chat-1", client_request_id: "queue-1", item: first }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "message_accepted", chat_id: "chat-1", client_request_id: "queue-1" }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "message_queued", chat_id: "chat-1", client_request_id: "queue-2", item: second }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "message_queued", chat_id: "chat-1", client_request_id: "queue-1", item: first }
+    });
+
+    expect(state.queuedMessagesByChatId["chat-1"]?.map((item) => item.clientRequestId))
+      .toEqual(["queue-1", "queue-2"]);
+    expect(state.messagesByChatId["chat-1"]).toBeUndefined();
+    expect(state.optimisticSendingByChatId["chat-1"]).toBeUndefined();
+    expect(state.optimisticTasksByChatId["chat-1"]).toBeUndefined();
+
+    state = agentReducer(state, {
+      type: "agent/queueItemRemoveStarted",
+      chatId: "chat-1",
+      clientRequestId: "queue-1"
+    });
+    expect(state.queuedMessagesByChatId["chat-1"]?.map((item) => item.status))
+      .toEqual(["removing", "queued"]);
+    state = agentReducer(state, {
+      type: "agent/queueItemRemoveFailed",
+      chatId: "chat-1",
+      clientRequestId: "queue-1",
+      error: { id: "queue-error", source: "queue", message: "home.queue.removeFailed", createdAt: 1 }
+    });
+    expect(state.queuedMessagesByChatId["chat-1"]?.map((item) => item.status))
+      .toEqual(["queued", "queued"]);
+    expect(state.operationErrorsBySurface.chat?.source).toBe("queue");
+
+    state = agentReducer(state, { type: "agent/sessionsLoaded", sessions: [] });
+    expect(state.queuedMessagesByChatId["chat-1"]).toBeUndefined();
+  });
+
+  it("replaces only the snapshot chat and promotes started items exactly once", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/sessionsLoaded", sessions });
+    const background = queuedWire("background", "后台排队", "2026-08-09T12:00:02.000Z");
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "message_queued", chat_id: "chat-2", client_request_id: "background", item: background }
+    });
+    const later = queuedWire("later", "稍后", "2026-08-09T12:00:03.000Z");
+    const earlier = queuedWire("earlier", "较早", "2026-08-09T12:00:01.000Z");
+    const started = queuedWire("started", "已经开始", "2026-08-09T12:00:00.000Z");
+    const snapshot = {
+      event: "message_queue_snapshot",
+      chat_id: "chat-1",
+      items: [later, earlier],
+      started_items: [started]
+    } as const;
+
+    state = agentReducer(state, { type: "agent/wsEvent", event: snapshot });
+    state = agentReducer(state, { type: "agent/wsEvent", event: snapshot });
+
+    expect(state.queuedMessagesByChatId["chat-1"]?.map((item) => item.clientRequestId))
+      .toEqual(["earlier", "later"]);
+    expect(state.queuedMessagesByChatId["chat-2"]?.map((item) => item.clientRequestId))
+      .toEqual(["background"]);
+    expect(state.messagesByChatId["chat-1"]?.filter((message) => message.clientRequestId === "started"))
+      .toHaveLength(1);
+    expect(state.currentChatId).toBeNull();
+  });
+
+  it("removes a dequeued background item and never duplicates its optimistic user message", () => {
+    let state = agentReducer(initialAgentState, {
+      type: "agent/historyLoading",
+      sessionKey: "websocket:chat-1",
+      chatId: "chat-1",
+      requestId: "focus-chat-1"
+    });
+    const item = queuedWire("racing", "竞态问题", "2026-08-09T12:00:00.000Z");
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "message_queued", chat_id: "chat-2", client_request_id: "racing", item }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "queue_remove_result",
+        chat_id: "chat-2",
+        client_request_id: "racing",
+        outcome: "already_dequeued"
+      }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "message_dequeued", chat_id: "chat-2", client_request_id: "racing", item }
+    });
+
+    expect(state.currentChatId).toBe("chat-1");
+    expect(state.queuedMessagesByChatId["chat-2"]).toBeUndefined();
+    expect(state.messagesByChatId["chat-2"]?.filter((message) => message.clientRequestId === "racing"))
+      .toHaveLength(1);
+  });
+
+  it("rolls back only the rejected queued request", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/sessionsLoaded", sessions });
+    const first = queuedWire("rejected", "失败问题", "2026-08-09T12:00:00.000Z");
+    const second = queuedWire("remaining", "保留问题", "2026-08-09T12:00:01.000Z");
+    for (const item of [first, second]) {
+      state = agentReducer(state, {
+        type: "agent/wsEvent",
+        event: {
+          event: "message_queued",
+          chat_id: "chat-1",
+          client_request_id: item.client_request_id,
+          item
+        }
+      });
+    }
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "message_dequeued", chat_id: "chat-1", client_request_id: "rejected", item: first }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "error",
+        chat_id: "chat-1",
+        client_request_id: "rejected",
+        detail: "provider rejected",
+        reason: "provider_error"
+      }
+    });
+
+    expect(state.queuedMessagesByChatId["chat-1"]?.map((item) => item.clientRequestId))
+      .toEqual(["remaining"]);
+    expect(state.messagesByChatId["chat-1"]?.some((message) => message.clientRequestId === "rejected"))
+      .toBe(false);
   });
 
   it("moves deleted Session and draft selections to the latest available default", () => {

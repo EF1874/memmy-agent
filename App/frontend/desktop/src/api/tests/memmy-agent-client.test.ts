@@ -1584,6 +1584,166 @@ describe("memmy-agent client", () => {
     expect(settled).toBe(true);
   });
 
+  it("returns the first composer queue confirmation and preserves its surface across reconnect", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const client = createMemmyAgentClient({
+      baseUrl: "https://agent.local:18980",
+      clientId: "frontend-test",
+      fetchFn: vi.fn(async () => json(bootstrap)) as typeof fetch,
+      webSocketFactory: (url) => {
+        const socket = new FakeSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+    const connection = await connectReady(client, sockets);
+    const clientRequestId = "33333333-3333-4333-8333-333333333333";
+    const submission = connection.submitMessage({
+      chatId: "chat-composer-queue",
+      content: "queue me",
+      clientRequestId
+    }, 1);
+
+    expect(JSON.parse(sockets[0]!.sent.at(-1)!)).toMatchObject({
+      type: "message",
+      chat_id: "chat-composer-queue",
+      client_request_id: clientRequestId,
+      queue_surface: "chat_composer"
+    });
+    sockets[0]!.emit({
+      event: "message_queued",
+      chat_id: "chat-composer-queue",
+      client_request_id: clientRequestId,
+      item: {
+        client_request_id: clientRequestId,
+        text: "queue me",
+        media_urls: [],
+        queued_at: "2026-08-09T12:00:00.000Z"
+      }
+    });
+    await expect(submission).resolves.toEqual({ status: "queued" });
+
+    sockets[0]!.emitClose();
+    await vi.advanceTimersByTimeAsync(500);
+    sockets[1]!.emit({ event: "ready", chat_id: "ready-reconnect" });
+    expect(sockets[1]!.sent.map((frame) => JSON.parse(frame))).toContainEqual(expect.objectContaining({
+      type: "message",
+      chat_id: "chat-composer-queue",
+      client_request_id: clientRequestId,
+      queue_surface: "chat_composer"
+    }));
+    sockets[1]!.emit({
+      event: "message_accepted",
+      chat_id: "chat-composer-queue",
+      client_request_id: clientRequestId
+    });
+  });
+
+  it("returns accepted when a composer message starts immediately", async () => {
+    const sockets: FakeSocket[] = [];
+    const client = createMemmyAgentClient({
+      baseUrl: "https://agent.local:18980",
+      clientId: "frontend-test",
+      fetchFn: vi.fn(async () => json(bootstrap)) as typeof fetch,
+      webSocketFactory: (url) => {
+        const socket = new FakeSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+    const connection = await connectReady(client, sockets);
+    const clientRequestId = "44444444-4444-4444-8444-444444444444";
+    const submission = connection.submitMessage({
+      chatId: "chat-immediate",
+      content: "start now",
+      clientRequestId
+    }, 1);
+
+    sockets[0]!.emit({
+      event: "message_accepted",
+      chat_id: "chat-immediate",
+      client_request_id: clientRequestId
+    });
+    await expect(submission).resolves.toEqual({ status: "accepted" });
+  });
+
+  it("finishes a queued transport attempt when the item is removed", async () => {
+    const sockets: FakeSocket[] = [];
+    const client = createMemmyAgentClient({
+      baseUrl: "https://agent.local:18980",
+      clientId: "frontend-test",
+      fetchFn: vi.fn(async () => json(bootstrap)) as typeof fetch,
+      webSocketFactory: (url) => {
+        const socket = new FakeSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+    const connection = await connectReady(client, sockets);
+    const clientRequestId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const submission = connection.submitMessage({
+      chatId: "chat-remove-after-queue",
+      content: "remove after queue",
+      clientRequestId
+    }, 1);
+    sockets[0]!.emit({
+      event: "message_queued",
+      chat_id: "chat-remove-after-queue",
+      client_request_id: clientRequestId,
+      item: {
+        client_request_id: clientRequestId,
+        text: "remove after queue",
+        media_urls: [],
+        queued_at: "2026-08-09T12:00:00.000Z"
+      }
+    });
+    await expect(submission).resolves.toEqual({ status: "queued" });
+    expect((connection as unknown as { pendingMessageAttempts: Map<string, unknown> })
+      .pendingMessageAttempts.size).toBe(1);
+
+    sockets[0]!.emit({
+      event: "message_queue_removed",
+      chat_id: "chat-remove-after-queue",
+      client_request_id: clientRequestId
+    });
+    expect((connection as unknown as { pendingMessageAttempts: Map<string, unknown> })
+      .pendingMessageAttempts.size).toBe(0);
+  });
+
+  it("correlates a single queued-message removal result", async () => {
+    const sockets: FakeSocket[] = [];
+    const client = createMemmyAgentClient({
+      baseUrl: "https://agent.local:18980",
+      clientId: "frontend-test",
+      fetchFn: vi.fn(async () => json(bootstrap)) as typeof fetch,
+      webSocketFactory: (url) => {
+        const socket = new FakeSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+    const connection = await connectReady(client, sockets);
+    const clientRequestId = "55555555-5555-4555-8555-555555555555";
+    const removal = connection.removeQueuedMessage("chat-remove", clientRequestId, 1);
+    const frame = JSON.parse(sockets[0]!.sent.at(-1)!);
+    expect(frame).toMatchObject({
+      type: "queue_remove",
+      chat_id: "chat-remove",
+      client_request_id: clientRequestId
+    });
+
+    sockets[0]!.emit({
+      event: "queue_remove_result",
+      chat_id: "chat-remove",
+      request_id: frame.request_id,
+      client_request_id: clientRequestId,
+      ok: true,
+      outcome: "already_dequeued"
+    });
+    await expect(removal).resolves.toEqual({ outcome: "already_dequeued" });
+  });
+
   it("reconfirms queued messages across reconnects without exhausting retries", async () => {
     vi.useFakeTimers();
     const sockets: FakeSocket[] = [];

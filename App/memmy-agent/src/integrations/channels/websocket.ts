@@ -16,6 +16,11 @@ import type {
   GoalControlRequest,
   GoalControlResult,
 } from "../../core/agent-runtime/goal-runtime.js";
+import type {
+  RemoveQueuedWebuiMessageResult,
+  WebuiQueueMessageDescriptor,
+  WebuiQueueSnapshotDescriptor,
+} from "../../core/agent-runtime/loop.js";
 import { getMediaDir, getWorkspacePath } from "../../config/paths.js";
 import type { CronService } from "../../cron/service.js";
 import {
@@ -116,10 +121,17 @@ type WebuiUploadClassification = {
   extension: string;
   maxBytes: number;
 };
+type WebuiQueuedMessage = {
+  client_request_id: string;
+  text: string;
+  media_urls: WebuiMediaAttachment[];
+  queued_at: string;
+};
 type InflightWebuiMessageRequest = {
   digest: string;
   connections: Set<any>;
   queued: boolean;
+  queuedItem: WebuiQueuedMessage | null;
 };
 type WebSocketChannelOptions = {
   sessionManager?: any;
@@ -136,6 +148,13 @@ type WebSocketChannelOptions = {
   fileMemoryEnabled?: boolean;
   goalControlHandler?: (request: GoalControlRequest) => Promise<GoalControlResult>;
   activeGoalStopHandler?: (sessionKey: string) => Promise<boolean>;
+  getWebuiQueueSnapshot?: (
+    sessionKey: string,
+  ) => WebuiQueueSnapshotDescriptor | Promise<WebuiQueueSnapshotDescriptor>;
+  removeQueuedWebuiMessage?: (
+    sessionKey: string,
+    clientRequestId: string,
+  ) => RemoveQueuedWebuiMessageResult | Promise<RemoveQueuedWebuiMessageResult>;
 };
 type SessionDeletionServices = {
   cronService: CronService;
@@ -608,6 +627,7 @@ export class WebSocketChannel extends BaseChannel {
   webuiTitleService: WebuiTitleService | null = null;
   projectStore: ProjectStore | null = null;
   inflightWebuiMessageRequests = new Map<string, InflightWebuiMessageRequest>();
+  queueProjectionChains = new Map<string, Promise<void>>();
   sessionDeletionServices: SessionDeletionServices | null = null;
   projectDeletionCoordinators = new Map<string, Promise<string[]>>();
   projectDeletionRetryTimers = new Map<string, NodeJS.Timeout>();
@@ -616,6 +636,8 @@ export class WebSocketChannel extends BaseChannel {
   pendingProjectDeleteContinuation: Promise<void> | null = null;
   goalControlHandler: WebSocketChannelOptions["goalControlHandler"] = undefined;
   activeGoalStopHandler: WebSocketChannelOptions["activeGoalStopHandler"] = undefined;
+  getWebuiQueueSnapshot: WebSocketChannelOptions["getWebuiQueueSnapshot"] = undefined;
+  removeQueuedWebuiMessage: WebSocketChannelOptions["removeQueuedWebuiMessage"] = undefined;
   goalControlConnections = new Map<string, Set<any>>();
   dispatchingGoalControls = new Map<string, string>();
 
@@ -642,6 +664,8 @@ export class WebSocketChannel extends BaseChannel {
     this.closeBrowserChat = options.closeBrowserChat ?? config?.closeBrowserChat ?? null;
     this.goalControlHandler = options.goalControlHandler ?? config?.goalControlHandler;
     this.activeGoalStopHandler = options.activeGoalStopHandler ?? config?.activeGoalStopHandler;
+    this.getWebuiQueueSnapshot = options.getWebuiQueueSnapshot ?? config?.getWebuiQueueSnapshot;
+    this.removeQueuedWebuiMessage = options.removeQueuedWebuiMessage ?? config?.removeQueuedWebuiMessage;
     const workspacePath = options.workspacePath ?? config?.workspacePath ?? getWorkspacePath();
     this.workspacePath = path.resolve(String(workspacePath));
   }
@@ -730,6 +754,42 @@ export class WebSocketChannel extends BaseChannel {
     return `${sessionKey}\0${clientRequestId}`;
   }
 
+  private enqueueQueueProjection<T>(
+    sessionKey: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.queueProjectionChains.get(sessionKey) ?? Promise.resolve();
+    const result = previous.catch(() => undefined).then(operation);
+    const tail = result.then(() => undefined, () => undefined);
+    this.queueProjectionChains.set(sessionKey, tail);
+    void tail.then(() => {
+      if (this.queueProjectionChains.get(sessionKey) === tail) {
+        this.queueProjectionChains.delete(sessionKey);
+      }
+    });
+    return result;
+  }
+
+  private toWebuiQueuedMessage(
+    descriptor: WebuiQueueMessageDescriptor,
+  ): WebuiQueuedMessage {
+    return {
+      client_request_id: descriptor.clientRequestId,
+      text: visibleWebuiUserContent(descriptor.content),
+      media_urls: descriptor.media
+        .map((entry) => this.webuiMediaAttachmentForPath(entry, descriptor.sessionKey))
+        .filter((entry): entry is WebuiMediaAttachment => Boolean(entry)),
+      queued_at: new Date(descriptor.queuedAt).toISOString(),
+    };
+  }
+
+  private queueEventConnections(chatId: string, inflight?: InflightWebuiMessageRequest | null): Set<any> {
+    return new Set<any>([
+      ...(inflight?.connections ?? []),
+      ...(this.subscriptions.get(chatId) ?? []),
+    ]);
+  }
+
   private parseWebuiSessionTarget(value: unknown): WebuiSessionTarget | null {
     if (!value || typeof value !== "object" || Array.isArray(value)) return null;
     const target = value as Record<string, unknown>;
@@ -756,6 +816,7 @@ export class WebSocketChannel extends BaseChannel {
     language,
     target,
     modelPreset,
+    queueSurface,
   }: {
     chatId: string;
     content: string;
@@ -763,6 +824,7 @@ export class WebSocketChannel extends BaseChannel {
     language: WebuiLanguage | null;
     target: WebuiSessionTarget | null;
     modelPreset: string | null | undefined;
+    queueSurface: "chat_composer" | null;
   }): string {
     return crypto.createHash("sha256").update(JSON.stringify({
       chat_id: chatId,
@@ -771,6 +833,7 @@ export class WebSocketChannel extends BaseChannel {
       language,
       target,
       model_preset: modelPreset,
+      queue_surface: queueSurface,
     })).digest("hex");
   }
 
@@ -1002,6 +1065,24 @@ export class WebSocketChannel extends BaseChannel {
           ...(turnId ? { turn_id: turnId } : {}),
         };
     await this.safeSendTo(connection, payload);
+  }
+
+  async sendWebuiQueueSnapshot(connection: any, chatId: string): Promise<void> {
+    const sessionKey = this.canonicalSessionKeyForChatId(chatId);
+    if (!sessionKey || !this.getWebuiQueueSnapshot) return;
+    try {
+      await this.enqueueQueueProjection(sessionKey, async () => {
+        const snapshot = await this.getWebuiQueueSnapshot!(sessionKey);
+        await this.safeSendTo(connection, {
+          event: "message_queue_snapshot",
+          chat_id: chatId,
+          items: snapshot.items.map((item) => this.toWebuiQueuedMessage(item)),
+          started_items: snapshot.startedItems.map((item) => this.toWebuiQueuedMessage(item)),
+        });
+      });
+    } catch (error) {
+      console.warn("[websocket] queue snapshot failed", { sessionKey, error });
+    }
   }
 
   async hydrateAfterSubscribe(chatId: string): Promise<void> {
@@ -1878,6 +1959,7 @@ export class WebSocketChannel extends BaseChannel {
         if (this.sessionTurnBarrier) await this.sessionTurnBarrier(key, deleteOne);
         else await deleteOne();
       }
+      this.queueProjectionChains.delete(key);
     }
     removeWebuiSidebarSessionKeys(projectedKeys);
     for (const projectedKey of projectedKeys) {
@@ -2424,6 +2506,7 @@ export class WebSocketChannel extends BaseChannel {
     this.streamTextBuffers.clear();
     this.activeTurnIdByChatId.clear();
     this.inflightWebuiMessageRequests.clear();
+    this.queueProjectionChains.clear();
     this.sessionManager?.clearWebuiSessionBindingReservations?.();
     for (const timer of this.projectDeletionRetryTimers.values()) clearTimeout(timer);
     this.projectDeletionRetryTimers.clear();
@@ -2645,6 +2728,20 @@ export class WebSocketChannel extends BaseChannel {
     const clientRequestId = typeof rawClientRequestId === "string" && UUID_RE.test(rawClientRequestId)
       ? rawClientRequestId
       : null;
+    const queueSurface = envelope.queue_surface == null
+      ? null
+      : envelope.queue_surface === "chat_composer"
+        ? "chat_composer" as const
+        : undefined;
+    if (queueSurface === undefined) {
+      await this.sendWebuiRequestError(connection, {
+        chatId,
+        clientRequestId,
+        detail: "message_request_rejected",
+        reason: "queue_surface_invalid",
+      });
+      return;
+    }
     const existing = this.sessionManager?.get?.(sessionKey) as Session | null;
     if (!clientRequestId && (!existing || rawClientRequestId != null || envelope.target != null)) {
       await this.sendWebuiRequestError(connection, {
@@ -2708,6 +2805,7 @@ export class WebSocketChannel extends BaseChannel {
           language,
           target: normalizedTarget,
           modelPreset: requestedPreset,
+          queueSurface,
         })
       : null;
     if (existing && clientRequestId) {
@@ -2768,6 +2866,7 @@ export class WebSocketChannel extends BaseChannel {
             await this.sendEvent(connection, "message_queued", {
               chat_id: chatId,
               client_request_id: clientRequestId,
+              ...(inflight.queuedItem ? { item: inflight.queuedItem } : {}),
             });
           }
         }
@@ -2794,6 +2893,7 @@ export class WebSocketChannel extends BaseChannel {
         digest,
         connections: new Set([connection]),
         queued: false,
+        queuedItem: null,
       });
     }
     const metadata: Record<string, any> = {
@@ -2807,6 +2907,7 @@ export class WebSocketChannel extends BaseChannel {
       metadata.client_request_id = clientRequestId;
       metadata.webui_request_digest = digest;
     }
+    if (queueSurface) metadata.webui_queue_surface = queueSurface;
     if (language) metadata.webui_language = language;
     const mcpPresets: any[] = normalizeMcpPresetMentions(envelope.mcp_presets);
     if (!mcpPresets.length) mcpPresets.push(...normalizeMentionList(envelope.mcp_presets));
@@ -2855,6 +2956,73 @@ export class WebSocketChannel extends BaseChannel {
 
   async dispatchEnvelope(connection: any, clientId: string, envelope: Record<string, any>): Promise<void> {
     const type = envelope.type;
+    if (type === "queue_remove") {
+      const chatId = typeof envelope.chat_id === "string" && isValidGuiChatId(envelope.chat_id)
+        ? envelope.chat_id
+        : "";
+      const requestId = typeof envelope.request_id === "string" && UUID_RE.test(envelope.request_id)
+        ? envelope.request_id
+        : "";
+      const clientRequestId = typeof envelope.client_request_id === "string"
+        && UUID_RE.test(envelope.client_request_id)
+        ? envelope.client_request_id
+        : "";
+      const sessionKey = chatId ? this.canonicalSessionKeyForChatId(chatId) : null;
+      if (!chatId || !requestId || !clientRequestId || !sessionKey || !this.removeQueuedWebuiMessage) {
+        await this.safeSendTo(connection, {
+          event: "queue_remove_result",
+          chat_id: chatId,
+          request_id: requestId,
+          client_request_id: clientRequestId,
+          ok: false,
+          error: "invalid_request",
+        });
+        return;
+      }
+
+      let result: RemoveQueuedWebuiMessageResult;
+      try {
+        result = await this.removeQueuedWebuiMessage(sessionKey, clientRequestId);
+      } catch {
+        await this.safeSendTo(connection, {
+          event: "queue_remove_result",
+          chat_id: chatId,
+          request_id: requestId,
+          client_request_id: clientRequestId,
+          ok: false,
+          error: "remove_failed",
+        });
+        return;
+      }
+
+      const outcome = result === "already_dequeued" ? "already_dequeued" : "removed";
+      if (outcome === "removed") {
+        const key = this.webuiRequestKey(sessionKey, clientRequestId);
+        const inflight = this.inflightWebuiMessageRequests.get(key);
+        this.inflightWebuiMessageRequests.delete(key);
+        await this.enqueueQueueProjection(sessionKey, async () => {
+          const payload = {
+            event: "message_queue_removed",
+            chat_id: chatId,
+            client_request_id: clientRequestId,
+          };
+          const connections = new Set<any>([
+            connection,
+            ...this.queueEventConnections(chatId, inflight),
+          ]);
+          for (const target of connections) await this.safeSendTo(target, payload);
+        });
+      }
+      await this.safeSendTo(connection, {
+        event: "queue_remove_result",
+        chat_id: chatId,
+        request_id: requestId,
+        client_request_id: clientRequestId,
+        ok: true,
+        outcome,
+      });
+      return;
+    }
     if (type === "goal_control") {
       const chatId = typeof envelope.chat_id === "string" && isValidGuiChatId(envelope.chat_id)
         ? envelope.chat_id
@@ -3022,6 +3190,7 @@ export class WebSocketChannel extends BaseChannel {
       this.attachConnection(connection, chatId);
       await this.sendEvent(connection, "attached", { chat_id: chatId });
       await this.sendRunStatusSnapshot(connection, chatId);
+      await this.sendWebuiQueueSnapshot(connection, chatId);
       await this.hydrateAfterSubscribe(chatId);
       return;
     }
@@ -3263,12 +3432,46 @@ export class WebSocketChannel extends BaseChannel {
       const inflight = this.inflightWebuiMessageRequests.get(key);
       if (!inflight) return;
       inflight.queued = true;
+      const descriptor = message.metadata.webuiQueueItem as WebuiQueueMessageDescriptor | undefined;
+      const item = descriptor ? this.toWebuiQueuedMessage(descriptor) : null;
+      inflight.queuedItem = item;
       const payload = {
         event: "message_queued",
         chat_id: message.chatId,
         client_request_id: clientRequestId,
+        ...(item ? { item } : {}),
       };
-      for (const connection of inflight.connections) await this.safeSendTo(connection, payload);
+      if (!item) {
+        for (const connection of inflight.connections) await this.safeSendTo(connection, payload);
+        return;
+      }
+      await this.enqueueQueueProjection(requestSessionKey, async () => {
+        for (const connection of this.queueEventConnections(message.chatId, inflight)) {
+          await this.safeSendTo(connection, payload);
+        }
+      });
+      return;
+    }
+    if (message.metadata?.webuiMessageDequeued) {
+      const clientRequestId = String(message.metadata.clientRequestId ?? "");
+      const requestSessionKey = typeof message.metadata.webuiRequestSessionKey === "string"
+        ? message.metadata.webuiRequestSessionKey
+        : this.canonicalSessionKeyForChatId(message.chatId);
+      const descriptor = message.metadata.webuiQueueItem as WebuiQueueMessageDescriptor | undefined;
+      if (!clientRequestId || !requestSessionKey || !descriptor) return;
+      const key = this.webuiRequestKey(requestSessionKey, clientRequestId);
+      const inflight = this.inflightWebuiMessageRequests.get(key);
+      const payload = {
+        event: "message_dequeued",
+        chat_id: message.chatId,
+        client_request_id: clientRequestId,
+        item: this.toWebuiQueuedMessage(descriptor),
+      };
+      await this.enqueueQueueProjection(requestSessionKey, async () => {
+        for (const connection of this.queueEventConnections(message.chatId, inflight)) {
+          await this.safeSendTo(connection, payload);
+        }
+      });
       return;
     }
     if (message.metadata?.webuiMessageAccepted) {
