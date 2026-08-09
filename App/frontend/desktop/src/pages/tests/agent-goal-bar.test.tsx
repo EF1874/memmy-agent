@@ -306,11 +306,12 @@ describe("AgentGoalBar", () => {
       .every((button) => button.disabled)).toBe(true);
   });
 
-  it("locks the single-line, compact, popover, and reduced-motion style boundaries", () => {
+  it("locks the single-line, fluid objective, compact, popover, and reduced-motion style boundaries", () => {
     const styles = readFileSync(stylesSourcePath, "utf8");
     const goalStyles = styles.slice(styles.indexOf(".agent-goal-bar {"));
     expect(goalStyles).toContain("flex-wrap: nowrap;");
-    expect(goalStyles).toContain("flex: 0 1 16rem;");
+    expect(goalStyles).toContain("flex: 1 1 16rem;");
+    expect(goalStyles).not.toContain("max-width: 16rem;");
     expect(goalStyles).toContain('text-overflow: ellipsis;');
     expect(goalStyles).toContain('@container (max-width: 560px)');
     expect(goalStyles).toContain("flex-basis: 7rem;");
