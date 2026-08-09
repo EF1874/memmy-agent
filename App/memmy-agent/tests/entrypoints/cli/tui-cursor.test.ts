@@ -3,17 +3,17 @@ import { describe, expect, it } from "vitest";
 import { resolveComposerCursorPosition } from "../../../src/entrypoints/cli/tui-cursor.js";
 
 describe("TUI composer cursor", () => {
-  it("reuses one AgentLoop across turns and closes runtime tools on TUI cleanup", () => {
+  it("runs one bus-backed AgentLoop and closes runtime tools on TUI cleanup", () => {
     const tuiSource = readFileSync(
       new URL("../../../src/entrypoints/cli/tui.tsx", import.meta.url),
       "utf8",
     );
 
     expect(tuiSource).toContain(
-      "const loop = activeLoopRef.current ?? AgentLoop.fromConfig(config);",
+      "const loop = AgentLoop.fromConfig(config, bus);",
     );
     expect(tuiSource).toMatch(
-      /const cleanup = onceCleanup[\s\S]*?if \(activeLoop\) activeLoop\.stop\(\);[\s\S]*?loop\.closeRuntimeTools\(\)/,
+      /const cleanup = onceCleanup[\s\S]*?loop\.cancelActiveTasks\(sessionId\)[\s\S]*?loop\.stop\(\);[\s\S]*?loop\.closeRuntimeTools\(\)/,
     );
   });
 

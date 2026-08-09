@@ -1147,6 +1147,42 @@ describe("HomePage", () => {
     expect(onNewChatMessageSent).not.toHaveBeenCalled();
   });
 
+  it("does not clear the composer or add an optimistic user before send confirmation", async () => {
+    let confirmSend!: () => void;
+    const sendMessage = vi.fn(() => new Promise<void>((resolve) => {
+      confirmSend = resolve;
+    }));
+    const dispatch = vi.fn();
+    const clearComposer = vi.fn();
+    const submission = submitAgentComposerMessage({
+      chatId: "chat-1",
+      connection: {
+        getReadyGeneration: () => 1,
+        newChat: vi.fn(async () => ({ chatId: "unused-chat", modelPreset: "desktop-openai-gpt-5" })),
+        sendMessage
+      },
+      content: "等待正式接受",
+      pendingAttachments: [],
+      uploadAgentMedia: vi.fn(async () => []),
+      dispatch,
+      track: vi.fn(),
+      clearComposer
+    });
+
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledOnce());
+    expect(dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: "agent/userMessageQueued" }));
+    expect(clearComposer).not.toHaveBeenCalled();
+
+    confirmSend();
+    await expect(submission).resolves.toBe(true);
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({
+      type: "agent/userMessageQueued",
+      chatId: "chat-1",
+      content: "等待正式接受"
+    }));
+    expect(clearComposer).toHaveBeenCalledOnce();
+  });
+
   it("keeps the Goal command on the wire but shows only its objective", async () => {
     const sendMessage = vi.fn();
     const dispatch = vi.fn();

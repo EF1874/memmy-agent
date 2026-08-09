@@ -53,6 +53,20 @@ afterEach(() => {
 });
 
 describe("agent chat slice", () => {
+  it("treats message_queued as a transport-only event", () => {
+    const state = agentReducer(initialAgentState, { type: "agent/sessionsLoaded", sessions });
+    const next = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message_queued",
+        chat_id: "chat-1",
+        client_request_id: "11111111-1111-4111-8111-111111111111"
+      }
+    });
+
+    expect(next).toBe(state);
+  });
+
   it("moves deleted Session and draft selections to the latest available default", () => {
     const state: AgentState = {
       ...initialAgentState,

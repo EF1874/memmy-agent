@@ -11,6 +11,8 @@ export type InboundMessageInternal = {
   goalUpdatedAt: string;
 };
 
+export type TurnAdmissionMode = "queue" | "steer";
+
 function normalizeTimestamp(value: TimestampInput | null | undefined): Date {
   if (value instanceof Date) return new Date(value.getTime());
   if (value !== null && value !== undefined) {
@@ -33,6 +35,7 @@ export class InboundMessage {
   sessionKeyOverride: string | null;
   timestamp: Date;
   internal: InboundMessageInternal | null;
+  turnAdmission: TurnAdmissionMode;
   private explicitSessionKey!: string | null;
 
   constructor(init: {
@@ -49,6 +52,7 @@ export class InboundMessage {
     sessionKeyOverride?: string | null;
     timestamp?: TimestampInput | null;
     internal?: InboundMessageInternal | null;
+    turnAdmission?: TurnAdmissionMode;
   }) {
     this.channel = init.channel;
     this.chatId = init.chatId ?? "";
@@ -62,6 +66,7 @@ export class InboundMessage {
     this.sessionKeyOverride = init.sessionKeyOverride ?? null;
     this.timestamp = normalizeTimestamp(init.timestamp);
     this.internal = init.internal ?? null;
+    this.turnAdmission = init.turnAdmission ?? "queue";
     Object.defineProperty(this, "explicitSessionKey", {
       value: init.sessionKey ?? null,
       writable: true,

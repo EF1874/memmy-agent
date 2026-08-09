@@ -172,6 +172,71 @@ describe("WebSocket channel", () => {
     });
   });
 
+  it("acknowledges queued WebUI requests without accepting or duplicating them", async () => {
+    const bus = new MessageBus();
+    const channel = webuiChannel(bus);
+    const first = connection();
+    const duplicate = connection();
+    const chatId = "chat-queued";
+    const clientRequestId = "11111111-1111-4111-8111-111111111111";
+    const request = {
+      type: "message",
+      chat_id: chatId,
+      content: "queued work",
+      webui: true,
+      client_request_id: clientRequestId,
+      target: { kind: "standalone" },
+    };
+
+    await channel.dispatchEnvelope(first, "client-1", request);
+    expect(bus.inboundSize).toBe(1);
+    expect(channel.inflightWebuiMessageRequests.size).toBe(1);
+
+    await channel.send(new OutboundMessage({
+      channel: "websocket",
+      chatId,
+      content: "",
+      metadata: {
+        webuiMessageQueued: true,
+        webuiRequestSessionKey: `websocket:${chatId}`,
+        clientRequestId,
+      },
+    }));
+    const firstQueued = first.send.mock.calls
+      .map(([payload]) => JSON.parse(payload))
+      .find((event) => event.event === "message_queued");
+    expect(firstQueued).toEqual({
+      event: "message_queued",
+      chat_id: chatId,
+      client_request_id: clientRequestId,
+    });
+
+    await channel.dispatchEnvelope(duplicate, "client-2", request);
+    expect(bus.inboundSize).toBe(1);
+    const duplicateQueued = duplicate.send.mock.calls
+      .map(([payload]) => JSON.parse(payload))
+      .find((event) => event.event === "message_queued");
+    expect(duplicateQueued).toEqual({
+      event: "message_queued",
+      chat_id: chatId,
+      client_request_id: clientRequestId,
+    });
+
+    await channel.send(new OutboundMessage({
+      channel: "websocket",
+      chatId,
+      content: "",
+      metadata: {
+        webuiMessageAccepted: true,
+        webuiRequestSessionKey: `websocket:${chatId}`,
+        clientRequestId,
+      },
+    }));
+    expect(channel.inflightWebuiMessageRequests.size).toBe(0);
+    expect(first.send.mock.calls.map(([payload]) => JSON.parse(payload).event)).toContain("message_accepted");
+    expect(duplicate.send.mock.calls.map(([payload]) => JSON.parse(payload).event)).toContain("message_accepted");
+  });
+
   it("rejects new chat creation when no usable default model exists", async () => {
     const channel = new WebSocketChannel({}, new MessageBus(), {
       modelSelectionResolver: () => null,

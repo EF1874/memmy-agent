@@ -119,6 +119,7 @@ type WebuiUploadClassification = {
 type InflightWebuiMessageRequest = {
   digest: string;
   connections: Set<any>;
+  queued: boolean;
 };
 type WebSocketChannelOptions = {
   sessionManager?: any;
@@ -2722,13 +2723,19 @@ export class WebSocketChannel extends BaseChannel {
           return;
         }
         this.ensureAcceptedTranscript(chatId, clientRequestId, sessionKey);
-        await this.sendEvent(connection, "message_accepted", {
+        const key = this.webuiRequestKey(sessionKey, clientRequestId);
+        const inflight = this.inflightWebuiMessageRequests.get(key);
+        this.inflightWebuiMessageRequests.delete(key);
+        const payload = {
+          event: "message_accepted",
           chat_id: chatId,
           client_request_id: clientRequestId,
           model_preset: accepted.model_preset ?? null,
           model_provider: accepted.model_provider ?? null,
           model: accepted.model ?? null,
-        });
+        };
+        const connections = new Set([connection, ...(inflight?.connections ?? [])]);
+        for (const target of connections) await this.safeSendTo(target, payload);
         return;
       }
     }
@@ -2757,6 +2764,12 @@ export class WebSocketChannel extends BaseChannel {
           });
         } else {
           inflight.connections.add(connection);
+          if (inflight.queued) {
+            await this.sendEvent(connection, "message_queued", {
+              chat_id: chatId,
+              client_request_id: clientRequestId,
+            });
+          }
         }
         return;
       }
@@ -2780,6 +2793,7 @@ export class WebSocketChannel extends BaseChannel {
       this.inflightWebuiMessageRequests.set(requestKey, {
         digest,
         connections: new Set([connection]),
+        queued: false,
       });
     }
     const metadata: Record<string, any> = {
@@ -3216,22 +3230,56 @@ export class WebSocketChannel extends BaseChannel {
 
   override async send(message: OutboundMessage): Promise<void> {
     if (message.metadata?.webuiSessionWorkspaceLost) {
-      await this.broadcast(message.chatId, {
+      const clientRequestId = String(message.metadata.clientRequestId ?? "");
+      const requestSessionKey = typeof message.metadata.webuiRequestSessionKey === "string"
+        ? message.metadata.webuiRequestSessionKey
+        : this.canonicalSessionKeyForChatId(message.chatId);
+      const key = clientRequestId && requestSessionKey
+        ? this.webuiRequestKey(requestSessionKey, clientRequestId)
+        : null;
+      const inflight = key ? this.inflightWebuiMessageRequests.get(key) : null;
+      if (key) this.inflightWebuiMessageRequests.delete(key);
+      const payload = {
         event: "error",
         chat_id: message.chatId,
-        client_request_id: String(message.metadata.clientRequestId ?? ""),
+        client_request_id: clientRequestId,
         detail: "session_workspace_lost",
         reason: String(message.metadata.reason ?? "workspace_unavailable"),
-      });
+      };
+      if (inflight) {
+        for (const connection of inflight.connections) await this.safeSendTo(connection, payload);
+      } else {
+        await this.broadcast(message.chatId, payload);
+      }
+      return;
+    }
+    if (message.metadata?.webuiMessageQueued) {
+      const clientRequestId = String(message.metadata.clientRequestId ?? "");
+      const requestSessionKey = typeof message.metadata.webuiRequestSessionKey === "string"
+        ? message.metadata.webuiRequestSessionKey
+        : null;
+      if (!clientRequestId || !requestSessionKey) return;
+      const key = this.webuiRequestKey(requestSessionKey, clientRequestId);
+      const inflight = this.inflightWebuiMessageRequests.get(key);
+      if (!inflight) return;
+      inflight.queued = true;
+      const payload = {
+        event: "message_queued",
+        chat_id: message.chatId,
+        client_request_id: clientRequestId,
+      };
+      for (const connection of inflight.connections) await this.safeSendTo(connection, payload);
       return;
     }
     if (message.metadata?.webuiMessageAccepted) {
       const clientRequestId = String(message.metadata.clientRequestId ?? "");
       if (!clientRequestId) return;
-      const canonicalSessionKey = this.canonicalSessionKeyForChatId(message.chatId);
-      if (!canonicalSessionKey) return;
-      this.ensureAcceptedTranscript(message.chatId, clientRequestId, canonicalSessionKey);
-      const key = this.webuiRequestKey(canonicalSessionKey, clientRequestId);
+      const requestSessionKey = typeof message.metadata.webuiRequestSessionKey === "string"
+        ? message.metadata.webuiRequestSessionKey
+        : this.canonicalSessionKeyForChatId(message.chatId);
+      if (!requestSessionKey) return;
+      this.ensureAcceptedTranscript(message.chatId, clientRequestId, requestSessionKey);
+      const key = this.webuiRequestKey(requestSessionKey, clientRequestId);
       const inflight = this.inflightWebuiMessageRequests.get(key);
       this.inflightWebuiMessageRequests.delete(key);
       const payload = {
@@ -3250,9 +3298,11 @@ export class WebSocketChannel extends BaseChannel {
     if (message.metadata?.webuiMessageRejected) {
       const clientRequestId = String(message.metadata.clientRequestId ?? "");
       if (!clientRequestId) return;
-      const canonicalSessionKey = this.canonicalSessionKeyForChatId(message.chatId);
-      if (!canonicalSessionKey) return;
-      const key = this.webuiRequestKey(canonicalSessionKey, clientRequestId);
+      const requestSessionKey = typeof message.metadata.webuiRequestSessionKey === "string"
+        ? message.metadata.webuiRequestSessionKey
+        : this.canonicalSessionKeyForChatId(message.chatId);
+      if (!requestSessionKey) return;
+      const key = this.webuiRequestKey(requestSessionKey, clientRequestId);
       const inflight = this.inflightWebuiMessageRequests.get(key);
       this.inflightWebuiMessageRequests.delete(key);
       const payload = {

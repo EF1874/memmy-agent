@@ -2,9 +2,10 @@ import { Box, Text, render, useApp, useCursor, useInput, useStdout } from "ink";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import stringWidth from "string-width";
 import { AgentLoop } from "../../core/agent-runtime/loop.js";
+import { InboundMessage, MessageBus } from "../../core/runtime-messages/index.js";
 import { Config } from "../../config/schema.js";
 import { getConfigPath, getWorkspacePath } from "../../config/paths.js";
-import { withProgressCapabilities, type ProgressOptions } from "../../utils/progress-events.js";
+import type { ProgressOptions } from "../../utils/progress-events.js";
 import { VERSION } from "../../version.js";
 import { GuiTranscriptMirror } from "../frontend-bridge/gui-transcript-sync.js";
 import type { TerminalTarget } from "./commands.js";
@@ -903,7 +904,9 @@ function MemmyTui({ config, registerCleanup, sessionId, target, toolsets, versio
   const exitTriggerRef = useRef<"quit" | "interrupt">("quit");
   const { columns, rows } = useTerminalSize();
   const activeLoopRef = useRef<AgentLoop | null>(null);
+  const activeBusRef = useRef<MessageBus | null>(null);
   const activeAssistantIdRef = useRef<number | null>(null);
+  const streamedFinalPendingRef = useRef(false);
   const idRef = useRef(1);
   const [busy, setBusy] = useState(false);
   const [input, setInput] = useState("");
@@ -968,40 +971,17 @@ function MemmyTui({ config, registerCleanup, sessionId, target, toolsets, versio
   useEffect(() => {
     if (!busy) return;
     setNow(Date.now());
-    const id = setInterval(() => setNow(Date.now()), 250);
-    return () => clearInterval(id);
-  }, [busy]);
-
-  useEffect(() => {
-    const initialLoop = activeLoopRef.current ?? AgentLoop.fromConfig(config);
-    if (!initialLoop.guiTranscriptMirror) {
-      initialLoop.guiTranscriptMirror = new GuiTranscriptMirror(initialLoop.sessions, initialLoop.workspace);
-    }
-    activeLoopRef.current = initialLoop;
-    refreshCurrentModelLabel(initialLoop);
-    const cleanup = onceCleanup(async () => {
-      const activeLoop = activeLoopRef.current;
-      const loop = activeLoop ?? AgentLoop.fromConfig(config);
-      try {
-        await settleWithTimeout(
-          [loop.emitSessionEnd(null, sessionId, exitTriggerRef.current)],
-          5_000,
-        );
-      } finally {
-        if (activeLoop) activeLoop.stop();
-        await settleWithTimeout([
-          typeof (loop as any).closeRuntimeTools === "function"
-            ? loop.closeRuntimeTools()
-            : loop.closeMcp(),
-        ], 1_500);
-        if (activeLoopRef.current === activeLoop) activeLoopRef.current = null;
+    const id = setInterval(() => {
+      setNow(Date.now());
+      const loop = activeLoopRef.current;
+      const bus = activeBusRef.current;
+      if (loop && !loop.isSessionBusy(sessionId) && (bus?.inboundSize ?? 0) === 0) {
+        refreshCurrentModelLabel(loop);
+        finishTurn();
       }
-    });
-    registerCleanup(cleanup);
-    return () => {
-      void cleanup();
-    };
-  }, [config, refreshCurrentModelLabel, registerCleanup, sessionId]);
+    }, 250);
+    return () => clearInterval(id);
+  }, [busy, finishTurn, refreshCurrentModelLabel, sessionId]);
 
   const handleProgress = useCallback(
     async (content: string, opts: ProgressOptions = {}) => {
@@ -1020,8 +1000,86 @@ function MemmyTui({ config, registerCleanup, sessionId, target, toolsets, versio
     [appendMessage],
   );
 
+  useEffect(() => {
+    const bus = new MessageBus();
+    const loop = AgentLoop.fromConfig(config, bus);
+    if (!loop.guiTranscriptMirror) {
+      loop.guiTranscriptMirror = new GuiTranscriptMirror(loop.sessions, loop.workspace);
+    }
+    activeBusRef.current = bus;
+    activeLoopRef.current = loop;
+    refreshCurrentModelLabel(loop);
+    const outboundController = new AbortController();
+    const runPromise = loop.run().catch((error) => {
+      if (!outboundController.signal.aborted) {
+        appendMessage("system", `Error: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    });
+    const outboundPromise = (async () => {
+      while (!outboundController.signal.aborted) {
+        let message;
+        try {
+          message = await bus.consumeOutbound(outboundController.signal);
+        } catch {
+          return;
+        }
+        if (message.channel !== sessionParts[0] || String(message.chatId) !== sessionParts[1]) continue;
+        const metadata = message.metadata ?? {};
+        if (metadata.agentProgress) {
+          await handleProgress(message.content, metadata as ProgressOptions);
+          continue;
+        }
+        if (metadata.streamDelta) {
+          streamedFinalPendingRef.current = true;
+          appendAssistantDelta(message.content);
+          continue;
+        }
+        if (metadata.streamEnd) {
+          activeAssistantIdRef.current = null;
+          continue;
+        }
+        if (!message.content) {
+          activeAssistantIdRef.current = null;
+          streamedFinalPendingRef.current = false;
+          continue;
+        }
+        if (metadata.streamed && streamedFinalPendingRef.current) {
+          streamedFinalPendingRef.current = false;
+          activeAssistantIdRef.current = null;
+          continue;
+        }
+        appendMessage("assistant", message.content);
+        activeAssistantIdRef.current = null;
+      }
+    })();
+    const cleanup = onceCleanup(async () => {
+      try {
+        await loop.cancelActiveTasks(sessionId);
+        loop.stop();
+        outboundController.abort();
+        await settleWithTimeout([runPromise, outboundPromise], 1_500);
+        await settleWithTimeout(
+          [loop.emitSessionEnd(null, sessionId, exitTriggerRef.current)],
+          5_000,
+        );
+      } finally {
+        await settleWithTimeout([
+          typeof (loop as any).closeRuntimeTools === "function"
+            ? loop.closeRuntimeTools()
+            : loop.closeMcp(),
+        ], 1_500);
+        if (activeLoopRef.current === loop) activeLoopRef.current = null;
+        if (activeBusRef.current === bus) activeBusRef.current = null;
+      }
+    });
+    registerCleanup(cleanup);
+    return () => {
+      void cleanup();
+    };
+  }, [appendAssistantDelta, appendMessage, config, handleProgress, refreshCurrentModelLabel, registerCleanup, sessionId, sessionParts]);
+
   const submit = useCallback(
-    (value: string) => {
+    (value: string, turnAdmission: "queue" | "steer") => {
       const text = value.replace(/[\r\n]+/g, "").trim();
       setDraft("", 0);
       if (!text) return;
@@ -1031,50 +1089,28 @@ function MemmyTui({ config, registerCleanup, sessionId, target, toolsets, versio
         exit();
         return;
       }
-      if (busy) {
-        appendMessage("system", "The agent is still working; wait for the current turn to finish.");
-        return;
-      }
-
       const [channel, chatId] = sessionParts;
       appendMessage("user", text);
       setBusy(true);
-      setNotice("queued");
-      const startedAt = Date.now();
-      setTurnStartedAt(startedAt);
-      activeAssistantIdRef.current = null;
-      const loop = activeLoopRef.current ?? AgentLoop.fromConfig(config);
-      if (!loop.guiTranscriptMirror) {
-        loop.guiTranscriptMirror = new GuiTranscriptMirror(loop.sessions, loop.workspace);
+      setNotice(turnAdmission === "steer" ? "add to current turn requested" : "queued for next turn");
+      setTurnStartedAt((current) => current ?? Date.now());
+      const bus = activeBusRef.current;
+      if (!bus) {
+        appendMessage("system", "Error: agent runtime is not ready");
+        finishTurn();
+        return;
       }
-      activeLoopRef.current = loop;
-      void (async () => {
-        try {
-          const response = await loop.processDirect(text, {
-            sessionKey: sessionId,
-            channel,
-            chatId,
-            onProgress: withProgressCapabilities(handleProgress, {
-              fileEditEvents: true,
-              reasoning: true,
-              toolEvents: true,
-            }),
-            onStream: async (delta: string) => {
-              appendAssistantDelta(delta);
-            },
-            onStreamEnd: async () => undefined,
-          });
-          if (activeAssistantIdRef.current == null && response?.content) appendMessage("assistant", response.content);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          appendMessage("system", `Error: ${message}`);
-        } finally {
-          refreshCurrentModelLabel(loop);
-          finishTurn();
-        }
-      })();
+      void bus.publishInbound(new InboundMessage({
+        channel,
+        chatId,
+        senderId: "user",
+        content: text,
+        sessionKey: sessionId,
+        sessionKeyOverride: sessionId,
+        turnAdmission,
+      }));
     },
-    [appendAssistantDelta, appendMessage, busy, config, exit, finishTurn, handleProgress, refreshCurrentModelLabel, sessionId, sessionParts, setDraft],
+    [appendMessage, exit, finishTurn, sessionId, sessionParts, setDraft],
   );
 
   useInput((value, key) => {
@@ -1086,11 +1122,14 @@ function MemmyTui({ config, registerCleanup, sessionId, target, toolsets, versio
     }
 
     if (key.return) {
-      submit(inputRef.current);
+      submit(inputRef.current, "queue");
       return;
     }
 
-    if (busy) return;
+    if (key.tab) {
+      submit(inputRef.current, "steer");
+      return;
+    }
 
     const currentInput = inputRef.current;
     const currentCursor = inputCursorRef.current;
@@ -1169,7 +1208,7 @@ function MemmyTui({ config, registerCleanup, sessionId, target, toolsets, versio
     const text = value.replace(/\r/g, "");
     if (!text) return;
     if (text.includes("\n")) {
-      submit(currentInput.slice(0, currentCursor) + text.replace(/\n.*$/s, ""));
+      submit(currentInput.slice(0, currentCursor) + text.replace(/\n.*$/s, ""), "queue");
       return;
     }
 
@@ -1180,7 +1219,9 @@ function MemmyTui({ config, registerCleanup, sessionId, target, toolsets, versio
   const visibleMessages = messages.slice(-8);
   const elapsedMs = turnStartedAt ? now - turnStartedAt : 0;
   const ruleWidth = Math.max(0, columns - 2);
-  const inputPlaceholder = busy ? "agent is working..." : "Ask memmy, /quit to exit";
+  const inputPlaceholder = busy
+    ? "Enter: queue next turn · Tab: add to current turn"
+    : "Ask memmy, /quit to exit";
 
   return (
     <Box flexDirection="column" paddingX={1}>
@@ -1206,7 +1247,7 @@ function MemmyTui({ config, registerCleanup, sessionId, target, toolsets, versio
 
       <Box flexDirection="column">
         <ComposerInput
-          active={!busy}
+          active
           columns={columns}
           cursor={inputCursor}
           placeholder={inputPlaceholder}

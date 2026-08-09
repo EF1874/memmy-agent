@@ -367,7 +367,8 @@ export class SubagentManager {
         temperature: temperature ?? undefined,
         maxIterations: this.maxIterations,
         maxToolResultChars: this.maxToolResultChars,
-        maxIterationsMessage: "Task completed but no final response was generated.",
+        maxIterationsMessage: "The subagent reached its iteration limit before completing the task; its report may be incomplete.",
+        maxIterationsFinalPrompt: readTemplate("agent/subagent-max-iterations-final-response.md").trim(),
         errorMessage: null,
         failOnToolError: true,
         checkpointCallback: async (payload: Record<string, any>) => {

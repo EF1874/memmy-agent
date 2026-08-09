@@ -1536,6 +1536,98 @@ describe("memmy-agent client", () => {
     expect(connection.getRunStartedAt("chat-1")).toBeNull();
   });
 
+  it("keeps a queued message pending past the old result timeout until accepted", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const events: MemmyAgentWsEvent[] = [];
+    const client = createMemmyAgentClient({
+      baseUrl: "https://agent.local:18980",
+      clientId: "frontend-test",
+      fetchFn: vi.fn(async () => json(bootstrap)) as typeof fetch,
+      webSocketFactory: (url) => {
+        const socket = new FakeSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+    const connection = await connectReady(client, sockets, (event) => events.push(event));
+    const clientRequestId = "11111111-1111-4111-8111-111111111111";
+    let settled = false;
+    const pending = connection.sendMessage({
+      chatId: "chat-queued",
+      content: "wait in queue",
+      clientRequestId
+    }, 1).then(() => {
+      settled = true;
+    });
+
+    sockets[0]?.emit({
+      event: "message_queued",
+      chat_id: "chat-queued",
+      client_request_id: clientRequestId
+    });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(settled).toBe(false);
+    expect(events).toContainEqual(expect.objectContaining({
+      event: "message_queued",
+      chat_id: "chat-queued",
+      client_request_id: clientRequestId
+    }));
+    expect(events.some((event) => event.event === "message_confirmation_exhausted")).toBe(false);
+
+    sockets[0]?.emit({
+      event: "message_accepted",
+      chat_id: "chat-queued",
+      client_request_id: clientRequestId
+    });
+    await pending;
+    expect(settled).toBe(true);
+  });
+
+  it("reconfirms queued messages across reconnects without exhausting retries", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const client = createMemmyAgentClient({
+      baseUrl: "https://agent.local:18980",
+      clientId: "frontend-test",
+      fetchFn: vi.fn(async () => json(bootstrap)) as typeof fetch,
+      webSocketFactory: (url) => {
+        const socket = new FakeSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+    const connection = await connectReady(client, sockets);
+    const clientRequestId = "22222222-2222-4222-8222-222222222222";
+    const pending = connection.sendMessage({
+      chatId: "chat-queued",
+      content: "survive reconnects",
+      clientRequestId
+    }, 1);
+    sockets[0]?.emit({ event: "message_queued", chat_id: "chat-queued", client_request_id: clientRequestId });
+
+    for (let index = 0; index < 4; index += 1) {
+      sockets.at(-1)?.emitClose();
+      await vi.advanceTimersByTimeAsync(500);
+      expect(sockets).toHaveLength(index + 2);
+      const socket = sockets.at(-1)!;
+      socket.emit({ event: "ready", chat_id: `ready-${index}` });
+      const resent = socket.sent.map((item) => JSON.parse(item)).find((item) => item.type === "message");
+      expect(resent).toMatchObject({
+        chat_id: "chat-queued",
+        client_request_id: clientRequestId,
+      });
+      socket.emit({ event: "message_queued", chat_id: "chat-queued", client_request_id: clientRequestId });
+    }
+
+    sockets.at(-1)?.emit({
+      event: "message_accepted",
+      chat_id: "chat-queued",
+      client_request_id: clientRequestId
+    });
+    await expect(pending).resolves.toBeUndefined();
+  });
+
   it("queues only control frames while reconnecting and flushes them after ready", async () => {
     vi.useFakeTimers();
     const sockets: FakeSocket[] = [];

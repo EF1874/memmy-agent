@@ -121,7 +121,9 @@ describe("AgentRunner tool execution", () => {
     tools.register(new MutationOutcomeTool());
     const fileEditEvents: Record<string, any>[] = [];
     const progressCallback = withProgressCapabilities(
-      (_content, options) => fileEditEvents.push(...(options?.fileEditEvents ?? [])),
+      (_content, options) => {
+        fileEditEvents.push(...(options?.fileEditEvents ?? []));
+      },
       { fileEditEvents: true },
     );
 

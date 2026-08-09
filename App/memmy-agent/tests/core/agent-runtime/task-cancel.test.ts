@@ -508,7 +508,7 @@ describe("task cancellation", () => {
     }
   });
 
-  it("run routes follow-up messages into the active turn pending queue", async () => {
+  it("run routes explicit steer messages into the active turn pending queue", async () => {
     const loop = makeLoop();
     let entered!: () => void;
     const runnerEntered = new Promise<void>((resolve) => {
@@ -529,7 +529,13 @@ describe("task cancellation", () => {
     const running = loop.run();
     await loop.bus.publishInbound(new InboundMessage({ channel: "test", chatId: "c1", senderId: "u1", content: "first" }));
     await withTimeout(runnerEntered);
-    await loop.bus.publishInbound(new InboundMessage({ channel: "test", chatId: "c1", senderId: "u1", content: "second" }));
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "test",
+      chatId: "c1",
+      senderId: "u1",
+      content: "second",
+      turnAdmission: "steer",
+    }));
 
     const out = await withTimeout(loop.bus.consumeOutbound(), 2000);
     loop.stop();

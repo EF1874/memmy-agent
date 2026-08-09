@@ -1055,6 +1055,7 @@ interface PendingMessageAttempt {
   resultTimer: ReturnType<typeof setTimeout> | null;
   reconnectConfirmations: number;
   lastSentGeneration: number | null;
+  queued: boolean;
 }
 
 interface PendingInitialReady {
@@ -1199,7 +1200,8 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
       acknowledgementTimer: null,
       resultTimer: null,
       reconnectConfirmations: 0,
-      lastSentGeneration: null
+      lastSentGeneration: null,
+      queued: false
     };
     this.pendingMessageAttempts.set(key, attempt);
     attempt.resultTimer = setTimeout(() => {
@@ -1526,7 +1528,9 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
 
     this.emitEvent(normalized);
 
-    if (normalized.event === "message_accepted") {
+    if (normalized.event === "message_queued") {
+      this.markPendingMessageQueued(normalized);
+    } else if (normalized.event === "message_accepted") {
       this.resolvePendingMessageAttempt(normalized);
     } else if (normalized.event === "error") {
       this.rejectPendingMessageAttempt(normalized);
@@ -1726,6 +1730,10 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     this.sendMessageFrame(attempt.input, generation);
     attempt.lastSentGeneration = generation;
     if (attempt.acknowledgementTimer) clearTimeout(attempt.acknowledgementTimer);
+    if (attempt.queued) {
+      attempt.acknowledgementTimer = null;
+      return;
+    }
     attempt.acknowledgementTimer = setTimeout(() => {
       attempt.acknowledgementTimer = null;
       this.emitEvent({
@@ -1740,7 +1748,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
   private confirmPendingMessagesAfterReconnect(generation: number): void {
     for (const attempt of this.pendingMessageAttempts.values()) {
       if (attempt.lastSentGeneration === generation) continue;
-      if (attempt.reconnectConfirmations >= MAX_AUTOMATIC_MESSAGE_CONFIRMATIONS) {
+      if (!attempt.queued && attempt.reconnectConfirmations >= MAX_AUTOMATIC_MESSAGE_CONFIRMATIONS) {
         this.emitEvent({
           event: "message_confirmation_exhausted",
           chat_id: attempt.input.chatId,
@@ -1759,7 +1767,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
         }
         continue;
       }
-      attempt.reconnectConfirmations += 1;
+      if (!attempt.queued) attempt.reconnectConfirmations += 1;
       try {
         this.sendPendingMessageAttempt(attempt, generation);
       } catch {
@@ -1782,6 +1790,19 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     if (attempt.acknowledgementTimer) clearTimeout(attempt.acknowledgementTimer);
     if (attempt.resultTimer) clearTimeout(attempt.resultTimer);
     attempt.resolve();
+  }
+
+  private markPendingMessageQueued(event: MemmyAgentWsEvent): void {
+    if (!event.chat_id || !event.client_request_id) return;
+    const key = messageAttemptKey(event.chat_id, event.client_request_id);
+    const attempt = this.pendingMessageAttempts.get(key);
+    if (!attempt) return;
+    attempt.queued = true;
+    attempt.reconnectConfirmations = 0;
+    if (attempt.acknowledgementTimer) clearTimeout(attempt.acknowledgementTimer);
+    if (attempt.resultTimer) clearTimeout(attempt.resultTimer);
+    attempt.acknowledgementTimer = null;
+    attempt.resultTimer = null;
   }
 
   private rejectPendingMessageAttempt(event: MemmyAgentWsEvent): void {
