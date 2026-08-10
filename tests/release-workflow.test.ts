@@ -87,7 +87,12 @@ describe("GitHub Draft Release v2 workflow", () => {
     });
     expect(draftWorkflow.on.pull_request).toBeUndefined();
     expect(draftWorkflow.on.workflow_dispatch.inputs.version.required).toBe(true);
-    expect(draftWorkflow.on.workflow_dispatch.inputs.dry_run.default).toBe(true);
+    expect(draftWorkflow.on.workflow_dispatch.inputs.preflight_level.default).toBe("smoke");
+    expect(draftWorkflow.on.workflow_dispatch.inputs.preflight_level.options).toEqual([
+      "smoke",
+      "full",
+    ]);
+    expect(draftWorkflow.on.workflow_dispatch.inputs.create_draft.default).toBe(false);
     expect(draftJob.if).toContain("github.event.pull_request.merged == true");
     expect(draftJob.if).toContain("startsWith(github.event.pull_request.head.ref, 'release/v')");
 
@@ -98,9 +103,12 @@ describe("GitHub Draft Release v2 workflow", () => {
     );
     expect(resolve).toContain('version="${BASH_REMATCH[1]}"');
     expect(resolve).toContain('target_sha="$PR_MERGE_SHA"');
+    expect(resolve).toContain('preflight_level="full"');
+    expect(resolve).toContain('create_draft="true"');
     expect(resolve).toContain('version="$MANUAL_VERSION"');
-    expect(resolve).toContain('dry_run="true"');
-    expect(resolve).toContain("dry_run=$dry_run");
+    expect(resolve).toContain('if [[ "$CREATE_DRAFT_INPUT" == "true" ]]');
+    expect(resolve).toContain("preflight_level=$preflight_level");
+    expect(resolve).toContain("create_draft=$create_draft");
     expect(resolve).toContain("git/ref/heads/main");
   });
 
@@ -120,6 +128,8 @@ describe("GitHub Draft Release v2 workflow", () => {
     expect(verify).toContain("git fetch --no-tags origin main");
     expect(verify).toContain('git cat-file -e "$TARGET_SHA^{commit}"');
     expect(verify).toContain('git merge-base --is-ancestor "$TARGET_SHA" origin/main');
+    expect(verify).toContain("Release target missing");
+    expect(verify).toContain("Release target is not on main");
     expect(verify).toContain('git checkout --detach "$TARGET_SHA"');
     expect(verify).toContain('test "$(git rev-parse HEAD)" = "$TARGET_SHA"');
   });
@@ -129,15 +139,19 @@ describe("GitHub Draft Release v2 workflow", () => {
     expect(verify).toContain("require('./package.json').version");
     expect(verify).toContain('= "$VERSION"');
     expect(verify).toContain("npm run version:check");
+    expect(verify).toContain("Root version mismatch");
+    expect(verify).toContain("Release version metadata mismatch");
   });
 
   it("refuses duplicate tags/releases and never forces publication", () => {
     expect(
       draftSteps.find((step) => step.name === "Check for an existing tag or release")?.if,
-    ).toBe("${{ steps.release.outputs.dry_run != 'true' }}");
+    ).toBe("${{ steps.release.outputs.preflight_level == 'full' }}");
     const duplicateCheck = draftScript("Check for an existing tag or release");
     expect(duplicateCheck).toContain("git ls-remote --exit-code --tags");
     expect(duplicateCheck).toContain('gh release view "$TAG"');
+    expect(duplicateCheck).toContain("Release tag already exists");
+    expect(duplicateCheck).toContain("Release already exists");
     expect(duplicateCheck).not.toContain("--force");
     expect(draftSource).toContain("gh release create");
     expect(draftSource).toContain("--draft");
@@ -146,10 +160,18 @@ describe("GitHub Draft Release v2 workflow", () => {
   });
 
   it("downloads all four OSS artifacts and verifies Content-MD5", () => {
+    expect(draftSteps.find((step) => step.name === "Download and verify OSS artifacts")?.if).toBe(
+      "${{ steps.release.outputs.preflight_level == 'full' }}",
+    );
     const download = draftScript("Download and verify OSS artifacts");
     expect(download).toContain("curl --fail --location --retry 5 --retry-all-errors");
     expect(download).toContain("Content-MD5");
-    expect(download).toContain('test -s "release-assets/$artifact"');
+    expect(download).toContain("Installer asset is missing");
+    expect(download).toContain("Installer checksum header missing");
+    expect(download).toContain("Installer download failed");
+    expect(download).toContain("Installer checksum mismatch");
+    expect(download).toContain('[[ ! -s "release-assets/$artifact" ]]');
+    expect(download).toContain("Installer download is empty");
     expect(download.match(/Memmy-\$VERSION-/g)).toHaveLength(4);
     expect(download).toContain("MD5SUMS.txt");
     expect(download).toContain("SHA256SUMS.txt");
@@ -157,20 +179,36 @@ describe("GitHub Draft Release v2 workflow", () => {
 
   it("records independently auditable commits, PRs, files, versions, and assets", () => {
     for (const stepName of [
-      "Download and verify OSS artifacts",
       "Build release notes",
       "Build auditable release evidence",
-      "Create draft release and upload every asset",
-      "Record the manual publish boundary",
     ]) {
       expect(draftSteps.find((step) => step.name === stepName)?.if).toBe(
-        "${{ steps.release.outputs.dry_run != 'true' }}",
+        "${{ steps.release.outputs.preflight_level == 'full' }}",
       );
     }
 
+    expect(
+      draftSteps.find((step) => step.name === "Create draft release and upload every asset")?.if,
+    ).toBe("${{ steps.release.outputs.create_draft == 'true' }}");
+    expect(draftSteps.find((step) => step.name === "Record the manual publish boundary")?.if).toBe(
+      "${{ steps.release.outputs.create_draft == 'true' }}",
+    );
+
+    expect(draftScript("Resolve previous stable release tag")).toContain(
+      'git fetch --force origin "refs/tags/v*:refs/tags/v*"',
+    );
+    expect(draftScript("Resolve previous stable release tag")).toContain(
+      "Release version is not newer",
+    );
+    expect(draftScript("Build release notes")).toContain("Release notes generation failed");
     const evidence = draftScript("Build auditable release evidence");
     expect(evidence).toContain("compare/${compare_base}...${TARGET_SHA}");
     expect(evidence).toContain("commits/${commit_sha}/pulls");
+    expect(evidence).toContain("Release compare failed");
+    expect(evidence).toContain("Release compare is truncated");
+    expect(evidence).toContain("Release diff is too large");
+    expect(evidence).toContain("Release compare target mismatch");
+    expect(evidence).toContain("Pull request evidence failed");
     expect(evidence).toContain("memmy.release.evidence.v2");
     expect(evidence).toContain("changedFiles");
     expect(evidence).toContain("versionFiles");
@@ -189,6 +227,9 @@ describe("GitHub Draft Release v2 workflow", () => {
     expect(create).toContain("cleanup_draft_release()");
     expect(create).toContain('draft_created=1');
     expect(create).toContain('gh release delete "$TAG" --cleanup-tag --yes');
+    expect(create).toContain("Draft Release creation failed");
+    expect(create).toContain("Draft asset upload failed");
+    expect(create).toContain("Automatic recovery");
     expect(create.indexOf("gh release create")).toBeLessThan(create.indexOf("draft_created=1"));
     expect(create.indexOf("draft_created=1")).toBeLessThan(create.indexOf("gh release upload"));
     expect(create).toContain("trap - EXIT");
@@ -206,14 +247,15 @@ describe("GitHub Draft Release v2 workflow", () => {
     const boundary = draftScript("Record the manual publish boundary");
     expect(boundary).toContain("This workflow intentionally stops before Publish.");
     expect(boundary).toContain("A human must audit");
+    expect(boundary).toContain("|| printf");
   });
 
-  it("keeps fork manual testing side-effect free by default", () => {
-    const dryRun = draftScript("Record dry-run result");
-    expect(draftSteps.find((step) => step.name === "Record dry-run result")?.if).toBe(
-      "${{ steps.release.outputs.dry_run == 'true' }}",
+  it("keeps fork manual testing side-effect free unless create_draft is explicit", () => {
+    const preflight = draftScript("Record preflight result");
+    expect(draftSteps.find((step) => step.name === "Record preflight result")?.if).toBe(
+      "${{ steps.release.outputs.create_draft != 'true' }}",
     );
-    expect(dryRun).toContain("No tag, Release, assets, or external publication was created.");
-    expect(dryRun).toContain("Set dry_run=false only when intentionally creating a Draft Release.");
+    expect(preflight).toContain("No tag, Release, assets, or external publication was created.");
+    expect(preflight).toContain("Set create_draft=true only when intentionally creating a Draft Release.");
   });
 });
