@@ -7,8 +7,11 @@ const srcDir = resolve(__dirname, "..", "..");
 
 const allowedSourceFiles = new Set([
   "i18n/messages.ts",
+  "i18n/error-notice-messages.ts",
   "lib/nickname.ts",
   "pages/memory/skill-demo-data.ts",
+  // Provider aliases are identifiers used for logo matching, not visible UI copy.
+  "components/model-provider-logo.tsx",
   // English ui coverage tests.
   "dev-agent-preview.tsx"
 ]);

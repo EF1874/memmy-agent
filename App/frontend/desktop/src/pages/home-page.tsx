@@ -20,6 +20,7 @@ import {
 import type { AnalyticsEvent } from "../analytics/analytics-events.js";
 import { buildOnboardingActivationEvent } from "../analytics/onboarding-analytics.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
+import { AgentModelSelector } from "../components/agent-model-selector.js";
 import { Memmy } from "../components/mascot/memmy.js";
 import { Select } from "../components/Select.js";
 import { formatMessage, type MessageKey, type MessageValues, zhCNMessages } from "../i18n/messages.js";
@@ -38,7 +39,7 @@ import { ImChannelTitleIcon, imChannelTitleDisplay } from "../integrations/integ
 import { useTaskBus, type TaskBusAgentMessage } from "../lib/task-bus.js";
 import type { AppAction } from "../state/app-actions.js";
 import { agentActions, appActions, createAgentOperationError } from "../state/app-actions.js";
-import { selectedModelPresetForScope, type AgentChatMessage, type AgentState } from "../state/agent-chat-slice.js";
+import { type AgentChatMessage, type AgentState } from "../state/agent-chat-slice.js";
 import { useAppState } from "../state/app-state.js";
 import { isComposingKeyboardEvent } from "../utils/keyboard.js";
 import {
@@ -49,6 +50,8 @@ import {
   type PendingFileAttachment,
   type PendingImage
 } from "../state/agent-composer-state.js";
+import { copyScopedModelSelection, resolveScopedModelSelection } from "../state/model-workspace.js";
+import { useModelWorkspace } from "../state/use-model-workspace.js";
 import {
   AgentCommandPalette,
   buildVisibleSlashCommands,
@@ -87,6 +90,8 @@ export { agentChatScopeKey, updateComposerDraftForScope };
 export { hydrateAgentThreadInBackground };
 export { isComposingKeyboardEvent } from "../utils/keyboard.js";
 export type { PendingAttachment, PendingAttachmentBase, PendingFileAttachment, PendingImage };
+
+const NEW_TASK_MODEL_SCOPE_KEY = "draft-new-task";
 
 const COMPOSER_MEDIA_STRIP_STYLE = { maxHeight: "min(7.5rem, 28vh)" } satisfies CSSProperties;
 const AGENT_WS_SAFE_FRAME_BYTES = 1024 * 1024;
@@ -433,11 +438,10 @@ export function ComposerSubmitButton(props: ComposerSubmitButtonProps) {
   const isCompact = props.variant === "compact";
   const squareSize = isCompact ? 10 : 11;
   const sendIconSize = isCompact ? 13 : 14;
-  const baseClassName = "inline-flex shrink-0 items-center justify-center leading-none rounded-full w-7 h-7 transition-colors";
   const stateClassName = props.disabled
     ? "bg-text-ink/25 text-white cursor-not-allowed"
     : "bg-action-sky text-white hover:bg-action-sky-hover shadow-sm cursor-pointer";
-  const className = `${baseClassName} ${stateClassName}`;
+  const className = `composer-action-submit ${stateClassName}`;
 
   return (
     <button
@@ -763,6 +767,7 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
 export function HomePage() {
   const { clients } = useApiClients();
   const { state, dispatch } = useAppState();
+  const { workspace: modelWorkspace, commit: commitModelWorkspace } = useModelWorkspace(state.modelConfig);
   const { language, t } = useTranslation();
   const { track } = useAnalytics();
   const { syncAgentConversation } = useTaskBus();
@@ -819,10 +824,13 @@ export function HomePage() {
   draftTargetRevisionRef.current = state.agent.draftTargetRevisionByScope;
   const asrRecorder = useAsrRecorder(clients?.asr, { emptyAudioMessage: t("home.asrEmptyAudio") });
   const chatScopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
-  const selectedModelPreset = selectedModelPresetForScope(state.agent, chatScopeKey);
-  const selectedChatModel = state.agent.modelPresets.find(
-    (preset) => preset.name === selectedModelPreset && preset.available
-  ) ?? null;
+  const modelSelectionScopeKey = state.agent.currentChatId ?? NEW_TASK_MODEL_SCOPE_KEY;
+  const modelWorkspaceMode = state.bootstrap?.app.userMode === "byok" ? "byok" : "account";
+  const resolvedConversationModel = resolveScopedModelSelection(
+    modelWorkspace,
+    modelWorkspaceMode,
+    modelSelectionScopeKey
+  );
   const input = composerDrafts[chatScopeKey] ?? "";
   const composerCommandDraft = parseComposerCommandDraft(input);
   const selectedComposerCommand = composerCommandDraft.command;
@@ -1446,8 +1454,7 @@ export function HomePage() {
     || currentSessionProjectBlocked
     || draftProjectBlocked
     || state.agent.connectionStatus !== "connected"
-    || state.agent.recoveringGeneration !== null
-    || selectedChatModel === null;
+    || state.agent.recoveringGeneration !== null;
   const composerStopDisabled = stopInFlight || Boolean(isCurrentGoalActive && goalMutationPending);
   const composerPrimaryAction = agentComposerPrimaryAction({
     isRunning: isCurrentAgentRunning,
@@ -1592,6 +1599,14 @@ export function HomePage() {
     if (runExactLocalSlashCommand(input)) {
       return;
     }
+    if (resolvedConversationModel.unavailable) {
+      dispatch(agentActions.operationFailed("chat", createAgentOperationError({
+        source: "send",
+        message: "home.modelSelector.unavailable",
+        ...(state.agent.currentChatId ? { chatId: state.agent.currentChatId } : { scopeKey: chatScopeKey })
+      })));
+      return;
+    }
     const sendScopeKey = chatScopeKey;
     if (messageSendLocksRef.current.has(sendScopeKey)) return;
     const clientRequestId = crypto.randomUUID();
@@ -1618,9 +1633,9 @@ export function HomePage() {
         chatSelectionEpoch: state.agent.chatSelectionEpoch,
         getChatSelectionEpoch: () => chatSelectionEpochRef.current,
         scopeKey: sendScopeKey,
-        modelPreset: selectedModelPreset,
         onNewChatMessageSent: clients?.memmyAgent
           ? (chatId) => {
+            commitModelWorkspace(copyScopedModelSelection(modelWorkspace, modelSelectionScopeKey, chatId));
             rememberFirstEncounterRelayChatIfArmed(chatId);
             taskStateCoordinator.refreshTaskState({
               expectedChatId: chatId,
@@ -2450,24 +2465,21 @@ export function HomePage() {
                   onPaste={handleComposerPaste}
                   className="w-full px-5 pt-4 pb-12 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40"
                 />
-                <div className="absolute bottom-3 right-4 flex items-center gap-2 z-10">
-                  <ChatModelSelector
-                    presets={state.agent.modelPresets}
-                    value={selectedModelPreset}
-                    disabled={isCurrentAgentRunning || messageSendInFlight}
-                    label={t("home.modelSelect")}
-                    onChange={(preset) => dispatch(
-                      agentActions.pendingModelPresetUpdated(chatScopeKey, preset)
-                    )}
+                <div className="composer-actions absolute bottom-3 right-4 z-50">
+                  <AgentModelSelector
+                    mode={modelWorkspaceMode}
+                    scopeKey={modelSelectionScopeKey}
+                    disabled={isCurrentAgentRunning || isCreatingChat || messageSendInFlight}
+                    seedConfig={state.modelConfig}
                   />
                   <button
                     type="button"
                     aria-label={t("home.media.menu")}
                     title={t("home.media.menu")}
                     onClick={openMediaFilePicker}
-                    className="p-1.5 inline-flex items-center justify-center rounded-lg text-text-ink/45 hover:bg-canvas-oat/60 hover:text-text-ink/65 transition-all cursor-pointer"
+                    className="composer-action-btn"
                   >
-                    <Plus size={15} />
+                    <Plus size={15} strokeWidth={2} />
                   </button>
                   <button
                     type="button"
@@ -2475,9 +2487,9 @@ export function HomePage() {
                     title={t("home.voiceInput")}
                     disabled={asrRecorder.isTranscribing || asrRecorder.isStarting}
                     onClick={toggleVoiceInput}
-                    className={`p-1.5 hover:bg-canvas-oat/60 rounded-lg transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${asrRecorder.isRecording ? "text-action-sky" : "text-text-ink/45 hover:text-text-ink/65"}`}
+                    className={`composer-action-btn${asrRecorder.isRecording ? " composer-action-btn--active" : ""}`}
                   >
-                    {asrRecorder.isRecording ? <Pause size={15} /> : <Mic size={15} />}
+                    {asrRecorder.isRecording ? <Pause size={15} strokeWidth={2} /> : <Mic size={15} strokeWidth={2} />}
                   </button>
                   <ComposerSubmitButton
                     isSending={isCurrentAgentRunning}
@@ -2656,26 +2668,23 @@ export function HomePage() {
                       }}
                       onKeyDown={handleComposerKeyDown}
                       onPaste={handleComposerPaste}
-                      className={`${isComposerSingleLine ? "agent-composer-input--single " : ""}${selectedComposerCommand ? "agent-composer-input--command-selected " : ""}block w-full pl-4 pr-20 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40`}
+                      className={`${isComposerSingleLine ? "agent-composer-input--single " : ""}${selectedComposerCommand ? "agent-composer-input--command-selected " : ""}block w-full pl-4 pr-36 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40`}
                     />
-                    <div className={`absolute right-2.5 flex items-center gap-1 z-10 ${centerComposerControls ? "top-1/2 -translate-y-1/2" : "bottom-2"}`}>
-                      <ChatModelSelector
-                        presets={state.agent.modelPresets}
-                        value={selectedModelPreset}
-                        disabled={isCurrentAgentRunning || messageSendInFlight}
-                        label={t("home.modelSelect")}
-                        onChange={(preset) => dispatch(
-                          agentActions.pendingModelPresetUpdated(chatScopeKey, preset)
-                        )}
+                    <div className={`composer-actions absolute right-2.5 z-50 ${centerComposerControls ? "top-1/2 -translate-y-1/2" : "bottom-2"}`}>
+                      <AgentModelSelector
+                        mode={modelWorkspaceMode}
+                        scopeKey={modelSelectionScopeKey}
+                        disabled={isCurrentAgentRunning || isCreatingChat || messageSendInFlight}
+                        seedConfig={state.modelConfig}
                       />
                       <button
                         type="button"
                         aria-label={t("home.media.menu")}
                         title={t("home.media.menu")}
                         onClick={openMediaFilePicker}
-                        className="p-1.5 text-text-ink/45 hover:text-text-ink/65 hover:bg-canvas-oat/60 rounded-lg transition-all cursor-pointer"
+                        className="composer-action-btn"
                       >
-                        <Plus size={15} />
+                        <Plus size={15} strokeWidth={2} />
                       </button>
                       <button
                         type="button"
@@ -2683,9 +2692,9 @@ export function HomePage() {
                         title={t("home.voiceInput")}
                         disabled={asrRecorder.isTranscribing || asrRecorder.isStarting}
                         onClick={toggleVoiceInput}
-                        className={`p-1.5 hover:bg-canvas-oat/60 rounded-lg transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${asrRecorder.isRecording ? "text-action-sky" : "text-text-ink/45 hover:text-text-ink/65"}`}
+                        className={`composer-action-btn${asrRecorder.isRecording ? " composer-action-btn--active" : ""}`}
                       >
-                        {asrRecorder.isRecording ? <Pause size={15} /> : <Mic size={15} />}
+                        {asrRecorder.isRecording ? <Pause size={15} strokeWidth={2} /> : <Mic size={15} strokeWidth={2} />}
                       </button>
                       <ComposerSubmitButton
                         isSending={composerPrimaryAction === "stop"}

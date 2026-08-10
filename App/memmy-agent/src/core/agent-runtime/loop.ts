@@ -21,6 +21,8 @@ import {
   type ResolvedModelSelection,
 } from "../../providers/model-catalog.js";
 import type { ProviderErrorCategory } from "../../providers/provider-error-classifier.js";
+
+type UserFacingModelErrorCategory = ProviderErrorCategory | "model_failed";
 import { makeReloadingProviderSnapshotLoader, makeReloadingToolsSnapshotLoader } from "../../providers/snapshot-loader.js";
 import {
   readWebuiSessionBinding,
@@ -207,6 +209,7 @@ export class TurnContext {
   history: Record<string, any>[] = [];
   initialMessages: Record<string, any>[] = [];
   finalContent: string | null = null;
+  errorDetail: string | null = null;
   finalContentStreamed = false;
   errorCategory: ProviderErrorCategory | null = null;
   usage: Record<string, number> = {};
@@ -2421,11 +2424,13 @@ export class AgentLoop {
       modelPreset,
       modelProvider,
       modelName,
+      modelError,
     }: {
       turnLatencyMs?: number;
       modelPreset?: string | null;
       modelProvider?: string | null;
       modelName?: string | null;
+      modelError?: { category: UserFacingModelErrorCategory; detail?: string } | null;
     } = {},
   ): void {
     let lastAssistantIdx: number | null = null;
@@ -2463,6 +2468,7 @@ export class AgentLoop {
       if (role === "assistant") lastAssistantIdx = session.messages.length - 1;
     }
     if (turnLatencyMs != null && lastAssistantIdx != null) session.messages[lastAssistantIdx].latency_ms = Math.max(0, Math.floor(turnLatencyMs));
+    if (modelError && lastAssistantIdx != null) session.messages[lastAssistantIdx].model_error = modelError;
     session.updatedAt = new Date().toISOString();
   }
 
@@ -2803,16 +2809,30 @@ export class AgentLoop {
     allMessages: Record<string, any>[],
     stopReason: string,
     hadInjections: boolean,
-    { turnLatencyMs = null, tools = null, finalContentStreamed = false, errorCategory = null, goalId = null, goalOutcome = null }: {
+    {
+      turnLatencyMs = null,
+      tools = null,
+      finalContentStreamed = false,
+      errorCategory = null,
+      errorDetail = null,
+      usage = null,
+      goalId = null,
+      goalOutcome = null,
+    }: {
       turnLatencyMs?: number | null;
       tools?: ToolRegistryInstance | null;
       finalContentStreamed?: boolean;
       errorCategory?: ProviderErrorCategory | null;
+      errorDetail?: string | null;
+      usage?: Record<string, number> | null;
       goalId?: string | null;
       goalOutcome?: GoalStatus | null;
     } = {},
   ): OutboundMessage | null {
     void allMessages;
+    const modelErrorCategory: UserFacingModelErrorCategory | null = stopReason === "error"
+      ? errorCategory ?? "model_failed"
+      : null;
     const messageTool = (tools ?? this.tools).get("message");
     if (messageTool instanceof MessageTool && messageTool.sentInTurn) {
       if (stopReason !== "maxIterations" && (!hadInjections || stopReason === "emptyFinalResponse")) return null;
@@ -2825,7 +2845,9 @@ export class AgentLoop {
         ...(msg.metadata ?? {}),
         ...(finalContentStreamed && !["error", "toolError"].includes(stopReason) ? { streamed: true } : {}),
         ...(turnLatencyMs != null ? { latencyMs: Math.trunc(turnLatencyMs) } : {}),
-        ...(errorCategory === "quota_exhausted" ? { modelErrorCategory: errorCategory } : {}),
+        ...(modelErrorCategory ? { modelErrorCategory } : {}),
+        ...(modelErrorCategory && errorDetail ? { modelErrorDetail: errorDetail } : {}),
+        ...(usage ? { usage } : {}),
         ...(goalId && goalOutcome ? { goalId, goalOutcome } : {}),
       },
     });
@@ -3220,6 +3242,7 @@ export class AgentLoop {
     if (ctx.abortSignal?.aborted || stopReason === "cancelled") {
       throw createTaskCancelledError();
     }
+    ctx.errorDetail = stopReason === "error" ? finalContent : null;
     ctx.finalContent = this.localizeUserFacingApiError(
       ctx.msg.channel,
       ctx.msg.metadata,
@@ -3272,6 +3295,9 @@ export class AgentLoop {
       modelPreset: ctx.modelSelection?.preset,
       modelProvider: ctx.actualModelProvider ?? ctx.modelSelection?.provider,
       modelName: ctx.actualModel ?? ctx.modelSelection?.model,
+      modelError: ctx.stopReason === "error"
+        ? { category: ctx.errorCategory ?? "model_failed", ...(ctx.errorDetail ? { detail: ctx.errorDetail } : {}) }
+        : null,
     });
     this.clearPendingUserTurn(ctx.session!);
     this.clearRuntimeCheckpoint(ctx.session!);
@@ -3349,6 +3375,8 @@ export class AgentLoop {
       tools: ctx.tools,
       finalContentStreamed: ctx.finalContentStreamed,
       errorCategory: ctx.errorCategory,
+      errorDetail: ctx.errorDetail,
+      usage: ctx.usage,
       goalId: ctx.goalIdForTurn,
       goalOutcome: ctx.goalOutcome,
     });
@@ -3546,6 +3574,9 @@ export class AgentLoop {
       modelPreset: modelSelection.preset,
       modelProvider: actualModelProvider ?? modelSelection.provider,
       modelName: actualModel ?? modelSelection.model,
+      modelError: stopReason === "error"
+        ? { category: errorCategory ?? "model_failed", ...(rawFinalContent ? { detail: rawFinalContent } : {}) }
+        : null,
     });
     this.clearRuntimeCheckpoint(session);
     session.enforceFileCap((messages) =>
@@ -3569,7 +3600,8 @@ export class AgentLoop {
     }
     const originMessageId = msg.metadata?.originMessageId;
     if (originMessageId) metadata.originMessageId = originMessageId;
-    if (errorCategory === "quota_exhausted") metadata.modelErrorCategory = errorCategory;
+    if (stopReason === "error") metadata.modelErrorCategory = errorCategory ?? "model_failed";
+    if (stopReason === "error" && rawFinalContent) metadata.modelErrorDetail = rawFinalContent;
     return new OutboundMessage({
       channel,
       chatId,

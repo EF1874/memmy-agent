@@ -6,6 +6,8 @@ import { Check, ChevronDown } from "lucide-react";
 export interface SelectOption {
   value: string;
   label: string;
+  /** Short label used only in the closed trigger; the menu keeps `label`. */
+  selectedLabel?: string;
   icon?: ReactNode;
   groupLabel?: string;
   disabled?: boolean;
@@ -27,6 +29,8 @@ export interface SelectProps {
   menuClassName?: string;
   labelClassName?: string;
   placement?: "top" | "bottom";
+  /** Optional footer rendered below options; receives a close helper. */
+  menuFooter?: (api: { close: () => void }) => ReactNode;
 }
 
 /** Handles select. */
@@ -129,13 +133,16 @@ export function Select(props: SelectProps) {
       <button
         id={controlId}
         type="button"
-        className={`select-control__button ${props.buttonClassName ?? ""}`}
+        className={`select-control__button ${
+          selectedOption?.disabled ? "select-control__button--disabled-value " : ""
+        }${props.buttonClassName ?? ""}`}
         role="combobox"
         aria-controls={listboxId}
         aria-expanded={open}
         aria-haspopup="listbox"
         aria-label={props.ariaLabel}
         aria-labelledby={props.label ? `${labelId} ${controlId}` : undefined}
+        title={selectedOption?.label}
         disabled={props.disabled}
         onClick={() => setOpen((value) => !value)}
         onKeyDown={handleKeyDown}
@@ -145,7 +152,7 @@ export function Select(props: SelectProps) {
             <span className="select-control__option-icon" aria-hidden="true">{selectedOption.icon}</span>
           )}
           <span className={`select-control__value ${selectedOption ? "" : "select-control__value--placeholder"}`}>
-            {selectedOption?.label ?? props.placeholder ?? ""}
+            {selectedOption?.selectedLabel ?? selectedOption?.label ?? props.placeholder ?? ""}
           </span>
         </span>
         <ChevronDown size={16} strokeWidth={2.2} className="select-control__icon" aria-hidden="true" />
@@ -175,11 +182,14 @@ export function Select(props: SelectProps) {
                     )}
                     <span className="select-control__option-label">{option.label}</span>
                   </span>
-                  {option.value === props.value && <Check size={14} strokeWidth={2.6} aria-hidden="true" />}
+                  {option.value === props.value && !option.disabled && (
+                    <Check size={14} strokeWidth={2.6} className="select-control__option-check" aria-hidden="true" />
+                  )}
                 </button>
               </div>
             );
           })}
+          {props.menuFooter?.({ close: () => setOpen(false) })}
         </div>
       )}
     </div>
