@@ -87,6 +87,7 @@ describe("GitHub Draft Release v2 workflow", () => {
     });
     expect(draftWorkflow.on.pull_request).toBeUndefined();
     expect(draftWorkflow.on.workflow_dispatch.inputs.version.required).toBe(true);
+    expect(draftWorkflow.on.workflow_dispatch.inputs.dry_run.default).toBe(true);
     expect(draftJob.if).toContain("github.event.pull_request.merged == true");
     expect(draftJob.if).toContain("startsWith(github.event.pull_request.head.ref, 'release/v')");
 
@@ -98,6 +99,8 @@ describe("GitHub Draft Release v2 workflow", () => {
     expect(resolve).toContain('version="${BASH_REMATCH[1]}"');
     expect(resolve).toContain('target_sha="$PR_MERGE_SHA"');
     expect(resolve).toContain('version="$MANUAL_VERSION"');
+    expect(resolve).toContain('dry_run="true"');
+    expect(resolve).toContain("dry_run=$dry_run");
     expect(resolve).toContain("git/ref/heads/main");
   });
 
@@ -129,6 +132,9 @@ describe("GitHub Draft Release v2 workflow", () => {
   });
 
   it("refuses duplicate tags/releases and never forces publication", () => {
+    expect(
+      draftSteps.find((step) => step.name === "Check for an existing tag or release")?.if,
+    ).toBe("${{ steps.release.outputs.dry_run != 'true' }}");
     const duplicateCheck = draftScript("Check for an existing tag or release");
     expect(duplicateCheck).toContain("git ls-remote --exit-code --tags");
     expect(duplicateCheck).toContain('gh release view "$TAG"');
@@ -150,6 +156,18 @@ describe("GitHub Draft Release v2 workflow", () => {
   });
 
   it("records independently auditable commits, PRs, files, versions, and assets", () => {
+    for (const stepName of [
+      "Download and verify OSS artifacts",
+      "Build release notes",
+      "Build auditable release evidence",
+      "Create draft release and upload every asset",
+      "Record the manual publish boundary",
+    ]) {
+      expect(draftSteps.find((step) => step.name === stepName)?.if).toBe(
+        "${{ steps.release.outputs.dry_run != 'true' }}",
+      );
+    }
+
     const evidence = draftScript("Build auditable release evidence");
     expect(evidence).toContain("compare/${compare_base}...${TARGET_SHA}");
     expect(evidence).toContain("commits/${commit_sha}/pulls");
@@ -188,5 +206,14 @@ describe("GitHub Draft Release v2 workflow", () => {
     const boundary = draftScript("Record the manual publish boundary");
     expect(boundary).toContain("This workflow intentionally stops before Publish.");
     expect(boundary).toContain("A human must audit");
+  });
+
+  it("keeps fork manual testing side-effect free by default", () => {
+    const dryRun = draftScript("Record dry-run result");
+    expect(draftSteps.find((step) => step.name === "Record dry-run result")?.if).toBe(
+      "${{ steps.release.outputs.dry_run == 'true' }}",
+    );
+    expect(dryRun).toContain("No tag, Release, assets, or external publication was created.");
+    expect(dryRun).toContain("Set dry_run=false only when intentionally creating a Draft Release.");
   });
 });

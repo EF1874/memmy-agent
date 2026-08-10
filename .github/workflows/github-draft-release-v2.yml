@@ -12,6 +12,11 @@ on:
         description: Release version without the v prefix (for example, 1.2.3)
         required: true
         type: string
+      dry_run:
+        description: Validate the release target without creating a tag or Draft Release
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: write
@@ -36,11 +41,13 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           MANUAL_VERSION: ${{ inputs.version }}
+          DRY_RUN_INPUT: ${{ inputs.dry_run || false }}
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
           PR_MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
         run: |
           set -euo pipefail
 
+          dry_run="false"
           if [[ "$EVENT_NAME" == "pull_request_target" ]]; then
             if [[ ! "$PR_HEAD_REF" =~ ^release/v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))$ ]]; then
               echo "Release branch must match release/vX.Y.Z" >&2
@@ -54,6 +61,9 @@ jobs:
             fi
           else
             version="$MANUAL_VERSION"
+            if [[ "$DRY_RUN_INPUT" == "true" ]]; then
+              dry_run="true"
+            fi
             target_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
           fi
 
@@ -69,8 +79,10 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
           echo "target_sha=$target_sha" >> "$GITHUB_OUTPUT"
+          echo "dry_run=$dry_run" >> "$GITHUB_OUTPUT"
 
       - name: Check for an existing tag or release
+        if: ${{ steps.release.outputs.dry_run != 'true' }}
         env:
           TAG: ${{ steps.release.outputs.tag }}
         run: |
@@ -134,6 +146,7 @@ jobs:
           echo "previous_tag=$previous_tag" >> "$GITHUB_OUTPUT"
 
       - name: Download and verify OSS artifacts
+        if: ${{ steps.release.outputs.dry_run != 'true' }}
         env:
           VERSION: ${{ steps.release.outputs.version }}
         run: |
@@ -174,6 +187,7 @@ jobs:
           (cd release-assets && sha256sum Memmy-* > SHA256SUMS.txt)
 
       - name: Build release notes
+        if: ${{ steps.release.outputs.dry_run != 'true' }}
         env:
           VERSION: ${{ steps.release.outputs.version }}
           TAG: ${{ steps.release.outputs.tag }}
@@ -230,6 +244,7 @@ jobs:
           EOF
 
       - name: Build auditable release evidence
+        if: ${{ steps.release.outputs.dry_run != 'true' }}
         env:
           VERSION: ${{ steps.release.outputs.version }}
           TAG: ${{ steps.release.outputs.tag }}
@@ -358,6 +373,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Create draft release and upload every asset
+        if: ${{ steps.release.outputs.dry_run != 'true' }}
         env:
           TAG: ${{ steps.release.outputs.tag }}
           TARGET_SHA: ${{ steps.release.outputs.target_sha }}
@@ -386,6 +402,7 @@ jobs:
           trap - EXIT
 
       - name: Record the manual publish boundary
+        if: ${{ steps.release.outputs.dry_run != 'true' }}
         env:
           TAG: ${{ steps.release.outputs.tag }}
         run: |
@@ -397,4 +414,20 @@ jobs:
             echo "- Draft: $release_url"
             echo "- This workflow intentionally stops before Publish."
             echo "- A human must audit the notes, evidence JSON, checksums, and installers before publishing."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Record dry-run result
+        if: ${{ steps.release.outputs.dry_run == 'true' }}
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+          TARGET_SHA: ${{ steps.release.outputs.target_sha }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Draft Release dry-run"
+            echo
+            echo "- Tag: $TAG"
+            echo "- Target SHA: $TARGET_SHA"
+            echo "- No tag, Release, assets, or external publication was created."
+            echo "- Set dry_run=false only when intentionally creating a Draft Release."
           } >> "$GITHUB_STEP_SUMMARY"
