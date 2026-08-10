@@ -65,10 +65,10 @@ function cancelableTaskWithSignal(): Promise<void> & { cancel: () => boolean; do
   return task;
 }
 
-async function withTimeout<T>(promise: Promise<T>, ms = 1000): Promise<T> {
+async function withTimeout<T>(promise: Promise<T>, ms = 1000, label = "operation"): Promise<T> {
   return await Promise.race([
     promise,
-    new Promise<T>((resolve, reject) => setTimeout(() => reject(new Error("timeout")), ms)),
+    new Promise<T>((resolve, reject) => setTimeout(() => reject(new Error(`timeout: ${label}`)), ms)),
   ]);
 }
 
@@ -302,11 +302,11 @@ describe("task cancellation", () => {
     const answer = await withTimeout(loop.bus.consumeOutbound());
     const turnEnd = await withTimeout(loop.bus.consumeOutbound());
     const idle = await withTimeout(loop.bus.consumeOutbound());
-    expect(running.metadata).toMatchObject({ goalStatusEvent: true, goalStatus: "running" });
+    expect(running.metadata).toMatchObject({ runStatusEvent: true, runStatus: "running" });
     expect(sessionUpdated.metadata).toMatchObject({ sessionUpdated: true, sessionUpdateScope: "thread" });
     expect(answer.content).toBe("hi");
     expect(turnEnd.metadata).toMatchObject({ turnEnd: true });
-    expect(idle.metadata).toMatchObject({ goalStatusEvent: true, goalStatus: "idle" });
+    expect(idle.metadata).toMatchObject({ runStatusEvent: true, runStatus: "idle" });
   });
 
   it("dispatch streaming preserves message metadata", async () => {
@@ -405,15 +405,15 @@ describe("task cancellation", () => {
         content: "/new",
         metadata: { webui: true },
       }));
-      const runningStatus = await withTimeout(loop.bus.consumeOutbound(), 2000);
-      const reset = await withTimeout(loop.bus.consumeOutbound(), 2000);
-      const resetTurnEnd = await withTimeout(loop.bus.consumeOutbound(), 2000);
-      const idleStatus = await withTimeout(loop.bus.consumeOutbound(), 2000);
+      const runningStatus = await withTimeout(loop.bus.consumeOutbound(), 2000, "new running status");
+      const reset = await withTimeout(loop.bus.consumeOutbound(), 2000, "new response");
+      const resetTurnEnd = await withTimeout(loop.bus.consumeOutbound(), 2000, "new turn_end");
+      const idleStatus = await withTimeout(loop.bus.consumeOutbound(), 2000, "new idle status");
 
-      expect(runningStatus.metadata).toMatchObject({ goalStatusEvent: true, goalStatus: "running" });
+      expect(runningStatus.metadata).toMatchObject({ runStatusEvent: true, runStatus: "running" });
       expect(reset.content).toBe("New session started.");
       expect(resetTurnEnd.metadata).toMatchObject({ turnEnd: true });
-      expect(idleStatus.metadata).toMatchObject({ goalStatusEvent: true, goalStatus: "idle" });
+      expect(idleStatus.metadata).toMatchObject({ runStatusEvent: true, runStatus: "idle" });
       expect(loop.pendingQueues.has("websocket:c1")).toBe(false);
 
       await loop.bus.publishInbound(new InboundMessage({
@@ -423,18 +423,18 @@ describe("task cancellation", () => {
         content: "hello after reset",
         metadata: { webui: true },
       }));
-      const reply = await withTimeout(loop.bus.consumeOutbound(), 2000);
+      const reply = await withTimeout(loop.bus.consumeOutbound(), 2000, "follow-up running status");
 
-      expect(reply.metadata).toMatchObject({ goalStatusEvent: true, goalStatus: "running" });
-      const answerSessionUpdated = await withTimeout(loop.bus.consumeOutbound(), 2000);
-      const answer = await withTimeout(loop.bus.consumeOutbound(), 2000);
-      const answerTurnEnd = await withTimeout(loop.bus.consumeOutbound(), 2000);
-      const answerIdle = await withTimeout(loop.bus.consumeOutbound(), 2000);
+      expect(reply.metadata).toMatchObject({ runStatusEvent: true, runStatus: "running" });
+      const answerSessionUpdated = await withTimeout(loop.bus.consumeOutbound(), 2000, "follow-up session_updated");
+      const answer = await withTimeout(loop.bus.consumeOutbound(), 2000, "follow-up response");
+      const answerTurnEnd = await withTimeout(loop.bus.consumeOutbound(), 2000, "follow-up turn_end");
+      const answerIdle = await withTimeout(loop.bus.consumeOutbound(), 2000, "follow-up idle status");
 
       expect(answerSessionUpdated.metadata).toMatchObject({ sessionUpdated: true, sessionUpdateScope: "thread" });
       expect(answer.content).toBe("after-new");
       expect(answerTurnEnd.metadata).toMatchObject({ turnEnd: true });
-      expect(answerIdle.metadata).toMatchObject({ goalStatusEvent: true, goalStatus: "idle" });
+      expect(answerIdle.metadata).toMatchObject({ runStatusEvent: true, runStatus: "idle" });
       expect(loop.runner.run).toHaveBeenCalledTimes(1);
     } finally {
       loop.stop();
@@ -442,7 +442,7 @@ describe("task cancellation", () => {
     }
   });
 
-  it("aborts the active websocket turn and restores pending context on /stop", async () => {
+  it("aborts the active websocket turn without synthesizing a final answer on /stop", async () => {
     let entered!: () => void;
     let seenSignal: AbortSignal | null = null;
     const providerEntered = new Promise<void>((resolve) => {
@@ -492,14 +492,15 @@ describe("task cancellation", () => {
 
       const signal = seenSignal as unknown as AbortSignal;
       expect(signal.aborted).toBe(true);
-      expect(first.metadata).toMatchObject({ goalStatusEvent: true, goalStatus: "running" });
+      expect(first.metadata).toMatchObject({ runStatusEvent: true, runStatus: "running" });
       expect(second.metadata).toMatchObject({ sessionUpdated: true, sessionUpdateScope: "thread" });
       expect(third.metadata).toMatchObject({ turnEnd: true });
-      expect(fourth.metadata).toMatchObject({ goalStatusEvent: true, goalStatus: "idle" });
+      expect(fourth.metadata).toMatchObject({ runStatusEvent: true, runStatus: "idle" });
       expect(fifth.content.toLowerCase()).toContain("stopped");
       const session = loop.sessions.getOrCreate("websocket:c1");
-      expect(session.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
-      expect(session.messages.at(-1)?.content).toBe("Error: Task interrupted before a response was generated.");
+      expect(session.messages.map((message) => message.role)).toEqual(["user"]);
+      expect(session.metadata.pendingUserTurn).toBeUndefined();
+      expect(session.metadata.runtimeCheckpoint).toBeUndefined();
       expect(session.messages.some((message) => message.content === "Error: task cancelled")).toBe(false);
     } finally {
       loop.stop();
@@ -507,7 +508,7 @@ describe("task cancellation", () => {
     }
   });
 
-  it("run routes follow-up messages into the active turn pending queue", async () => {
+  it("run routes explicit steer messages into the active turn pending queue", async () => {
     const loop = makeLoop();
     let entered!: () => void;
     const runnerEntered = new Promise<void>((resolve) => {
@@ -528,7 +529,13 @@ describe("task cancellation", () => {
     const running = loop.run();
     await loop.bus.publishInbound(new InboundMessage({ channel: "test", chatId: "c1", senderId: "u1", content: "first" }));
     await withTimeout(runnerEntered);
-    await loop.bus.publishInbound(new InboundMessage({ channel: "test", chatId: "c1", senderId: "u1", content: "second" }));
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "test",
+      chatId: "c1",
+      senderId: "u1",
+      content: "second",
+      turnAdmission: "steer",
+    }));
 
     const out = await withTimeout(loop.bus.consumeOutbound(), 2000);
     loop.stop();

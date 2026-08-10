@@ -390,6 +390,92 @@ describe("MemmyMemoryHook", () => {
     });
   });
 
+  it("uses only the Goal objective as the continuation Memory query and completion query", async () => {
+    const client = fakeClient();
+    const hook = new MemmyMemoryHook(client as any, { workspace: "/tmp/workspace" });
+    const objective = "Finish and verify persistent Goal mode";
+    const spec = {
+      sessionKey: "cli:goal-memory",
+      workspace: "/tmp/workspace",
+      contextWindowTokens: 4096,
+      internalTurnContext: { kind: "goal_continuation" as const, objective },
+    };
+    const messages = [
+      { role: "user", content: "Unrelated question asked between Goal turns" },
+      { role: "assistant", content: "Unrelated answer" },
+      {
+        role: "user",
+        content: "<goal_continuation>full private contract with budgets and audits</goal_continuation>",
+        internal_context: "goal_continuation",
+      },
+    ];
+
+    await hook.beforeRun(new AgentHookContext({ spec, messages }));
+    await hook.afterRun(new AgentHookContext({ spec }), {
+      finalContent: "Implemented and verified the next stage.",
+      messages: [
+        ...messages,
+        { role: "assistant", content: "Inspecting tests", reasoning_content: "Check current evidence." },
+        { role: "tool", name: "exec", tool_call_id: "call-1", content: "tests passed" },
+      ],
+      toolCalls: [{ id: "call-1", function: { name: "exec", arguments: "{}" } }],
+      stopReason: "completed",
+    });
+
+    expect((client.startTurn as any).mock.calls[0][1].query).toBe(objective);
+    expect((client.completeTurn as any).mock.calls[0][1]).toMatchObject({
+      query: objective,
+      answer: "Implemented and verified the next stage.",
+      status: "succeeded",
+    });
+    expect(JSON.stringify((client.startTurn as any).mock.calls[0][1])).not.toContain("private contract");
+    expect(JSON.stringify((client.completeTurn as any).mock.calls[0][1])).not.toContain("Unrelated question");
+  });
+
+  it("does not fall back to an older user message when continuation objective is missing", async () => {
+    const client = fakeClient();
+    const hook = new MemmyMemoryHook(client as any, { workspace: "/tmp/workspace" });
+    const spec = {
+      sessionKey: "cli:goal-memory-missing-objective",
+      workspace: "/tmp/workspace",
+      contextWindowTokens: 4096,
+      internalTurnContext: { kind: "goal_continuation" as const, objective: "   " },
+    };
+
+    await hook.beforeRun(new AgentHookContext({
+      spec,
+      messages: [
+        { role: "user", content: "Older real question" },
+        { role: "user", content: "private continuation", internal_context: "goal_continuation" },
+      ],
+    }));
+
+    expect(client.openSession).not.toHaveBeenCalled();
+    expect(client.startTurn).not.toHaveBeenCalled();
+    expect(hook.currentTurnId(spec.sessionKey)).toBeNull();
+  });
+
+  it("defensively skips an internal continuation when resolving a normal Turn query", async () => {
+    const client = fakeClient();
+    const hook = new MemmyMemoryHook(client as any, { workspace: "/tmp/workspace" });
+    const spec = {
+      sessionKey: "cli:goal-memory-defense",
+      workspace: "/tmp/workspace",
+      contextWindowTokens: 4096,
+    };
+
+    await hook.beforeRun(new AgentHookContext({
+      spec,
+      messages: [
+        { role: "user", content: "Current real user request" },
+        { role: "assistant", content: "Earlier answer" },
+        { role: "user", content: "private continuation", internal_context: "goal_continuation" },
+      ],
+    }));
+
+    expect((client.startTurn as any).mock.calls[0][1].query).toBe("Current real user request");
+  });
+
   it("closes sessions without subagent reporting", async () => {
     const client = fakeClient();
     const hook = new MemmyMemoryHook(client as any, { workspace: "/tmp/workspace" });

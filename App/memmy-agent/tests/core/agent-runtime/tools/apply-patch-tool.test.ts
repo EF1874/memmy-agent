@@ -207,6 +207,113 @@ describe("ApplyPatchTool structured edits", () => {
     expect(fs.existsSync(path.join(root, "added.txt"))).toBe(false);
   });
 
+  it("reports a same-content replacement as unchanged without writing or linting", async () => {
+    const root = workspace();
+    const target = path.join(root, "same.ts");
+    fs.writeFileSync(target, "export const value = 1;\n");
+    const writeSpy = vi.spyOn(fsp, "writeFile");
+    const reportFileMutation = vi.fn();
+
+    const result = await new ApplyPatchTool({ workspace: root }).execute({
+      edits: [{
+        path: "same.ts",
+        action: "replace",
+        oldText: "export const value = 1;",
+        newText: "export const value = 1;",
+      }],
+    }, { reportFileMutation });
+
+    expect(result).toBe("No changes made by patch:\n- unchanged same.ts");
+    expect(writeSpy).not.toHaveBeenCalled();
+    expect(reportFileMutation).toHaveBeenCalledWith({ path: target, changed: false });
+    expect(result).not.toContain("Lint results:");
+  });
+
+  it("classifies multiple edits by the final net result for each file", async () => {
+    const root = workspace();
+    const existing = path.join(root, "existing.txt");
+    fs.writeFileSync(existing, "a\n");
+    const reportFileMutation = vi.fn();
+
+    const result = await new ApplyPatchTool({ workspace: root }).execute({
+      edits: [
+        { path: "existing.txt", action: "replace", oldText: "a", newText: "b" },
+        { path: "existing.txt", action: "replace", oldText: "b", newText: "a" },
+        { path: "temporary.txt", action: "add", newText: "temporary" },
+        { path: "temporary.txt", action: "delete", oldText: "temporary\n" },
+      ],
+    }, { reportFileMutation });
+
+    expect(result).toBe(
+      "No changes made by patch:\n- unchanged existing.txt\n- unchanged temporary.txt",
+    );
+    expect(fs.readFileSync(existing, "utf8")).toBe("a\n");
+    expect(fs.existsSync(path.join(root, "temporary.txt"))).toBe(false);
+    expect(reportFileMutation.mock.calls).toEqual([
+      [{ path: existing, changed: false }],
+      [{ path: path.join(root, "temporary.txt"), changed: false }],
+    ]);
+  });
+
+  it("treats deleting and restoring an existing file as one net no-op", async () => {
+    const root = workspace();
+    const target = path.join(root, "restored.txt");
+    fs.writeFileSync(target, "original\n");
+
+    const result = await new ApplyPatchTool({ workspace: root }).execute({
+      edits: [
+        { path: "restored.txt", action: "delete", oldText: "original\n" },
+        { path: "restored.txt", action: "add", newText: "original" },
+      ],
+    });
+
+    expect(result).toBe("No changes made by patch:\n- unchanged restored.txt");
+    expect(fs.readFileSync(target, "utf8")).toBe("original\n");
+  });
+
+  it("writes and lints only changed files in a mixed patch", async () => {
+    const root = workspace();
+    const unchanged = path.join(root, "unchanged.json");
+    const changed = path.join(root, "changed.json");
+    fs.writeFileSync(unchanged, "{}\n");
+    fs.writeFileSync(changed, "{\"value\":1}\n");
+    const writeSpy = vi.spyOn(fsp, "writeFile");
+    const reportFileMutation = vi.fn();
+
+    const result = await new ApplyPatchTool({ workspace: root }).execute({
+      edits: [
+        { path: "unchanged.json", action: "replace", oldText: "{}", newText: "{}" },
+        { path: "changed.json", action: "replace", oldText: "1", newText: "2" },
+      ],
+    }, { reportFileMutation });
+
+    expect(result).toContain("- unchanged unchanged.json");
+    expect(result).toContain("- update changed.json (+1/-1)");
+    expect(result).not.toContain(`${unchanged}:`);
+    expect(result).toContain(`${changed}: passed`);
+    expect(writeSpy).toHaveBeenCalledTimes(1);
+    expect(writeSpy.mock.calls[0]?.[0]).toBe(changed);
+    expect(reportFileMutation).toHaveBeenCalledOnce();
+    expect(reportFileMutation).toHaveBeenCalledWith({ path: unchanged, changed: false });
+  });
+
+  it("previews all-unchanged dry runs without reporting a mutation", async () => {
+    const root = workspace();
+    const target = path.join(root, "same.txt");
+    fs.writeFileSync(target, "same\n");
+    const writeSpy = vi.spyOn(fsp, "writeFile");
+    const reportFileMutation = vi.fn();
+
+    const result = await new ApplyPatchTool({ workspace: root }).execute({
+      edits: [{ path: "same.txt", action: "replace", oldText: "same", newText: "same" }],
+      dryRun: true,
+    }, { reportFileMutation });
+
+    expect(result).toBe("Patch dry-run found no changes:\n- unchanged same.txt");
+    expect(writeSpy).not.toHaveBeenCalled();
+    expect(reportFileMutation).not.toHaveBeenCalled();
+  });
+
   it("rejects absolute and parent paths", async () => {
     const root = workspace();
     const tool = new ApplyPatchTool({ workspace: root });
@@ -340,5 +447,35 @@ describe("ApplyPatchTool structured edits", () => {
       edits: [{ path: "readback.ts", action: "replace", oldText: "1", newText: "2" }],
     })).rejects.toThrow("content mismatch");
     expect(fs.readFileSync(target, "utf8")).toBe("const value = 1;\n");
+  });
+
+  it("does not publish unchanged outcomes when another file fails and rolls back", async () => {
+    const root = workspace();
+    const unchanged = path.join(root, "unchanged.ts");
+    const changed = path.join(root, "changed.ts");
+    fs.writeFileSync(unchanged, "export const same = 1;\n");
+    fs.writeFileSync(changed, "export const value = 1;\n");
+    const originalReadFile = fsp.readFile.bind(fsp);
+    let encodedReads = 0;
+    vi.spyOn(fsp, "readFile").mockImplementation(async (...args) => {
+      const result = await originalReadFile(...args);
+      if (String(args[0]) === changed && typeof result === "string") {
+        encodedReads += 1;
+        if (encodedReads === 2) return `${result}changed`;
+      }
+      return result;
+    });
+    const reportFileMutation = vi.fn();
+
+    await expect(new ApplyPatchTool({ workspace: root }).execute({
+      edits: [
+        { path: "unchanged.ts", action: "replace", oldText: "same", newText: "same" },
+        { path: "changed.ts", action: "replace", oldText: "1", newText: "2" },
+      ],
+    }, { reportFileMutation })).rejects.toThrow("content mismatch");
+
+    expect(reportFileMutation).not.toHaveBeenCalled();
+    expect(fs.readFileSync(unchanged, "utf8")).toBe("export const same = 1;\n");
+    expect(fs.readFileSync(changed, "utf8")).toBe("export const value = 1;\n");
   });
 });

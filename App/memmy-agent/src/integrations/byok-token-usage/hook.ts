@@ -31,8 +31,13 @@ export class ByokTokenUsageHook extends AgentHook {
       const usage = normalizeByokTokenUsage(result?.usage ?? ctx.usage);
       if (!usage) return;
 
-      const modelId = resolveModelId(ctx);
-      const provider = resolveProviderName(ctx, modelId, this.options.resolveProviderName);
+      const modelId = stringOrNull(result?.response?.actualModel) ?? resolveModelId(ctx);
+      const provider = stringOrNull(result?.response?.actualProvider)
+        ?? resolveProviderName(ctx, modelId, this.options.resolveProviderName);
+      if (!provider) {
+        console.error("BYOK token usage hook skipped event without an actual provider");
+        return;
+      }
       if (provider === ACCOUNT_PROVIDER) return;
 
       const event: ByokTokenUsageEvent = {

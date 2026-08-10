@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import YAML from "yaml";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConfigLoadError, loadConfig, saveConfig } from "../../src/config/loader.js";
 import { WebSocketConfig } from "../../src/integrations/channels/websocket.js";
@@ -37,6 +38,66 @@ function configFile(contents = ""): string {
 }
 
 describe("config schema validation", () => {
+  it("serializes only providers with explicit connection settings", () => {
+    const emptyProviders = new Config().toObject().providers;
+    expect(emptyProviders).toEqual({});
+
+    const providers = new Config({
+      providers: {
+        openai: { apiType: "responses" },
+        anthropic: { apiKey: "anthropic-key" },
+        gemini: { apiBase: "https://gemini.example.test" },
+        deepseek: { extraHeaders: { "X-Test": "header" } },
+        zhipu: { extraBody: { trace: true } },
+        bedrock: { region: "us-east-1" },
+      },
+    }).toObject().providers;
+
+    expect(new Set(Object.keys(providers))).toEqual(new Set([
+      "bedrock",
+      "openai",
+      "anthropic",
+      "gemini",
+      "deepseek",
+      "zhipu",
+    ]));
+    expect(providers).not.toHaveProperty("qwen");
+  });
+
+  it("removes empty provider blocks on the next config save", () => {
+    const file = configFile(YAML.stringify({
+      providers: {
+        openai: {
+          apiKey: "openai-key",
+          apiBase: "https://openai.example.test/v1",
+        },
+        anthropic: {
+          apiKey: null,
+          apiBase: null,
+          apiType: "auto",
+          extraHeaders: null,
+          extraBody: null,
+        },
+        ollama: {},
+      },
+      channels: {
+        sendProgress: false,
+      },
+    }));
+    const config = loadConfig(file);
+
+    saveConfig(config, file);
+
+    const saved = YAML.parse(fs.readFileSync(file, "utf8"));
+    expect(saved.providers).toEqual({
+      openai: expect.objectContaining({
+        apiKey: "openai-key",
+        apiBase: "https://openai.example.test/v1",
+      }),
+    });
+    expect(saved.channels.sendProgress).toBe(false);
+  });
+
   it("defines and round-trips browser tool defaults", () => {
     const defaults = new BrowserToolsConfig();
     expect(defaults.toObject()).toEqual({
@@ -142,11 +203,12 @@ describe("config schema validation", () => {
     expect(fs.readFileSync(file, "utf8")).toBe(contents);
   });
 
-  it("fails loudly for invalid unrelated sections without rewriting them", () => {
+  it("fails loudly for invalid unrelated sections without rewriting the config", () => {
     const contents = "sessionDag:\n  debugLog: \"true\"\n";
     const file = configFile(contents);
 
     expect(() => loadConfig(file)).toThrow(ConfigLoadError);
+    expect(() => loadConfig(file)).toThrow(/sessionDag\.debugLog/);
     expect(fs.readFileSync(file, "utf8")).toBe(contents);
   });
 

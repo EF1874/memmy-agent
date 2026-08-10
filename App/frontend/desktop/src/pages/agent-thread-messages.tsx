@@ -2068,11 +2068,18 @@ function FileEditLine(props: { edit: AgentFileEdit; t: Translate }) {
   const status = props.edit.status ?? "editing";
   const isError = status === "error";
   const isDone = status === "done";
-  const labelKey = isError ? "agent.activity.failed" : isDone ? "agent.activity.edited" : "agent.activity.editing";
+  const isUnchanged = isDone && props.edit.unchanged === true;
+  const labelKey = isError
+    ? "agent.activity.failed"
+    : isUnchanged
+      ? "agent.activity.unchanged"
+      : isDone
+        ? "agent.activity.edited"
+        : "agent.activity.editing";
   const target = props.edit.path || "pending file edit";
   const added = props.edit.added ?? 0;
   const deleted = props.edit.deleted ?? 0;
-  const hasDiff = !props.edit.binary && (added > 0 || deleted > 0);
+  const hasDiff = !isUnchanged && !props.edit.binary && (added > 0 || deleted > 0);
   return (
     <div className={`agent-activity-timeline-item agent-activity-timeline-item--file-edit agent-activity-timeline-item--edit${isError ? " agent-activity-timeline-item--error" : ""}`}>
       <Pencil size={13} aria-hidden="true" className="agent-activity-timeline-item__icon" />
@@ -2087,7 +2094,9 @@ function FileEditLine(props: { edit: AgentFileEdit; t: Translate }) {
           ) : null}
           {props.edit.binary ? <span className="ml-2 text-text-ink/40">binary</span> : null}
         </p>
-        <p className="agent-activity-timeline__status sr-only">{status} · {props.edit.binary ? "binary" : `+${added} / -${deleted}`}</p>
+        <p className="agent-activity-timeline__status sr-only">
+          {isUnchanged ? "unchanged" : `${status} · ${props.edit.binary ? "binary" : `+${added} / -${deleted}`}`}
+        </p>
         {props.edit.error && <p className="agent-activity-timeline-item__error">{props.edit.error}</p>}
       </div>
     </div>
@@ -2225,13 +2234,15 @@ function toolEventName(event: AgentToolProgressEvent): string {
 
 function toolGroupLabel(items: ActivityRenderItem[], t: Translate): { text: string; added: number; deleted: number } {
   let edited = 0;
+  let unchanged = 0;
   let addedTotal = 0;
   let deletedTotal = 0;
   let explored = 0;
   let other = 0;
   for (const item of items) {
     if (item.type === "fileEdit") {
-      edited += 1;
+      if (item.edit.unchanged === true) unchanged += 1;
+      else edited += 1;
       addedTotal += item.edit.added ?? 0;
       deletedTotal += item.edit.deleted ?? 0;
       continue;
@@ -2249,7 +2260,10 @@ function toolGroupLabel(items: ActivityRenderItem[], t: Translate): { text: stri
   // Category labels only when the whole group IS that category — a mixed
   // group labeled "Explored 1 item" while holding 2 rows misreports the count.
   // Mixed groups always fall back to the total step tally.
-  const total = edited + explored + other;
+  const total = edited + unchanged + explored + other;
+  if (unchanged > 0 && unchanged === total) {
+    return { text: t("agent.activity.group.unchanged"), added: addedTotal, deleted: deletedTotal };
+  }
   if (edited > 0 && edited === total) {
     const text = edited === 1 ? t("agent.activity.group.editedOne") : t("agent.activity.group.edited", { count: edited });
     return { text, added: addedTotal, deleted: deletedTotal };

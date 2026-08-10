@@ -12,7 +12,7 @@ export * from "./web.js";
 export * from "./cron.js";
 export * from "./exec-session.js";
 export * from "./spawn.js";
-export * from "./long-task.js";
+export * from "./goal.js";
 export * from "./image-generation.js";
 export * from "./loader.js";
 export * from "./mcp.js";

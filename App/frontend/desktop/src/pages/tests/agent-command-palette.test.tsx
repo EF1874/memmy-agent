@@ -1,6 +1,6 @@
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { zhCNMessages } from "../../i18n/messages.js";
+import { enUSMessages, zhCNMessages } from "../../i18n/messages.js";
 import {
   AgentCommandPalette,
   buildVisibleSlashCommands,
@@ -62,6 +62,7 @@ describe("AgentCommandPalette", () => {
         { command: "/new", title: "New", description: "New chat", icon: "square-pen", argHint: "" },
         { command: "/status", title: "Status", description: "Show status", icon: "activity", argHint: "" },
         { command: "/history-dag", title: "History DAG", description: "Show history DAG", icon: "git-branch", argHint: "" },
+        { command: "/goal", title: "Goal", description: "Start goal", icon: "activity", argHint: "[status|create <objective>|pause]" },
         { command: "/plugin", title: "Plugin", description: "Plugin command", icon: "activity", argHint: "" }
       ],
       "zh-CN",
@@ -72,8 +73,19 @@ describe("AgentCommandPalette", () => {
       { command: "/new", title: "新对话", description: "停止当前任务，并开始一段全新的对话。", icon: "square-pen", argHint: "" },
       { command: "/status", title: "查看状态", description: "显示运行时、模型供应商和频道状态。", icon: "activity", argHint: "" },
       { command: "/history-dag", title: "查看历史 DAG", description: "查看当前会话的任务状态图。", icon: "git-branch", argHint: "" },
+      { command: "/goal", title: "开始长期目标", description: "让 Agent 将本次请求作为长期目标处理。", icon: "activity", argHint: "" },
       { command: "/plugin", title: "Plugin", description: "Plugin command", icon: "activity", argHint: "" }
     ]);
+  });
+
+  it("hides the Goal argument hint in non-Chinese palettes", () => {
+    const localized = localizeSlashCommands(
+      [{ command: "/goal", title: "Goal", description: "Start goal", icon: "activity", argHint: "[status|create <objective>|pause]" }],
+      "en-US",
+      (key) => enUSMessages[key]
+    );
+
+    expect(localized[0]).toMatchObject({ title: "Goal", description: "Start goal", argHint: "" });
   });
 
   it("renders command metadata as a listbox", () => {
@@ -92,6 +104,8 @@ describe("AgentCommandPalette", () => {
     expect(html).toContain("max-height:min(432px, calc(100vh - 260px))");
     expect(html).toContain("rounded-card");
     expect(html).toContain("rounded-btn px-2.5 py-2");
+    expect(html).toContain("shrink-0 whitespace-nowrap font-mono");
+    expect(html).toContain("min-w-0 flex-1 truncate text-xs");
     expect(html).toContain("font-mono text-xs font-semibold text-action-sky");
     expect(html).toContain("lucide-activity");
     expect(html).toContain("w-8 h-8");

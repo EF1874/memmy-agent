@@ -118,6 +118,35 @@ describe("WebuiTitleService", () => {
     });
   });
 
+  it("uses an explicitly resolved canonical Session key for GUI projections", async () => {
+    const sessions = new SessionManager(sessionRoot());
+    const sessionKey = "telegram:chat-1";
+    const session = sessions.getOrCreate(sessionKey);
+    session.metadata.webui = true;
+    session.metadata.webuiProjectId = null;
+    session.metadata.webuiWorkspaceCwd = fs.realpathSync(sessions.root);
+    session.addMessage("user", "请总结这段 Telegram 对话");
+    sessions.save(session);
+    const provider = titleProvider("Telegram 对话总结");
+    const { service, scheduled, recorder } = createService({ sessions, provider });
+
+    service.trackUserMessage({
+      chatId: "ext_projection",
+      sessionKey,
+      content: "请总结这段 Telegram 对话",
+      metadata: { webui: true },
+    });
+    service.onUserMessagePersisted("ext_projection");
+    await scheduled[0];
+
+    expect(sessions.loadSession(sessionKey)?.metadata[WEBUI_TITLE_METADATA_KEY]).toBe("Telegram 对话总结");
+    expect(sessions.loadSession("websocket:ext_projection")).toBeNull();
+    expect(recorder.recordAgentChatUsage).toHaveBeenCalledWith(expect.objectContaining({
+      chatId: "ext_projection",
+      sessionKey,
+    }));
+  });
+
   it("does not create a missing session or generate titles for non-WebUI sessions", async () => {
     const sessions = new SessionManager(sessionRoot());
     const provider = titleProvider("不应该生成");
@@ -162,6 +191,33 @@ describe("WebuiTitleService", () => {
 
     expect(provider.chatWithRetry).not.toHaveBeenCalled();
     expect(sessions.loadSession("websocket:chat-title")?.metadata[WEBUI_TITLE_METADATA_KEY]).toBe("用户手动标题");
+  });
+
+  it("generates a title from the objective of the first Goal command", async () => {
+    const sessions = new SessionManager(sessionRoot());
+    const session = sessions.getOrCreate("websocket:chat-goal");
+    session.metadata.webui = true;
+    session.metadata.webuiProjectId = null;
+    session.metadata.webuiWorkspaceCwd = fs.realpathSync(sessions.root);
+    session.addMessage("user", "/goal 编写亚洲流行文化网页", { commandMessage: true });
+    session.addMessage("assistant", "Goal created.", { commandMessage: true });
+    sessions.save(session);
+    const provider = titleProvider("亚洲流行文化网页");
+    const { service, scheduled } = createService({ sessions, provider });
+
+    service.trackUserMessage({
+      chatId: "chat-goal",
+      content: "/goal 编写亚洲流行文化网页",
+      metadata: { webui: true },
+    });
+    service.onUserMessagePersisted("chat-goal");
+    await scheduled[0];
+
+    expect(provider.chatWithRetry).toHaveBeenCalledTimes(1);
+    const request = provider.chatWithRetry.mock.calls[0]?.[0];
+    expect(request.messages[1].content).toContain("编写亚洲流行文化网页");
+    expect(request.messages[1].content).not.toContain("/goal");
+    expect(sessions.loadSession("websocket:chat-goal")?.metadata[WEBUI_TITLE_METADATA_KEY]).toBe("亚洲流行文化网页");
   });
 
   it("does not treat later user messages as a historical title generation trigger", async () => {

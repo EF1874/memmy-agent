@@ -172,7 +172,8 @@ const EMPTY_BYOK_TOKEN_USAGE: ByokTokenUsageSummary = {
   cachedInputTokens: 0,
   cacheCreationInputTokens: 0,
   updatedAt: null,
-  byKind: []
+  byKind: [],
+  byProvider: []
 };
 
 // Display order for both panels. Platform Cloud scenes omit embedding; BYOK

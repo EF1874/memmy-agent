@@ -34,6 +34,7 @@ import { decideTaskDoneNotification } from "../state/task-done-notification.js";
 import { maskAccountIdentifier } from "../utils/mask-account-identifier.js";
 import { openExternalUrl } from "../utils/open-url.js";
 import { isComposingKeyboardEvent } from "../utils/keyboard.js";
+import { ImChannelTitleIcon, imChannelTitleDisplay } from "../integrations/integration-meta.js";
 import { ImprovementProgramModal } from "./improvement-program-modal.js";
 import { writeMemorySubPage } from "./memory-page.js";
 import { SearchPalette } from "../components/search-palette.js";
@@ -366,9 +367,10 @@ export function AppFrame(props: AppFrameProps) {
       tasks: state.agent.tasks.map((task) => ({
         sessionIds: [task.chatId, task.sessionKey],
         isRunning: task.runStartedAt != null
+          || state.agent.goalStatesByChatId[task.chatId]?.status === "active"
       }))
     });
-  }, [state.agent.tasks, syncAgentTaskStatuses]);
+  }, [state.agent.goalStatesByChatId, state.agent.tasks, syncAgentTaskStatuses]);
 
   useEffect(() => {
     const current = new Set(state.agent.sessions.map((session) => session.key));
@@ -2315,6 +2317,7 @@ export function TaskRow(props: {
   const renaming = Boolean(props.renaming);
   const depth = props.depth ?? 0;
   const hasTaskStatus = props.task.runStartedAt != null || props.task.completedUnseen;
+  const imTitleDisplay = imChannelTitleDisplay(props.task.title);
   const projectIssueLabel = props.task.projectId == null || props.task.groupProjectId != null
     ? null
     : props.projectRegistryState === "corrupt"
@@ -2371,7 +2374,13 @@ export function TaskRow(props: {
           {archived ? (
             <span className="app-frame-task-row__title-row">
               <Archive size={14} className="app-frame-task-row__archive-icon" aria-hidden="true" />
-              <SidebarMarqueeText text={props.task.title} className="app-frame-task-title" />
+              {imTitleDisplay ? <ImChannelTitleIcon slug={imTitleDisplay.slug} name={imTitleDisplay.channelName} /> : null}
+              <SidebarMarqueeText text={imTitleDisplay?.title ?? props.task.title} className="app-frame-task-title" />
+            </span>
+          ) : imTitleDisplay ? (
+            <span className="app-frame-task-row__title-row">
+              <ImChannelTitleIcon slug={imTitleDisplay.slug} name={imTitleDisplay.channelName} />
+              <SidebarMarqueeText text={imTitleDisplay.title} className="app-frame-task-title" />
             </span>
           ) : (
             <SidebarMarqueeText text={props.task.title} className="app-frame-task-title" />

@@ -17,7 +17,7 @@ import { isIntegrationSetupDiagnosticError, logHiddenIntegrationSetupDiagnosticE
 import type { IntegrationsClient } from "../api/integrations-client.js";
 import type { IntegrationConnection } from "../integrations/connection-state.js";
 import type { IntegrationMeta } from "../integrations/integration-meta.js";
-import type { MemmyAgentRunStatusSnapshot, MemmyAgentSessionSnapshot, MemmyAgentSessionSummary, MemmyAgentSidebarState, MemmyAgentWebuiThread, MemmyAgentWsEvent, WebuiSessionTarget } from "../api/memmy-agent-client.js";
+import type { AgentGoalControlAction, ChatModelPreset, MemmyAgentRunStatusSnapshot, MemmyAgentSessionSnapshot, MemmyAgentSessionSummary, MemmyAgentSidebarState, MemmyAgentWebuiThread, MemmyAgentWsEvent, WebuiSessionTarget } from "../api/memmy-agent-client.js";
 import type { PendingAttachment } from "./agent-composer-state.js";
 import type {
   AgentAction,
@@ -250,6 +250,22 @@ export const agentActions = {
     return { type: "agent/bootstrapSucceeded", modelName };
   },
 
+  modelCatalogLoaded(presets: ChatModelPreset[], defaultPreset: string | null): AppAction {
+    return { type: "agent/modelCatalogLoaded", presets, defaultPreset };
+  },
+
+  pendingModelPresetUpdated(scopeKey: string, preset: string | null): AppAction {
+    return { type: "agent/pendingModelPresetUpdated", scopeKey, preset };
+  },
+
+  pendingModelPresetCleared(scopeKey: string): AppAction {
+    return { type: "agent/pendingModelPresetCleared", scopeKey };
+  },
+
+  modelSelectionCommitted(scopeKey: string, chatId: string, preset: string): AppAction {
+    return { type: "agent/modelSelectionCommitted", scopeKey, chatId, preset };
+  },
+
   connectionConnecting(): AppAction {
     return { type: "agent/connectionConnecting" };
   },
@@ -369,8 +385,16 @@ export const agentActions = {
     return { type: "agent/transientSendFailed", chatId };
   },
 
-  userMessageQueued(input: { chatId: string; content: string; media?: AgentChatMediaAttachment[]; focus?: boolean; deliveryUncertain?: boolean; target?: WebuiSessionTarget }): AppAction {
+  userMessageQueued(input: { chatId: string; content: string; media?: AgentChatMediaAttachment[]; focus?: boolean; deliveryUncertain?: boolean; target?: WebuiSessionTarget; clientRequestId?: string }): AppAction {
     return { type: "agent/userMessageQueued", ...input };
+  },
+
+  queueItemRemoveStarted(chatId: string, clientRequestId: string): AppAction {
+    return { type: "agent/queueItemRemoveStarted", chatId, clientRequestId };
+  },
+
+  queueItemRemoveFailed(chatId: string, clientRequestId: string, error: AgentOperationError): AppAction {
+    return { type: "agent/queueItemRemoveFailed", chatId, clientRequestId, error };
   },
 
   composerDraftUpdated(scopeKey: string, value: string): AppAction {
@@ -403,6 +427,19 @@ export const agentActions = {
 
   stopUnconfirmed(chatId: string): AppAction {
     return { type: "agent/stopUnconfirmed", chatId };
+  },
+
+  goalMutationStarted(input: {
+    chatId: string;
+    requestId: string;
+    goalId: string;
+    action: AgentGoalControlAction;
+  }): AppAction {
+    return { type: "agent/goalMutationStarted", ...input };
+  },
+
+  goalMutationSettled(chatId: string, requestId: string): AppAction {
+    return { type: "agent/goalMutationSettled", chatId, requestId };
   },
 
   restartRequested(startedAt: number): AppAction {

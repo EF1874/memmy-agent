@@ -343,6 +343,7 @@ function createTestEmbedder(): Embedder {
   return {
     config: {
       provider: "local",
+      mode: "local",
       model: "cli-test-embedding",
       batchSize: 32,
       timeoutMs: 60_000,

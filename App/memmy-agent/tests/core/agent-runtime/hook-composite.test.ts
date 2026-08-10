@@ -547,16 +547,17 @@ describe("CompositeHook", () => {
     ).rejects.toThrow("progress failed");
   });
 
-  it("agent loop without hooks keeps backward-compatible max-iteration behavior", async () => {
+  it("agent loop without hooks uses the tool-free max-iteration finalization", async () => {
     const provider = {
       generation: { maxTokens: 4096 },
       getDefaultModel: () => "test-model",
       chatWithRetry: vi.fn(
-        async () =>
-          new LLMResponse({
-            content: "working",
-            toolCalls: [new ToolCallRequest({ id: "c1", name: "list_dir", arguments: { path: "." } })],
-          }),
+        async (args: any) => args.tools === null
+          ? new LLMResponse({ content: "honest final from completed work" })
+          : new LLMResponse({
+              content: "working",
+              toolCalls: [new ToolCallRequest({ id: "c1", name: "list_dir", arguments: { path: "." } })],
+            }),
       ),
     };
     const loop = makeLoop([], provider);
@@ -567,9 +568,9 @@ describe("CompositeHook", () => {
 
     const [content, toolsUsed] = await loop.runAgentLoop([]);
 
-    expect(content).toBe(
-      "I reached the tool-call iteration limit (2), but have not completed the task yet. You can try splitting the task into smaller steps.",
-    );
+    expect(content).toBe("honest final from completed work");
     expect(toolsUsed).toEqual(["list_dir", "list_dir"]);
+    expect(provider.chatWithRetry).toHaveBeenCalledTimes(3);
+    expect(provider.chatWithRetry.mock.calls.at(-1)?.[0].tools).toBeNull();
   });
 });

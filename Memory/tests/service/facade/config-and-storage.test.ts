@@ -200,7 +200,6 @@ describe("MemoryService / facade / config and storage", () => {
     const result = service.reloadConfig({ reason: "profile_switched" });
 
     expect(result).toMatchObject({
-      activeProfile: "account",
       changed: true,
       requiresRestart: false,
       models: {
@@ -208,23 +207,26 @@ describe("MemoryService / facade / config and storage", () => {
           provider: "openai_compatible",
           model: "memory_summary",
           configured: true,
-          remote: true
+          remote: true,
+          routing: "follow"
         },
         evolution: {
           provider: "openai_compatible",
           model: "memory_evolution",
           configured: true,
-          remote: true
+          remote: true,
+          routing: "follow"
         },
         embedding: {
           provider: "openai_compatible",
           model: "embedding",
           configured: true,
-          remote: true
+          remote: true,
+          mode: "cloud"
         }
       }
     });
-    expect(service.health().activeProfile).toBe("account");
+    expect(service.health().models.summary.routing).toBe("follow");
     expect(service.health().storage.backendId).toBe("sqlite-local");
 
     db.close();

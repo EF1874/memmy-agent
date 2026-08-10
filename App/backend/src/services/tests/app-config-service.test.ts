@@ -56,7 +56,7 @@ describe("AppConfigService", () => {
     expect(result).toMatchObject({ autoInjectSkill: true });
   });
 
-  it("writes the saved BYOK model projection when switching to BYOK mode", async () => {
+  it("does not change the model directory when userMode changes", async () => {
     const calls: unknown[] = [];
     const service = createAppConfigService({
       bootstrapRepository: {
@@ -69,133 +69,37 @@ describe("AppConfigService", () => {
           };
         }
       },
-      modelConfigRepository: {
-        get() {
-          calls.push("get-model-config");
+      memmyConfigWriter: {
+        async readModelConfig() {
+          calls.push("model:read");
           return modelConfigView();
         },
-        upsert() {
-          throw new Error("upsert should not be called");
-        }
-      },
-      memmyConfigWriter: {
+        async writeModelConfig(input) {
+          calls.push({ model: input });
+          return modelConfigView();
+        },
         async writeAccountModelProjection(input) {
           calls.push({ account: input });
-          return projectionResult("account");
+          return projectionResult();
         },
-        async writeByokModelProjection(input, options) {
-          calls.push({ byok: input, options });
-          return projectionResult("byok");
+        async clearAccountModelProjection() {
+          return projectionResult();
         },
-        async writeActiveMemoryProfile(profile) {
-          calls.push({ activeProfile: profile });
-          return projectionResult(profile);
+        async patchChannelConfig() {
+          return undefined;
+        },
+        async patchMcpServerConfig() {
+          return undefined;
         }
       }
     });
 
     await expect(service.updateSettings({ userMode: "byok" })).resolves.toMatchObject({ userMode: "byok" });
+    await expect(service.updateSettings({ userMode: "account" })).resolves.toMatchObject({ userMode: "account" });
 
     expect(calls).toEqual([
-      {
-        settings: {
-          userMode: "byok"
-        }
-      },
-      "get-model-config",
-      {
-        byok: {
-          provider: "openai_compatible",
-          baseUrl: "https://api.example.com/v1",
-          modelId: "gpt-4.1-mini",
-          embedding: {
-            mode: "local"
-          },
-          memmyMemory: {
-            summary: {
-              provider: "openai_compatible",
-              baseUrl: "https://api.example.com/v1",
-              modelId: "gpt-4.1-mini"
-            },
-            evolution: {
-              provider: "openai_compatible",
-              baseUrl: "https://api.example.com/v1",
-              modelId: "gpt-4.1-mini"
-            }
-          }
-        },
-        options: {
-          activate: true
-        }
-      }
-    ]);
-  });
-
-  it("persists BYOK mode before model config is ready and defers runtime projection", async () => {
-    const calls: unknown[] = [];
-    const service = createAppConfigService({
-      bootstrapRepository: {
-        ...createBootstrapRepositoryStub(),
-        updateAppSettings(patch) {
-          calls.push({ settings: patch });
-          return {
-            ...appSettings(),
-            ...patch
-          };
-        }
-      },
-      modelConfigRepository: {
-        get() {
-          calls.push("get-model-config");
-          return modelConfigView({
-            hasApiKey: false,
-            apiKeyMasked: "",
-            memmyMemory: {
-              summary: {
-                provider: "openai_compatible",
-                baseUrl: "https://api.example.com/v1",
-                modelId: "gpt-4.1-mini",
-                hasApiKey: false,
-                apiKeyMasked: ""
-              },
-              evolution: {
-                provider: "openai_compatible",
-                baseUrl: "https://api.example.com/v1",
-                modelId: "gpt-4.1-mini",
-                hasApiKey: false,
-                apiKeyMasked: ""
-              }
-            }
-          });
-        },
-        upsert() {
-          throw new Error("upsert should not be called");
-        }
-      },
-      memmyConfigWriter: {
-        async writeAccountModelProjection(input) {
-          calls.push({ account: input });
-          return projectionResult("account");
-        },
-        async writeByokModelProjection(input, options) {
-          calls.push({ byok: input, options });
-          throw new Error("projection should be deferred");
-        },
-        async writeActiveMemoryProfile(profile) {
-          calls.push({ activeProfile: profile });
-          return projectionResult(profile);
-        }
-      }
-    });
-
-    await expect(service.updateSettings({ userMode: "byok" })).resolves.toMatchObject({ userMode: "byok" });
-    expect(calls).toEqual([
-      {
-        settings: {
-          userMode: "byok"
-        }
-      },
-      "get-model-config"
+      { settings: { userMode: "byok" } },
+      { settings: { userMode: "account" } }
     ]);
   });
 
@@ -255,7 +159,7 @@ describe("AppConfigService", () => {
     ]);
   });
 
-  it("includes BYOK image generation config when projecting saved model config", async () => {
+  it("does not re-project saved image configuration when userMode changes", async () => {
     const calls: unknown[] = [];
     const service = createAppConfigService({
       bootstrapRepository: {
@@ -303,20 +207,10 @@ describe("AppConfigService", () => {
 
     await service.updateSettings({ userMode: "byok" });
 
-    expect(calls).toContainEqual({
-      byok: expect.objectContaining({
-        imageGen: {
-          provider: "doubao",
-          baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
-          modelId: "doubao-seedream-4-0-250828",
-          apiKey: "sk-image-secret"
-        }
-      }),
-      options: { activate: true }
-    });
+    expect(calls).toEqual([{ settings: { userMode: "byok" } }]);
   });
 
-  it("persists BYOK mode before surfacing runtime projection failures", async () => {
+  it("does not invoke a model writer that cannot affect userMode changes", async () => {
     const calls: unknown[] = [];
     const service = createAppConfigService({
       bootstrapRepository: {
@@ -354,12 +248,8 @@ describe("AppConfigService", () => {
       }
     });
 
-    await expect(service.updateSettings({ userMode: "byok" })).rejects.toThrow("runtime projection failed");
-    expect(calls[0]).toEqual({
-      settings: {
-        userMode: "byok"
-      }
-    });
+    await expect(service.updateSettings({ userMode: "byok" })).resolves.toMatchObject({ userMode: "byok" });
+    expect(calls).toEqual([{ settings: { userMode: "byok" } }]);
   });
 
   it("saves BYOK model config without an active cloud account", async () => {
@@ -429,6 +319,18 @@ describe("AppConfigService", () => {
         }
       },
       memmyConfigWriter: {
+        async readModelConfig() {
+          calls.push("writer:read");
+          return savedConfig;
+        },
+        async writeModelConfig(input) {
+          calls.push({ writeModel: input });
+          savedConfig = modelConfigView({
+            hasApiKey: true,
+            apiKeyMasked: "sk-l••••cret"
+          });
+          return savedConfig;
+        },
         async writeAccountModelProjection(input) {
           calls.push({ account: input });
         },
@@ -458,17 +360,23 @@ describe("AppConfigService", () => {
       memmyMemory: {
         summary: {
           hasApiKey: true,
-          apiKeyMasked: "sk-l••••cret"
+          apiKeyMasked: "sk-t••••cret"
         },
         evolution: {
           hasApiKey: true,
-          apiKeyMasked: "sk-l••••cret"
+          apiKeyMasked: "sk-t••••cret"
         }
       }
     });
     await expect(service.updateSettings({ userMode: "byok" })).resolves.toMatchObject({ userMode: "byok" });
 
-    expect(calls).toEqual([
+    expect(calls).toContainEqual({
+      writeModel: expect.objectContaining({
+        apiKey: "sk-local-secret"
+      })
+    });
+    expect(calls).toContainEqual({ settings: { userMode: "byok" } });
+    expect(calls).not.toEqual([
       {
         upsert: {
           provider: "openai_compatible",
@@ -575,6 +483,16 @@ describe("AppConfigService", () => {
         }
       },
       memmyConfigWriter: {
+        async readModelConfig() {
+          throw new Error("read should not be called");
+        },
+        async writeModelConfig(input) {
+          calls.push({ writeModel: input });
+          return modelConfigView({
+            hasApiKey: true,
+            apiKeyMasked: "sk-l••••cret"
+          });
+        },
         async writeAccountModelProjection(input) {
           calls.push({ account: input });
           return projectionResult("account");
@@ -612,7 +530,13 @@ describe("AppConfigService", () => {
       apiKeyMasked: "sk-l••••cret"
     });
 
-    expect(calls).toEqual([
+    expect(calls).toContainEqual({
+      writeModel: expect.objectContaining({
+        apiKey: "sk-local-secret"
+      })
+    });
+    expect(calls).toContainEqual({ reload: { reason: "model_config_saved" } });
+    expect(calls).not.toEqual([
       {
         upsert: {
           provider: "openai_compatible",
@@ -664,7 +588,7 @@ describe("AppConfigService", () => {
     ]);
   });
 
-  it("writes the account model projection when switching to account mode", async () => {
+  it("does not rewrite account models when userMode changes", async () => {
     const calls: unknown[] = [];
     const service = createAppConfigService({
       bootstrapRepository: {
@@ -700,6 +624,14 @@ describe("AppConfigService", () => {
         }
       },
       memmyConfigWriter: {
+        async readModelConfig() {
+          calls.push("writer:get");
+          return modelConfigView();
+        },
+        async writeModelConfig(input) {
+          calls.push({ writerSet: input });
+          return modelConfigView();
+        },
         async writeAccountModelProjection(input) {
           calls.push({ account: input });
           return projectionResult("account");
@@ -717,19 +649,7 @@ describe("AppConfigService", () => {
 
     await expect(service.updateSettings({ userMode: "account" })).resolves.toMatchObject({ userMode: "account" });
 
-    expect(calls).toEqual([
-      {
-        settings: {
-          userMode: "account"
-        }
-      },
-      {
-        account: {
-          cloudUuid: "cloud-login-uuid",
-          userId: "user-1"
-        }
-      }
-    ]);
+    expect(calls).toEqual([{ settings: { userMode: "account" } }]);
   });
 
   it("updates privacy, onboarding, and improvement program through the bootstrap repository", async () => {
@@ -1002,6 +922,14 @@ describe("AppConfigService", () => {
         }
       },
       memmyConfigWriter: {
+        async readModelConfig() {
+          calls.push("writer:get");
+          return modelConfigView();
+        },
+        async writeModelConfig(input) {
+          calls.push({ writerSet: input });
+          return modelConfigView();
+        },
         async writeAccountModelProjection(input) {
           calls.push({ account: input });
         },
@@ -1030,7 +958,13 @@ describe("AppConfigService", () => {
       hasApiKey: true,
       apiKeyMasked: "sk-t••••cret"
     });
-    expect(calls).toEqual([
+    expect(calls).toContain("writer:get");
+    expect(calls).toContainEqual({
+      writerSet: expect.objectContaining({
+        apiKey: "sk-test-secret"
+      })
+    });
+    expect(calls).not.toEqual([
       "get",
       {
         provider: "openai_compatible",

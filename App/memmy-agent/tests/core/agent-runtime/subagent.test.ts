@@ -134,7 +134,10 @@ describe("SubagentManager", () => {
     expect(seenSpec.maxTokens).toBe(DEFAULT_MAX_TOKENS);
     expect(seenSpec.contextWindowTokens).toBe(128_000);
     expect(seenSpec.temperature).toBe(0.9);
-    expect(seenSpec.maxIterationsMessage).toBe("Task completed but no final response was generated.");
+    expect(seenSpec.maxIterationsMessage).toBe(
+      "The subagent reached its iteration limit before completing the task; its report may be incomplete.",
+    );
+    expect(seenSpec.maxIterationsFinalPrompt).toContain("produce a final report for the parent agent");
     expect(seenSpec.errorMessage).toBeNull();
     expect(seenSpec.failOnToolError).toBe(true);
     expect(seenSpec.sessionKey).toBe("cli:direct");

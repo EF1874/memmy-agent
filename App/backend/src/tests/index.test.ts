@@ -303,6 +303,9 @@ describe("local api", () => {
         "    apiKey: cloud.login.uuid",
         "memmyMemory:",
         "  activeProfile: account",
+        "  profiles:",
+        "    account:",
+        "      userId: account-user",
         ""
       ].join("\n"),
       "utf8"
@@ -368,6 +371,13 @@ describe("local api", () => {
           "x-memmy-local-token": "test-token"
         }
       });
+      const currentModelConfigResponse = await fetch(`${backend.runtimeConfig.baseUrl}/api/app/model-config`, {
+        method: "GET",
+        headers: {
+          "x-memmy-local-token": "test-token"
+        }
+      });
+      const currentModelConfig = await currentModelConfigResponse.json() as any;
       const modelConfigResponse = await fetch(`${backend.runtimeConfig.baseUrl}/api/app/model-config`, {
         method: "PUT",
         headers: {
@@ -375,10 +385,14 @@ describe("local api", () => {
           "x-memmy-local-token": "test-token"
         },
         body: JSON.stringify({
-          provider: "openai_compatible",
-          baseUrl: "https://api.changed.example/v1",
-          modelId: "gpt-4.1-mini",
-          apiKey: "sk-changed"
+          configRevision: currentModelConfig.configRevision,
+          providers: [{
+            provider: "openai",
+            apiBase: "https://api.changed.example/v1",
+            apiKey: "sk-changed",
+            models: [{ model: "gpt-4.1-mini" }]
+          }],
+          defaultModelPreset: null
         })
       });
 
@@ -390,10 +404,11 @@ describe("local api", () => {
       });
       expect(modelConfigResponse.status).toBe(200);
       const parsedConfig = YAML.parse(readFileSync(memmyConfigPath, "utf8")) as any;
-      expect(parsedConfig.agents.defaults).toEqual({
+      expect(parsedConfig.agents.defaults.modelPreset).toMatch(/^desktop-openai-gpt-4-1-mini-/);
+      expect(parsedConfig.agents.defaults.timezone).toBe(systemUtcOffset());
+      expect(parsedConfig.modelPresets[parsedConfig.agents.defaults.modelPreset]).toMatchObject({
         provider: "openai",
-        model: "gpt-4.1-mini",
-        timezone: systemUtcOffset()
+        model: "gpt-4.1-mini"
       });
       expect(parsedConfig.providers.openai).toMatchObject({
         apiBase: "https://api.changed.example/v1",
@@ -637,6 +652,13 @@ describe("local api", () => {
         loginSource: "Memmy"
       })
     });
+    const currentModelConfigResponse = await fetch(`${backend.runtimeConfig.baseUrl}/api/app/model-config`, {
+      method: "GET",
+      headers: {
+        "x-memmy-local-token": "test-token"
+      }
+    });
+    const currentModelConfig = await currentModelConfigResponse.json() as any;
     const modelConfigResponse = await fetch(`${backend.runtimeConfig.baseUrl}/api/app/model-config`, {
       method: "PUT",
       headers: {
@@ -644,10 +666,25 @@ describe("local api", () => {
         "x-memmy-local-token": "test-token"
       },
       body: JSON.stringify({
-        provider: "openai_compatible",
-        baseUrl: "https://api.example.com/v1",
-        modelId: "gpt-4.1-mini",
-        apiKey: "sk-local-secret"
+        configRevision: currentModelConfig.configRevision,
+        providers: [
+          ...currentModelConfig.providers.map((provider: any) => ({
+            provider: provider.provider,
+            apiBase: provider.apiBase,
+            apiType: provider.apiType,
+            models: provider.models.map((model: any) => ({
+              presetName: model.presetName,
+              model: model.model
+            }))
+          })),
+          {
+            provider: "openai",
+            apiBase: "https://api.example.com/v1",
+            apiKey: "sk-local-secret",
+            models: [{ model: "gpt-4.1-mini" }]
+          }
+        ],
+        defaultModelPreset: currentModelConfig.defaultModelPreset
       })
     });
     const settingsResponse = await fetch(`${backend.runtimeConfig.baseUrl}/api/app/settings`, {
