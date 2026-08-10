@@ -7,6 +7,7 @@ import {
   emptyAgentGoalState,
   goalStateWsBlob,
   nextGoalUpdatedAt,
+  parseGoalRoute,
   parseGoalState,
   runnerWallLlmTimeoutS,
   sustainedGoalActive,
@@ -74,5 +75,27 @@ describe("GoalState session metadata helpers", () => {
     expect(runnerWallLlmTimeoutS(manager, "cli:test", {
       metadata: { [GOAL_STATE_KEY]: goal({ status: "completed" }) },
     })).toBeNull();
+  });
+
+  it("reads legacy and source-aware Goal routes without accepting extra fields", () => {
+    expect(parseGoalRoute({ channel: "telegram", chatId: "room" })).toEqual({
+      channel: "telegram",
+      chatId: "room",
+    });
+    expect(parseGoalRoute({
+      channel: "websocket",
+      chatId: "ext_session",
+      source: { kind: "tui", channel: "websocket" },
+    })).toEqual({
+      channel: "websocket",
+      chatId: "ext_session",
+      source: { kind: "tui", channel: "websocket" },
+    });
+    expect(parseGoalRoute({
+      channel: "websocket",
+      chatId: "ext_session",
+      source: { kind: "gui", channel: "spoofed", extra: true },
+    })).toBeNull();
+    expect(parseGoalRoute({ channel: "telegram", chatId: "room", extra: true })).toBeNull();
   });
 });

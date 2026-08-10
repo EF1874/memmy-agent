@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { lookup as lookupMime } from "mime-types";
 import { getWebuiDir } from "../../config/paths.js";
+import { parseTurnSource } from "../../core/runtime-messages/events.js";
 
 export const WEBUI_TRANSCRIPT_SCHEMA_VERSION = 3;
 
@@ -23,9 +24,28 @@ export interface ReplayTranscriptOptions {
   augmentAssistantMedia?: AugmentAssistantMedia | null;
   augmentAssistantText?: AugmentAssistantText | null;
   sessionMessages?: Dict[] | null;
+  surface?: "gui" | "tui";
 }
 
 export interface BuildWebuiThreadResponseOptions extends ReplayTranscriptOptions {}
+
+function surfaceAwareTranscriptLines(
+  lines: Dict[],
+  surface: "gui" | "tui",
+): Dict[] {
+  if (surface === "gui") return lines;
+  const visibleTurnIds = new Set<string>();
+  for (const line of lines) {
+    if (line.event !== "user") continue;
+    const turnId = stringValue(line.turn_id) ?? stringValue(line.turnId);
+    if (!turnId || parseTurnSource(line.source)?.kind !== "tui") continue;
+    visibleTurnIds.add(turnId);
+  }
+  return lines.filter((line) => {
+    const turnId = stringValue(line.turn_id) ?? stringValue(line.turnId);
+    return turnId !== null && visibleTurnIds.has(turnId);
+  });
+}
 
 export interface RewriteLocalMarkdownImagesOptions {
   workspacePath?: string;
@@ -1115,6 +1135,9 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
         ...activeTurnPatch(),
         ...roleCreatedAtPatch("user"),
       };
+      const clientRequestId = stringValue(rec.client_request_id)
+        ?? stringValue(rec.clientRequestId);
+      if (clientRequestId) row.client_request_id = clientRequestId;
       if (mediaAttachments?.length) {
         row.media = mediaAttachments;
         if (mediaAttachments.every((item) => item.kind === "image")) {
@@ -1449,8 +1472,11 @@ export function buildWebuiThreadResponse(sessionKey: string, messages: any[]): D
 export function buildWebuiThreadResponse(sessionKey: string, options?: BuildWebuiThreadResponseOptions | null): Dict | null;
 export function buildWebuiThreadResponse(sessionKey: string, messagesOrOptions: any[] | BuildWebuiThreadResponseOptions | null = null): Dict | null {
   if (Array.isArray(messagesOrOptions)) return { id: sessionKey, messages: messagesOrOptions };
-  const lines = readTranscriptLines(sessionKey);
-  if (!lines.length) return null;
+  const options = messagesOrOptions ?? {};
+  const surface = options.surface ?? "gui";
+  const allLines = readTranscriptLines(sessionKey);
+  if (!allLines.length) return null;
+  const lines = surfaceAwareTranscriptLines(allLines, surface);
   const turnState = lastTranscriptTurnState(lines);
   const lastTurnId = stringValue(turnState.last_turn_id);
   return {
@@ -1458,6 +1484,13 @@ export function buildWebuiThreadResponse(sessionKey: string, messagesOrOptions: 
     sessionKey,
     ...turnState,
     ...lastTranscriptGoalOutcome(lines, lastTurnId),
-    messages: replayTranscriptToUiMessages(lines, messagesOrOptions ?? {}),
+    messages: replayTranscriptToUiMessages(lines, {
+      ...options,
+      sessionMessages: surface === "tui"
+        ? (options.sessionMessages ?? []).filter(
+            (message) => parseTurnSource(message.turn_source)?.kind === "tui",
+          )
+        : options.sessionMessages,
+    }),
   };
 }

@@ -3,6 +3,7 @@ import {
   GoalRuntimeError,
 } from "../goal-runtime.js";
 import { publicGoalState } from "../../session/goal-state.js";
+import { parseTurnSource } from "../../runtime-messages/events.js";
 import { Tool } from "./base.js";
 import { RequestContext } from "./context.js";
 
@@ -76,12 +77,13 @@ export class CreateGoalTool extends GoalTool {
       const channel = String(context?.channel ?? "").trim();
       const chatId = String(context?.chatId ?? "").trim();
       const turnId = String(context?.metadata?.turn_id ?? "").trim();
+      const source = parseTurnSource(context?.metadata?.turn_source);
       if (!channel || !chatId || !turnId) throw new GoalRuntimeError("goal_route_unavailable");
       const goal = await this.goalRuntime.create({
         sessionKey: this.sessionKey(),
         objective: params.objective ?? "",
         ...(params.token_budget === undefined ? {} : { tokenBudget: params.token_budget }),
-        route: { channel, chatId },
+        route: { channel, chatId, ...(source ? { source } : {}) },
         turnId,
       });
       return `Goal created.\n${formatGoal(goal)}`;

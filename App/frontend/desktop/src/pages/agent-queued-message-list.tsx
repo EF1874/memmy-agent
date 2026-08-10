@@ -1,8 +1,12 @@
 /** Queued WebUI message list displayed above the chat composer. */
 import { useEffect, useRef } from "react";
-import { CornerDownRight, Trash2 } from "lucide-react";
+import { CornerDownRight, Monitor, SquareTerminal, Trash2 } from "lucide-react";
 import { OverflowTooltipText } from "../components/overflow-tooltip-text.js";
 import { Tooltip } from "../components/tooltip.js";
+import {
+  AgentQueueChannelIcon,
+  agentChannelDisplay,
+} from "../integrations/integration-meta.js";
 import type { AgentQueuedMessage } from "../state/agent-chat-slice.js";
 
 export interface AgentQueuedMessageListProps {
@@ -10,7 +14,38 @@ export interface AgentQueuedMessageListProps {
   label: string;
   removeLabel: string;
   attachmentOnlyLabel: (count: number) => string;
+  sourceLabels: {
+    gui: string;
+    tui: string;
+    im: (channelName: string) => string;
+    unknownIm: string;
+  };
   onRemove: (clientRequestId: string) => void;
+}
+
+function queueSourceLabel(
+  item: AgentQueuedMessage,
+  labels: AgentQueuedMessageListProps["sourceLabels"]
+): string {
+  if (item.source.kind === "gui") return labels.gui;
+  if (item.source.kind === "tui") return labels.tui;
+  const display = agentChannelDisplay(item.source.channel);
+  return display ? labels.im(display.name) : labels.unknownIm;
+}
+
+function QueueSourceIcon({ item }: { item: AgentQueuedMessage }) {
+  if (item.source.kind === "gui") {
+    return <Monitor className="agent-queue-item__source-mark" size={16} aria-hidden="true" />;
+  }
+  if (item.source.kind === "tui") {
+    return <SquareTerminal className="agent-queue-item__source-mark" size={16} aria-hidden="true" />;
+  }
+  return (
+    <AgentQueueChannelIcon
+      channel={item.source.channel}
+      className="agent-queue-item__source-mark agent-queue-item__source-image"
+    />
+  );
 }
 
 function queuedMessageLabel(
@@ -41,9 +76,19 @@ export function AgentQueuedMessageList(props: AgentQueuedMessageListProps) {
         {props.items.map((item) => {
           const text = queuedMessageLabel(item, props.attachmentOnlyLabel);
           const removing = item.status === "removing";
+          const sourceLabel = queueSourceLabel(item, props.sourceLabels);
           return (
             <li className="agent-queue-item" key={item.clientRequestId}>
               <CornerDownRight className="agent-queue-item__icon" size={14} aria-hidden="true" />
+              <Tooltip content={sourceLabel}>
+                <span
+                  className="agent-queue-item__source"
+                  role="img"
+                  aria-label={sourceLabel}
+                >
+                  <QueueSourceIcon item={item} />
+                </span>
+              </Tooltip>
               <OverflowTooltipText className="agent-queue-item__text" text={text} />
               <Tooltip content={props.removeLabel}>
                 <button

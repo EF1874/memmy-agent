@@ -19,7 +19,8 @@ import type {
   AgentGoalControlAction,
   WebuiSessionTarget,
   WebuiQueuedMessage,
-  ChatModelPreset
+  ChatModelPreset,
+  AgentTurnSource
 } from "../api/memmy-agent-client.js";
 import {
   chatIdToSessionKey,
@@ -132,7 +133,13 @@ export type AgentQueuedMessage = {
   content: string;
   media: AgentChatMediaAttachment[];
   queuedAt: number;
+  source: AgentTurnSource;
   status: "queued" | "removing";
+};
+
+export type AgentQueueDesync = {
+  generation: number;
+  observedRevision: number;
 };
 
 export interface AgentRetryWaitStatus {
@@ -186,6 +193,8 @@ export interface AgentState {
   messages: AgentChatMessage[];
   messagesByChatId: Record<string, AgentChatMessage[]>;
   queuedMessagesByChatId: Record<string, AgentQueuedMessage[]>;
+  queueRevisionByChatId: Record<string, number>;
+  queueDesyncedByChatId: Record<string, AgentQueueDesync>;
   retryWaitStatusByChatId: Record<string, AgentRetryWaitStatus | undefined>;
   historyVersionByChatId: Record<string, number>;
   pendingCanonicalHydrateByChatId: Record<string, boolean>;
@@ -338,6 +347,8 @@ export const initialAgentState: AgentState = {
   messages: [],
   messagesByChatId: {},
   queuedMessagesByChatId: {},
+  queueRevisionByChatId: {},
+  queueDesyncedByChatId: {},
   retryWaitStatusByChatId: {},
   historyVersionByChatId: {},
   pendingCanonicalHydrateByChatId: {},
@@ -441,6 +452,9 @@ export function agentReducer(state: AgentState, action: AgentAction): AgentState
         currentSessionsRequestRunStatusVersionByChatId: null,
         currentHistoryRequestIdByChatId: {},
         currentHistoryHydrateRequestIdByChatId: {},
+        queuedMessagesByChatId: {},
+        queueRevisionByChatId: {},
+        queueDesyncedByChatId: {},
         isLoadingSessions: false,
         isLoadingHistory: false
       };
@@ -673,6 +687,20 @@ function operationErrorFromEvent(event: MemmyAgentWsEvent, source: AgentOperatio
   };
 }
 
+function turnSourceFromWire(value: unknown): AgentTurnSource {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const source = value as Record<string, unknown>;
+    if (
+      (source.kind === "gui" || source.kind === "tui" || source.kind === "im")
+      && typeof source.channel === "string"
+      && source.channel.trim()
+    ) {
+      return { kind: source.kind, channel: source.channel.trim() };
+    }
+  }
+  return { kind: "gui", channel: "websocket" };
+}
+
 function queuedMessageFromWire(item: WebuiQueuedMessage): AgentQueuedMessage | null {
   if (
     typeof item.client_request_id !== "string"
@@ -686,7 +714,65 @@ function queuedMessageFromWire(item: WebuiQueuedMessage): AgentQueuedMessage | n
     content: item.text,
     media: normalizeMedia(Array.isArray(item.media_urls) ? item.media_urls : []),
     queuedAt,
+    source: turnSourceFromWire(item.source),
     status: "queued"
+  };
+}
+
+function queueRevisionFromEvent(event: MemmyAgentWsEvent): number | null {
+  return typeof event.revision === "number"
+    && Number.isSafeInteger(event.revision)
+    && event.revision >= 0
+    ? event.revision
+    : null;
+}
+
+function clearQueueDesync(state: AgentState, chatId: string): Record<string, AgentQueueDesync> {
+  return clearChatMapValue(state.queueDesyncedByChatId, chatId);
+}
+
+function markQueueDesynced(
+  state: AgentState,
+  chatId: string,
+  observedRevision: number
+): AgentState {
+  const current = state.queueDesyncedByChatId[chatId];
+  const generation = state.connectionGeneration;
+  if (
+    current
+    && current.generation === generation
+    && current.observedRevision >= observedRevision
+  ) return state;
+  return {
+    ...state,
+    queueDesyncedByChatId: {
+      ...state.queueDesyncedByChatId,
+      [chatId]: { generation, observedRevision }
+    }
+  };
+}
+
+function applyQueueIncrement(
+  state: AgentState,
+  event: MemmyAgentWsEvent,
+  apply: (current: AgentState) => AgentState
+): AgentState {
+  const chatId = event.chat_id;
+  if (!chatId) return state;
+  const revision = queueRevisionFromEvent(event);
+  if (revision === null) return apply(state);
+  const currentRevision = state.queueRevisionByChatId[chatId];
+  if (currentRevision === undefined || revision > currentRevision + 1) {
+    return markQueueDesynced(state, chatId, revision);
+  }
+  if (revision <= currentRevision || state.queueDesyncedByChatId[chatId]) return state;
+  const applied = apply(state);
+  return {
+    ...applied,
+    queueRevisionByChatId: {
+      ...applied.queueRevisionByChatId,
+      [chatId]: revision
+    }
   };
 }
 
@@ -767,6 +853,19 @@ function applyQueueSnapshot(state: AgentState, event: MemmyAgentWsEvent): AgentS
   if (!event.chat_id || !Array.isArray(event.items) || !Array.isArray(event.started_items)) {
     return state;
   }
+  const revision = queueRevisionFromEvent(event);
+  const currentRevision = state.queueRevisionByChatId[event.chat_id];
+  const desync = state.queueDesyncedByChatId[event.chat_id];
+  if (revision !== null && currentRevision !== undefined && revision < currentRevision) {
+    return state;
+  }
+  if (
+    revision !== null
+    && desync?.generation === state.connectionGeneration
+    && revision < desync.observedRevision
+  ) {
+    return state;
+  }
   const started = event.started_items
     .map(queuedMessageFromWire)
     .filter((item): item is AgentQueuedMessage => item !== null);
@@ -778,7 +877,13 @@ function applyQueueSnapshot(state: AgentState, event: MemmyAgentWsEvent): AgentS
   for (const item of sortedQueuedMessages(started)) {
     nextState = promoteQueuedMessage(nextState, event.chat_id, item);
   }
-  return nextState;
+  return {
+    ...nextState,
+    queueRevisionByChatId: revision === null
+      ? nextState.queueRevisionByChatId
+      : { ...nextState.queueRevisionByChatId, [event.chat_id]: revision },
+    queueDesyncedByChatId: clearQueueDesync(nextState, event.chat_id)
+  };
 }
 
 function rejectQueuedMessage(state: AgentState, event: MemmyAgentWsEvent): AgentState | null {
@@ -1400,6 +1505,14 @@ function completeSessionsLoad(state: AgentState, sessions: MemmyAgentSessionSumm
     state.queuedMessagesByChatId,
     new Set([...canonicalChatIds, ...Object.keys(optimisticTasksByChatId)])
   );
+  const queueRevisionByChatId = pruneNumberMap(
+    state.queueRevisionByChatId,
+    new Set([...canonicalChatIds, ...Object.keys(optimisticTasksByChatId)])
+  );
+  const queueDesyncedByChatId = pruneChatMap(
+    state.queueDesyncedByChatId,
+    new Set([...canonicalChatIds, ...Object.keys(optimisticTasksByChatId)])
+  );
   const knownChatIds = new Set([
     ...canonicalChatIds,
     ...Object.keys(optimisticTasksByChatId),
@@ -1422,6 +1535,8 @@ function completeSessionsLoad(state: AgentState, sessions: MemmyAgentSessionSumm
     committedPresetByScope,
     optimisticTasksByChatId,
     queuedMessagesByChatId,
+    queueRevisionByChatId,
+    queueDesyncedByChatId,
     retryWaitStatusByChatId: pruneOptionalMap(state.retryWaitStatusByChatId, knownChatIds),
     completedUnseenByChatId: pruneNumberMap(state.completedUnseenByChatId, knownChatIds),
     runStartedAtByChatId: reconcileSessionRunStartedOverrides(state.runStartedAtByChatId, sessions, knownChatIds, preserveRunChatIds),
@@ -2289,9 +2404,17 @@ function reduceWsEvent(state: AgentState, event: MemmyAgentWsEvent): AgentState 
   switch (event.event) {
     case "ready": {
       const readyGeneration = generation ?? Math.max(1, state.connectionGeneration);
-      const base = state.currentChatId || state.blankDraftActive
+      const generationState = readyGeneration === state.connectionGeneration
         ? state
-        : withCurrentChat(state, event.chat_id ?? null);
+        : {
+            ...state,
+            queuedMessagesByChatId: {},
+            queueRevisionByChatId: {},
+            queueDesyncedByChatId: {}
+          };
+      const base = generationState.currentChatId || generationState.blankDraftActive
+        ? generationState
+        : withCurrentChat(generationState, event.chat_id ?? null);
       if (readyGeneration <= state.lastRecoveredGeneration || state.recoveringGeneration === readyGeneration) {
         return completeRestartAfterReconnect({
           ...base,
@@ -2329,42 +2452,62 @@ function reduceWsEvent(state: AgentState, event: MemmyAgentWsEvent): AgentState 
       if (!event.chat_id || !event.item) return state;
       const item = queuedMessageFromWire(event.item);
       if (!item) return state;
-      const current = state.queuedMessagesByChatId[event.chat_id] ?? [];
-      const index = current.findIndex(
-        (candidate) => candidate.clientRequestId === item.clientRequestId
-      );
-      if (index < 0) {
-        return setQueuedMessagesForChat(state, event.chat_id, [...current, item]);
-      }
-      const next = [...current];
-      next[index] = { ...item, status: current[index]!.status };
-      return setQueuedMessagesForChat(state, event.chat_id, next);
+      return applyQueueIncrement(state, event, (currentState) => {
+        const current = currentState.queuedMessagesByChatId[event.chat_id!] ?? [];
+        const index = current.findIndex(
+          (candidate) => candidate.clientRequestId === item.clientRequestId
+        );
+        if (index < 0) {
+          return setQueuedMessagesForChat(currentState, event.chat_id!, [...current, item]);
+        }
+        const next = [...current];
+        next[index] = { ...item, status: current[index]!.status };
+        return setQueuedMessagesForChat(currentState, event.chat_id!, next);
+      });
     }
     case "message_dequeued": {
       if (!event.chat_id || !event.client_request_id) return state;
-      const eventItem = event.item ? queuedMessageFromWire(event.item) : null;
-      const localItem = state.queuedMessagesByChatId[event.chat_id]?.find(
-        (item) => item.clientRequestId === event.client_request_id
-      ) ?? null;
-      const item = eventItem ?? localItem;
-      return item ? promoteQueuedMessage(state, event.chat_id, item) : state;
+      return applyQueueIncrement(state, event, (currentState) => {
+        const eventItem = event.item ? queuedMessageFromWire(event.item) : null;
+        const localItem = currentState.queuedMessagesByChatId[event.chat_id!]?.find(
+          (item) => item.clientRequestId === event.client_request_id
+        ) ?? null;
+        const item = eventItem ?? localItem;
+        return item ? promoteQueuedMessage(currentState, event.chat_id!, item) : currentState;
+      });
     }
     case "message_queue_removed":
       return event.chat_id && event.client_request_id
-        ? removeQueuedMessageFromChat(state, event.chat_id, event.client_request_id).state
+        ? applyQueueIncrement(
+            state,
+            event,
+            (currentState) => removeQueuedMessageFromChat(
+              currentState,
+              event.chat_id!,
+              event.client_request_id!
+            ).state
+          )
         : state;
     case "message_queue_snapshot":
       return applyQueueSnapshot(state, event);
     case "queue_remove_result": {
       if (
-        event.outcome !== "already_dequeued"
+        (event.outcome !== "removed" && event.outcome !== "already_dequeued")
         || !event.chat_id
         || !event.client_request_id
       ) return state;
       const item = state.queuedMessagesByChatId[event.chat_id]?.find(
         (candidate) => candidate.clientRequestId === event.client_request_id
       );
-      return item ? promoteQueuedMessage(state, event.chat_id, item) : state;
+      let nextState = event.outcome === "already_dequeued" && item
+        ? promoteQueuedMessage(state, event.chat_id, item)
+        : removeQueuedMessageFromChat(state, event.chat_id, event.client_request_id).state;
+      const revision = queueRevisionFromEvent(event);
+      const currentRevision = state.queueRevisionByChatId[event.chat_id];
+      if (revision !== null && (currentRevision === undefined || revision > currentRevision)) {
+        nextState = markQueueDesynced(nextState, event.chat_id, revision);
+      }
+      return nextState;
     }
     case "error": {
       const rejectedQueue = rejectQueuedMessage(state, event);

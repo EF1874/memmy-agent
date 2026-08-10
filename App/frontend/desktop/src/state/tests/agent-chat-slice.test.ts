@@ -52,12 +52,14 @@ function queuedWire(
   clientRequestId: string,
   text: string,
   queuedAt: string,
+  source: WebuiQueuedMessage["source"] = { kind: "gui", channel: "websocket" },
 ): WebuiQueuedMessage {
   return {
     client_request_id: clientRequestId,
     text,
     media_urls: [],
-    queued_at: queuedAt
+    queued_at: queuedAt,
+    source
   };
 }
 
@@ -103,6 +105,8 @@ describe("agent chat slice", () => {
 
     expect(state.queuedMessagesByChatId["chat-1"]?.map((item) => item.clientRequestId))
       .toEqual(["queue-1", "queue-2"]);
+    expect(state.queuedMessagesByChatId["chat-1"]?.map((item) => item.source.kind))
+      .toEqual(["gui", "gui"]);
     expect(state.messagesByChatId["chat-1"]).toBeUndefined();
     expect(state.optimisticSendingByChatId["chat-1"]).toBeUndefined();
     expect(state.optimisticTasksByChatId["chat-1"]).toBeUndefined();
@@ -126,6 +130,116 @@ describe("agent chat slice", () => {
 
     state = agentReducer(state, { type: "agent/sessionsLoaded", sessions: [] });
     expect(state.queuedMessagesByChatId["chat-1"]).toBeUndefined();
+  });
+
+  it("uses GUI as the compatibility source when an old server omits source", () => {
+    const legacy = queuedWire("legacy", "legacy queue", "2026-08-09T12:00:00.000Z");
+    delete legacy.source;
+    const state = agentReducer(initialAgentState, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message_queued",
+        chat_id: "chat-legacy",
+        client_request_id: "legacy",
+        item: legacy
+      }
+    });
+
+    expect(state.queuedMessagesByChatId["chat-legacy"]?.[0]?.source)
+      .toEqual({ kind: "gui", channel: "websocket" });
+  });
+
+  it("applies consecutive queue revisions, ignores duplicates, and requests snapshot reconciliation on gaps", () => {
+    let state = agentReducer(initialAgentState, {
+      type: "agent/wsEvent",
+      event: { event: "ready", chat_id: "default", connection_generation: 7 }
+    });
+    const first = queuedWire(
+      "queue-1",
+      "from TUI",
+      "2026-08-09T12:00:00.000Z",
+      { kind: "tui", channel: "websocket" }
+    );
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message_queue_snapshot",
+        chat_id: "chat-2",
+        revision: 2,
+        items: [first],
+        started_items: []
+      }
+    });
+    const second = queuedWire(
+      "queue-2",
+      "from Slack",
+      "2026-08-09T12:00:01.000Z",
+      { kind: "im", channel: "slack" }
+    );
+    const revisionThree = {
+      event: "message_queued",
+      chat_id: "chat-2",
+      client_request_id: "queue-2",
+      revision: 3,
+      item: second
+    } as const;
+    state = agentReducer(state, { type: "agent/wsEvent", event: revisionThree });
+    state = agentReducer(state, { type: "agent/wsEvent", event: revisionThree });
+    expect(state.queuedMessagesByChatId["chat-2"]?.map((item) => [item.clientRequestId, item.source.kind]))
+      .toEqual([["queue-1", "tui"], ["queue-2", "im"]]);
+    expect(state.queueRevisionByChatId["chat-2"]).toBe(3);
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message_dequeued",
+        chat_id: "chat-2",
+        client_request_id: "queue-1",
+        revision: 5,
+        item: first
+      }
+    });
+    expect(state.queuedMessagesByChatId["chat-2"]?.map((item) => item.clientRequestId))
+      .toEqual(["queue-1", "queue-2"]);
+    expect(state.messagesByChatId["chat-2"]).toBeUndefined();
+    expect(state.queueDesyncedByChatId["chat-2"]).toEqual({ generation: 7, observedRevision: 5 });
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message_queue_snapshot",
+        chat_id: "chat-2",
+        revision: 4,
+        items: [first, second],
+        started_items: []
+      }
+    });
+    expect(state.queueDesyncedByChatId["chat-2"])
+      .toEqual({ generation: 7, observedRevision: 5 });
+    expect(state.queueRevisionByChatId["chat-2"]).toBe(3);
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message_queue_snapshot",
+        chat_id: "chat-2",
+        revision: 5,
+        items: [second],
+        started_items: [first]
+      }
+    });
+    expect(state.queueDesyncedByChatId["chat-2"]).toBeUndefined();
+    expect(state.queueRevisionByChatId["chat-2"]).toBe(5);
+    expect(state.messagesByChatId["chat-2"]?.filter((message) => message.clientRequestId === "queue-1"))
+      .toHaveLength(1);
+    expect(state.currentChatId).toBe("default");
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { ...revisionThree, revision: 4 }
+    });
+    expect(state.queuedMessagesByChatId["chat-2"]?.map((item) => item.clientRequestId))
+      .toEqual(["queue-2"]);
   });
 
   it("replaces only the snapshot chat and promotes started items exactly once", () => {
@@ -187,6 +301,54 @@ describe("agent chat slice", () => {
     expect(state.queuedMessagesByChatId["chat-2"]).toBeUndefined();
     expect(state.messagesByChatId["chat-2"]?.filter((message) => message.clientRequestId === "racing"))
       .toHaveLength(1);
+  });
+
+  it("clears a delete result immediately but reconciles a leading revision by snapshot", () => {
+    const item = queuedWire("remove-race", "remove race", "2026-08-09T12:00:00.000Z");
+    let state = agentReducer(initialAgentState, {
+      type: "agent/wsEvent",
+      event: { event: "ready", chat_id: "default", connection_generation: 3 }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message_queue_snapshot",
+        chat_id: "chat-race",
+        revision: 2,
+        items: [item],
+        started_items: []
+      }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "queue_remove_result",
+        chat_id: "chat-race",
+        client_request_id: "remove-race",
+        outcome: "removed",
+        revision: 4
+      }
+    });
+
+    expect(state.queuedMessagesByChatId["chat-race"]).toBeUndefined();
+    expect(state.queueRevisionByChatId["chat-race"]).toBe(2);
+    expect(state.queueDesyncedByChatId["chat-race"]).toEqual({
+      generation: 3,
+      observedRevision: 4
+    });
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message_queue_snapshot",
+        chat_id: "chat-race",
+        revision: 4,
+        items: [],
+        started_items: []
+      }
+    });
+    expect(state.queueRevisionByChatId["chat-race"]).toBe(4);
+    expect(state.queueDesyncedByChatId["chat-race"]).toBeUndefined();
   });
 
   it("rolls back only the rejected queued request", () => {

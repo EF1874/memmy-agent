@@ -2,10 +2,13 @@ import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import {
   CATEGORY_TABS,
+  AGENT_CHANNEL_DISPLAY_BY_SLUG,
+  AgentQueueChannelIcon,
   GenericIntegrationIcon,
   ImChannelTitleIcon,
   IntegrationLogoBadge,
   composioLogoUrl,
+  agentChannelDisplay,
   getAllIntegrationMeta,
   getIntegrationMeta,
   guessIntegrationCategory,
@@ -111,5 +114,31 @@ describe("integrationMeta", () => {
     expect(guessIntegrationCategory("googledocs", "Google Docs")).toBe("Productivity");
     expect(guessIntegrationCategory("github", "GitHub")).toBe("Platform");
     expect(guessIntegrationCategory("instagram", "Instagram")).toBe("Social");
+  });
+
+  it("为共享队列覆盖 14 个固定 IM 渠道及别名", () => {
+    expect(Object.keys(AGENT_CHANNEL_DISPLAY_BY_SLUG)).toEqual([
+      "dingtalk",
+      "discord",
+      "feishu",
+      "imessage",
+      "matrix",
+      "mochat",
+      "msteams",
+      "qq",
+      "signal",
+      "slack",
+      "telegram",
+      "wecom",
+      "weixin",
+      "whatsapp"
+    ]);
+    expect(agentChannelDisplay("weixin")).toMatchObject({ logoSlug: "wechat" });
+    expect(agentChannelDisplay("msteams")).toMatchObject({ logoSlug: "microsoft_teams" });
+    expect(agentChannelDisplay("unknown")).toBeNull();
+    expect(renderToString(<AgentQueueChannelIcon channel="weixin" />)).not.toContain("logos.composio.dev");
+    expect(renderToString(<AgentQueueChannelIcon channel="msteams" />)).toContain("microsoft_teams");
+    expect(renderToString(<AgentQueueChannelIcon channel="imessage" />)).toContain("channel-integration-icon-imessage");
+    expect(renderToString(<AgentQueueChannelIcon channel="unknown" />)).toContain("lucide-message-circle");
   });
 });

@@ -16,6 +16,7 @@ import {
   createAgentTaskStateCoordinator,
   hydrateAgentThreadInBackground,
   isAgentRuntimeBridgeRoute,
+  requestDesyncedAgentQueueSnapshots,
   refreshAgentTaskList
 } from "../agent-runtime-bridge.js";
 
@@ -33,6 +34,28 @@ describe("AgentRuntimeBridge", () => {
     expect(agentRuntimeConnectRetryDelayMs(3)).toBe(5000);
     expect(agentRuntimeConnectRetryDelayMs(4)).toBe(10000);
     expect(agentRuntimeConnectRetryDelayMs(99)).toBe(10000);
+  });
+
+  it("requests each queue revision gap once and drops old-generation bookkeeping", () => {
+    const connection = { requestQueueSnapshot: vi.fn() };
+    const requestedKeys = new Set(["6\u0000old-chat\u00003"]);
+    const desynced = {
+      "chat-1": { generation: 7, observedRevision: 5 },
+      "chat-2": { generation: 6, observedRevision: 8 }
+    };
+
+    requestDesyncedAgentQueueSnapshots(connection, 7, desynced, requestedKeys);
+    requestDesyncedAgentQueueSnapshots(connection, 7, desynced, requestedKeys);
+
+    expect(connection.requestQueueSnapshot).toHaveBeenCalledOnce();
+    expect(connection.requestQueueSnapshot).toHaveBeenCalledWith("chat-1", 7);
+    expect([...requestedKeys]).toEqual(["7\u0000chat-1\u00005"]);
+
+    requestDesyncedAgentQueueSnapshots(connection, 8, {
+      "chat-1": { generation: 8, observedRevision: 9 }
+    }, requestedKeys);
+    expect(connection.requestQueueSnapshot).toHaveBeenLastCalledWith("chat-1", 8);
+    expect([...requestedKeys]).toEqual(["8\u0000chat-1\u00009"]);
   });
 
   it("enables websocket runtime only for the main workspace route family", () => {
@@ -93,6 +116,7 @@ describe("AgentRuntimeBridge", () => {
     expect(lifecycleBlock).toContain("if (chatId === subscribedChatRef.current)");
     expect(lifecycleBlock).toContain("return;");
     expect(lifecycleBlock).toContain("dispatch(agentActions.wsEventReceived(event));");
+    expect(source).toContain("event.chat_id !== subscribedChatRef.current");
   });
 
   it("refreshes the chat catalog and settings model config from the same config change event", () => {

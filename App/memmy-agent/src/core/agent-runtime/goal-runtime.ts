@@ -1,5 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { InboundMessage, OutboundMessage, type MessageBus } from "../runtime-messages/index.js";
+import {
+  InboundMessage,
+  OutboundMessage,
+  parseTurnSource,
+  type MessageBus,
+} from "../runtime-messages/index.js";
 import type { ProviderErrorCategory } from "../../providers/provider-error-classifier.js";
 import type { Session, SessionManager } from "../session/manager.js";
 import {
@@ -106,6 +111,8 @@ const GOAL_CONTROL_RESULT_TTL_MS = 10 * 60 * 1000;
 const GOAL_TURN_SETTLEMENT_LIMIT = 64;
 const INBOX_METADATA_KEYS = new Set([
   "client_request_id",
+  "queued_at",
+  "turn_source",
   "webui_request_digest",
   "webui_queue_surface",
   "webui",
@@ -247,6 +254,18 @@ export function sanitizeGoalInboxMetadata(
     if (typeof requestId !== "string" || !requestId.trim() || typeof digest !== "string" || !digest.trim()) {
       throw new GoalRuntimeError("goal_inbox_metadata_invalid");
     }
+  }
+  if (Object.prototype.hasOwnProperty.call(out, "turn_source")) {
+    const source = parseTurnSource(out.turn_source);
+    if (!source) throw new GoalRuntimeError("goal_inbox_metadata_invalid");
+    out.turn_source = source;
+  }
+  if (Object.prototype.hasOwnProperty.call(out, "queued_at")) {
+    const queuedAt = out.queued_at;
+    if (typeof queuedAt !== "string" || !Number.isFinite(Date.parse(queuedAt))) {
+      throw new GoalRuntimeError("goal_inbox_metadata_invalid");
+    }
+    out.queued_at = new Date(queuedAt).toISOString();
   }
   return out;
 }
@@ -844,8 +863,8 @@ export class GoalRuntime {
       const inbox = parseInbox(session.metadata[GOAL_TURN_INBOX_KEY]);
       const index = inbox.findIndex((entry) => (
         entry.id === entryId
-        && entry.channel === "websocket"
-        && entry.metadata.webui_queue_surface === "chat_composer"
+        && typeof entry.metadata.client_request_id === "string"
+        && parseTurnSource(entry.metadata.turn_source) !== null
       ));
       if (index < 0) return { value: "missing" as const };
       if (inbox[index]!.turnId !== null) return { value: "reserved" as const };

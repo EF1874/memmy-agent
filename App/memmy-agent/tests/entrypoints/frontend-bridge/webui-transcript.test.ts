@@ -1239,6 +1239,61 @@ describe("webui transcript replay", () => {
     expect(response?.messages).toHaveLength(1);
   });
 
+  it("filters the TUI history by the root Turn source while GUI remains complete", () => {
+    useDataDir();
+    const key = "websocket:t-surface";
+    appendAll(key, [
+      {
+        event: "user",
+        chat_id: "t-surface",
+        turn_id: "turn-tui",
+        text: "TUI question",
+        client_request_id: "11111111-1111-4111-8111-111111111111",
+        source: { kind: "tui", channel: "websocket" },
+      },
+      {
+        event: "message",
+        chat_id: "t-surface",
+        turn_id: "turn-tui",
+        text: "TUI answer",
+        source: { kind: "gui", channel: "websocket" },
+      },
+      { event: "turn_end", chat_id: "t-surface", turn_id: "turn-tui" },
+      {
+        event: "user",
+        chat_id: "t-surface",
+        turn_id: "turn-gui",
+        text: "GUI question",
+        source: { kind: "gui", channel: "websocket" },
+      },
+      { event: "message", chat_id: "t-surface", turn_id: "turn-gui", text: "GUI answer" },
+      { event: "turn_end", chat_id: "t-surface", turn_id: "turn-gui" },
+      { event: "user", chat_id: "t-surface", turn_id: "turn-legacy", text: "legacy question" },
+      { event: "message", chat_id: "t-surface", turn_id: "turn-legacy", text: "legacy answer" },
+      { event: "turn_end", chat_id: "t-surface", turn_id: "turn-legacy" },
+    ]);
+
+    const gui = buildWebuiThreadResponse(key, { surface: "gui", augmentUserMedia: null });
+    const tui = buildWebuiThreadResponse(key, { surface: "tui", augmentUserMedia: null });
+
+    expect(gui?.messages.map((message: Record<string, any>) => message.content)).toEqual([
+      "TUI question",
+      "TUI answer",
+      "GUI question",
+      "GUI answer",
+      "legacy question",
+      "legacy answer",
+    ]);
+    expect(tui?.messages.map((message: Record<string, any>) => message.content)).toEqual([
+      "TUI question",
+      "TUI answer",
+    ]);
+    expect(tui?.messages[0]).toMatchObject({
+      client_request_id: "11111111-1111-4111-8111-111111111111",
+      turnId: "turn-tui",
+    });
+  });
+
   it("replays complete assistant text written by stream_end without subscribers", async () => {
     useDataDir();
     const channel = new WebSocketChannel({}, new MessageBus());

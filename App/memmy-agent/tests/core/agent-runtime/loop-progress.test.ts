@@ -456,6 +456,8 @@ describe("AgentLoop progress integration", () => {
       sessionKey: session.key,
       chatId: "ext-d2VpeGluOnd4LXVzZXI",
       turnId: ctx.turnId,
+      source: null,
+      clientRequestId: null,
     };
     loop.guiTranscriptMirror = {
       user: vi.fn(),
@@ -497,6 +499,8 @@ describe("AgentLoop progress integration", () => {
       sessionKey: session.key,
       chatId: "ext-dGVsZWdyYW06Y2hhdC0x",
       turnId: ctx.turnId,
+      source: null,
+      clientRequestId: null,
     };
     loop.guiTranscriptMirror = {
       user: vi.fn(),

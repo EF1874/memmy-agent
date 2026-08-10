@@ -552,6 +552,29 @@ export function agentRuntimeConnectRetryDelayMs(attempt: number): number {
     ?? AGENT_RUNTIME_CONNECT_STEADY_RETRY_DELAY_MS;
 }
 
+export function requestDesyncedAgentQueueSnapshots(
+  connection: Pick<MemmyAgentWebSocketConnection, "requestQueueSnapshot">,
+  generation: number,
+  desyncedByChatId: Record<string, { generation: number; observedRevision: number }>,
+  requestedKeys: Set<string>
+): void {
+  const generationPrefix = `${generation}\0`;
+  for (const key of requestedKeys) {
+    if (!key.startsWith(generationPrefix)) requestedKeys.delete(key);
+  }
+  for (const [chatId, desync] of Object.entries(desyncedByChatId)) {
+    if (desync.generation !== generation) continue;
+    const key = `${generationPrefix}${chatId}\0${desync.observedRevision}`;
+    if (requestedKeys.has(key)) continue;
+    requestedKeys.add(key);
+    try {
+      connection.requestQueueSnapshot(chatId, generation);
+    } catch {
+      // A new connection generation receives an authoritative attach snapshot.
+    }
+  }
+}
+
 /** Checks is agent runtime bridge route. */
 export function isAgentRuntimeBridgeRoute(path: AppRoutePath): boolean {
   return path === "/main"
@@ -581,6 +604,7 @@ export function AgentRuntimeBridge(props: {
   const connectAttemptRef = useRef(0);
   const connectInFlightRef = useRef(false);
   const operationErrorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const queueSnapshotRequestKeysRef = useRef(new Set<string>());
   const agentStateRef = useRef(state.agent);
   agentStateRef.current = state.agent;
   const ownedTaskStateCoordinatorRef = useRef<{
@@ -630,6 +654,7 @@ export function AgentRuntimeBridge(props: {
     connectionRef.current?.close();
     connectionRef.current = null;
     setConnection(null);
+    queueSnapshotRequestKeysRef.current.clear();
     if (hadActiveConnection) {
       dispatch(agentActions.connectionDisposed());
     }
@@ -778,6 +803,12 @@ export function AgentRuntimeBridge(props: {
           if (isAgentConnectionEvent(event)) {
             dispatch(agentActions.wsEventReceived(event));
           }
+          if (
+            isAgentQueueProjectionEvent(event)
+            && event.chat_id !== subscribedChatRef.current
+          ) {
+            dispatch(agentActions.wsEventReceived(event));
+          }
         });
 
         if (!isActive) {
@@ -820,6 +851,16 @@ export function AgentRuntimeBridge(props: {
 
     subscribeAgentChat(connection, chatId);
   }, [connection, state.agent.currentChatId, subscribeAgentChat]);
+
+  useEffect(() => {
+    if (!connection) return;
+    requestDesyncedAgentQueueSnapshots(
+      connection,
+      state.agent.connectionGeneration,
+      state.agent.queueDesyncedByChatId,
+      queueSnapshotRequestKeysRef.current
+    );
+  }, [connection, state.agent.connectionGeneration, state.agent.queueDesyncedByChatId]);
 
   useEffect(() => {
     const client = clients?.memmyAgent;
@@ -1071,6 +1112,13 @@ function isAgentConnectionEvent(event: MemmyAgentWsEvent): boolean {
     || event.event === "transport_error"
     || event.event === "connection_closed"
     || event.event === "connection_attempt_failed";
+}
+
+function isAgentQueueProjectionEvent(event: MemmyAgentWsEvent): boolean {
+  return event.event === "message_queued"
+    || event.event === "message_dequeued"
+    || event.event === "message_queue_removed"
+    || event.event === "message_queue_snapshot";
 }
 
 type SettledSuccess<T> = { ok: true; value: T };

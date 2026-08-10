@@ -166,6 +166,8 @@ describe("AgentLoop turn persistence", () => {
       sessionKey: session.key,
       chatId: "ext_dGVsZWdyYW06Y2hhdA",
       turnId: "turn-projected",
+      source: null,
+      clientRequestId: null,
     };
     const contextCompaction = vi.fn();
     const retryWait = vi.fn();

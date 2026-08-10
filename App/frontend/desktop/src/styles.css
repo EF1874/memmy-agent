@@ -1815,6 +1815,31 @@ body:has(.memory-drawer) .window-drag-region {
   color: color-mix(in srgb, var(--color-text-ink) 38%, transparent);
 }
 
+.agent-queue-item__source {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  color: color-mix(in srgb, var(--color-text-ink) 58%, transparent);
+}
+
+.agent-queue-item__source-mark {
+  display: block;
+  width: 16px;
+  height: 16px;
+  max-width: 16px;
+  max-height: 16px;
+  flex: 0 0 16px;
+  object-fit: contain;
+}
+
+.agent-queue-item__source-image {
+  border-radius: 3px;
+}
+
 .agent-queue-item__text {
   min-width: 0;
   flex: 1 1 auto;

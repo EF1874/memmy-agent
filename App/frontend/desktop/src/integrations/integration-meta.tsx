@@ -95,6 +95,63 @@ const channelLogoBySlug: Record<string, string> = {
   wechat: wechatLogoUrl
 };
 
+export const AGENT_CHANNEL_DISPLAY_BY_SLUG = {
+  dingtalk: { name: "DingTalk", logoSlug: "dingtalk" },
+  discord: { name: "Discord", logoSlug: "discord" },
+  feishu: { name: "\u98de\u4e66", logoSlug: "feishu" },
+  imessage: { name: "iMessage", logoSlug: "imessage" },
+  matrix: { name: "Matrix", logoSlug: "matrix" },
+  mochat: { name: "Mochat", logoSlug: "mochat" },
+  msteams: { name: "Microsoft Teams", logoSlug: "microsoft_teams" },
+  qq: { name: "QQ", logoSlug: "qq" },
+  signal: { name: "Signal", logoSlug: "signal" },
+  slack: { name: "Slack", logoSlug: "slack" },
+  telegram: { name: "Telegram", logoSlug: "telegram" },
+  wecom: { name: "\u4f01\u4e1a\u5fae\u4fe1", logoSlug: "wecom" },
+  weixin: { name: "\u5fae\u4fe1", logoSlug: "wechat" },
+  whatsapp: { name: "WhatsApp", logoSlug: "whatsapp" }
+} as const;
+
+export function agentChannelDisplay(channel: string): {
+  name: string;
+  logoSlug: string;
+} | null {
+  return Object.prototype.hasOwnProperty.call(AGENT_CHANNEL_DISPLAY_BY_SLUG, channel)
+    ? AGENT_CHANNEL_DISPLAY_BY_SLUG[channel as keyof typeof AGENT_CHANNEL_DISPLAY_BY_SLUG]
+    : null;
+}
+
+/** Decorative compact channel icon used inside the Agent queue source slot. */
+export function AgentQueueChannelIcon(props: { channel: string; className?: string }) {
+  const [failed, setFailed] = useState(false);
+  const display = agentChannelDisplay(props.channel);
+  if (!display || failed) {
+    return <MessageCircle className={props.className} size={16} aria-hidden="true" />;
+  }
+  const iconDefinition = channelIconBySlug[display.logoSlug];
+  if (iconDefinition) {
+    const { Icon } = iconDefinition;
+    return (
+      <Icon
+        className={[props.className, iconDefinition.className].filter(Boolean).join(" ")}
+        size={16}
+        aria-hidden="true"
+      />
+    );
+  }
+  const logoUrl = channelLogoBySlug[display.logoSlug] ?? composioLogoUrl(display.logoSlug);
+  return (
+    <img
+      src={logoUrl}
+      alt=""
+      aria-hidden="true"
+      className={props.className}
+      loading="lazy"
+      onError={() => setFailed(true)}
+    />
+  );
+}
+
 const taskChannelByTitleSuffix = [
   { slug: "telegram", name: "Telegram", suffixes: ["Telegram"] },
   { slug: "wechat", name: "\u5fae\u4fe1", suffixes: ["\u5fae\u4fe1", "WeChat"] },

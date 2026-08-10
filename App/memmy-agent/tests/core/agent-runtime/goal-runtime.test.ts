@@ -559,19 +559,24 @@ describe("GoalRuntime control and inbox arbitration", () => {
     expect(runtime.inbox(SESSION_KEY)).toHaveLength(1);
     expect(sessions.get(SESSION_KEY)?.messages).toEqual([]);
 
+    const sourceAwareRoute = {
+      ...ROUTE,
+      source: { kind: "tui" as const, channel: "websocket" },
+    };
     await expect(runtime.persistGoalUserTurn(
       SESSION_KEY,
       "turn-inbox",
-      ROUTE,
+      sourceAwareRoute,
       (session, entry) => session.addMessage("user", entry?.content ?? ""),
     )).resolves.toMatchObject({ entry: { content: "atomic inbox message" } });
     expect(runtime.inbox(SESSION_KEY)).toHaveLength(0);
+    expect(runtime.route(SESSION_KEY)).toEqual(sourceAwareRoute);
     expect(sessions.get(SESSION_KEY)?.messages).toEqual([
       expect.objectContaining({ role: "user", content: "atomic inbox message" }),
     ]);
   });
 
-  it("removes only an unreserved visible WebUI inbox entry and persists the result", async () => {
+  it("removes only an unreserved visible shared-queue inbox entry and persists the result", async () => {
     const { runtime, root } = createRuntime();
     const goal = await createGoal(runtime);
     for (const [id, content] of [["remove-me", "delete this"], ["keep-me", "keep this"]] as const) {
@@ -585,6 +590,8 @@ describe("GoalRuntime control and inbox arbitration", () => {
           webui_request_digest: `digest-${id}`,
           webui_queue_surface: "chat_composer",
           webui: true,
+          queued_at: "2026-08-09T12:00:00.000Z",
+          turn_source: { kind: "gui", channel: "websocket" },
         },
       }));
     }
@@ -612,5 +619,22 @@ describe("GoalRuntime control and inbox arbitration", () => {
       reply_to: "root",
       unsupported: new Date(),
     })).toEqual({ message_id: "m1", reply_to: "root" });
+    expect(sanitizeGoalInboxMetadata("websocket", {
+      client_request_id: "request-1",
+      webui_request_digest: "digest-1",
+      queued_at: "2026-08-09T12:00:00.000Z",
+      turn_source: { kind: "tui", channel: "websocket" },
+    })).toEqual({
+      client_request_id: "request-1",
+      webui_request_digest: "digest-1",
+      queued_at: "2026-08-09T12:00:00.000Z",
+      turn_source: { kind: "tui", channel: "websocket" },
+    });
+    expect(() => sanitizeGoalInboxMetadata("websocket", {
+      client_request_id: "request-1",
+      webui_request_digest: "digest-1",
+      queued_at: "not-a-date",
+      turn_source: { kind: "tui", channel: "websocket" },
+    })).toThrowError(expect.objectContaining({ code: "goal_inbox_metadata_invalid" }));
   });
 });

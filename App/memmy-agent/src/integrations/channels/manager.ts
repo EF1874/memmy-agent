@@ -53,6 +53,7 @@ export class ChannelManager {
   originReplyFingerprints = new Map<string, string>();
   sessionManager: any = null;
   webuiRuntimeModelName: (() => string | null) | null = null;
+  webuiRuntimeToolNames: (() => string[]) | null = null;
   webuiModelSelectionResolver: ((input: {
     requestedPreset?: string | null;
     sessionPreset?: string | null;
@@ -64,6 +65,7 @@ export class ChannelManager {
   activeGoalStopHandler: ((sessionKey: string) => Promise<boolean>) | null = null;
   getWebuiQueueSnapshot: ((sessionKey: string) => WebuiQueueSnapshotDescriptor | Promise<WebuiQueueSnapshotDescriptor>) | null = null;
   removeQueuedWebuiMessage: ((sessionKey: string, clientRequestId: string) => RemoveQueuedWebuiMessageResult | Promise<RemoveQueuedWebuiMessageResult>) | null = null;
+  stopExpectedTurn: ((sessionKey: string, expectedTurnId: string) => Promise<"stopped" | "already_finished" | "not_owned">) | null = null;
 
   constructor(
     configOrBus: any = defaultConfig(),
@@ -71,6 +73,7 @@ export class ChannelManager {
     options: {
       sessionManager?: any;
       webuiRuntimeModelName?: (() => string | null) | null;
+      webuiRuntimeToolNames?: (() => string[]) | null;
       webuiModelSelectionResolver?: ((input: {
         requestedPreset?: string | null;
         sessionPreset?: string | null;
@@ -82,6 +85,7 @@ export class ChannelManager {
       activeGoalStopHandler?: ((sessionKey: string) => Promise<boolean>) | null;
       getWebuiQueueSnapshot?: ((sessionKey: string) => WebuiQueueSnapshotDescriptor | Promise<WebuiQueueSnapshotDescriptor>) | null;
       removeQueuedWebuiMessage?: ((sessionKey: string, clientRequestId: string) => RemoveQueuedWebuiMessageResult | Promise<RemoveQueuedWebuiMessageResult>) | null;
+      stopExpectedTurn?: ((sessionKey: string, expectedTurnId: string) => Promise<"stopped" | "already_finished" | "not_owned">) | null;
     } = {},
   ) {
     if (configOrBus instanceof MessageBus) {
@@ -93,6 +97,7 @@ export class ChannelManager {
     }
     this.sessionManager = options.sessionManager ?? null;
     this.webuiRuntimeModelName = options.webuiRuntimeModelName ?? null;
+    this.webuiRuntimeToolNames = options.webuiRuntimeToolNames ?? null;
     this.webuiModelSelectionResolver = options.webuiModelSelectionResolver ?? null;
     this.workspacePath = options.workspacePath
       ? path.resolve(options.workspacePath)
@@ -103,6 +108,7 @@ export class ChannelManager {
     this.activeGoalStopHandler = options.activeGoalStopHandler ?? null;
     this.getWebuiQueueSnapshot = options.getWebuiQueueSnapshot ?? null;
     this.removeQueuedWebuiMessage = options.removeQueuedWebuiMessage ?? null;
+    this.stopExpectedTurn = options.stopExpectedTurn ?? null;
     this.initChannels();
   }
 
@@ -166,6 +172,7 @@ export class ChannelManager {
       ?? this.config?.workspace_path;
     if (workspacePath) options.workspacePath = workspacePath;
     if (this.webuiRuntimeModelName) options.runtimeModelName = this.webuiRuntimeModelName;
+    if (this.webuiRuntimeToolNames) options.runtimeToolNames = this.webuiRuntimeToolNames;
     if (this.webuiModelSelectionResolver) {
       options.modelSelectionResolver = this.webuiModelSelectionResolver;
     }
@@ -175,6 +182,7 @@ export class ChannelManager {
     if (this.activeGoalStopHandler) options.activeGoalStopHandler = this.activeGoalStopHandler;
     if (this.getWebuiQueueSnapshot) options.getWebuiQueueSnapshot = this.getWebuiQueueSnapshot;
     if (this.removeQueuedWebuiMessage) options.removeQueuedWebuiMessage = this.removeQueuedWebuiMessage;
+    if (this.stopExpectedTurn) options.stopExpectedTurn = this.stopExpectedTurn;
     return options;
   }
 

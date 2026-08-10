@@ -4,15 +4,22 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentLoop } from "../../../src/core/agent-runtime/loop.js";
 import { Config } from "../../../src/config/schema.js";
+import { ProjectStore } from "../../../src/entrypoints/frontend-bridge/projects.js";
 import {
   listTerminalSessions,
   resolveTerminalTarget,
+  type TerminalTargetDependencies,
 } from "../../../src/entrypoints/cli/commands.js";
 
 const originalDataDir = process.env.MEMMY_AGENT_DATA_DIR;
 const roots: string[] = [];
 
-function makeLoop(): { root: string; workspace: string; loop: AgentLoop } {
+function makeLoop(): {
+  root: string;
+  workspace: string;
+  loop: AgentLoop;
+  dependencies: TerminalTargetDependencies;
+} {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-terminal-target-"));
   roots.push(root);
   process.env.MEMMY_AGENT_DATA_DIR = root;
@@ -32,7 +39,20 @@ function makeLoop(): { root: string; workspace: string; loop: AgentLoop } {
     sessionDir: path.join(workspace, "sessions"),
     model: "test-model",
   });
-  return { root, workspace: fs.realpathSync(workspace), loop };
+  const canonicalWorkspace = fs.realpathSync(workspace);
+  const projectStore = new ProjectStore();
+  loop.projectStore = projectStore;
+  return {
+    root,
+    workspace: canonicalWorkspace,
+    loop,
+    dependencies: {
+      sessions: loop.sessions,
+      projectStore,
+      workspace: canonicalWorkspace,
+      hasUsableDefaultModel: () => loop.resolveTurnModelSelection({}) !== null,
+    },
+  };
 }
 
 afterEach(() => {
@@ -44,8 +64,8 @@ afterEach(() => {
 
 describe("terminal target resolution", () => {
   it("creates cli:direct as a fixed standalone session by default", () => {
-    const { loop, workspace } = makeLoop();
-    const target = resolveTerminalTarget(loop);
+    const { dependencies, loop, workspace } = makeLoop();
+    const target = resolveTerminalTarget(dependencies);
     expect(target).toMatchObject({
       sessionId: "cli:direct",
       target: "standalone",
@@ -60,27 +80,27 @@ describe("terminal target resolution", () => {
   });
 
   it("creates new standalone sessions and resumes them only by full cli session ID", () => {
-    const { loop } = makeLoop();
-    const created = resolveTerminalTarget(loop, { standalone: true });
+    const { dependencies } = makeLoop();
+    const created = resolveTerminalTarget(dependencies, { standalone: true });
     expect(created.sessionId).toMatch(/^cli:[0-9a-f-]{36}$/);
-    expect(resolveTerminalTarget(loop, { sessionId: created.sessionId })).toEqual(created);
-    expect(() => resolveTerminalTarget(loop, { sessionId: "telegram:123" }))
+    expect(resolveTerminalTarget(dependencies, { sessionId: created.sessionId })).toEqual(created);
+    expect(() => resolveTerminalTarget(dependencies, { sessionId: "telegram:123" }))
       .toThrow("--session only accepts");
-    expect(() => resolveTerminalTarget(loop, {
+    expect(() => resolveTerminalTarget(dependencies, {
       sessionId: created.sessionId,
       standalone: true,
     })).toThrow("mutually exclusive");
   });
 
   it("accepts project paths, reuses the registered canonical root, and fixes each binding", () => {
-    const { root, loop } = makeLoop();
+    const { root, dependencies } = makeLoop();
     const projectPath = path.join(root, "code", "memmy");
     fs.mkdirSync(projectPath, { recursive: true });
-    const first = resolveTerminalTarget(loop, {
+    const first = resolveTerminalTarget(dependencies, {
       project: path.relative(root, projectPath),
       invocationCwd: root,
     });
-    const second = resolveTerminalTarget(loop, { project: projectPath });
+    const second = resolveTerminalTarget(dependencies, { project: projectPath });
     expect(first.sessionId).not.toBe(second.sessionId);
     expect(first.projectId).toBe(second.projectId);
     expect(first).toMatchObject({
@@ -88,12 +108,12 @@ describe("terminal target resolution", () => {
       projectName: "memmy",
       cwd: fs.realpathSync(projectPath),
     });
-    expect(resolveTerminalTarget(loop, { sessionId: first.sessionId })).toEqual(first);
+    expect(resolveTerminalTarget(dependencies, { sessionId: first.sessionId })).toEqual(first);
   });
 
   it("does not expose non-cli projected sessions through session listing", () => {
-    const { loop, workspace } = makeLoop();
-    resolveTerminalTarget(loop);
+    const { dependencies, loop, workspace } = makeLoop();
+    resolveTerminalTarget(dependencies);
     const im = loop.sessions.getOrCreate("telegram:123");
     im.metadata.webui = true;
     im.metadata.webuiProjectId = null;

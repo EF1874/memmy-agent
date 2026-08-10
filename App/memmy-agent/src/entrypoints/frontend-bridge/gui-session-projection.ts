@@ -33,6 +33,10 @@ export const GUI_IM_CHANNELS = {
 
 type GuiImChannel = keyof typeof GUI_IM_CHANNELS;
 
+export function isGuiImChannel(value: string): value is GuiImChannel {
+  return Object.prototype.hasOwnProperty.call(GUI_IM_CHANNELS, value);
+}
+
 export type GuiSessionSource =
   | { kind: "gui"; channel: null; displayName: null }
   | { kind: "terminal"; channel: "cli"; displayName: null }
@@ -68,7 +72,8 @@ function sourceForCanonicalSessionKey(sessionKey: string): GuiSessionSource | nu
   }
   const separator = sessionKey.indexOf(":");
   if (separator <= 0) return null;
-  const channel = sessionKey.slice(0, separator) as GuiImChannel;
+  const channel = sessionKey.slice(0, separator);
+  if (!isGuiImChannel(channel)) return null;
   const displayName = GUI_IM_CHANNELS[channel];
   return displayName ? { kind: "im", channel, displayName } : null;
 }

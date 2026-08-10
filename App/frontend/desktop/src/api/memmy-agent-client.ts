@@ -378,11 +378,17 @@ export type MemmyAgentMediaAttachment = {
   path?: string;
 };
 
+export type AgentTurnSource = {
+  kind: "gui" | "tui" | "im";
+  channel: string;
+};
+
 export type WebuiQueuedMessage = {
   client_request_id: string;
   text: string;
   media_urls: MemmyAgentMediaAttachment[];
   queued_at: string;
+  source?: AgentTurnSource;
 };
 
 export type MemmyAgentMessageSubmissionResult = {
@@ -391,6 +397,7 @@ export type MemmyAgentMessageSubmissionResult = {
 
 export type MemmyAgentQueueRemovalResult = {
   outcome: "removed" | "already_dequeued";
+  revision: number;
 };
 
 export type WebuiSessionTarget =
@@ -454,6 +461,7 @@ export type MemmyAgentWsEvent = {
   item?: WebuiQueuedMessage;
   items?: WebuiQueuedMessage[];
   started_items?: WebuiQueuedMessage[];
+  revision?: number;
   [key: string]: unknown;
 };
 
@@ -529,6 +537,7 @@ export interface MemmyAgentWebSocketConnection {
     expectedGeneration: number,
     timeoutMs?: number
   ): Promise<MemmyAgentQueueRemovalResult>;
+  requestQueueSnapshot(chatId: string, expectedGeneration: number): void;
   controlGoal(
     input: AgentGoalControlInput,
     expectedGeneration: number,
@@ -677,6 +686,7 @@ function toWebSocketUrl(baseUrl: string, wsPath: string, token: string, clientId
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   url.searchParams.set("token", token);
   url.searchParams.set("client_id", clientId);
+  url.searchParams.set("client_surface", "gui");
   return url.toString();
 }
 
@@ -1213,6 +1223,15 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     if (generation !== null) {
       this.sendAttach(chatId, generation);
     }
+  }
+
+  requestQueueSnapshot(chatId: string, expectedGeneration: number): void {
+    this.assertReadyGeneration(expectedGeneration);
+    this.knownChats.add(chatId);
+    this.sendOrdinaryFrame({
+      type: "queue_snapshot_request",
+      chat_id: chatId
+    }, expectedGeneration);
   }
 
   sendMessage(input: MemmyAgentSendMessageInput, expectedGeneration: number): Promise<void> {
@@ -2237,8 +2256,11 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     if (
       event.ok === true
       && (event.outcome === "removed" || event.outcome === "already_dequeued")
+      && typeof event.revision === "number"
+      && Number.isSafeInteger(event.revision)
+      && event.revision >= 0
     ) {
-      pending.resolve({ outcome: event.outcome });
+      pending.resolve({ outcome: event.outcome, revision: event.revision });
       return;
     }
     pending.reject(new Error(

@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { InboundMessage } from "../../core/runtime-messages/events.js";
+import type { InboundMessage, TurnSource } from "../../core/runtime-messages/events.js";
 import type { GoalStatus } from "../../core/session/goal-state.js";
 import type { ProviderErrorCategory } from "../../providers/provider-error-classifier.js";
 import {
@@ -24,6 +24,8 @@ type MirrorTurn = {
   sessionKey: string;
   chatId: string;
   turnId: string;
+  source: TurnSource | null;
+  clientRequestId: string | null;
 };
 
 type MonitorCursor = {
@@ -95,10 +97,15 @@ export class GuiTranscriptMirror {
     return expected;
   }
 
-  turn(sessionKey: string, turnId: string): MirrorTurn | null {
+  turn(
+    sessionKey: string,
+    turnId: string,
+    source: TurnSource | null = null,
+    clientRequestId: string | null = null,
+  ): MirrorTurn | null {
     if (!isProjectableCanonicalSessionKey(sessionKey)) return null;
     try {
-      return { sessionKey, chatId: toGuiChatId(sessionKey), turnId };
+      return { sessionKey, chatId: toGuiChatId(sessionKey), turnId, source, clientRequestId };
     } catch {
       return null;
     }
@@ -108,13 +115,20 @@ export class GuiTranscriptMirror {
     return appendTranscriptObject(guiSessionKey(sessionKey), record);
   }
 
+  private appendTurn(turn: MirrorTurn, record: Record<string, any>): number {
+    return this.append(turn.sessionKey, {
+      ...record,
+      ...(turn.source ? { source: turn.source } : {}),
+    });
+  }
+
   sessionUpdated(sessionKey: string): void {
     const chatId = toGuiChatId(sessionKey);
     this.append(sessionKey, { event: "session_updated", chat_id: chatId, scope: "metadata" });
   }
 
   running(turn: MirrorTurn, startedAt: number): void {
-    this.append(turn.sessionKey, {
+    this.appendTurn(turn, {
       event: "run_status",
       chat_id: turn.chatId,
       status: "running",
@@ -124,18 +138,19 @@ export class GuiTranscriptMirror {
   }
 
   user(turn: MirrorTurn, text: string, mediaPaths: string[] = []): void {
-    this.append(turn.sessionKey, {
+    this.appendTurn(turn, {
       event: "user",
       chat_id: turn.chatId,
       text,
       turn_id: turn.turnId,
+      ...(turn.clientRequestId ? { client_request_id: turn.clientRequestId } : {}),
       ...(mediaPaths.length ? { media_paths: mediaPaths } : {}),
     });
   }
 
   progress(turn: MirrorTurn, content: string, options: Record<string, any> = {}): void {
     if (options.reasoning || options.reasoningDelta) {
-      this.append(turn.sessionKey, {
+      this.appendTurn(turn, {
         event: "reasoning_delta",
         chat_id: turn.chatId,
         text: content,
@@ -144,7 +159,7 @@ export class GuiTranscriptMirror {
       return;
     }
     if (options.reasoningEnd) {
-      this.append(turn.sessionKey, {
+      this.appendTurn(turn, {
         event: "reasoning_end",
         chat_id: turn.chatId,
         turn_id: turn.turnId,
@@ -158,7 +173,7 @@ export class GuiTranscriptMirror {
       const cancellationTerminal = fileEditEvents.every(
         (event: any) => event?.cancellation_terminal === true,
       );
-      this.append(turn.sessionKey, {
+      this.appendTurn(turn, {
         event: "file_edit",
         chat_id: turn.chatId,
         turn_id: turn.turnId,
@@ -167,7 +182,7 @@ export class GuiTranscriptMirror {
       });
     }
     if (!content && fileEditEvents.length && !options.toolEvents) return;
-    this.append(turn.sessionKey, {
+    this.appendTurn(turn, {
       event: "message",
       chat_id: turn.chatId,
       text: content,
@@ -180,7 +195,7 @@ export class GuiTranscriptMirror {
   }
 
   delta(turn: MirrorTurn, text: string, streamId: string): void {
-    this.append(turn.sessionKey, {
+    this.appendTurn(turn, {
       event: "delta",
       chat_id: turn.chatId,
       text,
@@ -190,7 +205,7 @@ export class GuiTranscriptMirror {
   }
 
   streamEnd(turn: MirrorTurn, streamId: string, resuming = false): void {
-    this.append(turn.sessionKey, {
+    this.appendTurn(turn, {
       event: "stream_end",
       chat_id: turn.chatId,
       stream_id: streamId,
@@ -204,7 +219,7 @@ export class GuiTranscriptMirror {
     text: string,
     status: "running" | "done" | "error",
   ): void {
-    this.append(turn.sessionKey, {
+    this.appendTurn(turn, {
       event: "context_compaction",
       chat_id: turn.chatId,
       compaction_id: `context-compaction:${turn.turnId}`,
@@ -216,7 +231,7 @@ export class GuiTranscriptMirror {
   }
 
   retryWait(turn: MirrorTurn, text: string): void {
-    this.append(turn.sessionKey, {
+    this.appendTurn(turn, {
       event: "retry_wait",
       chat_id: turn.chatId,
       text,
@@ -231,7 +246,7 @@ export class GuiTranscriptMirror {
     agentUi: unknown = null,
     errorCategory: ProviderErrorCategory | null = null,
   ): void {
-    this.append(turn.sessionKey, {
+    this.appendTurn(turn, {
       event: "message",
       chat_id: turn.chatId,
       text,
@@ -251,14 +266,14 @@ export class GuiTranscriptMirror {
     goalId: string | null = null,
     goalOutcome: GoalStatus | null = null,
   ): void {
-    this.append(turn.sessionKey, {
+    this.appendTurn(turn, {
       event: "turn_end",
       chat_id: turn.chatId,
       turn_id: turn.turnId,
       ...(latencyMs == null ? {} : { latency_ms: latencyMs }),
       ...(goalId && goalOutcome ? { goal_id: goalId, goal_outcome: goalOutcome } : {}),
     });
-    this.append(turn.sessionKey, {
+    this.appendTurn(turn, {
       event: "run_status",
       chat_id: turn.chatId,
       status: "idle",

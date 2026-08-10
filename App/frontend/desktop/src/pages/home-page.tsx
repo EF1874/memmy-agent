@@ -2616,6 +2616,12 @@ export function HomePage() {
                     label={t("home.queue.label")}
                     removeLabel={t("home.queue.remove")}
                     attachmentOnlyLabel={(count) => t("home.queue.attachmentOnly", { count })}
+                    sourceLabels={{
+                      gui: t("home.queue.source.gui"),
+                      tui: t("home.queue.source.tui"),
+                      im: (channelName) => t("home.queue.source.im", { channel: channelName }),
+                      unknownIm: t("home.queue.source.imUnknown")
+                    }}
                     onRemove={(clientRequestId) => void removeQueuedMessage(clientRequestId)}
                   />
                   <div

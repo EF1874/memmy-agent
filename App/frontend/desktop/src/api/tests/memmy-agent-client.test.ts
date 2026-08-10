@@ -601,7 +601,7 @@ describe("memmy-agent client", () => {
     const events: unknown[] = [];
 
     const connection = await connectReady(client, sockets, (event) => events.push(event), { event: "ready", chat_id: "chat-1", client_id: "frontend-test" });
-    expect(sockets[0]?.url).toBe("wss://agent.local:18980/ws?token=agent-token&client_id=frontend-test");
+    expect(sockets[0]?.url).toBe("wss://agent.local:18980/ws?token=agent-token&client_id=frontend-test&client_surface=gui");
 
     const newChat = connection.newChat(1);
     connection.attach("chat-2");
@@ -625,6 +625,7 @@ describe("memmy-agent client", () => {
     connection.status("");
     connection.historyDag("chat-2");
     connection.historyDag("");
+    connection.requestQueueSnapshot("chat-2", 1);
     const newChatRequestId = JSON.parse(sockets[0]!.sent[0]!).client_request_id as string;
     sockets[0]?.emit({
       event: "attached",
@@ -661,7 +662,8 @@ describe("memmy-agent client", () => {
       { type: "stop", chat_id: "chat-2" },
       { type: "message", chat_id: "chat-2", content: "/restart", webui: true },
       { type: "status", chat_id: "chat-2" },
-      { type: "history_dag", chat_id: "chat-2" }
+      { type: "history_dag", chat_id: "chat-2" },
+      { type: "queue_snapshot_request", chat_id: "chat-2" }
     ]);
   });
 
@@ -941,7 +943,7 @@ describe("memmy-agent client", () => {
 
     await connectReady(client, sockets, () => undefined);
 
-    expect(sockets[0]?.url).toBe("ws://127.0.0.1:5174/ws?token=agent-token&client_id=frontend-test");
+    expect(sockets[0]?.url).toBe("ws://127.0.0.1:5174/ws?token=agent-token&client_id=frontend-test&client_surface=gui");
   });
 
   it("routes websocket events per chat and flushes queued events on subscribe", async () => {
@@ -1739,9 +1741,10 @@ describe("memmy-agent client", () => {
       request_id: frame.request_id,
       client_request_id: clientRequestId,
       ok: true,
-      outcome: "already_dequeued"
+      outcome: "already_dequeued",
+      revision: 8
     });
-    await expect(removal).resolves.toEqual({ outcome: "already_dequeued" });
+    await expect(removal).resolves.toEqual({ outcome: "already_dequeued", revision: 8 });
   });
 
   it("reconfirms queued messages across reconnects without exhausting retries", async () => {

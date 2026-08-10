@@ -104,6 +104,7 @@ describe("WebSocket HTTP route helpers", () => {
     sessionManager = null,
     staticDistPath = null,
     runtimeModelName = null,
+    runtimeToolNames = null,
     workspacePath = null,
     fileMemoryEnabled = false,
     cancelActiveTasks = undefined,
@@ -113,6 +114,7 @@ describe("WebSocket HTTP route helpers", () => {
     sessionManager?: SessionManager | null;
     staticDistPath?: string | null;
     runtimeModelName?: (() => string | null | undefined) | null;
+    runtimeToolNames?: (() => string[] | null | undefined) | null;
     workspacePath?: string | null;
     fileMemoryEnabled?: boolean;
     cancelActiveTasks?: (sessionKey: string) => Promise<number>;
@@ -134,6 +136,7 @@ describe("WebSocket HTTP route helpers", () => {
         sessionManager,
         staticDistPath,
         runtimeModelName,
+        runtimeToolNames,
         workspacePath,
         fileMemoryEnabled,
         cancelActiveTasks,
@@ -203,6 +206,7 @@ describe("WebSocket HTTP route helpers", () => {
         sessionManager,
         workspacePath: root,
         webuiRuntimeModelName: () => "openai/gpt-4.1",
+        webuiRuntimeToolNames: () => ["exec", "read_file"],
       },
     );
 
@@ -212,6 +216,7 @@ describe("WebSocket HTTP route helpers", () => {
     expect((channel as WebSocketChannel).sessionManager).toBe(sessionManager);
     expect((channel as WebSocketChannel).workspacePath).toBe(path.resolve(root));
     expect((channel as WebSocketChannel).runtimeModelName?.()).toBe("openai/gpt-4.1");
+    expect((channel as WebSocketChannel).runtimeToolNames?.()).toEqual(["exec", "read_file"]);
   });
 
   it("routes channel admin HTTP requests to the injected admin API", async () => {
@@ -277,7 +282,11 @@ describe("WebSocket HTTP route helpers", () => {
     const channel = new WebSocketChannel(
       { enabled: true, allowFrom: ["*"], host: "127.0.0.1", port: 0, path: "/", websocketRequiresToken: false },
       new MessageBus(),
-      { sessionManager: manager, runtimeModelName: () => "openai/gpt-4.1" },
+      {
+        sessionManager: manager,
+        runtimeModelName: () => "openai/gpt-4.1",
+        runtimeToolNames: () => ["exec", "read_file"],
+      },
     );
     running.push(channel);
     await channel.start();
@@ -292,6 +301,7 @@ describe("WebSocket HTTP route helpers", () => {
     expect(body.token).toMatch(/^nbwt_/);
     expect(body.ws_path).toBe("/");
     expect(body.model_name).toBe("openai/gpt-4.1");
+    expect(body.tool_names).toEqual(["exec", "read_file"]);
 
     const headers = { Authorization: `Bearer ${body.token}` };
     const listing = await fetch(`http://127.0.0.1:${port}/api/sessions`, { headers });

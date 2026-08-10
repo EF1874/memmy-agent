@@ -81,7 +81,13 @@ describe("GUI transcript synchronization", () => {
       webuiWorkspaceCwd: canonicalWorkspace,
     });
 
-    const turn = mirror.turn(session.key, "turn-1")!;
+    const clientRequestId = "11111111-1111-4111-8111-111111111111";
+    const turn = mirror.turn(
+      session.key,
+      "turn-1",
+      { kind: "im", channel: "telegram" },
+      clientRequestId,
+    )!;
     mirror.user(turn, "hello");
     mirror.progress(turn, "", {
       fileEditEvents: [{ path: "src/index.ts", action: "write" }],
@@ -129,6 +135,14 @@ describe("GUI transcript synchronization", () => {
       event: "message",
       agent_ui: { result: { status: "done" } },
     });
+    expect(transcript[1]).toMatchObject({
+      event: "user",
+      client_request_id: clientRequestId,
+      source: { kind: "im", channel: "telegram" },
+    });
+    for (const record of transcript.slice(1, 10)) {
+      expect(record.source).toEqual({ kind: "im", channel: "telegram" });
+    }
   });
 
   it("starts existing files at EOF and broadcasts only appended complete records", async () => {

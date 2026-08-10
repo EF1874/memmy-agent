@@ -8,7 +8,13 @@ import path from "node:path";
 import { lookup as lookupMime } from "mime-types";
 import { requestMcpReload } from "../../core/agent-runtime/tools/mcp.js";
 import { BaseChannel, type ChannelHandleMessageOptions } from "./base.js";
-import { OUTBOUND_META_AGENT_UI, MessageBus, OutboundMessage } from "../../core/runtime-messages/index.js";
+import {
+  OUTBOUND_META_AGENT_UI,
+  MessageBus,
+  OutboundMessage,
+  parseTurnSource,
+  type TurnSource,
+} from "../../core/runtime-messages/index.js";
 import { builtinCommandPalette } from "../../command/builtin.js";
 import { loadConfig } from "../../config/loader.js";
 import type { ResolvedModelSelection } from "../../providers/model-catalog.js";
@@ -18,6 +24,7 @@ import type {
 } from "../../core/agent-runtime/goal-runtime.js";
 import type {
   RemoveQueuedWebuiMessageResult,
+  StopExpectedTurnResult,
   WebuiQueueMessageDescriptor,
   WebuiQueueSnapshotDescriptor,
 } from "../../core/agent-runtime/loop.js";
@@ -93,6 +100,7 @@ type Query = Record<string, string[]>;
 type HttpRequestLike = { path: string; method?: string; headers?: http.IncomingHttpHeaders | Record<string, any>; body?: Buffer | string };
 type HttpLikeResponse = { status: number; headers: Record<string, string>; body: Buffer | string };
 type RuntimeModelNameResolver = (() => string | null | undefined) | null;
+type RuntimeToolNamesResolver = (() => string[] | null | undefined) | null;
 type WebuiMediaKind = "image" | "video" | "file";
 type WebuiArtifactKind = WebuiMediaKind | "directory";
 type WebuiMediaAttachment = {
@@ -126,12 +134,16 @@ type WebuiQueuedMessage = {
   text: string;
   media_urls: WebuiMediaAttachment[];
   queued_at: string;
+  source: TurnSource;
 };
+type ClientSurface = "gui" | "tui";
 type InflightWebuiMessageRequest = {
   digest: string;
   connections: Set<any>;
   queued: boolean;
   queuedItem: WebuiQueuedMessage | null;
+  queuedRevision: number;
+  steeredTurnId: string | null;
 };
 type WebSocketChannelOptions = {
   sessionManager?: any;
@@ -139,6 +151,7 @@ type WebSocketChannelOptions = {
   staticDistPath?: string | null;
   workspacePath?: string | null;
   runtimeModelName?: RuntimeModelNameResolver;
+  runtimeToolNames?: RuntimeToolNamesResolver;
   modelSelectionResolver?: ((input: {
     requestedPreset?: string | null;
     sessionPreset?: string | null;
@@ -155,6 +168,10 @@ type WebSocketChannelOptions = {
     sessionKey: string,
     clientRequestId: string,
   ) => RemoveQueuedWebuiMessageResult | Promise<RemoveQueuedWebuiMessageResult>;
+  stopExpectedTurn?: (
+    sessionKey: string,
+    expectedTurnId: string,
+  ) => StopExpectedTurnResult | Promise<StopExpectedTurnResult>;
 };
 type SessionDeletionServices = {
   cronService: CronService;
@@ -165,6 +182,19 @@ export type WebuiLanguage = "zh-CN" | "en-US";
 const CHAT_ID_RE = /^[A-Za-z0-9_:-]{1,64}$/;
 const API_KEY_RE = /^[A-Za-z0-9_:.-]{1,128}$/;
 const WEBUI_LANGUAGE_VALUES = new Set<WebuiLanguage>(["zh-CN", "en-US"]);
+const TURN_CONTENT_EVENTS = new Set([
+  "context_compaction",
+  "delta",
+  "file_edit",
+  "message",
+  "reasoning_delta",
+  "reasoning_end",
+  "retry_wait",
+  "stop_result",
+  "stream_end",
+  "turn_end",
+  "user",
+]);
 const LOCALHOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
 const MCP_VALUES_HEADER = "x-memmy-agent-mcp-values";
 const MCP_VALUES_HEADER_MAX_BYTES = 64 * 1024;
@@ -603,6 +633,8 @@ export class WebSocketChannel extends BaseChannel {
   apiTokens = new Map<string, number>();
   streamTextBuffers = new Map<string, string[]>();
   activeTurnIdByChatId = new Map<string, string>();
+  activeTurnSourceByChatId = new Map<string, TurnSource>();
+  connectionSurface = new Map<any, ClientSurface>();
   mediaSecret = crypto.randomBytes(32);
   settingsRestartSections = new Set<string>();
   sessionManager: any = null;
@@ -611,6 +643,7 @@ export class WebSocketChannel extends BaseChannel {
   terminalRunControl: TerminalRunControl | null = null;
   staticDistPath: string | null = null;
   runtimeModelName: RuntimeModelNameResolver = null;
+  runtimeToolNames: RuntimeToolNamesResolver = null;
   modelSelectionResolver: WebSocketChannelOptions["modelSelectionResolver"] = null;
   workspacePath: string;
   readonly fileMemoryEnabled: boolean;
@@ -638,6 +671,7 @@ export class WebSocketChannel extends BaseChannel {
   activeGoalStopHandler: WebSocketChannelOptions["activeGoalStopHandler"] = undefined;
   getWebuiQueueSnapshot: WebSocketChannelOptions["getWebuiQueueSnapshot"] = undefined;
   removeQueuedWebuiMessage: WebSocketChannelOptions["removeQueuedWebuiMessage"] = undefined;
+  stopExpectedTurn: WebSocketChannelOptions["stopExpectedTurn"] = undefined;
   goalControlConnections = new Map<string, Set<any>>();
   dispatchingGoalControls = new Map<string, string>();
 
@@ -656,6 +690,7 @@ export class WebSocketChannel extends BaseChannel {
     const staticDistPath = options.staticDistPath ?? config?.staticDistPath ?? null;
     this.staticDistPath = staticDistPath ? path.resolve(String(staticDistPath)) : null;
     this.runtimeModelName = options.runtimeModelName ?? config?.runtimeModelName ?? null;
+    this.runtimeToolNames = options.runtimeToolNames ?? config?.runtimeToolNames ?? null;
     this.modelSelectionResolver = options.modelSelectionResolver
       ?? config?.modelSelectionResolver
       ?? null;
@@ -666,6 +701,7 @@ export class WebSocketChannel extends BaseChannel {
     this.activeGoalStopHandler = options.activeGoalStopHandler ?? config?.activeGoalStopHandler;
     this.getWebuiQueueSnapshot = options.getWebuiQueueSnapshot ?? config?.getWebuiQueueSnapshot;
     this.removeQueuedWebuiMessage = options.removeQueuedWebuiMessage ?? config?.removeQueuedWebuiMessage;
+    this.stopExpectedTurn = options.stopExpectedTurn ?? config?.stopExpectedTurn;
     const workspacePath = options.workspacePath ?? config?.workspacePath ?? getWorkspacePath();
     this.workspacePath = path.resolve(String(workspacePath));
   }
@@ -716,6 +752,16 @@ export class WebSocketChannel extends BaseChannel {
   }
 
   attachConnection(connection: any, chatId: string): void {
+    if (this.connectionSurface.get(connection) === "tui") {
+      const attached = this.connectionChats.get(connection);
+      for (const previousChatId of attached ?? []) {
+        if (previousChatId === chatId) continue;
+        const subscribers = this.subscriptions.get(previousChatId);
+        subscribers?.delete(connection);
+        if (subscribers?.size === 0) this.subscriptions.delete(previousChatId);
+        attached?.delete(previousChatId);
+      }
+    }
     (this.subscriptions.get(chatId) ?? this.subscriptions.set(chatId, new Set()).get(chatId)!).add(connection);
     (this.connectionChats.get(connection) ?? this.connectionChats.set(connection, new Set()).get(connection)!).add(chatId);
   }
@@ -739,6 +785,7 @@ export class WebSocketChannel extends BaseChannel {
     }
     this.connectionChats.delete(connection);
     this.connectionDefaultChats.delete(connection);
+    this.connectionSurface.delete(connection);
   }
 
   safeCleanupConnection(connection: any): void {
@@ -752,6 +799,18 @@ export class WebSocketChannel extends BaseChannel {
 
   private webuiRequestKey(sessionKey: string, clientRequestId: string): string {
     return `${sessionKey}\0${clientRequestId}`;
+  }
+
+  private clearSteeredInflightForTurn(sessionKey: string, turnId: string): void {
+    for (const [key, request] of this.inflightWebuiMessageRequests) {
+      if (
+        key.startsWith(`${sessionKey}\0`)
+        && request.steeredTurnId === turnId
+        && !request.queued
+      ) {
+        this.inflightWebuiMessageRequests.delete(key);
+      }
+    }
   }
 
   private enqueueQueueProjection<T>(
@@ -780,6 +839,7 @@ export class WebSocketChannel extends BaseChannel {
         .map((entry) => this.webuiMediaAttachmentForPath(entry, descriptor.sessionKey))
         .filter((entry): entry is WebuiMediaAttachment => Boolean(entry)),
       queued_at: new Date(descriptor.queuedAt).toISOString(),
+      source: { ...descriptor.source },
     };
   }
 
@@ -817,6 +877,8 @@ export class WebSocketChannel extends BaseChannel {
     target,
     modelPreset,
     queueSurface,
+    turnAdmission,
+    expectedTurnId,
   }: {
     chatId: string;
     content: string;
@@ -825,6 +887,8 @@ export class WebSocketChannel extends BaseChannel {
     target: WebuiSessionTarget | null;
     modelPreset: string | null | undefined;
     queueSurface: "chat_composer" | null;
+    turnAdmission: "queue" | "steer";
+    expectedTurnId: string | null;
   }): string {
     return crypto.createHash("sha256").update(JSON.stringify({
       chat_id: chatId,
@@ -834,6 +898,8 @@ export class WebSocketChannel extends BaseChannel {
       target,
       model_preset: modelPreset,
       queue_surface: queueSurface,
+      turn_admission: turnAdmission,
+      expected_turn_id: expectedTurnId,
     })).digest("hex");
   }
 
@@ -924,6 +990,10 @@ export class WebSocketChannel extends BaseChannel {
       text: typeof message.content === "string" ? visibleWebuiUserContent(message.content) : "",
       client_request_id: clientRequestId,
     };
+    const source = parseTurnSource(message.turn_source);
+    if (source) wire.source = source;
+    const turnId = firstNonemptyString(message.turn_id, message.turnId);
+    if (turnId) wire.turn_id = turnId;
     if (Array.isArray(message.media) && message.media.length) {
       wire.media_paths = [...message.media];
     }
@@ -1050,12 +1120,24 @@ export class WebSocketChannel extends BaseChannel {
     const startedAt = websocketTurnWallStartedAt(chatId)
       ?? (terminalRun ? terminalRun.startedAt / 1000 : null);
     const turnId = this.activeTurnIdByChatId.get(chatId) ?? terminalRun?.turnId ?? null;
+    const source = this.activeTurnSourceByChatId.get(chatId) ?? null;
+    if ((this.connectionSurface.get(connection) ?? "gui") === "tui" && source?.kind !== "tui") {
+      await this.safeSendTo(connection, {
+        event: "run_status_snapshot",
+        chat_id: chatId,
+        status: startedAt == null ? "idle" : "running",
+        busy: startedAt != null,
+        owned_by_tui: false,
+      });
+      return;
+    }
     const payload = startedAt == null
       ? {
           event: "run_status_snapshot",
           chat_id: chatId,
           status: "idle",
           ...(turnId ? { turn_id: turnId } : {}),
+          ...(source?.kind === "tui" ? { owned_by_tui: true } : {}),
         }
       : {
           event: "run_status_snapshot",
@@ -1063,6 +1145,7 @@ export class WebSocketChannel extends BaseChannel {
           status: "running",
           started_at: startedAt,
           ...(turnId ? { turn_id: turnId } : {}),
+          ...(source?.kind === "tui" ? { owned_by_tui: true } : {}),
         };
     await this.safeSendTo(connection, payload);
   }
@@ -1076,6 +1159,7 @@ export class WebSocketChannel extends BaseChannel {
         await this.safeSendTo(connection, {
           event: "message_queue_snapshot",
           chat_id: chatId,
+          revision: snapshot.revision,
           items: snapshot.items.map((item) => this.toWebuiQueuedMessage(item)),
           started_items: snapshot.startedItems.map((item) => this.toWebuiQueuedMessage(item)),
         });
@@ -1195,6 +1279,7 @@ export class WebSocketChannel extends BaseChannel {
       ws_path: this.expectedPath(),
       expires_in: this.config.tokenTtlS,
       model_name: resolveBootstrapModelName(this.runtimeModelName),
+      tool_names: this.runtimeToolNames?.() ?? [],
     });
   }
 
@@ -1681,6 +1766,12 @@ export class WebSocketChannel extends BaseChannel {
 
   handleWebuiThreadGet(request: any, key: string): HttpLikeResponse {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    const [, query] = parseRequestPath(String(request?.path ?? ""));
+    const rawSurface = queryFirst(query, "surface");
+    if (rawSurface != null && rawSurface !== "gui" && rawSurface !== "tui") {
+      return httpError(400, "surface_invalid");
+    }
+    const surface = rawSurface === "tui" ? "tui" as const : "gui" as const;
     const decodedKey = decodeGuiSessionApiKey(key);
     if (decodedKey == null) return invalidGuiSessionKeyResponse(key);
     const resolved = this.resolveGuiSessionResponse(decodedKey);
@@ -1692,6 +1783,7 @@ export class WebSocketChannel extends BaseChannel {
         )
       : null;
     const data = buildWebuiThreadResponse(resolved.guiSessionKey, {
+      surface,
       sessionMessages,
       augmentUserMedia: (paths: string[]) => this.augmentTranscriptUserMedia(paths, resolved.canonicalSessionKey),
       augmentAssistantMedia: (paths: string[]) => paths.flatMap((p) => this.webuiMediaAttachmentForPath(p, resolved.canonicalSessionKey) ?? []),
@@ -2310,6 +2402,38 @@ export class WebSocketChannel extends BaseChannel {
     return this.activeTurnIdByChatId.get(chatId) === turnId;
   }
 
+  private turnSourceForPayload(chatId: string, payload: Record<string, any>): TurnSource | null {
+    return parseTurnSource(payload.source)
+      ?? parseTurnSource(payload.metadata?.turn_source)
+      ?? this.activeTurnSourceByChatId.get(chatId)
+      ?? null;
+  }
+
+  private payloadForConnection(
+    connection: any,
+    chatId: string,
+    payload: Record<string, any>,
+    source: TurnSource | null,
+  ): Record<string, any> | null {
+    if ((this.connectionSurface.get(connection) ?? "gui") === "gui") return payload;
+    if (source?.kind === "tui") {
+      return payload.event === "run_status"
+        ? { ...payload, owned_by_tui: true }
+        : payload;
+    }
+    if (payload.event === "run_status") {
+      return {
+        event: "run_status",
+        chat_id: chatId,
+        status: payload.status,
+        busy: payload.status === "running",
+        owned_by_tui: false,
+      };
+    }
+    if (TURN_CONTENT_EVENTS.has(String(payload.event ?? ""))) return null;
+    return payload;
+  }
+
   async sendTurnPayload(
     chatId: string,
     payload: Record<string, any>,
@@ -2322,8 +2446,13 @@ export class WebSocketChannel extends BaseChannel {
     } = {},
   ): Promise<void> {
     if (!this.shouldSendTurnPayload(chatId, payload)) return;
-    if (appendTranscript) this.tryAppendWebuiTranscript(chatId, payload);
-    for (const connection of targets ?? [...(this.subscriptions.get(chatId) ?? [])]) await this.safeSendTo(connection, payload);
+    const source = this.turnSourceForPayload(chatId, payload);
+    const enrichedPayload = source ? { ...payload, source } : payload;
+    if (appendTranscript) this.tryAppendWebuiTranscript(chatId, enrichedPayload);
+    for (const connection of targets ?? [...(this.subscriptions.get(chatId) ?? [])]) {
+      const projected = this.payloadForConnection(connection, chatId, enrichedPayload, source);
+      if (projected) await this.safeSendTo(connection, projected);
+    }
   }
 
   rewriteLocalMarkdownImages(text: string, sessionKey?: string | null): string {
@@ -2505,6 +2634,8 @@ export class WebSocketChannel extends BaseChannel {
     this.apiTokens.clear();
     this.streamTextBuffers.clear();
     this.activeTurnIdByChatId.clear();
+    this.activeTurnSourceByChatId.clear();
+    this.connectionSurface.clear();
     this.inflightWebuiMessageRequests.clear();
     this.queueProjectionChains.clear();
     this.sessionManager?.clearWebuiSessionBindingReservations?.();
@@ -2521,6 +2652,9 @@ export class WebSocketChannel extends BaseChannel {
     let clientId = rawClientId?.trim() || "";
     if (!clientId) clientId = `anon-${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
     if (clientId.length > 128) clientId = clientId.slice(0, 128);
+    const requestedSurface = queryFirst(query, "client_surface");
+    const surface: ClientSurface = requestedSurface === "tui" ? "tui" : "gui";
+    this.connectionSurface.set(connection, surface);
     const defaultChatId = crypto.randomUUID();
 
     try {
@@ -2554,6 +2688,7 @@ export class WebSocketChannel extends BaseChannel {
           content,
           metadata: { remote: connection?.remoteAddress ?? null },
           isDm: false,
+          turnSource: { kind: surface, channel: "websocket" },
         });
       }
     } finally {
@@ -2721,6 +2856,10 @@ export class WebSocketChannel extends BaseChannel {
         media: mediaPaths.length ? mediaPaths : undefined,
         metadata: legacyMetadata,
         isDm: false,
+        turnSource: {
+          kind: this.connectionSurface.get(connection) ?? "gui",
+          channel: "websocket",
+        },
       });
       return;
     }
@@ -2739,6 +2878,27 @@ export class WebSocketChannel extends BaseChannel {
         clientRequestId,
         detail: "message_request_rejected",
         reason: "queue_surface_invalid",
+      });
+      return;
+    }
+    const turnAdmission = envelope.turn_admission == null
+      ? "queue" as const
+      : envelope.turn_admission === "queue" || envelope.turn_admission === "steer"
+        ? envelope.turn_admission
+        : null;
+    const expectedTurnId = envelope.expected_turn_id == null
+      ? null
+      : typeof envelope.expected_turn_id === "string"
+        && envelope.expected_turn_id.trim().length > 0
+        && envelope.expected_turn_id.length <= 128
+        ? envelope.expected_turn_id.trim()
+        : undefined;
+    if (!turnAdmission || expectedTurnId === undefined) {
+      await this.sendWebuiRequestError(connection, {
+        chatId,
+        clientRequestId,
+        detail: "message_request_rejected",
+        reason: !turnAdmission ? "turn_admission_invalid" : "expected_turn_id_invalid",
       });
       return;
     }
@@ -2806,6 +2966,8 @@ export class WebSocketChannel extends BaseChannel {
           target: normalizedTarget,
           modelPreset: requestedPreset,
           queueSurface,
+          turnAdmission,
+          expectedTurnId,
         })
       : null;
     if (existing && clientRequestId) {
@@ -2866,7 +3028,14 @@ export class WebSocketChannel extends BaseChannel {
             await this.sendEvent(connection, "message_queued", {
               chat_id: chatId,
               client_request_id: clientRequestId,
+              revision: inflight.queuedRevision,
               ...(inflight.queuedItem ? { item: inflight.queuedItem } : {}),
+            });
+          } else if (inflight.steeredTurnId) {
+            await this.sendEvent(connection, "message_steered", {
+              chat_id: chatId,
+              client_request_id: clientRequestId,
+              turn_id: inflight.steeredTurnId,
             });
           }
         }
@@ -2894,6 +3063,8 @@ export class WebSocketChannel extends BaseChannel {
         connections: new Set([connection]),
         queued: false,
         queuedItem: null,
+        queuedRevision: 0,
+        steeredTurnId: null,
       });
     }
     const metadata: Record<string, any> = {
@@ -2938,6 +3109,12 @@ export class WebSocketChannel extends BaseChannel {
         metadata,
         sessionKey,
         isDm: false,
+        turnAdmission,
+        expectedTurnId,
+        turnSource: {
+          kind: this.connectionSurface.get(connection) ?? "gui",
+          channel: "websocket",
+        },
       });
     } catch (error) {
       if (createdReservation) {
@@ -2956,6 +3133,20 @@ export class WebSocketChannel extends BaseChannel {
 
   async dispatchEnvelope(connection: any, clientId: string, envelope: Record<string, any>): Promise<void> {
     const type = envelope.type;
+    if (type === "queue_snapshot_request") {
+      const chatId = typeof envelope.chat_id === "string" && isValidGuiChatId(envelope.chat_id)
+        ? envelope.chat_id
+        : "";
+      if (!chatId || !this.connectionChats.get(connection)?.has(chatId)) {
+        await this.sendEvent(connection, "error", {
+          chat_id: chatId,
+          detail: "queue_snapshot_request_invalid",
+        });
+        return;
+      }
+      await this.sendWebuiQueueSnapshot(connection, chatId);
+      return;
+    }
     if (type === "queue_remove") {
       const chatId = typeof envelope.chat_id === "string" && isValidGuiChatId(envelope.chat_id)
         ? envelope.chat_id
@@ -2968,7 +3159,14 @@ export class WebSocketChannel extends BaseChannel {
         ? envelope.client_request_id
         : "";
       const sessionKey = chatId ? this.canonicalSessionKeyForChatId(chatId) : null;
-      if (!chatId || !requestId || !clientRequestId || !sessionKey || !this.removeQueuedWebuiMessage) {
+      if (
+        !chatId
+        || !requestId
+        || !clientRequestId
+        || !sessionKey
+        || !this.connectionChats.get(connection)?.has(chatId)
+        || !this.removeQueuedWebuiMessage
+      ) {
         await this.safeSendTo(connection, {
           event: "queue_remove_result",
           chat_id: chatId,
@@ -2995,7 +3193,7 @@ export class WebSocketChannel extends BaseChannel {
         return;
       }
 
-      const outcome = result === "already_dequeued" ? "already_dequeued" : "removed";
+      const outcome = result.outcome;
       if (outcome === "removed") {
         const key = this.webuiRequestKey(sessionKey, clientRequestId);
         const inflight = this.inflightWebuiMessageRequests.get(key);
@@ -3005,6 +3203,7 @@ export class WebSocketChannel extends BaseChannel {
             event: "message_queue_removed",
             chat_id: chatId,
             client_request_id: clientRequestId,
+            revision: result.revision,
           };
           const connections = new Set<any>([
             connection,
@@ -3020,6 +3219,7 @@ export class WebSocketChannel extends BaseChannel {
         client_request_id: clientRequestId,
         ok: true,
         outcome,
+        revision: result.revision,
       });
       return;
     }
@@ -3191,7 +3391,7 @@ export class WebSocketChannel extends BaseChannel {
       await this.sendEvent(connection, "attached", { chat_id: chatId });
       await this.sendRunStatusSnapshot(connection, chatId);
       await this.sendWebuiQueueSnapshot(connection, chatId);
-      await this.hydrateAfterSubscribe(chatId);
+      await this.maybePushActiveGoalState(chatId);
       return;
     }
     if (type === "status") {
@@ -3239,6 +3439,43 @@ export class WebSocketChannel extends BaseChannel {
       if (!isValidGuiChatId(chatId)) return this.sendEvent(connection, "error", { detail: "invalid chat_id" });
       const sessionKey = this.canonicalSessionKeyForChatId(chatId);
       if (!sessionKey) return this.sendEvent(connection, "error", { chat_id: chatId, detail: "session_not_found" });
+      if (this.connectionSurface.get(connection) === "tui") {
+        if (!this.connectionChats.get(connection)?.has(chatId)) {
+          await this.sendEvent(connection, "error", {
+            chat_id: chatId,
+            detail: "stop_failed",
+            reason: "session_not_attached",
+          });
+          return;
+        }
+        const expectedTurnId = typeof envelope.expected_turn_id === "string"
+          && envelope.expected_turn_id.trim().length > 0
+          && envelope.expected_turn_id.length <= 128
+          ? envelope.expected_turn_id.trim()
+          : null;
+        if (!expectedTurnId || !this.stopExpectedTurn) {
+          await this.sendEvent(connection, "error", {
+            chat_id: chatId,
+            detail: "stop_failed",
+            reason: "expected_turn_id_required",
+          });
+          return;
+        }
+        let outcome: StopExpectedTurnResult;
+        try {
+          outcome = await this.stopExpectedTurn(sessionKey, expectedTurnId);
+        } catch {
+          await this.sendEvent(connection, "error", { chat_id: chatId, detail: "stop_failed" });
+          return;
+        }
+        await this.sendEvent(connection, "stop_result", {
+          chat_id: chatId,
+          turn_id: expectedTurnId,
+          stopped: outcome === "stopped" ? 1 : 0,
+          outcome,
+        });
+        return;
+      }
       this.attachConnection(connection, chatId);
       const turnId = this.activeTurnIdByChatId.get(chatId) ?? null;
       let stopped = 0;
@@ -3430,23 +3667,30 @@ export class WebSocketChannel extends BaseChannel {
       if (!clientRequestId || !requestSessionKey) return;
       const key = this.webuiRequestKey(requestSessionKey, clientRequestId);
       const inflight = this.inflightWebuiMessageRequests.get(key);
-      if (!inflight) return;
-      inflight.queued = true;
+      if (inflight) inflight.queued = true;
       const descriptor = message.metadata.webuiQueueItem as WebuiQueueMessageDescriptor | undefined;
       const item = descriptor ? this.toWebuiQueuedMessage(descriptor) : null;
-      inflight.queuedItem = item;
+      if (inflight) inflight.queuedItem = item;
+      if (inflight) inflight.queuedRevision = Number(message.metadata.queueRevision ?? 0);
+      let chatId: string;
+      try {
+        chatId = toGuiChatId(requestSessionKey);
+      } catch {
+        return;
+      }
       const payload = {
         event: "message_queued",
-        chat_id: message.chatId,
+        chat_id: chatId,
         client_request_id: clientRequestId,
+        revision: Number(message.metadata.queueRevision ?? 0),
         ...(item ? { item } : {}),
       };
       if (!item) {
-        for (const connection of inflight.connections) await this.safeSendTo(connection, payload);
+        for (const connection of inflight?.connections ?? []) await this.safeSendTo(connection, payload);
         return;
       }
       await this.enqueueQueueProjection(requestSessionKey, async () => {
-        for (const connection of this.queueEventConnections(message.chatId, inflight)) {
+        for (const connection of this.queueEventConnections(chatId, inflight)) {
           await this.safeSendTo(connection, payload);
         }
       });
@@ -3459,19 +3703,98 @@ export class WebSocketChannel extends BaseChannel {
         : this.canonicalSessionKeyForChatId(message.chatId);
       const descriptor = message.metadata.webuiQueueItem as WebuiQueueMessageDescriptor | undefined;
       if (!clientRequestId || !requestSessionKey || !descriptor) return;
+      let chatId: string;
+      try {
+        chatId = toGuiChatId(requestSessionKey);
+      } catch {
+        return;
+      }
       const key = this.webuiRequestKey(requestSessionKey, clientRequestId);
       const inflight = this.inflightWebuiMessageRequests.get(key);
       const payload = {
         event: "message_dequeued",
-        chat_id: message.chatId,
+        chat_id: chatId,
         client_request_id: clientRequestId,
         item: this.toWebuiQueuedMessage(descriptor),
+        revision: Number(message.metadata.queueRevision ?? 0),
       };
       await this.enqueueQueueProjection(requestSessionKey, async () => {
-        for (const connection of this.queueEventConnections(message.chatId, inflight)) {
+        for (const connection of this.queueEventConnections(chatId, inflight)) {
           await this.safeSendTo(connection, payload);
         }
       });
+      return;
+    }
+    if (message.metadata?.webuiMessageQueueRemoved) {
+      const clientRequestId = String(message.metadata.clientRequestId ?? "");
+      const requestSessionKey = typeof message.metadata.webuiRequestSessionKey === "string"
+        ? message.metadata.webuiRequestSessionKey
+        : null;
+      if (!clientRequestId || !requestSessionKey) return;
+      let chatId: string;
+      try {
+        chatId = toGuiChatId(requestSessionKey);
+      } catch {
+        return;
+      }
+      const inflight = this.inflightWebuiMessageRequests.get(
+        this.webuiRequestKey(requestSessionKey, clientRequestId),
+      );
+      const payload = {
+        event: "message_queue_removed",
+        chat_id: chatId,
+        client_request_id: clientRequestId,
+        revision: Number(message.metadata.queueRevision ?? 0),
+      };
+      await this.enqueueQueueProjection(requestSessionKey, async () => {
+        for (const connection of this.queueEventConnections(chatId, inflight)) {
+          await this.safeSendTo(connection, payload);
+        }
+      });
+      return;
+    }
+    if (message.metadata?.webuiMessageSteered) {
+      const clientRequestId = String(message.metadata.clientRequestId ?? "");
+      const requestSessionKey = typeof message.metadata.webuiRequestSessionKey === "string"
+        ? message.metadata.webuiRequestSessionKey
+        : null;
+      if (!clientRequestId || !requestSessionKey) return;
+      const key = this.webuiRequestKey(requestSessionKey, clientRequestId);
+      const inflight = this.inflightWebuiMessageRequests.get(key);
+      const turnId = String(message.metadata.turnId ?? "");
+      const source = parseTurnSource(message.metadata.turnSource);
+      if (!turnId || source?.kind !== "tui") return;
+      if (inflight) inflight.steeredTurnId = turnId;
+      let chatId: string;
+      try {
+        chatId = toGuiChatId(requestSessionKey);
+      } catch {
+        return;
+      }
+      const content = typeof message.metadata.steeredContent === "string"
+        ? visibleWebuiUserContent(message.metadata.steeredContent)
+        : "";
+      const mediaPaths = Array.isArray(message.metadata.steeredMedia)
+        ? message.metadata.steeredMedia.filter(
+            (entry: unknown): entry is string => typeof entry === "string" && Boolean(entry.trim()),
+          )
+        : [];
+      await this.sendTurnPayload(chatId, {
+        event: "user",
+        chat_id: chatId,
+        text: content,
+        client_request_id: clientRequestId,
+        turn_id: turnId,
+        source,
+        ...(mediaPaths.length ? { media_paths: mediaPaths } : {}),
+      });
+      const payload = {
+        event: "message_steered",
+        chat_id: chatId,
+        client_request_id: clientRequestId,
+        turn_id: turnId,
+      };
+      for (const connection of inflight?.connections ?? []) await this.safeSendTo(connection, payload);
       return;
     }
     if (message.metadata?.webuiMessageAccepted) {
@@ -3570,6 +3893,7 @@ export class WebSocketChannel extends BaseChannel {
       await this.sendRunStatus(message.chatId, String(message.metadata.runStatus), {
         startedAt: numberOrNull(message.metadata.startedAt),
         turnId: this.turnIdFromMetadata(message.metadata),
+        source: parseTurnSource(message.metadata.turn_source),
       });
       return;
     }
@@ -3686,8 +4010,19 @@ export class WebSocketChannel extends BaseChannel {
     if (message.metadata?.toolEvents) payload.tool_events = message.metadata.toolEvents;
     if (message.metadata?.[OUTBOUND_META_AGENT_UI] != null) payload.agent_ui = message.metadata[OUTBOUND_META_AGENT_UI];
     if (!this.shouldSendTurnPayload(message.chatId, payload)) return;
-    this.tryAppendWebuiTranscript(message.chatId, { ...payload, text: message.content, content: message.content });
-    for (const connection of targets) await this.safeSendTo(connection, payload);
+    const source = parseTurnSource(message.metadata?.turn_source)
+      ?? this.activeTurnSourceByChatId.get(message.chatId)
+      ?? null;
+    this.tryAppendWebuiTranscript(message.chatId, {
+      ...payload,
+      text: message.content,
+      content: message.content,
+      ...(source ? { source } : {}),
+    });
+    await this.sendTurnPayload(message.chatId, payload, {
+      appendTranscript: false,
+      targets,
+    });
   }
 
   async sendDelta(chatId: string, delta: string, metadata: Record<string, any> = {}): Promise<void> {
@@ -3750,7 +4085,12 @@ export class WebSocketChannel extends BaseChannel {
       ...(turnId ? { turn_id: turnId } : {}),
     };
     await this.sendTurnPayload(chatId, payload);
-    if (turnId && this.activeTurnIdByChatId.get(chatId) === turnId) this.activeTurnIdByChatId.delete(chatId);
+    const sessionKey = this.canonicalSessionKeyForChatId(chatId);
+    if (sessionKey && turnId) this.clearSteeredInflightForTurn(sessionKey, turnId);
+    if (turnId && this.activeTurnIdByChatId.get(chatId) === turnId) {
+      this.activeTurnIdByChatId.delete(chatId);
+      this.activeTurnSourceByChatId.delete(chatId);
+    }
     if (isExternalGuiChatId(chatId)) {
       this.queueGlobalSessionUpdated(chatId, "metadata");
     }
@@ -3760,13 +4100,21 @@ export class WebSocketChannel extends BaseChannel {
     await this.broadcast(chatId, { event: "goal_state", chat_id: chatId, goal_state: blob });
   }
 
-  async sendRunStatus(chatId: string, status: string, { startedAt = null, turnId = null }: { startedAt?: number | null; turnId?: string | null } = {}): Promise<void> {
+  async sendRunStatus(chatId: string, status: string, {
+    startedAt = null,
+    turnId = null,
+    source = null,
+  }: {
+    startedAt?: number | null;
+    turnId?: string | null;
+    source?: TurnSource | null;
+  } = {}): Promise<void> {
     if (status === "running" && startedAt != null) {
       websocketTurnWallStartTimes.set(chatId, startedAt);
       if (turnId) this.activeTurnIdByChatId.set(chatId, turnId);
+      if (source) this.activeTurnSourceByChatId.set(chatId, source);
     } else if (status === "idle") {
       websocketTurnWallStartTimes.delete(chatId);
-      if (turnId && this.activeTurnIdByChatId.get(chatId) === turnId) this.activeTurnIdByChatId.delete(chatId);
     }
     await this.sendTurnPayload(chatId, {
       event: "run_status",
@@ -3774,7 +4122,12 @@ export class WebSocketChannel extends BaseChannel {
       status,
       ...(status === "running" && startedAt != null ? { started_at: startedAt } : {}),
       ...(turnId ? { turn_id: turnId } : {}),
+      ...(source ? { source } : {}),
     }, { appendTranscript: false });
+    if (status === "idle" && turnId && this.activeTurnIdByChatId.get(chatId) === turnId) {
+      this.activeTurnIdByChatId.delete(chatId);
+      this.activeTurnSourceByChatId.delete(chatId);
+    }
   }
 
   async sendSessionUpdated(chatId: string, scope: string | null = null): Promise<void> {
@@ -3799,12 +4152,14 @@ export class WebSocketChannel extends BaseChannel {
       await this.sendRunStatus(chatId, String(record.status ?? ""), {
         startedAt: numberOrNull(record.started_at),
         turnId: firstNonemptyString(record.turn_id, record.turnId),
+        source: parseTurnSource(record.source ?? record.metadata?.turn_source),
       });
       return;
     }
     const turnId = firstNonemptyString(record.turn_id, record.turnId);
     if (record.event === "turn_end" && turnId && this.activeTurnIdByChatId.get(chatId) === turnId) {
       this.activeTurnIdByChatId.delete(chatId);
+      this.activeTurnSourceByChatId.delete(chatId);
     }
     const payload = { ...record };
     if (canonicalSessionKey) {

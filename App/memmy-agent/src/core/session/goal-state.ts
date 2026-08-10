@@ -1,4 +1,5 @@
 import type { SessionManager } from "./manager.js";
+import { parseTurnSource, type TurnSource } from "../runtime-messages/events.js";
 
 export const GOAL_STATE_KEY = "goalState";
 export const GOAL_ROUTE_KEY = "goalRoute";
@@ -30,6 +31,7 @@ export type GoalState = {
 export type GoalRoute = {
   channel: string;
   chatId: string;
+  source?: TurnSource;
 };
 
 export type AgentGoalState = {
@@ -53,7 +55,8 @@ const GOAL_STATE_KEYS = new Set([
   "createdAt",
   "updatedAt",
 ]);
-const GOAL_ROUTE_KEYS = new Set(["channel", "chatId"]);
+const LEGACY_GOAL_ROUTE_KEYS = new Set(["channel", "chatId"]);
+const GOAL_ROUTE_KEYS = new Set(["channel", "chatId", "source"]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -107,10 +110,18 @@ export function readGoalState(metadata?: Record<string, unknown> | null): GoalSt
 }
 
 export function parseGoalRoute(value: unknown): GoalRoute | null {
-  if (!isObject(value) || !hasExactKeys(value, GOAL_ROUTE_KEYS)) return null;
+  if (
+    !isObject(value)
+    || (!hasExactKeys(value, LEGACY_GOAL_ROUTE_KEYS) && !hasExactKeys(value, GOAL_ROUTE_KEYS))
+  ) return null;
   if (typeof value.channel !== "string" || !value.channel.trim()) return null;
   if (typeof value.chatId !== "string" || !value.chatId.trim()) return null;
-  return { channel: value.channel, chatId: value.chatId };
+  if (!Object.prototype.hasOwnProperty.call(value, "source")) {
+    return { channel: value.channel, chatId: value.chatId };
+  }
+  const source = parseTurnSource(value.source);
+  if (!source) return null;
+  return { channel: value.channel, chatId: value.chatId, source };
 }
 
 export function readGoalRoute(metadata?: Record<string, unknown> | null): GoalRoute | null {

@@ -23,6 +23,7 @@ import {
   stripTrailingSlash,
 } from "../../../src/integrations/channels/websocket.js";
 import { webuiTranscriptPath } from "../../../src/entrypoints/frontend-bridge/transcript.js";
+import { toGuiChatId } from "../../../src/entrypoints/frontend-bridge/gui-session-projection.js";
 import { websocketTurnWallStartTimes } from "../../../src/core/session/webui-turns.js";
 
 const WINDOWS_COMMAND_ERROR = "'node' 不是内部或外部命令，也不是可运行的程序\r\n或批处理文件。";
@@ -113,6 +114,19 @@ describe("WebSocket channel", () => {
     expect(parseInboundPayload("raw text")).toBe("raw text");
     expect(isValidChatId("chat-1")).toBe(true);
     expect(isValidChatId("")).toBe(false);
+  });
+
+  it("rejects an invalid transcript surface before reading a Session", () => {
+    const channel = new WebSocketChannel({}, new MessageBus());
+    channel.apiTokens.set("api-token", Number.POSITIVE_INFINITY);
+
+    const response = channel.handleWebuiThreadGet({
+      path: "/api/sessions/websocket%3Achat/webui-thread?surface=other",
+      headers: { authorization: "Bearer api-token" },
+    }, "websocket%3Achat");
+
+    expect(response.status).toBe(400);
+    expect(String(response.body)).toContain("surface_invalid");
   });
 
   it("uses one request id and the confirmed fallback model for a new chat's first message", async () => {
@@ -209,6 +223,7 @@ describe("WebSocket channel", () => {
       event: "message_queued",
       chat_id: chatId,
       client_request_id: clientRequestId,
+      revision: 0,
     });
 
     await channel.dispatchEnvelope(duplicate, "client-2", request);
@@ -220,6 +235,7 @@ describe("WebSocket channel", () => {
       event: "message_queued",
       chat_id: chatId,
       client_request_id: clientRequestId,
+      revision: 0,
     });
 
     await channel.send(new OutboundMessage({
@@ -246,6 +262,8 @@ describe("WebSocket channel", () => {
     const chatId = "chat-visible-queue";
     const sessionKey = `websocket:${chatId}`;
     const clientRequestId = "66666666-6666-4666-8666-666666666666";
+    channel.connectionSurface.set(first, "gui");
+    channel.connectionSurface.set(second, "tui");
     channel.attachConnection(first, chatId);
     channel.attachConnection(second, chatId);
     const request = {
@@ -278,7 +296,9 @@ describe("WebSocket channel", () => {
           media: [],
           queuedAt: "2026-08-09T12:00:00.000Z",
           sessionKey,
+          source: { kind: "gui", channel: "websocket" },
         },
+        queueRevision: 1,
       },
     }));
 
@@ -287,6 +307,7 @@ describe("WebSocket channel", () => {
       text: "visible queued work",
       media_urls: [],
       queued_at: "2026-08-09T12:00:00.000Z",
+      source: { kind: "gui", channel: "websocket" },
     };
     for (const ws of [first, second]) {
       expect(ws.send.mock.calls.map(([payload]) => JSON.parse(payload))).toContainEqual({
@@ -294,6 +315,7 @@ describe("WebSocket channel", () => {
         chat_id: chatId,
         client_request_id: clientRequestId,
         item: expectedItem,
+        revision: 1,
       });
     }
 
@@ -303,6 +325,7 @@ describe("WebSocket channel", () => {
       chat_id: chatId,
       client_request_id: clientRequestId,
       item: expectedItem,
+      revision: 1,
     });
 
     const invalid = connection();
@@ -311,6 +334,213 @@ describe("WebSocket channel", () => {
       event: "error",
       reason: "queue_surface_invalid",
     }));
+  });
+
+  it("derives the immutable Turn source from the connection surface", async () => {
+    const bus = new MessageBus();
+    const channel = webuiChannel(bus);
+    const tui = connection();
+    channel.connectionSurface.set(tui, "tui");
+    const chatId = "chat-tui-source";
+
+    await channel.dispatchEnvelope(tui, "tui-client", {
+      type: "message",
+      chat_id: chatId,
+      content: "from the terminal",
+      webui: true,
+      queue_surface: "chat_composer",
+      client_request_id: "12121212-1212-4212-8212-121212121212",
+      target: { kind: "standalone" },
+      turn_source: { kind: "gui", channel: "spoofed" },
+    });
+
+    const inbound = await bus.nextInbound();
+    expect(inbound.turnSource).toEqual({ kind: "tui", channel: "websocket" });
+    expect(inbound.metadata.turn_source).toBeUndefined();
+  });
+
+  it("replays an idempotent Steer acknowledgement without submitting a second Turn", async () => {
+    const bus = new MessageBus();
+    const channel = webuiChannel(bus);
+    const tui = connection();
+    const gui = connection();
+    const duplicate = connection();
+    const chatId = "chat-steer-idempotent";
+    const sessionKey = `websocket:${chatId}`;
+    const clientRequestId = "13131313-1313-4313-8313-131313131313";
+    const turnId = "turn-tui-owned";
+    const request = {
+      type: "message",
+      chat_id: chatId,
+      content: "add this to the current Turn",
+      webui: true,
+      queue_surface: "chat_composer",
+      client_request_id: clientRequestId,
+      target: { kind: "standalone" },
+      turn_admission: "steer",
+      expected_turn_id: turnId,
+    };
+    channel.connectionSurface.set(tui, "tui");
+    channel.connectionSurface.set(gui, "gui");
+    channel.connectionSurface.set(duplicate, "tui");
+    channel.attachConnection(tui, chatId);
+    channel.attachConnection(gui, chatId);
+    channel.activeTurnIdByChatId.set(chatId, turnId);
+    channel.activeTurnSourceByChatId.set(chatId, { kind: "tui", channel: "websocket" });
+
+    await channel.dispatchEnvelope(tui, "tui-client", request);
+    expect(bus.inboundSize).toBe(1);
+    await channel.send(new OutboundMessage({
+      channel: "websocket",
+      chatId,
+      content: "",
+      metadata: {
+        webuiMessageSteered: true,
+        webuiRequestSessionKey: sessionKey,
+        clientRequestId,
+        turnId,
+        steeredContent: request.content,
+        steeredMedia: [],
+        turnSource: { kind: "tui", channel: "websocket" },
+      },
+    }));
+
+    for (const ws of [tui, gui]) {
+      expect(ws.send.mock.calls.map(([payload]) => JSON.parse(payload))).toContainEqual(expect.objectContaining({
+        event: "user",
+        chat_id: chatId,
+        text: request.content,
+        client_request_id: clientRequestId,
+        turn_id: turnId,
+        source: { kind: "tui", channel: "websocket" },
+      }));
+    }
+    expect(tui.send.mock.calls.map(([payload]) => JSON.parse(payload))).toContainEqual({
+      event: "message_steered",
+      chat_id: chatId,
+      client_request_id: clientRequestId,
+      turn_id: turnId,
+    });
+
+    await channel.dispatchEnvelope(duplicate, "tui-client-2", request);
+    expect(bus.inboundSize).toBe(1);
+    expect(duplicate.send.mock.calls.map(([payload]) => JSON.parse(payload))).toContainEqual({
+      event: "message_steered",
+      chat_id: chatId,
+      client_request_id: clientRequestId,
+      turn_id: turnId,
+    });
+  });
+
+  it("projects all Turn content to GUI and only TUI-owned Turn content to TUI", async () => {
+    const channel = webuiChannel(new MessageBus());
+    const gui = connection();
+    const tui = connection();
+    const chatId = "chat-surface-projection";
+    channel.connectionSurface.set(gui, "gui");
+    channel.connectionSurface.set(tui, "tui");
+    channel.attachConnection(gui, chatId);
+    channel.attachConnection(tui, chatId);
+
+    await channel.sendRunStatus(chatId, "running", {
+      startedAt: 10,
+      turnId: "turn-gui",
+      source: { kind: "gui", channel: "websocket" },
+    });
+    await channel.sendTurnPayload(chatId, {
+      event: "user",
+      chat_id: chatId,
+      text: "private GUI question",
+      turn_id: "turn-gui",
+      source: { kind: "gui", channel: "websocket" },
+    });
+    await channel.sendTurnPayload(chatId, {
+      event: "message",
+      chat_id: chatId,
+      text: "private GUI answer",
+      turn_id: "turn-gui",
+      source: { kind: "gui", channel: "websocket" },
+    });
+
+    expect(gui.send.mock.calls.map(([payload]) => JSON.parse(payload))).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event: "user", text: "private GUI question", turn_id: "turn-gui" }),
+      expect.objectContaining({ event: "message", text: "private GUI answer", turn_id: "turn-gui" }),
+    ]));
+    expect(tui.send.mock.calls.map(([payload]) => JSON.parse(payload))).toEqual([
+      {
+        event: "run_status",
+        chat_id: chatId,
+        status: "running",
+        busy: true,
+        owned_by_tui: false,
+      },
+    ]);
+
+    gui.send.mockClear();
+    tui.send.mockClear();
+    await channel.sendRunStatus(chatId, "running", {
+      startedAt: 20,
+      turnId: "turn-tui",
+      source: { kind: "tui", channel: "websocket" },
+    });
+    await channel.sendTurnPayload(chatId, {
+      event: "user",
+      chat_id: chatId,
+      text: "shared TUI question",
+      turn_id: "turn-tui",
+      source: { kind: "tui", channel: "websocket" },
+    });
+
+    expect(tui.send.mock.calls.map(([payload]) => JSON.parse(payload))).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event: "run_status",
+        turn_id: "turn-tui",
+        owned_by_tui: true,
+      }),
+      expect.objectContaining({
+        event: "user",
+        text: "shared TUI question",
+        turn_id: "turn-tui",
+      }),
+    ]));
+  });
+
+  it("keeps a TUI connection attached to one Session and targets Stop only there", async () => {
+    const stopExpectedTurn = vi.fn(async () => "stopped" as const);
+    const channel = new WebSocketChannel({}, new MessageBus(), { stopExpectedTurn });
+    const tui = connection();
+    channel.connectionSurface.set(tui, "tui");
+    channel.attachConnection(tui, "chat-old");
+    channel.attachConnection(tui, "chat-current");
+    expect(channel.connectionChats.get(tui)).toEqual(new Set(["chat-current"]));
+    expect(channel.subscriptions.get("chat-old")).toBeUndefined();
+
+    await channel.dispatchEnvelope(tui, "tui-client", {
+      type: "stop",
+      chat_id: "chat-other",
+      expected_turn_id: "turn-other",
+    });
+    expect(stopExpectedTurn).not.toHaveBeenCalled();
+    expect(sent(tui)).toMatchObject({
+      event: "error",
+      detail: "stop_failed",
+      reason: "session_not_attached",
+    });
+
+    tui.send.mockClear();
+    await channel.dispatchEnvelope(tui, "tui-client", {
+      type: "stop",
+      chat_id: "chat-current",
+      expected_turn_id: "turn-current",
+    });
+    expect(stopExpectedTurn).toHaveBeenCalledWith("websocket:chat-current", "turn-current");
+    expect(sent(tui)).toEqual({
+      event: "stop_result",
+      chat_id: "chat-current",
+      turn_id: "turn-current",
+      stopped: 1,
+      outcome: "stopped",
+    });
   });
 
   it("serializes attach snapshots before a concurrent dequeue event", async () => {
@@ -329,6 +559,7 @@ describe("WebSocket channel", () => {
       media: [],
       queuedAt: "2026-08-09T12:00:00.000Z",
       sessionKey,
+      source: { kind: "gui" as const, channel: "websocket" },
     };
     const startedDescriptor = {
       ...descriptor,
@@ -339,7 +570,7 @@ describe("WebSocket channel", () => {
     channel.getWebuiQueueSnapshot = vi.fn(async () => {
       entered.resolve(undefined);
       await release.promise;
-      return { items: [descriptor], startedItems: [startedDescriptor] };
+      return { revision: 1, items: [descriptor], startedItems: [startedDescriptor] };
     });
 
     const attaching = channel.dispatchEnvelope(ws, "client-1", { type: "attach", chat_id: chatId });
@@ -353,6 +584,7 @@ describe("WebSocket channel", () => {
         webuiRequestSessionKey: sessionKey,
         clientRequestId,
         webuiQueueItem: descriptor,
+        queueRevision: 2,
       },
     }));
     await Promise.resolve();
@@ -386,6 +618,103 @@ describe("WebSocket channel", () => {
     expect(channel.getWebuiQueueSnapshot).toHaveBeenCalledTimes(2);
   });
 
+  it("serves an attached queue snapshot request and rejects another Session", async () => {
+    const channel = webuiChannel(new MessageBus());
+    const ws = connection();
+    const chatId = "chat-explicit-snapshot";
+    channel.attachConnection(ws, chatId);
+    channel.getWebuiQueueSnapshot = vi.fn(async () => ({
+      revision: 7,
+      items: [],
+      startedItems: [],
+    }));
+
+    await channel.dispatchEnvelope(ws, "client-1", {
+      type: "queue_snapshot_request",
+      chat_id: chatId,
+    });
+    expect(sent(ws)).toEqual({
+      event: "message_queue_snapshot",
+      chat_id: chatId,
+      revision: 7,
+      items: [],
+      started_items: [],
+    });
+
+    ws.send.mockClear();
+    await channel.dispatchEnvelope(ws, "client-1", {
+      type: "queue_snapshot_request",
+      chat_id: "chat-not-attached",
+    });
+    expect(sent(ws)).toMatchObject({
+      event: "error",
+      chat_id: "chat-not-attached",
+      detail: "queue_snapshot_request_invalid",
+    });
+    expect(channel.getWebuiQueueSnapshot).toHaveBeenCalledTimes(1);
+  });
+
+  it("projects an IM queue event only to the matching canonical Session subscribers", async () => {
+    const channel = webuiChannel(new MessageBus());
+    const matching = connection();
+    const other = connection();
+    const sessionKey = "slack:room-42";
+    const chatId = toGuiChatId(sessionKey);
+    const clientRequestId = "14141414-1414-4414-8414-141414141414";
+    channel.attachConnection(matching, chatId);
+    channel.attachConnection(other, "chat-other-session");
+
+    await channel.send(new OutboundMessage({
+      channel: "websocket",
+      chatId: "room-42",
+      content: "",
+      metadata: {
+        webuiMessageQueued: true,
+        webuiRequestSessionKey: sessionKey,
+        clientRequestId,
+        queueRevision: 1,
+        webuiQueueItem: {
+          clientRequestId,
+          content: "from Slack",
+          media: [],
+          queuedAt: "2026-08-09T12:00:00.000Z",
+          sessionKey,
+          source: { kind: "im", channel: "slack" },
+        },
+      },
+    }));
+
+    expect(sent(matching)).toMatchObject({
+      event: "message_queued",
+      chat_id: chatId,
+      revision: 1,
+      item: {
+        text: "from Slack",
+        source: { kind: "im", channel: "slack" },
+      },
+    });
+    expect(other.send).not.toHaveBeenCalled();
+
+    await channel.send(new OutboundMessage({
+      channel: "websocket",
+      chatId: "room-42",
+      content: "",
+      metadata: {
+        webuiMessageQueueRemoved: true,
+        webuiRequestSessionKey: sessionKey,
+        clientRequestId,
+        queueRevision: 2,
+      },
+    }));
+    expect(sent(matching, 1)).toEqual({
+      event: "message_queue_removed",
+      chat_id: chatId,
+      client_request_id: clientRequestId,
+      revision: 2,
+    });
+    expect(other.send).not.toHaveBeenCalled();
+  });
+
   it("removes one queued idempotent request, broadcasts it, and preserves started Turns", async () => {
     const bus = new MessageBus();
     const channel = webuiChannel(bus);
@@ -398,9 +727,9 @@ describe("WebSocket channel", () => {
     channel.attachConnection(first, chatId);
     channel.attachConnection(second, chatId);
     const removeQueuedWebuiMessage = vi.fn()
-      .mockResolvedValueOnce("removed")
-      .mockResolvedValueOnce("missing")
-      .mockResolvedValueOnce("already_dequeued");
+      .mockResolvedValueOnce({ outcome: "removed", revision: 3 })
+      .mockResolvedValueOnce({ outcome: "missing", revision: 3 })
+      .mockResolvedValueOnce({ outcome: "already_dequeued", revision: 4 });
     channel.removeQueuedWebuiMessage = removeQueuedWebuiMessage;
     await channel.dispatchEnvelope(first, "client-message", {
       type: "message",
@@ -428,6 +757,7 @@ describe("WebSocket channel", () => {
         event: "message_queue_removed",
         chat_id: chatId,
         client_request_id: clientRequestId,
+        revision: 3,
       });
     }
     expect(first.send.mock.calls.map(([payload]) => JSON.parse(payload))).toContainEqual(expect.objectContaining({
@@ -438,11 +768,12 @@ describe("WebSocket channel", () => {
     }));
 
     await remove(second, "cccccccc-cccc-4ccc-8ccc-cccccccccccc", missingRequestId);
-    expect(first.send.mock.calls.map(([payload]) => JSON.parse(payload))).toContainEqual({
-      event: "message_queue_removed",
-      chat_id: chatId,
-      client_request_id: missingRequestId,
-    });
+    expect(first.send.mock.calls.map(([payload]) => JSON.parse(payload))).not.toContainEqual(
+      expect.objectContaining({
+        event: "message_queue_removed",
+        client_request_id: missingRequestId,
+      }),
+    );
     await remove(first, "dddddddd-dddd-4ddd-8ddd-dddddddddddd", startedRequestId);
     expect(first.send.mock.calls.map(([payload]) => JSON.parse(payload))).toContainEqual(expect.objectContaining({
       event: "queue_remove_result",
@@ -464,6 +795,15 @@ describe("WebSocket channel", () => {
     });
     expect(removeQueuedWebuiMessage).toHaveBeenCalledTimes(callsBeforeInvalid);
     expect(first.send.mock.calls.map(([payload]) => JSON.parse(payload)).at(-1)).toMatchObject({
+      event: "queue_remove_result",
+      ok: false,
+      error: "invalid_request",
+    });
+
+    const unattached = connection();
+    await remove(unattached, "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", clientRequestId);
+    expect(removeQueuedWebuiMessage).toHaveBeenCalledTimes(callsBeforeInvalid);
+    expect(sent(unattached)).toMatchObject({
       event: "queue_remove_result",
       ok: false,
       error: "invalid_request",
@@ -1509,7 +1849,7 @@ describe("WebSocket channel", () => {
     ]);
   });
 
-  it("sends a running snapshot before the legacy running hydrate", async () => {
+  it("sends one authoritative running snapshot after attach", async () => {
     const channel = new WebSocketChannel({}, new MessageBus());
     const ws = connection();
     websocketTurnWallStartTimes.set("chat-1", 1780732800);
@@ -1521,13 +1861,6 @@ describe("WebSocket channel", () => {
       { event: "attached", chat_id: "chat-1" },
       {
         event: "run_status_snapshot",
-        chat_id: "chat-1",
-        status: "running",
-        started_at: 1780732800,
-        turn_id: "turn-1",
-      },
-      {
-        event: "run_status",
         chat_id: "chat-1",
         status: "running",
         started_at: 1780732800,

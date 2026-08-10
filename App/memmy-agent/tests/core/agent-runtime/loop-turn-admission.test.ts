@@ -25,12 +25,12 @@ function makeLoop(): AgentLoop {
   return loop;
 }
 
-async function waitUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+async function waitUntil(predicate: () => boolean | Promise<boolean>, timeoutMs = 2_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  while (!predicate() && Date.now() < deadline) {
+  while (!(await predicate()) && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
-  expect(predicate()).toBe(true);
+  expect(await predicate()).toBe(true);
 }
 
 afterEach(() => {
@@ -94,28 +94,33 @@ describe("AgentLoop Turn admission", () => {
 
     const running = loop.run();
     await loop.bus.publishInbound(new InboundMessage({
-      channel: "cli",
+      channel: "websocket",
       chatId: "turns",
       senderId: "user",
       content: "active",
       sessionKeyOverride: "cli:turns",
+      turnSource: { kind: "tui", channel: "websocket" },
     }));
     await waitUntil(() => (loop.turnSlots.get("cli:turns") as any[])?.[0]?.acceptingSteer === true);
+    const activeTurnId = (loop.turnSlots.get("cli:turns") as any[])[0].turnId;
     await loop.bus.publishInbound(new InboundMessage({
-      channel: "cli",
+      channel: "websocket",
       chatId: "turns",
       senderId: "user",
       content: "queued",
       sessionKeyOverride: "cli:turns",
+      turnSource: { kind: "tui", channel: "websocket" },
     }));
     await waitUntil(() => (loop.turnSlots.get("cli:turns")?.length ?? 0) === 2);
     await loop.bus.publishInbound(new InboundMessage({
-      channel: "cli",
+      channel: "websocket",
       chatId: "turns",
       senderId: "user",
       content: "correction",
       sessionKeyOverride: "cli:turns",
       turnAdmission: "steer",
+      expectedTurnId: activeTurnId,
+      turnSource: { kind: "tui", channel: "websocket" },
     }));
 
     await waitUntil(() => ((loop.turnSlots.get("cli:turns") as any[])?.[0]?.pendingSteer.size ?? 0) === 1);
@@ -123,12 +128,14 @@ describe("AgentLoop Turn admission", () => {
     expect(slots[0].pendingSteer.getNowait().content).toBe("correction");
     expect(slots[1].pendingSteer.size).toBe(0);
     slots[0].pendingSteer.put(new InboundMessage({
-      channel: "cli",
+      channel: "websocket",
       chatId: "turns",
       senderId: "user",
       content: "correction",
       sessionKeyOverride: "cli:turns",
       turnAdmission: "steer",
+      expectedTurnId: activeTurnId,
+      turnSource: { kind: "tui", channel: "websocket" },
     }));
 
     releaseActive();
@@ -181,6 +188,137 @@ describe("AgentLoop Turn admission", () => {
     await running;
   });
 
+  it("degrades a stale TUI Steer to exactly one shared Queue item", async () => {
+    const loop = makeLoop();
+    let releaseActive!: () => void;
+    const activeGate = new Promise<void>((resolve) => {
+      releaseActive = resolve;
+    });
+    loop.processMessageInternal = vi.fn(async (message: InboundMessage, _key, options: any) => {
+      if (message.content === "active") {
+        options.slot.acceptingSteer = true;
+        await activeGate;
+      }
+      return null;
+    }) as any;
+    const sessionKey = "cli:stale-steer";
+    const running = loop.run();
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "websocket",
+      chatId: "ext_stale",
+      content: "active",
+      sessionKeyOverride: sessionKey,
+      turnSource: { kind: "tui", channel: "websocket" },
+    }));
+    await waitUntil(() => (loop.turnSlots.get(sessionKey) as any[])?.[0]?.acceptingSteer === true);
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "websocket",
+      chatId: "ext_stale",
+      content: "stale correction",
+      metadata: { client_request_id: "10101010-1010-4010-8010-101010101010" },
+      sessionKeyOverride: sessionKey,
+      turnAdmission: "steer",
+      expectedTurnId: "stale-turn-id",
+      turnSource: { kind: "tui", channel: "websocket" },
+    }));
+
+    await waitUntil(async () => (await loop.getQueueSnapshot(sessionKey)).items.length === 1);
+    expect((await loop.getQueueSnapshot(sessionKey))).toMatchObject({
+      revision: 1,
+      items: [{
+        clientRequestId: "10101010-1010-4010-8010-101010101010",
+        content: "stale correction",
+        source: { kind: "tui", channel: "websocket" },
+      }],
+    });
+    const queuedEvents = [];
+    while (loop.bus.outboundSize) queuedEvents.push(await loop.bus.consumeOutbound());
+    expect(queuedEvents.filter((message) => message.metadata?.webuiMessageQueued)).toHaveLength(1);
+    expect(queuedEvents.some((message) => message.metadata?.webuiMessageSteered)).toBe(false);
+
+    releaseActive();
+    await waitUntil(() => !loop.isSessionBusy(sessionKey));
+    loop.stop();
+    await running;
+  });
+
+  it("shares one FIFO and monotonic revision across GUI, TUI, and IM sources", async () => {
+    const loop = makeLoop();
+    const started: string[] = [];
+    let releaseActive!: () => void;
+    const activeGate = new Promise<void>((resolve) => {
+      releaseActive = resolve;
+    });
+    loop.processMessageInternal = vi.fn(async (message: InboundMessage) => {
+      started.push(message.content);
+      if (message.content === "active") await activeGate;
+      return null;
+    }) as any;
+    const sessionKey = "cli:mixed-sources";
+    const running = loop.run();
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "websocket",
+      chatId: "ext_mixed",
+      content: "active",
+      sessionKeyOverride: sessionKey,
+      turnSource: { kind: "tui", channel: "websocket" },
+    }));
+    await waitUntil(() => started.length === 1);
+    expect(await loop.getQueueSnapshot(sessionKey)).toEqual({ revision: 0, items: [], startedItems: [] });
+
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "websocket",
+      chatId: "ext_mixed",
+      content: "from GUI",
+      metadata: { client_request_id: "11111111-1111-4111-8111-111111111111" },
+      sessionKeyOverride: sessionKey,
+      turnSource: { kind: "gui", channel: "websocket" },
+    }));
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "websocket",
+      chatId: "ext_mixed",
+      content: "from TUI",
+      metadata: { client_request_id: "22222222-2222-4222-8222-222222222222" },
+      sessionKeyOverride: sessionKey,
+      turnSource: { kind: "tui", channel: "websocket" },
+    }));
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "slack",
+      chatId: "room",
+      content: "from IM",
+      timestamp: new Date("2020-01-01T00:00:00.000Z"),
+      sessionKeyOverride: sessionKey,
+    }));
+
+    await waitUntil(async () => (await loop.getQueueSnapshot(sessionKey)).items.length === 3);
+    const snapshot = await loop.getQueueSnapshot(sessionKey);
+    expect(snapshot.revision).toBe(3);
+    expect(snapshot.items.map((item) => [item.content, item.source])).toEqual([
+      ["from GUI", { kind: "gui", channel: "websocket" }],
+      ["from TUI", { kind: "tui", channel: "websocket" }],
+      ["from IM", { kind: "im", channel: "slack" }],
+    ]);
+    expect(snapshot.items.every((item, index, items) => (
+      index === 0 || item.queuedAt > items[index - 1]!.queuedAt
+    ))).toBe(true);
+    expect(snapshot.items[2]?.clientRequestId).toMatch(/^[0-9a-f-]{36}$/i);
+
+    releaseActive();
+    await waitUntil(() => started.length === 4);
+    await waitUntil(() => !loop.isSessionBusy(sessionKey));
+    expect(started).toEqual(["active", "from GUI", "from TUI", "from IM"]);
+    const finalSnapshot = await loop.getQueueSnapshot(sessionKey);
+    expect(finalSnapshot).toEqual({ revision: 6, items: [], startedItems: [] });
+    const events = [];
+    while (loop.bus.outboundSize) events.push(await loop.bus.consumeOutbound());
+    expect(events.filter((message) => message.metadata?.webuiMessageQueued)
+      .map((message) => message.metadata.queueRevision)).toEqual([1, 2, 3]);
+    expect(events.filter((message) => message.metadata?.webuiMessageDequeued)
+      .map((message) => message.metadata.queueRevision)).toEqual([4, 5, 6]);
+    loop.stop();
+    await running;
+  });
+
   it("emits message_queued before a busy WebUI root is accepted", async () => {
     const loop = makeLoop();
     loop.unifiedSession = true;
@@ -214,6 +352,7 @@ describe("AgentLoop Turn admission", () => {
         webui: true,
         client_request_id: "11111111-1111-4111-8111-111111111111",
       },
+      turnSource: { kind: "gui", channel: "websocket" },
     }));
 
     await waitUntil(() => loop.bus.outboundSize === 1);
@@ -281,12 +420,16 @@ describe("AgentLoop Turn admission", () => {
         },
       }));
     }
-    await waitUntil(() => loop.getWebuiQueueSnapshot(sessionKey).items.length === 3);
-    expect(loop.getWebuiQueueSnapshot(sessionKey).items.map((item) => item.clientRequestId))
+    await waitUntil(async () => (await loop.getWebuiQueueSnapshot(sessionKey)).items.length === 3);
+    expect(await loop.getWebuiQueueSnapshot(sessionKey)).toMatchObject({ revision: 3 });
+    expect((await loop.getWebuiQueueSnapshot(sessionKey)).items.map((item) => item.clientRequestId))
       .toEqual(requests.map(([id]) => id));
-    await expect(loop.removeQueuedWebuiMessage(sessionKey, requests[1][0])).resolves.toBe("removed");
+    await expect(loop.removeQueuedWebuiMessage(sessionKey, requests[1][0])).resolves.toMatchObject({
+      outcome: "removed",
+      revision: 4,
+    });
     expect(cancelAll).not.toHaveBeenCalled();
-    expect(loop.getWebuiQueueSnapshot(sessionKey).items.map((item) => item.clientRequestId))
+    expect((await loop.getWebuiQueueSnapshot(sessionKey)).items.map((item) => item.clientRequestId))
       .toEqual([requests[0][0], requests[2][0]]);
 
     releaseFirst();
@@ -300,7 +443,11 @@ describe("AgentLoop Turn admission", () => {
     expect(outbound.filter((message) => message.metadata?.webuiMessageDequeued)
       .map((message) => message.metadata?.clientRequestId))
       .toEqual([requests[0][0], requests[2][0]]);
-    expect(loop.getWebuiQueueSnapshot(sessionKey)).toEqual({ items: [], startedItems: [] });
+    expect(await loop.getWebuiQueueSnapshot(sessionKey)).toMatchObject({ revision: 6, items: [], startedItems: [] });
+    expect(outbound.filter((message) => message.metadata?.webuiMessageQueued)
+      .map((message) => message.metadata.queueRevision)).toEqual([1, 2, 3]);
+    expect(outbound.filter((message) => message.metadata?.webuiMessageDequeued)
+      .map((message) => message.metadata.queueRevision)).toEqual([5, 6]);
     loop.stop();
     await running;
   });
@@ -355,13 +502,13 @@ describe("AgentLoop Turn admission", () => {
     await expect(loop.removeQueuedWebuiMessage(
       "websocket:announcement-gate",
       "44444444-4444-4444-8444-444444444444",
-    )).resolves.toBe("removed");
+    )).resolves.toMatchObject({ outcome: "removed" });
 
     releaseAnnouncement();
     await waitUntil(() => !loop.isSessionBusy("websocket:announcement-gate"));
     expect(started).toEqual(["running"]);
-    expect(loop.getWebuiQueueSnapshot("websocket:announcement-gate"))
-      .toEqual({ items: [], startedItems: [] });
+    expect(await loop.getWebuiQueueSnapshot("websocket:announcement-gate"))
+      .toMatchObject({ items: [], startedItems: [] });
     loop.stop();
     await running;
   });
@@ -409,8 +556,8 @@ describe("AgentLoop Turn admission", () => {
       clientRequestId: "55555555-5555-4555-8555-555555555555",
       reason: "turn_start_failed",
     });
-    expect(loop.getWebuiQueueSnapshot("websocket:announcement-failure"))
-      .toEqual({ items: [], startedItems: [] });
+    expect(await loop.getWebuiQueueSnapshot("websocket:announcement-failure"))
+      .toMatchObject({ items: [], startedItems: [] });
 
     releaseRunning();
     await waitUntil(() => !loop.isSessionBusy("websocket:announcement-failure"));
@@ -453,7 +600,7 @@ describe("AgentLoop Turn admission", () => {
         webui_queue_surface: "chat_composer",
       },
     }));
-    await waitUntil(() => loop.getWebuiQueueSnapshot(sessionKey).items.length === 1);
+    await waitUntil(async () => (await loop.getWebuiQueueSnapshot(sessionKey)).items.length === 1);
     const beforeStart = [];
     while (loop.bus.outboundSize) beforeStart.push(await loop.bus.consumeOutbound());
     expect(beforeStart.filter((message) => (
@@ -465,7 +612,7 @@ describe("AgentLoop Turn admission", () => {
     loop.goalRuntime.releaseTurn(sessionKey, "turn-create");
     await (loop as any).dispatchNextGoalWork(sessionKey);
     await waitUntil(() => (loop.processMessageInternal as any).mock.calls.length === 1);
-    expect(loop.getWebuiQueueSnapshot(sessionKey)).toMatchObject({
+    expect(await loop.getWebuiQueueSnapshot(sessionKey)).toMatchObject({
       items: [],
       startedItems: [expect.objectContaining({ clientRequestId })],
     });
@@ -507,6 +654,7 @@ describe("AgentLoop Turn admission", () => {
         client_request_id: "22222222-2222-4222-8222-222222222222",
       },
       turnAdmission: "steer",
+      turnSource: { kind: "gui", channel: "websocket" },
     }));
 
     await waitUntil(() => (loop.sessionDeletionQueues.get(sessionKey)?.length ?? 0) === 1);
@@ -553,6 +701,7 @@ describe("AgentLoop Turn admission", () => {
       senderId: "user",
       content: "queued",
       metadata: { webui: true, client_request_id: clientRequestId },
+      turnSource: { kind: "gui", channel: "websocket" },
     }));
     await waitUntil(() => (loop.turnSlots.get(sessionKey)?.length ?? 0) === 2);
     await loop.cancelActiveTasks(sessionKey);
@@ -560,6 +709,13 @@ describe("AgentLoop Turn admission", () => {
 
     const outbound = [];
     while (loop.bus.outboundSize) outbound.push(await loop.bus.consumeOutbound());
+    expect(outbound.filter((message) => message.metadata?.webuiMessageQueueRemoved))
+      .toEqual([expect.objectContaining({
+        metadata: expect.objectContaining({
+          clientRequestId,
+          queueRevision: 2,
+        }),
+      })]);
     const rejections = outbound.filter((message) => message.metadata?.webuiMessageRejected);
     expect(rejections).toHaveLength(1);
     expect(rejections[0].metadata).toMatchObject({
@@ -569,6 +725,140 @@ describe("AgentLoop Turn admission", () => {
     expect((loop.processMessageInternal as any).mock.calls).toHaveLength(1);
     loop.stop();
     await running;
+  });
+
+  it("acknowledges safe inline TUI commands and rejects broad TUI process controls", async () => {
+    const loop = makeLoop();
+    const cancelAll = vi.spyOn(loop, "cancelActiveTasks");
+    const sessionKey = "cli:tui-inline-command";
+    const running = loop.run();
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "websocket",
+      chatId: "ext_tui_inline",
+      content: "/status",
+      metadata: {
+        client_request_id: "77777777-7777-4777-8777-777777777777",
+      },
+      sessionKeyOverride: sessionKey,
+      turnSource: { kind: "tui", channel: "websocket" },
+    }));
+
+    await waitUntil(() => loop.bus.outboundSize >= 2);
+    const statusMessages = [];
+    while (loop.bus.outboundSize) statusMessages.push(await loop.bus.consumeOutbound());
+    expect(statusMessages.some((message) => message.metadata?.webuiMessageAccepted)).toBe(true);
+    expect(statusMessages.find((message) => message.content)?.metadata).toMatchObject({
+      turn_source: { kind: "tui", channel: "websocket" },
+    });
+
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "websocket",
+      chatId: "ext_tui_inline",
+      content: "/stop",
+      metadata: {
+        client_request_id: "88888888-8888-4888-8888-888888888888",
+      },
+      sessionKeyOverride: sessionKey,
+      turnSource: { kind: "tui", channel: "websocket" },
+    }));
+    await waitUntil(() => loop.bus.outboundSize >= 1);
+    const rejected = await loop.bus.consumeOutbound();
+    expect(rejected.metadata).toMatchObject({
+      webuiMessageRejected: true,
+      reason: "tui_targeted_control_required",
+    });
+    expect(cancelAll).not.toHaveBeenCalled();
+    loop.stop();
+    await running;
+  });
+
+  it("targets Stop to the exact active TUI Turn and never stops a GUI Turn", async () => {
+    const loop = makeLoop();
+    let releaseGui!: () => void;
+    const guiGate = new Promise<void>((resolve) => {
+      releaseGui = resolve;
+    });
+    loop.processMessageInternal = vi.fn(async (message: InboundMessage, _key, options: any) => {
+      if (message.content === "TUI running") {
+        await new Promise<void>((resolve) => {
+          if (options.abortSignal.aborted) resolve();
+          else options.abortSignal.addEventListener("abort", () => resolve(), { once: true });
+        });
+      }
+      if (message.content === "GUI running") await guiGate;
+      return null;
+    }) as any;
+    const sessionKey = "cli:targeted-stop";
+    const running = loop.run();
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "websocket",
+      chatId: "ext_stop",
+      content: "TUI running",
+      sessionKeyOverride: sessionKey,
+      turnSource: { kind: "tui", channel: "websocket" },
+    }));
+    await waitUntil(() => (loop.processMessageInternal as any).mock.calls.length === 1);
+    const tuiTurnId = (loop.turnSlots.get(sessionKey) as any[])[0].turnId;
+    await expect(loop.stopExpectedTurn(sessionKey, "stale-id", "tui")).resolves.toBe("already_finished");
+    expect(loop.isSessionBusy(sessionKey)).toBe(true);
+    await expect(loop.stopExpectedTurn(sessionKey, tuiTurnId, "tui")).resolves.toBe("stopped");
+    await waitUntil(() => !loop.isSessionBusy(sessionKey));
+
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "websocket",
+      chatId: "ext_stop",
+      content: "GUI running",
+      sessionKeyOverride: sessionKey,
+      turnSource: { kind: "gui", channel: "websocket" },
+    }));
+    await waitUntil(() => (loop.processMessageInternal as any).mock.calls.length === 2);
+    const guiTurnId = (loop.turnSlots.get(sessionKey) as any[])[0].turnId;
+    await expect(loop.stopExpectedTurn(sessionKey, guiTurnId, "tui")).resolves.toBe("not_owned");
+    expect(loop.isSessionBusy(sessionKey)).toBe(true);
+    releaseGui();
+    await waitUntil(() => !loop.isSessionBusy(sessionKey));
+    loop.stop();
+    await running;
+  });
+
+  it("persists a TUI command response with its source and Turn identity", async () => {
+    const loop = makeLoop();
+    const sessionKey = "cli:tui-command";
+    const session = loop.sessions.getOrCreate(sessionKey);
+    const source = { kind: "tui", channel: "websocket" } as const;
+    const result = await loop.dispatchCommand(
+      new InboundMessage({
+        channel: "websocket",
+        chatId: "ext_tui_command",
+        content: "/help",
+        metadata: {
+          client_request_id: "66666666-6666-4666-8666-666666666666",
+        },
+        sessionKeyOverride: sessionKey,
+        turnSource: source,
+      }),
+      session,
+      sessionKey,
+      null,
+      "turn-tui-command",
+    );
+
+    expect(result).not.toBeNull();
+    expect(session.messages).toHaveLength(2);
+    expect(session.messages).toEqual([
+      expect.objectContaining({
+        role: "user",
+        commandMessage: true,
+        turn_id: "turn-tui-command",
+        turn_source: source,
+      }),
+      expect.objectContaining({
+        role: "assistant",
+        commandMessage: true,
+        turn_id: "turn-tui-command",
+        turn_source: source,
+      }),
+    ]);
   });
 
   it("keeps direct, Slot-backed, and deletion-barrier Sessions out of auto-compaction", () => {

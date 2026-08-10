@@ -239,14 +239,32 @@ export type TerminalTarget = {
   cwd: string;
 };
 
+export type TerminalTargetDependencies = {
+  sessions: SessionManager;
+  projectStore: ProjectStore;
+  workspace: string;
+  hasUsableDefaultModel: () => boolean;
+};
+
 let rootInteractiveRunnerForTest: RootInteractiveRunner | null = null;
 
 export function setRootInteractiveRunnerForTest(runner: RootInteractiveRunner | null): void {
   rootInteractiveRunnerForTest = runner;
 }
 
+function terminalTargetDependenciesForLoop(loop: AgentLoop): TerminalTargetDependencies {
+  const projectStore = loop.projectStore ?? new ProjectStore();
+  loop.projectStore = projectStore;
+  return {
+    sessions: loop.sessions,
+    projectStore,
+    workspace: loop.workspace,
+    hasUsableDefaultModel: () => loop.resolveTurnModelSelection({}) !== null,
+  };
+}
+
 export function resolveTerminalTarget(
-  loop: AgentLoop,
+  dependencies: TerminalTargetDependencies,
   {
     sessionId = null,
     standalone = false,
@@ -261,10 +279,10 @@ export function resolveTerminalTarget(
 ): TerminalTarget {
   const selected = Number(Boolean(sessionId)) + Number(standalone) + Number(Boolean(project));
   if (selected > 1) throw new Error("--session, --standalone, and --project are mutually exclusive");
+  const { sessions, projectStore, workspace } = dependencies;
   if (
-    !loop.sessions
-    || typeof loop.sessions.get !== "function"
-    || typeof loop.sessions.save !== "function"
+    typeof sessions?.get !== "function"
+    || typeof sessions?.save !== "function"
   ) {
     const fallbackId = sessionId
       ?? (standalone || project ? `cli:${crypto.randomUUID()}` : "cli:direct");
@@ -273,16 +291,20 @@ export function resolveTerminalTarget(
       target: project ? "project" : "standalone",
       projectId: null,
       projectName: project ? path.basename(project) : null,
-      cwd: path.resolve(loop.workspace ?? invocationCwd),
+      cwd: path.resolve(workspace || invocationCwd),
     };
   }
   const reload = (key: string): Session | null => {
-    if (typeof loop.sessions.reload === "function") return loop.sessions.reload(key);
-    loop.sessions.invalidate?.(key);
-    return loop.sessions.get(key);
+    const runtimeSessions = sessions as SessionManager & {
+      invalidate?: (sessionKey: string) => void;
+      reload?: (sessionKey: string) => Session | null;
+    };
+    if (typeof runtimeSessions.reload === "function") {
+      return runtimeSessions.reload(key);
+    }
+    runtimeSessions.invalidate?.(key);
+    return sessions.get(key);
   };
-  const projectStore = loop.projectStore ?? new ProjectStore();
-  loop.projectStore = projectStore;
 
   let key = sessionId;
   let binding: WebuiSessionBinding;
@@ -303,7 +325,7 @@ export function resolveTerminalTarget(
   } else {
     key = standalone || project ? `cli:${crypto.randomUUID()}` : "cli:direct";
     const existing = reload(key);
-    if (!existing && !loop.resolveTurnModelSelection({})) {
+    if (!existing && !dependencies.hasUsableDefaultModel()) {
       throw new Error("No usable default model is configured. Run `memmy onboard` first.");
     }
     if (existing) {
@@ -322,21 +344,21 @@ export function resolveTerminalTarget(
         session.metadata.webui = true;
         session.metadata.webuiProjectId = resolvedBinding.projectId;
         session.metadata.webuiWorkspaceCwd = resolvedBinding.cwd;
-        loop.sessions.save(session, { fsync: true });
+        sessions.save(session, { fsync: true });
         sessionSaved = true;
         return resolvedProject;
       });
       binding = { projectId: registered.id, cwd: registered.rootPath };
       projectName = registered.name;
     } else {
-      binding = { projectId: null, cwd: fs.realpathSync(loop.workspace) };
+      binding = { projectId: null, cwd: fs.realpathSync(workspace) };
     }
     if (!existing && !sessionSaved) {
       const session = new Session({ key });
       session.metadata.webui = true;
       session.metadata.webuiProjectId = binding.projectId;
       session.metadata.webuiWorkspaceCwd = binding.cwd;
-      loop.sessions.save(session, { fsync: true });
+      sessions.save(session, { fsync: true });
     }
   }
   if (binding.projectId !== null && !projectName) {
@@ -409,13 +431,22 @@ export async function runRootInteractiveAgent({
 } = {}): Promise<unknown> {
   if (rootInteractiveRunnerForTest) return rootInteractiveRunnerForTest();
   const loaded = loadRuntimeConfig(null, null);
-  syncRuntimeWorkspaceTemplates(loaded);
-  const loop = AgentLoop.fromConfig(loaded);
-  const target = resolveTerminalTarget(loop, { sessionId, standalone, project });
-  if (loop.sessions instanceof SessionManager) {
-    loop.guiTranscriptMirror = new GuiTranscriptMirror(loop.sessions, target.cwd);
-    loop.guiTranscriptMirror.sessionUpdated(target.sessionId);
-  }
+  const workspace = syncRuntimeWorkspaceTemplates(loaded);
+  const target = resolveTerminalTarget({
+    sessions: new SessionManager(path.join(workspace, "sessions"), {
+      legacyWebuiWorkspaceCwd: workspace,
+    }),
+    projectStore: new ProjectStore(),
+    workspace,
+    hasUsableDefaultModel: () => {
+      try {
+        const preset = loaded.resolvePreset();
+        return Boolean(preset.model.trim() && loaded.getProviderName(preset.model, { preset }));
+      } catch {
+        return false;
+      }
+    },
+  }, { sessionId, standalone, project });
   printCliRestartNoticeIfNeeded(target.sessionId, true);
   const { runInkInteractiveAgent } = await import("./tui.js");
   return runInkInteractiveAgent(loaded, target.sessionId, target);
@@ -1044,6 +1075,7 @@ export async function gateway({
         return null;
       }
     },
+    webuiRuntimeToolNames: () => loop.toolNames,
     webuiModelSelectionResolver: (input) => loop.resolveTurnModelSelection(input),
     cancelActiveTasks: cancelSessionTasks,
     closeBrowserChat: (channel, chatId) => loop.closeBrowserChat(channel, chatId),
@@ -1051,6 +1083,9 @@ export async function gateway({
     getWebuiQueueSnapshot: (sessionKey) => loop.getWebuiQueueSnapshot(sessionKey),
     removeQueuedWebuiMessage: (sessionKey, clientRequestId) => (
       loop.removeQueuedWebuiMessage(sessionKey, clientRequestId)
+    ),
+    stopExpectedTurn: (sessionKey, expectedTurnId) => (
+      loop.stopExpectedTurn(sessionKey, expectedTurnId, "tui")
     ),
     activeGoalStopHandler: async (sessionKey) => {
       const goal = loop.goalRuntime.get(sessionKey);
@@ -1443,7 +1478,7 @@ export async function agent({
   syncRuntimeWorkspaceTemplates(loaded);
   setCliRuntimeLogs(Boolean(logs));
   const loop = AgentLoop.fromConfig(loaded);
-  const target = resolveTerminalTarget(loop, {
+  const target = resolveTerminalTarget(terminalTargetDependenciesForLoop(loop), {
     sessionId,
     standalone,
     project,

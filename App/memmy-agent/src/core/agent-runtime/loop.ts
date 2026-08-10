@@ -1,6 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
-import { AsyncQueue, MessageBus, OutboundMessage, InboundMessage } from "../runtime-messages/index.js";
+import { randomUUID } from "node:crypto";
+import {
+  AsyncQueue,
+  MessageBus,
+  OutboundMessage,
+  InboundMessage,
+  parseTurnSource,
+  type TurnSource,
+} from "../runtime-messages/index.js";
 import { CommandContext, CommandRouter } from "../../command/router.js";
 import { registerBuiltinCommands } from "../../command/builtin.js";
 import { Config, ModelPresetConfig } from "../../config/schema.js";
@@ -72,13 +80,17 @@ import {
   ProjectStore,
   WebuiProjectError,
 } from "../../entrypoints/frontend-bridge/projects.js";
+import { isGuiImChannel } from "../../entrypoints/frontend-bridge/gui-session-projection.js";
 
 export const UNIFIED_SESSION_KEY = "unified:default";
 const WEBUI_CHAT_COMPOSER_QUEUE_SURFACE = "chat_composer";
 
-function isWebuiChatComposerQueueMessage(message: InboundMessage): boolean {
-  return message.channel === "websocket"
-    && message.metadata?.webui_queue_surface === WEBUI_CHAT_COMPOSER_QUEUE_SURFACE
+function sharedTurnSource(message: InboundMessage): TurnSource | null {
+  return message.turnSource ?? parseTurnSource(message.metadata?.turn_source);
+}
+
+function isSharedQueueMessage(message: InboundMessage): boolean {
+  return sharedTurnSource(message) !== null
     && typeof message.metadata?.client_request_id === "string";
 }
 
@@ -99,7 +111,13 @@ function isSessionOrderedCommand(raw: string): boolean {
 }
 
 type ToolRegistryInstance = ReturnType<ToolLoader["loadRegistry"]>;
-type GuiMirrorTurn = { sessionKey: string; chatId: string; turnId: string };
+type GuiMirrorTurn = {
+  sessionKey: string;
+  chatId: string;
+  turnId: string;
+  source: TurnSource | null;
+  clientRequestId: string | null;
+};
 type GuiTranscriptMirrorLike = {
   sessionKeyForMessage: (message: InboundMessage) => string | null;
   prepareSession: (
@@ -108,7 +126,12 @@ type GuiTranscriptMirrorLike = {
     sessionKey: string,
   ) => WebuiSessionBinding | null;
   sessionUpdated: (sessionKey: string) => void;
-  turn: (sessionKey: string, turnId: string) => GuiMirrorTurn | null;
+  turn: (
+    sessionKey: string,
+    turnId: string,
+    source?: TurnSource | null,
+    clientRequestId?: string | null,
+  ) => GuiMirrorTurn | null;
   running: (turn: GuiMirrorTurn, startedAt: number) => void;
   user: (turn: GuiMirrorTurn, text: string, mediaPaths?: string[]) => void;
   progress: (turn: GuiMirrorTurn, content: string, options?: Record<string, any>) => void;
@@ -352,6 +375,13 @@ function turnMetadata(turnId: string | null | undefined): Record<string, string>
   return turnId ? { turnId, turn_id: turnId } : {};
 }
 
+function withoutTurnMetadata(metadata: Record<string, any>): Record<string, any> {
+  const copy = { ...metadata };
+  delete copy.turnId;
+  delete copy.turn_id;
+  return copy;
+}
+
 function isTestRuntime(env: Record<string, string | undefined>): boolean {
   return env.NODE_ENV === "test" || Boolean(env.VITEST_WORKER_ID);
 }
@@ -436,20 +466,31 @@ type CancelActiveTasksOptions = {
   excludeSignal?: AbortSignal | null;
 };
 
-export type WebuiQueueMessageDescriptor = {
+export type QueueMessageDescriptor = {
   clientRequestId: string;
   content: string;
   media: string[];
   queuedAt: string;
   sessionKey: string;
+  source: TurnSource;
 };
 
-export type WebuiQueueSnapshotDescriptor = {
-  items: WebuiQueueMessageDescriptor[];
-  startedItems: WebuiQueueMessageDescriptor[];
+export type QueueSnapshotDescriptor = {
+  revision: number;
+  items: QueueMessageDescriptor[];
+  startedItems: QueueMessageDescriptor[];
 };
 
-export type RemoveQueuedWebuiMessageResult = "removed" | "already_dequeued" | "missing";
+export type RemoveQueuedMessageResult = {
+  outcome: "removed" | "already_dequeued" | "missing";
+  revision: number;
+};
+
+export type StopExpectedTurnResult = "stopped" | "already_finished" | "not_owned";
+
+export type WebuiQueueMessageDescriptor = QueueMessageDescriptor;
+export type WebuiQueueSnapshotDescriptor = QueueSnapshotDescriptor;
+export type RemoveQueuedWebuiMessageResult = RemoveQueuedMessageResult;
 
 type TurnSlotAnnouncementGate = {
   promise: Promise<void>;
@@ -582,6 +623,9 @@ export class AgentLoop {
   turnSlots: Map<string, TurnSlot[]>;
   sessionDeletionQueues: Map<string, InboundMessage[]>;
   sessionLocks: Map<string, AsyncMutex>;
+  queueMutationLocks: Map<string, AsyncMutex>;
+  queueRevisionBySession: Map<string, number>;
+  lastQueuedAtBySession: Map<string, number>;
   running: boolean;
   currentIterationValue = 0;
   providerSignature: any[] | string | null = null;
@@ -614,6 +658,9 @@ export class AgentLoop {
     this.turnSlots = new Map();
     this.sessionDeletionQueues = new Map();
     this.sessionLocks = new Map();
+    this.queueMutationLocks = new Map();
+    this.queueRevisionBySession = new Map();
+    this.lastQueuedAtBySession = new Map();
     this.running = false;
     this.providerSnapshotLoader = init.providerSnapshotLoader ?? null;
     this.toolsSnapshotLoader = init.toolsSnapshotLoader ?? null;
@@ -1011,10 +1058,16 @@ export class AgentLoop {
     {
       sessionKeyOverride = message.sessionKeyOverride,
       turnAdmission = message.turnAdmission,
+      expectedTurnId = message.expectedTurnId,
+      turnSource = message.turnSource,
+      metadata = message.metadata,
       turnId = null,
     }: {
       sessionKeyOverride?: string | null;
       turnAdmission?: InboundMessage["turnAdmission"];
+      expectedTurnId?: string | null;
+      turnSource?: TurnSource | null;
+      metadata?: Record<string, any>;
       turnId?: string | null;
     } = {},
   ): InboundMessage {
@@ -1025,13 +1078,15 @@ export class AgentLoop {
       content: message.content,
       media: message.media,
       metadata: turnId
-        ? { ...(message.metadata ?? {}), ...turnMetadata(turnId) }
-        : message.metadata,
+        ? { ...metadata, ...turnMetadata(turnId) }
+        : metadata,
       timestamp: message.timestamp,
       internal: message.internal,
       sessionKey: message.sessionKey,
       sessionKeyOverride,
       turnAdmission,
+      expectedTurnId,
+      turnSource,
     });
   }
 
@@ -1266,7 +1321,20 @@ export class AgentLoop {
       const turnId = cryptoRandomId();
       if (!this.goalRuntime.reserveWork(sessionKey, turnId, "inbox")) return;
       try {
-        const entry = await this.goalRuntime.reserveInboxEntry(sessionKey, turnId);
+        const reservation = await this.queueMutationLockFor(sessionKey).runExclusive(async () => {
+          const reservedEntry = await this.goalRuntime.reserveInboxEntry(sessionKey, turnId);
+          const descriptor = reservedEntry
+            ? this.queueDescriptorFromInboxEntry(sessionKey, reservedEntry)
+            : null;
+          return {
+            entry: reservedEntry,
+            queueDescriptor: descriptor,
+            dequeuedRevision: descriptor
+              ? this.advanceQueueRevision(sessionKey)
+              : this.queueRevision(sessionKey),
+          };
+        });
+        const { entry, queueDescriptor, dequeuedRevision } = reservation;
         if (!entry) {
           this.goalRuntime.releaseWork(sessionKey, turnId);
           return;
@@ -1287,9 +1355,11 @@ export class AgentLoop {
           metadata,
           timestamp: entry.receivedAt,
           sessionKeyOverride: sessionKey,
+          turnSource: parseTurnSource(entry.metadata.turn_source),
         });
-        const queueDescriptor = this.webuiQueueDescriptorFromInboxEntry(sessionKey, entry);
-        if (queueDescriptor) await this.publishWebuiMessageDequeued(inboxMessage, queueDescriptor);
+        if (queueDescriptor) {
+          await this.publishWebuiMessageDequeued(inboxMessage, queueDescriptor, dequeuedRevision);
+        }
         await this.bus.publishInbound(inboxMessage);
       } catch (error) {
         this.goalRuntime.releaseWork(sessionKey, turnId);
@@ -1340,6 +1410,7 @@ export class AgentLoop {
           webui: route.channel === "websocket"
             && this.sessions.get(sessionKey)?.metadata?.webui === true,
           wantsStream: capabilities.supportsStreaming,
+          ...(route.source ? { turn_source: route.source } : {}),
           ...turnMetadata(turnId),
         },
         internal: {
@@ -1348,6 +1419,7 @@ export class AgentLoop {
           goalUpdatedAt: goal.updatedAt,
         },
         sessionKeyOverride: sessionKey,
+        turnSource: route.source ?? null,
       }));
     } catch (error) {
       this.goalRuntime.releaseWork(sessionKey, turnId);
@@ -1401,6 +1473,79 @@ export class AgentLoop {
     return lock;
   }
 
+  private queueMutationLockFor(key: string): AsyncMutex {
+    let lock = this.queueMutationLocks.get(key);
+    if (!lock) {
+      lock = new AsyncMutex();
+      this.queueMutationLocks.set(key, lock);
+    }
+    return lock;
+  }
+
+  private queueRevision(sessionKey: string): number {
+    return this.queueRevisionBySession.get(sessionKey) ?? 0;
+  }
+
+  private advanceQueueRevision(sessionKey: string): number {
+    const revision = this.queueRevision(sessionKey) + 1;
+    this.queueRevisionBySession.set(sessionKey, revision);
+    return revision;
+  }
+
+  private nextQueuedAt(sessionKey: string): string {
+    let previous = this.lastQueuedAtBySession.get(sessionKey);
+    if (previous === undefined) {
+      previous = this.goalRuntime.inbox(sessionKey).reduce((latest, entry) => {
+        const value = Date.parse(String(entry.metadata.queued_at ?? entry.receivedAt));
+        return Number.isFinite(value) ? Math.max(latest, value) : latest;
+      }, 0);
+    }
+    const next = Math.max(Date.now(), previous + 1);
+    this.lastQueuedAtBySession.set(sessionKey, next);
+    return new Date(next).toISOString();
+  }
+
+  private normalizeSharedInboundMessage(message: InboundMessage): InboundMessage {
+    let source: TurnSource | null = null;
+    if (message.internal) {
+      source = sharedTurnSource(message);
+    } else if (message.channel === "websocket") {
+      const candidate = sharedTurnSource(message);
+      if (candidate?.channel === "websocket" && (candidate.kind === "gui" || candidate.kind === "tui")) {
+        source = candidate;
+      } else if (message.metadata?.webui_queue_surface === WEBUI_CHAT_COMPOSER_QUEUE_SURFACE) {
+        source = { kind: "gui", channel: "websocket" };
+      }
+    } else if (isGuiImChannel(message.channel)) {
+      source = { kind: "im", channel: message.channel };
+    }
+    if (!source) return message;
+    const metadata = {
+      ...(message.metadata ?? {}),
+      turn_source: source,
+      ...(
+        source.kind === "im" && typeof message.metadata?.client_request_id !== "string"
+          ? { client_request_id: randomUUID() }
+          : {}
+      ),
+    };
+    return new InboundMessage({
+      channel: message.channel,
+      chatId: message.chatId,
+      senderId: message.senderId,
+      content: message.content,
+      media: message.media,
+      metadata,
+      timestamp: message.timestamp,
+      internal: message.internal,
+      sessionKey: message.sessionKey,
+      sessionKeyOverride: message.sessionKeyOverride,
+      turnAdmission: message.turnAdmission,
+      expectedTurnId: message.expectedTurnId,
+      turnSource: source,
+    });
+  }
+
   isSessionBusy(sessionKey: string): boolean {
     const tasks = this.activeTasks.get(sessionKey) ?? [];
     const hasActiveTask = tasks.some((task) => {
@@ -1412,87 +1557,113 @@ export class AgentLoop {
       || (this.turnSlots.get(sessionKey)?.length ?? 0) > 0;
   }
 
-  getWebuiQueueSnapshot(sessionKey: string): WebuiQueueSnapshotDescriptor {
-    const queued = new Map<string, WebuiQueueMessageDescriptor>();
-    const started = new Map<string, WebuiQueueMessageDescriptor>();
-    const add = (
-      target: Map<string, WebuiQueueMessageDescriptor>,
-      descriptor: WebuiQueueMessageDescriptor | null,
-    ) => {
-      if (!descriptor) return;
-      target.set(descriptor.clientRequestId, { ...descriptor, sessionKey });
-    };
+  async getQueueSnapshot(sessionKey: string): Promise<QueueSnapshotDescriptor> {
+    return this.queueMutationLockFor(sessionKey).runExclusive(async () => {
+      const queued = new Map<string, QueueMessageDescriptor>();
+      const started = new Map<string, QueueMessageDescriptor>();
+      const add = (
+        target: Map<string, QueueMessageDescriptor>,
+        descriptor: QueueMessageDescriptor | null,
+      ) => {
+        if (!descriptor) return;
+        target.set(descriptor.clientRequestId, { ...descriptor, sessionKey });
+      };
 
-    for (const slot of this.turnSlots.get(sessionKey) ?? []) {
-      if (!slot.announcedToWebui || !isWebuiChatComposerQueueMessage(slot.root)) continue;
-      const descriptor = this.webuiQueueDescriptorFromMessage(slot.root);
-      if (slot.state === "queued") add(queued, descriptor);
-      else if (
-        (slot.state === "running" || slot.state === "settling")
-        && slot.rootDelivery === "pending"
-      ) add(started, descriptor);
-    }
+      for (const slot of this.turnSlots.get(sessionKey) ?? []) {
+        if (!slot.announcedToWebui || !isSharedQueueMessage(slot.root)) continue;
+        const descriptor = this.queueDescriptorFromMessage(slot.root);
+        if (slot.state === "queued") add(queued, descriptor);
+        else if (
+          (slot.state === "running" || slot.state === "settling")
+          && slot.rootDelivery === "pending"
+        ) add(started, descriptor);
+      }
 
-    for (const entry of this.goalRuntime.inbox(sessionKey)) {
-      const descriptor = this.webuiQueueDescriptorFromInboxEntry(sessionKey, entry);
-      if (entry.turnId === null) add(queued, descriptor);
-      else add(started, descriptor);
-    }
+      for (const entry of this.goalRuntime.inbox(sessionKey)) {
+        const descriptor = this.queueDescriptorFromInboxEntry(sessionKey, entry);
+        if (entry.turnId === null) add(queued, descriptor);
+        else add(started, descriptor);
+      }
 
-    for (const clientRequestId of started.keys()) queued.delete(clientRequestId);
-    const ordered = (items: Iterable<WebuiQueueMessageDescriptor>) => [...items].sort((left, right) => (
-      left.queuedAt.localeCompare(right.queuedAt)
-      || left.clientRequestId.localeCompare(right.clientRequestId)
-    ));
-    return {
-      items: ordered(queued.values()),
-      startedItems: ordered(started.values()),
-    };
+      for (const clientRequestId of started.keys()) queued.delete(clientRequestId);
+      const ordered = (items: Iterable<QueueMessageDescriptor>) => [...items].sort((left, right) => (
+        left.queuedAt.localeCompare(right.queuedAt)
+        || left.clientRequestId.localeCompare(right.clientRequestId)
+      ));
+      return {
+        revision: this.queueRevision(sessionKey),
+        items: ordered(queued.values()),
+        startedItems: ordered(started.values()),
+      };
+    });
+  }
+
+  async getWebuiQueueSnapshot(sessionKey: string): Promise<QueueSnapshotDescriptor> {
+    return this.getQueueSnapshot(sessionKey);
+  }
+
+  async removeQueuedMessage(
+    sessionKey: string,
+    clientRequestId: string,
+  ): Promise<RemoveQueuedMessageResult> {
+    let removedInbox = false;
+    const result = await this.queueMutationLockFor(sessionKey).runExclusive(async () => {
+      const slot = (this.turnSlots.get(sessionKey) ?? []).find((candidate) => (
+        candidate.root.metadata?.client_request_id === clientRequestId
+        && isSharedQueueMessage(candidate.root)
+      ));
+      if (slot) {
+        if (slot.state !== "queued" || !slot.announcedToWebui) {
+          return { outcome: "already_dequeued" as const, revision: this.queueRevision(sessionKey) };
+        }
+        slot.acceptingSteer = false;
+        slot.state = "closed";
+        slot.announcementGate?.open();
+        this.removeTurnSlot(sessionKey, slot);
+        const task = slot.dispatchTask;
+        if (task) {
+          const tasks = this.activeTasks.get(sessionKey) ?? [];
+          const remaining = tasks.filter((candidate) => candidate !== task);
+          if (remaining.length) this.activeTasks.set(sessionKey, remaining);
+          else this.activeTasks.delete(sessionKey);
+          task.cancel();
+        }
+        return { outcome: "removed" as const, revision: this.advanceQueueRevision(sessionKey) };
+      }
+
+      let inboxResult: "removed" | "reserved" | "missing" = "missing";
+      try {
+        inboxResult = await this.goalRuntime.removeUnreservedInboxEntry(sessionKey, clientRequestId);
+      } catch (error) {
+        if (!(error instanceof GoalRuntimeError) || error.code !== "goal_not_found") throw error;
+      }
+      if (inboxResult === "removed") {
+        removedInbox = true;
+        return { outcome: "removed" as const, revision: this.advanceQueueRevision(sessionKey) };
+      }
+      if (inboxResult === "reserved") {
+        return { outcome: "already_dequeued" as const, revision: this.queueRevision(sessionKey) };
+      }
+
+      const session = this.sessions.get(sessionKey);
+      const accepted = session?.messages.some((message) => (
+        message?.role === "user"
+        && message?.client_request_id === clientRequestId
+      ));
+      return {
+        outcome: accepted ? "already_dequeued" as const : "missing" as const,
+        revision: this.queueRevision(sessionKey),
+      };
+    });
+    if (removedInbox) void this.dispatchNextGoalWork(sessionKey);
+    return result;
   }
 
   async removeQueuedWebuiMessage(
     sessionKey: string,
     clientRequestId: string,
-  ): Promise<RemoveQueuedWebuiMessageResult> {
-    const slot = (this.turnSlots.get(sessionKey) ?? []).find((candidate) => (
-      candidate.root.metadata?.client_request_id === clientRequestId
-      && isWebuiChatComposerQueueMessage(candidate.root)
-    ));
-    if (slot) {
-      if (slot.state !== "queued" || !slot.announcedToWebui) return "already_dequeued";
-      slot.acceptingSteer = false;
-      slot.state = "closed";
-      slot.announcementGate?.open();
-      this.removeTurnSlot(sessionKey, slot);
-      const task = slot.dispatchTask;
-      if (task) {
-        const tasks = this.activeTasks.get(sessionKey) ?? [];
-        const remaining = tasks.filter((candidate) => candidate !== task);
-        if (remaining.length) this.activeTasks.set(sessionKey, remaining);
-        else this.activeTasks.delete(sessionKey);
-        task.cancel();
-      }
-      return "removed";
-    }
-
-    let inboxResult: "removed" | "reserved" | "missing" = "missing";
-    try {
-      inboxResult = await this.goalRuntime.removeUnreservedInboxEntry(sessionKey, clientRequestId);
-    } catch (error) {
-      if (!(error instanceof GoalRuntimeError) || error.code !== "goal_not_found") throw error;
-    }
-    if (inboxResult === "removed") {
-      void this.dispatchNextGoalWork(sessionKey);
-      return "removed";
-    }
-    if (inboxResult === "reserved") return "already_dequeued";
-
-    const session = this.sessions.get(sessionKey);
-    const accepted = session?.messages.some((message) => (
-      message?.role === "user"
-      && message?.client_request_id === clientRequestId
-    ));
-    return accepted ? "already_dequeued" : "missing";
+  ): Promise<RemoveQueuedMessageResult> {
+    return this.removeQueuedMessage(sessionKey, clientRequestId);
   }
 
   isSessionGoalActive(sessionKey: string): boolean {
@@ -1746,13 +1917,52 @@ export class AgentLoop {
     return cancelled + Number(subCancelled || 0);
   }
 
+  async stopExpectedTurn(
+    sessionKey: string,
+    expectedTurnId: string,
+    requiredSource: TurnSource["kind"] = "tui",
+  ): Promise<StopExpectedTurnResult> {
+    const result = await this.queueMutationLockFor(sessionKey).runExclusive(async () => {
+      const slot = (this.turnSlots.get(sessionKey) ?? []).find((candidate) => (
+        candidate.turnId === expectedTurnId
+        && (candidate.state === "running" || candidate.state === "settling")
+      ));
+      if (!slot) return { outcome: "already_finished" as const, task: null };
+      if (sharedTurnSource(slot.root)?.kind !== requiredSource) {
+        return { outcome: "not_owned" as const, task: null };
+      }
+      return { outcome: "stopped" as const, task: slot.dispatchTask };
+    });
+    const { outcome, task } = result;
+    if (outcome !== "stopped") return outcome;
+    if (!task || task.done() || task.cancel() === false) return "already_finished";
+    await Promise.resolve(task).catch(() => undefined);
+    const subagents = this.subagents as any;
+    if (typeof subagents?.cancelBySession === "function") {
+      await subagents.cancelBySession(sessionKey);
+    } else if (typeof subagents?.cancel_by_session === "function") {
+      await subagents.cancel_by_session(sessionKey);
+    }
+    return "stopped";
+  }
+
   private async pendingToUserMessage(msg: InboundMessage): Promise<Record<string, any> | null> {
     let content = msg.content;
     let media = msg.media ?? [];
     if (media.length) [content, media] = await extractDocuments(content, media);
     const hasText = typeof content === "string" && content.trim().length > 0;
     if (!hasText && !media.length) return null;
-    return { role: "user", content: this.context.buildUserContent(content, media) };
+    return {
+      role: "user",
+      content: this.context.buildUserContent(content, media),
+      ...(typeof msg.metadata?.client_request_id === "string"
+        ? { client_request_id: msg.metadata.client_request_id }
+        : {}),
+      ...(firstString(msg.metadata?.turn_id, msg.metadata?.turnId)
+        ? { turn_id: firstString(msg.metadata?.turn_id, msg.metadata?.turnId) }
+        : {}),
+      ...(sharedTurnSource(msg) ? { turn_source: sharedTurnSource(msg) } : {}),
+    };
   }
 
   private async waitForPendingMessage(queue: AsyncQueue<InboundMessage>, timeoutMs: number): Promise<InboundMessage | null> {
@@ -1892,6 +2102,12 @@ export class AgentLoop {
             webui_request_digest: msg.metadata.webui_request_digest,
           }
         : {}),
+      ...(
+        firstString(msg.metadata?.turn_id, msg.metadata?.turnId)
+          ? { turn_id: firstString(msg.metadata?.turn_id, msg.metadata?.turnId) }
+          : {}
+      ),
+      ...(sharedTurnSource(msg) ? { turn_source: sharedTurnSource(msg) } : {}),
       ...(typeof msg.metadata?.model_preset === "string"
         ? {
             model_preset: msg.metadata.model_preset,
@@ -1918,48 +2134,56 @@ export class AgentLoop {
   private persistGoalContinuationContext(ctx: TurnContext): boolean {
     const content = ctx.msg.content;
     if (!content.trim()) return false;
-    ctx.session!.addMessage("user", content, { internal_context: "goal_continuation" });
+    ctx.session!.addMessage("user", content, {
+      internal_context: "goal_continuation",
+      ...(sharedTurnSource(ctx.msg) ? { turn_source: sharedTurnSource(ctx.msg) } : {}),
+    });
     this.sessions.save(ctx.session!, { fsync: true });
     return true;
   }
 
-  private webuiQueueDescriptorFromMessage(msg: InboundMessage): WebuiQueueMessageDescriptor | null {
+  private queueDescriptorFromMessage(msg: InboundMessage): QueueMessageDescriptor | null {
     const clientRequestId = msg.metadata?.client_request_id;
-    if (typeof clientRequestId !== "string") return null;
+    const source = sharedTurnSource(msg);
+    const queuedAt = msg.metadata?.queued_at;
+    if (typeof clientRequestId !== "string" || !source || typeof queuedAt !== "string") return null;
     return {
       clientRequestId,
       content: msg.content,
       media: [...msg.media],
-      queuedAt: msg.timestamp.toISOString(),
+      queuedAt,
       sessionKey: msg.sessionKey,
+      source,
     };
   }
 
-  private webuiQueueDescriptorFromInboxEntry(
+  private queueDescriptorFromInboxEntry(
     sessionKey: string,
     entry: GoalTurnInboxEntry,
-  ): WebuiQueueMessageDescriptor | null {
-    if (
-      entry.channel !== "websocket"
-      || entry.metadata.webui_queue_surface !== WEBUI_CHAT_COMPOSER_QUEUE_SURFACE
-      || typeof entry.metadata.client_request_id !== "string"
-    ) return null;
+  ): QueueMessageDescriptor | null {
+    const source = parseTurnSource(entry.metadata.turn_source);
+    const queuedAt = entry.metadata.queued_at;
+    if (typeof entry.metadata.client_request_id !== "string" || !source || typeof queuedAt !== "string") return null;
     return {
       clientRequestId: entry.metadata.client_request_id,
       content: entry.content,
       media: [...entry.media],
-      queuedAt: entry.receivedAt,
+      queuedAt,
       sessionKey,
+      source,
     };
   }
 
   async publishWebuiMessageQueued(
     msg: InboundMessage,
-    { visible = false }: { visible?: boolean } = {},
+    { visible = false, revision = this.queueRevision(this.effectiveSessionKey(msg)) }: {
+      visible?: boolean;
+      revision?: number;
+    } = {},
   ): Promise<void> {
     const clientRequestId = msg.metadata?.client_request_id;
-    if (msg.channel !== "websocket" || typeof clientRequestId !== "string") return;
-    const item = visible ? this.webuiQueueDescriptorFromMessage(msg) : null;
+    if (typeof clientRequestId !== "string" || !sharedTurnSource(msg)) return;
+    const item = visible ? this.queueDescriptorFromMessage(msg) : null;
     await this.bus.publishOutbound(
       new OutboundMessage({
         channel: "websocket",
@@ -1969,6 +2193,7 @@ export class AgentLoop {
           webuiMessageQueued: true,
           webuiRequestSessionKey: msg.sessionKey,
           clientRequestId,
+          queueRevision: revision,
           ...(item ? { webuiQueueItem: item } : {}),
         },
       }),
@@ -1977,7 +2202,8 @@ export class AgentLoop {
 
   async publishWebuiMessageDequeued(
     msg: InboundMessage,
-    descriptor = this.webuiQueueDescriptorFromMessage(msg),
+    descriptor = this.queueDescriptorFromMessage(msg),
+    revision = this.queueRevision(descriptor?.sessionKey ?? this.effectiveSessionKey(msg)),
   ): Promise<void> {
     if (!descriptor) return;
     await this.bus.publishOutbound(
@@ -1990,12 +2216,34 @@ export class AgentLoop {
           webuiRequestSessionKey: descriptor.sessionKey,
           clientRequestId: descriptor.clientRequestId,
           webuiQueueItem: descriptor,
+          queueRevision: revision,
         },
       }),
     );
   }
 
-  async publishWebuiMessageAccepted(msg: InboundMessage, slot: TurnSlot | null = null): Promise<void> {
+  async publishWebuiMessageQueueRemoved(
+    msg: InboundMessage,
+    revision: number,
+  ): Promise<void> {
+    const clientRequestId = msg.metadata?.client_request_id;
+    if (typeof clientRequestId !== "string" || !sharedTurnSource(msg)) return;
+    await this.bus.publishOutbound(
+      new OutboundMessage({
+        channel: "websocket",
+        chatId: msg.chatId,
+        content: "",
+        metadata: {
+          webuiMessageQueueRemoved: true,
+          webuiRequestSessionKey: msg.sessionKey,
+          clientRequestId,
+          queueRevision: revision,
+        },
+      }),
+    );
+  }
+
+  async publishWebuiMessageSteered(msg: InboundMessage, turnId: string): Promise<void> {
     const clientRequestId = msg.metadata?.client_request_id;
     if (msg.channel !== "websocket" || typeof clientRequestId !== "string") return;
     await this.bus.publishOutbound(
@@ -2004,17 +2252,42 @@ export class AgentLoop {
         chatId: msg.chatId,
         content: "",
         metadata: {
-          webuiMessageAccepted: true,
-          webuiRequestSessionKey: slot?.root.sessionKey ?? msg.sessionKey,
+          webuiMessageSteered: true,
+          webuiRequestSessionKey: msg.sessionKey,
           clientRequestId,
-          modelPreset: msg.metadata?.model_preset ?? null,
-          modelProvider: msg.metadata?.model_provider ?? null,
-          model: msg.metadata?.model ?? null,
+          turnId,
+          steeredContent: msg.content,
+          steeredMedia: [...msg.media],
+          ...(sharedTurnSource(msg) ? { turnSource: sharedTurnSource(msg) } : {}),
         },
       }),
     );
-    if (slot?.root === msg || slot?.root.metadata?.client_request_id === clientRequestId) {
-      slot.rootDelivery = "accepted";
+  }
+
+  async publishWebuiMessageAccepted(msg: InboundMessage, slot: TurnSlot | null = null): Promise<void> {
+    const clientRequestId = msg.metadata?.client_request_id;
+    if (msg.channel === "websocket" && typeof clientRequestId === "string") {
+      await this.bus.publishOutbound(
+        new OutboundMessage({
+          channel: "websocket",
+          chatId: msg.chatId,
+          content: "",
+          metadata: {
+            webuiMessageAccepted: true,
+            webuiRequestSessionKey: slot?.root.sessionKey ?? msg.sessionKey,
+            clientRequestId,
+            modelPreset: msg.metadata?.model_preset ?? null,
+            modelProvider: msg.metadata?.model_provider ?? null,
+            model: msg.metadata?.model ?? null,
+          },
+        }),
+      );
+    }
+    if (slot && (slot.root === msg || slot.root.metadata?.client_request_id === clientRequestId)) {
+      const matchedSlot = slot;
+      await this.queueMutationLockFor(this.effectiveSessionKey(matchedSlot.root)).runExclusive(async () => {
+        matchedSlot.rootDelivery = "accepted";
+      });
     }
   }
 
@@ -2024,22 +2297,26 @@ export class AgentLoop {
     slot: TurnSlot | null = null,
   ): Promise<void> {
     const clientRequestId = msg.metadata?.client_request_id;
-    if (msg.channel !== "websocket" || typeof clientRequestId !== "string") return;
-    await this.bus.publishOutbound(
-      new OutboundMessage({
-        channel: "websocket",
-        chatId: msg.chatId,
-        content: "",
-        metadata: {
-          webuiMessageRejected: true,
-          webuiRequestSessionKey: slot?.root.sessionKey ?? msg.sessionKey,
-          clientRequestId,
-          reason,
-        },
-      }),
-    );
-    if (slot?.root === msg || slot?.root.metadata?.client_request_id === clientRequestId) {
-      slot.rootDelivery = "rejected";
+    if (msg.channel === "websocket" && typeof clientRequestId === "string") {
+      await this.bus.publishOutbound(
+        new OutboundMessage({
+          channel: "websocket",
+          chatId: msg.chatId,
+          content: "",
+          metadata: {
+            webuiMessageRejected: true,
+            webuiRequestSessionKey: slot?.root.sessionKey ?? msg.sessionKey,
+            clientRequestId,
+            reason,
+          },
+        }),
+      );
+    }
+    if (slot && (slot.root === msg || slot.root.metadata?.client_request_id === clientRequestId)) {
+      const matchedSlot = slot;
+      await this.queueMutationLockFor(this.effectiveSessionKey(matchedSlot.root)).runExclusive(async () => {
+        matchedSlot.rootDelivery = "rejected";
+      });
     }
   }
 
@@ -2091,7 +2368,17 @@ export class AgentLoop {
 
   async dispatchCommandInline(msg: InboundMessage, key: string, raw: string, dispatchFn: (ctx: CommandContext) => Promise<OutboundMessage | null> | OutboundMessage | null): Promise<void> {
     const result = await dispatchFn(new CommandContext({ msg, session: null, key, raw, loop: this }));
-    if (result) await this.bus.publishOutbound(result);
+    if (!result) return;
+    const source = sharedTurnSource(msg);
+    if (
+      msg.channel === "websocket"
+      && source?.kind === "tui"
+      && typeof msg.metadata?.client_request_id === "string"
+    ) {
+      result.metadata = { ...(result.metadata ?? {}), turn_source: source };
+      await this.publishWebuiMessageAccepted(msg);
+    }
+    await this.bus.publishOutbound(result);
   }
 
   sanitizePersistedBlocks(
@@ -2350,6 +2637,11 @@ export class AgentLoop {
       return raw.startsWith("/") && msg.content !== raw ? "continue" : null;
     }
     if (raw.toLowerCase() !== "/new") {
+      const persistedTurnSource = sharedTurnSource(msg);
+      const persistedTurnId = turnId ?? firstString(
+        msg.metadata?.turn_id,
+        msg.metadata?.turnId,
+      );
       session.addMessage("user", msg.content, {
         commandMessage: true,
         ...(typeof msg.metadata?.client_request_id === "string"
@@ -2358,8 +2650,14 @@ export class AgentLoop {
               webui_request_digest: msg.metadata.webui_request_digest,
             }
           : {}),
+        ...(persistedTurnId ? { turn_id: persistedTurnId } : {}),
+        ...(persistedTurnSource ? { turn_source: persistedTurnSource } : {}),
       });
-      session.addMessage("assistant", result.content, { commandMessage: true });
+      session.addMessage("assistant", result.content, {
+        commandMessage: true,
+        ...(persistedTurnId ? { turn_id: persistedTurnId } : {}),
+        ...(persistedTurnSource ? { turn_source: persistedTurnSource } : {}),
+      });
       this.sessions.save(session, {
         fsync: typeof msg.metadata?.client_request_id === "string",
       });
@@ -2580,6 +2878,8 @@ export class AgentLoop {
       timestamp: msg.timestamp,
       internal: msg.internal,
       turnAdmission: msg.turnAdmission,
+      expectedTurnId: msg.expectedTurnId,
+      turnSource: msg.turnSource,
     });
     const reservation = existingSession
       || msg.channel !== "websocket"
@@ -2615,6 +2915,8 @@ export class AgentLoop {
         timestamp: msg.timestamp,
         internal: msg.internal,
         turnAdmission: msg.turnAdmission,
+        expectedTurnId: msg.expectedTurnId,
+        turnSource: msg.turnSource,
       });
     }
     const binding = this.resolveSessionWorkspace(
@@ -2639,6 +2941,8 @@ export class AgentLoop {
         timestamp: msg.timestamp,
         internal: msg.internal,
         turnAdmission: msg.turnAdmission,
+        expectedTurnId: msg.expectedTurnId,
+        turnSource: msg.turnSource,
       });
     }
     markWebuiSession(ctx.session, msg.metadata);
@@ -2711,7 +3015,11 @@ export class AgentLoop {
         const persisted = await this.goalRuntime.persistGoalUserTurn(
           ctx.sessionKey,
           ctx.turnId,
-          { channel: ctx.msg.channel, chatId: ctx.msg.chatId },
+          {
+            channel: ctx.msg.channel,
+            chatId: ctx.msg.chatId,
+            ...(sharedTurnSource(ctx.msg) ? { source: sharedTurnSource(ctx.msg)! } : {}),
+          },
           (session, entry) => {
             const source = entry
               ? new InboundMessage({
@@ -2723,6 +3031,7 @@ export class AgentLoop {
                   metadata: entry.metadata,
                   timestamp: entry.receivedAt,
                   sessionKeyOverride: ctx.sessionKey,
+                  turnSource: parseTurnSource(entry.metadata.turn_source),
                 })
               : ctx.msg;
             this.appendUserMessage(source, session, {}, entry?.receivedAt);
@@ -3117,6 +3426,8 @@ export class AgentLoop {
       timestamp: msg.timestamp,
       internal: msg.internal,
       turnAdmission: msg.turnAdmission,
+      expectedTurnId: msg.expectedTurnId,
+      turnSource: msg.turnSource,
     });
     let session = existingSession ?? await this.getOrCreateSession(key);
     session.metadata.modelPreset = modelSelection.preset;
@@ -3324,7 +3635,14 @@ export class AgentLoop {
 
     await this.stateRestore(ctx);
     if (message.channel !== "websocket") {
-      ctx.mirrorTurn = this.guiTranscriptMirror?.turn(key, ctx.turnId) ?? null;
+      ctx.mirrorTurn = this.guiTranscriptMirror?.turn(
+        key,
+        ctx.turnId,
+        sharedTurnSource(ctx.msg),
+        typeof ctx.msg.metadata?.client_request_id === "string"
+          ? ctx.msg.metadata.client_request_id
+          : null,
+      ) ?? null;
       if (ctx.mirrorTurn) {
         this.guiTranscriptMirror?.running(ctx.mirrorTurn, ctx.turnWallStartedAt);
       }
@@ -3475,8 +3793,7 @@ export class AgentLoop {
   }
 
   private rootDeliveryFor(message: InboundMessage): TurnRootDelivery {
-    return message.channel === "websocket"
-      && typeof message.metadata?.client_request_id === "string"
+    return isSharedQueueMessage(message)
       ? "pending"
       : "accepted";
   }
@@ -3524,15 +3841,33 @@ export class AgentLoop {
     owner: symbol,
     reason: "turn_queue_cancelled" | "turn_start_failed",
   ): Promise<void> {
-    const slots = this.turnSlots.get(sessionKey) ?? [];
-    const owned = slots.filter((slot) => slot.owner === owner);
+    const removedRevisions = new Map<TurnSlot, number>();
+    const owned = await this.queueMutationLockFor(sessionKey).runExclusive(async () => {
+      const slots = this.turnSlots.get(sessionKey) ?? [];
+      const matching = slots.filter((slot) => slot.owner === owner);
+      if (!matching.length) return [];
+      const remaining = slots.filter((slot) => slot.owner !== owner);
+      if (remaining.length) this.turnSlots.set(sessionKey, remaining);
+      else this.turnSlots.delete(sessionKey);
+      for (const slot of matching) {
+        if (slot.state === "queued" && slot.announcedToWebui) {
+          removedRevisions.set(slot, this.advanceQueueRevision(sessionKey));
+        }
+        slot.acceptingSteer = false;
+        slot.state = "closed";
+      }
+      return matching;
+    });
     if (!owned.length) return;
-    const remaining = slots.filter((slot) => slot.owner !== owner);
-    if (remaining.length) this.turnSlots.set(sessionKey, remaining);
-    else this.turnSlots.delete(sessionKey);
     for (const slot of owned) {
-      slot.acceptingSteer = false;
-      slot.state = "closed";
+      const removedRevision = removedRevisions.get(slot);
+      if (removedRevision !== undefined) {
+        try {
+          await this.publishWebuiMessageQueueRemoved(slot.root, removedRevision);
+        } catch {
+          // The rejection below still terminates the originating request.
+        }
+      }
       if (slot.rootDelivery !== "pending") continue;
       try {
         await this.publishWebuiMessageRejected(slot.root, reason, slot);
@@ -3561,14 +3896,22 @@ export class AgentLoop {
     let didPublishRunning = false;
     let goalTurnResult: { goalId: string; goalOutcome: GoalStatus } | null = null;
     if (slot) {
-      slot.state = "running";
-      slot.acceptingSteer = false;
-      slot.stopReason = null;
-      if (
-        slot.announcedToWebui
-        && slot.root.metadata?.webui_queue_dequeued !== true
-      ) {
-        await this.publishWebuiMessageDequeued(slot.root);
+      let dequeuedDescriptor: QueueMessageDescriptor | null = null;
+      let dequeuedRevision = this.queueRevision(sessionKey);
+      await this.queueMutationLockFor(sessionKey).runExclusive(async () => {
+        slot.state = "running";
+        slot.acceptingSteer = false;
+        slot.stopReason = null;
+        if (
+          slot.announcedToWebui
+          && slot.root.metadata?.webui_queue_dequeued !== true
+        ) {
+          dequeuedDescriptor = this.queueDescriptorFromMessage(slot.root);
+          if (dequeuedDescriptor) dequeuedRevision = this.advanceQueueRevision(sessionKey);
+        }
+      });
+      if (dequeuedDescriptor) {
+        await this.publishWebuiMessageDequeued(slot.root, dequeuedDescriptor, dequeuedRevision);
       }
     }
     try {
@@ -3772,6 +4115,7 @@ export class AgentLoop {
           if (slot.stopReason === "maxIterations" && residual.length && !isCancelled()) {
             const successorRoot = this.cloneInboundMessage(residual[0], {
               turnAdmission: "queue",
+              metadata: withoutTurnMetadata(residual[0].metadata),
             });
             const successor = this.createTurnSlot(
               successorRoot,
@@ -3849,8 +4193,8 @@ export class AgentLoop {
     if (!this.running) return;
     await this.recoverGoalWork();
     while (this.running) {
-      const msg = this.bus.inbound.getNowait();
-      if (!msg) {
+      const inbound = this.bus.inbound.getNowait();
+      if (!inbound) {
         this.autoCompact.checkExpired(
           (promise) => this.scheduleBackground(promise),
           this.busySessionKeysForAutoCompact(),
@@ -3858,6 +4202,7 @@ export class AgentLoop {
         await sleep(100);
         continue;
       }
+      const msg = this.normalizeSharedInboundMessage(inbound);
       const raw = msg.content.trim();
       const effectiveKey = this.effectiveSessionKey(msg);
       const deletionQueue = this.sessionDeletionQueues.get(effectiveKey);
@@ -3870,6 +4215,13 @@ export class AgentLoop {
         continue;
       }
       if (this.commands.isPriority(raw)) {
+        if (
+          sharedTurnSource(msg)?.kind === "tui"
+          && ["/restart", "/stop"].includes(raw.toLowerCase())
+        ) {
+          await this.publishWebuiMessageRejected(msg, "tui_targeted_control_required");
+          continue;
+        }
         await this.dispatchCommandInline(msg, msg.sessionKey, raw, (ctx) => this.commands.dispatchPriority(ctx));
         continue;
       }
@@ -3901,19 +4253,32 @@ export class AgentLoop {
       );
       if (shouldPersistGoalInbox) {
         let enqueuedEntry: GoalTurnInboxEntry | null = null;
+        let queuedRevision = this.queueRevision(effectiveKey);
         try {
-          enqueuedEntry = await this.goalRuntime.enqueueUserMessage(effectiveKey, msg);
-          if (isWebuiChatComposerQueueMessage(msg)) {
-            await this.publishWebuiMessageQueued(msg, { visible: true });
+          if (isSharedQueueMessage(msg)) {
+            await this.queueMutationLockFor(effectiveKey).runExclusive(async () => {
+              msg.metadata.queued_at = this.nextQueuedAt(effectiveKey);
+              enqueuedEntry = await this.goalRuntime.enqueueUserMessage(effectiveKey, msg);
+              queuedRevision = this.advanceQueueRevision(effectiveKey);
+            });
+            await this.publishWebuiMessageQueued(msg, {
+              visible: true,
+              revision: queuedRevision,
+            });
+          } else {
+            enqueuedEntry = await this.goalRuntime.enqueueUserMessage(effectiveKey, msg);
           }
           await this.publishWebuiMessageAccepted(msg);
           void this.dispatchNextGoalWork(effectiveKey);
         } catch (error) {
-          if (enqueuedEntry && isWebuiChatComposerQueueMessage(msg)) {
-            await this.goalRuntime.removeUnreservedInboxEntry(
-              effectiveKey,
-              enqueuedEntry.id,
-            ).catch(() => undefined);
+          if (enqueuedEntry && isSharedQueueMessage(msg)) {
+            await this.queueMutationLockFor(effectiveKey).runExclusive(async () => {
+              const removed = await this.goalRuntime.removeUnreservedInboxEntry(
+                effectiveKey,
+                enqueuedEntry!.id,
+              ).catch(() => "missing" as const);
+              if (removed === "removed") this.advanceQueueRevision(effectiveKey);
+            });
           }
           const reason = error instanceof GoalRuntimeError ? error.code : "goal_inbox_unavailable";
           await this.publishWebuiMessageRejected(msg, reason);
@@ -3921,7 +4286,7 @@ export class AgentLoop {
         continue;
       }
       const route = `${msg.channel}\0${String(msg.chatId)}`;
-      const slots = this.turnSlots.get(effectiveKey) ?? [];
+      let slots = this.turnSlots.get(effectiveKey) ?? [];
       const lastSlot = slots.at(-1);
       const directPending = this.pendingQueues.get(effectiveKey) ?? null;
       if (
@@ -3933,36 +4298,69 @@ export class AgentLoop {
         continue;
       }
       if (msg.turnAdmission === "steer") {
-        const activeSlot = slots.find((slot) => (
-          slot.state === "running"
-          && slot.acceptingSteer
-          && slot.route === route
-        ));
-        if (activeSlot) {
-          const steer = this.cloneInboundMessage(msg);
+        let steeredTurnId: string | null = null;
+        const requestedSource = sharedTurnSource(msg);
+        await this.queueMutationLockFor(effectiveKey).runExclusive(async () => {
+          const currentSlots = this.turnSlots.get(effectiveKey) ?? [];
+          const activeSlot = currentSlots.find((slot) => (
+            slot.state === "running"
+            && slot.acceptingSteer
+            && slot.route === route
+            && (
+              requestedSource?.kind === "tui"
+                ? slot.turnId === msg.expectedTurnId
+                  && sharedTurnSource(slot.root)?.kind === "tui"
+                : true
+            )
+          ));
+          if (!activeSlot) return;
+          const steer = this.cloneInboundMessage(
+            msg,
+            requestedSource?.kind === "tui" ? { turnId: activeSlot.turnId } : {},
+          );
           try {
             activeSlot.pendingSteer.put(steer);
-            continue;
+            steeredTurnId = activeSlot.turnId;
           } catch {
             // A closing active Slot safely falls back to a queued Turn.
           }
+        });
+        if (steeredTurnId) {
+          if (requestedSource?.kind === "tui") {
+            await this.publishWebuiMessageSteered(msg, steeredTurnId);
+          }
+          continue;
         }
       }
-      const hadEarlierSessionWork = this.isSessionBusy(effectiveKey);
       const root = this.cloneInboundMessage(msg, {
         turnAdmission: "queue",
       });
       const owner = Symbol("turn-slot-owner");
-      const slot = this.createTurnSlot(root, route, owner);
-      const visibleQueueItem = hadEarlierSessionWork
-        && !ownsGoalReservation
-        && isWebuiChatComposerQueueMessage(root);
-      if (visibleQueueItem) slot.announcementGate = createTurnSlotAnnouncementGate();
-      if (ownsGoalReservation && isWebuiChatComposerQueueMessage(root)) {
-        slot.announcedToWebui = true;
-      }
-      slots.push(slot);
-      this.turnSlots.set(effectiveKey, slots);
+      let hadEarlierSessionWork = false;
+      let visibleQueueItem = false;
+      let queuedRevision = this.queueRevision(effectiveKey);
+      let slot!: TurnSlot;
+      await this.queueMutationLockFor(effectiveKey).runExclusive(async () => {
+        slots = this.turnSlots.get(effectiveKey) ?? [];
+        hadEarlierSessionWork = this.isSessionBusy(effectiveKey);
+        visibleQueueItem = hadEarlierSessionWork
+          && !ownsGoalReservation
+          && isSharedQueueMessage(root);
+        if (visibleQueueItem) {
+          root.metadata.queued_at = this.nextQueuedAt(effectiveKey);
+        }
+        slot = this.createTurnSlot(root, route, owner);
+        if (visibleQueueItem) {
+          slot.announcementGate = createTurnSlotAnnouncementGate();
+          slot.announcedToWebui = true;
+          queuedRevision = this.advanceQueueRevision(effectiveKey);
+        }
+        if (ownsGoalReservation && isSharedQueueMessage(root)) {
+          slot.announcedToWebui = true;
+        }
+        slots.push(slot);
+        this.turnSlots.set(effectiveKey, slots);
+      });
       const task = makeCancelableDispatchTask(
         async (isCancelled, signal) => {
           if (slot.announcementGate) await slot.announcementGate.promise;
@@ -3984,19 +4382,24 @@ export class AgentLoop {
         })
         .catch(() => undefined);
       if (hadEarlierSessionWork) {
-        if (visibleQueueItem) slot.announcedToWebui = true;
         try {
-          await this.publishWebuiMessageQueued(root, { visible: visibleQueueItem });
+          await this.publishWebuiMessageQueued(root, {
+            visible: visibleQueueItem,
+            revision: queuedRevision,
+          });
         } catch {
-          slot.announcedToWebui = false;
-          slot.state = "closed";
-          slot.announcementGate?.open();
-          this.removeTurnSlot(effectiveKey, slot);
-          const active = this.activeTasks.get(effectiveKey) ?? [];
-          const remaining = active.filter((candidate) => candidate !== task);
-          if (remaining.length) this.activeTasks.set(effectiveKey, remaining);
-          else this.activeTasks.delete(effectiveKey);
-          task.cancel();
+          await this.queueMutationLockFor(effectiveKey).runExclusive(async () => {
+            slot.announcedToWebui = false;
+            slot.state = "closed";
+            slot.announcementGate?.open();
+            this.removeTurnSlot(effectiveKey, slot);
+            const active = this.activeTasks.get(effectiveKey) ?? [];
+            const remaining = active.filter((candidate) => candidate !== task);
+            if (remaining.length) this.activeTasks.set(effectiveKey, remaining);
+            else this.activeTasks.delete(effectiveKey);
+            task.cancel();
+            if (visibleQueueItem) this.advanceQueueRevision(effectiveKey);
+          });
           try {
             await this.publishWebuiMessageRejected(root, "turn_start_failed", slot);
           } catch {
