@@ -1656,6 +1656,13 @@ export function HomePage() {
     });
   }
 
+  useLayoutEffect(() => {
+    if (!inputRef.current) {
+      return;
+    }
+    resizeComposerInput(inputRef.current);
+  }, [input, hasActiveConversation]);
+
   /**
    * Resets the input box height after sending, so the next empty input does not inherit the previous height.
    */

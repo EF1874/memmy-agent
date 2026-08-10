@@ -183,6 +183,7 @@ export type MemoryServiceRuntimeConfig = z.infer<typeof MemoryServiceRuntimeConf
 export const RuntimeConfigSchema = z.object({
     baseUrl: z.string().url(),
     localToken: z.string().min(1),
+    timeZone: z.string().min(1).optional(),
     memory: MemoryServiceRuntimeConfigSchema.optional(),
     agentGateway: AgentGatewayRuntimeConfigSchema.optional()
 });

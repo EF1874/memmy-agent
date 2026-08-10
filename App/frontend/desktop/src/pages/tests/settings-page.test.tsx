@@ -154,8 +154,8 @@ describe("SettingsPageView", () => {
     expect(html).toContain("隐私");
     expect(html).toContain("高级 / 开发者");
     expect(html).toContain("关于");
-    expect(html).toContain("grace@example.com");
-    expect(html).not.toContain("g***@example.com");
+    expect(html).toContain("g***@example.com");
+    expect(html).not.toContain("grace@example.com");
     expect(html).toContain("注册时间：2026-04-12");
     expect(html).toContain("Agent 任务额度已用 1.4M Token");
     expect(html).toContain("共 5.0M Token");
@@ -358,8 +358,8 @@ describe("SettingsPageView", () => {
   it("注册用户平台 Token 态对齐 PRD 的原型数据和状态", () => {
     const html = normalizeSsrHtml(renderSettingsPageView(createReadyState()));
 
-    expect(html).toContain("grace@example.com");
-    expect(html).not.toContain("g***@example.com");
+    expect(html).toContain("g***@example.com");
+    expect(html).not.toContain("grace@example.com");
     expect(html).toContain("注册时间：2026-04-12");
     expect(html).toContain("桌宠模式");
     expect(html).toContain("中文");
@@ -405,8 +405,8 @@ describe("SettingsPageView", () => {
     const html = normalizeSsrHtml(renderSettingsPageView(createAccountModeState()));
     const modelConfigHtml = html.slice(html.indexOf('id="model-config"'), html.indexOf('id="token-usage"'));
 
-    expect(html).toContain("grace@example.com");
-    expect(html).not.toContain("g***@example.com");
+    expect(html).toContain("g***@example.com");
+    expect(html).not.toContain("grace@example.com");
     expect(html).toContain("注册时间：2026-04-12");
     expect(html).toContain("修改昵称");
     expect(html).toContain("Token 用量");
@@ -444,11 +444,11 @@ describe("SettingsPageView", () => {
     const phoneHtml = normalizeSsrHtml(renderSettingsPageView(createPhoneAccountModeState()));
     const emailHtml = normalizeSsrHtml(renderSettingsPageView(createAccountModeState()));
 
-    expect(phoneHtml).toContain("13800138000");
-    expect(phoneHtml).not.toContain("138****8000");
+    expect(phoneHtml).toContain("138****8000");
+    expect(phoneHtml).not.toContain("13800138000");
     expect(phoneHtml).not.toContain("未绑定邮箱");
-    expect(emailHtml).toContain("grace@example.com");
-    expect(emailHtml).not.toContain("g***@example.com");
+    expect(emailHtml).toContain("g***@example.com");
+    expect(emailHtml).not.toContain("grace@example.com");
   });
 
   it("注册账号缺少账号标识时不误提示未绑定邮箱", () => {
@@ -462,8 +462,8 @@ describe("SettingsPageView", () => {
     const html = normalizeSsrHtml(renderSettingsPageView(createAccountModeWithSavedModelState()));
     const modelConfigHtml = html.slice(html.indexOf('id="model-config"'), html.indexOf('id="token-usage"'));
 
-    expect(html).toContain("grace@example.com");
-    expect(html).not.toContain("g***@example.com");
+    expect(html).toContain("g***@example.com");
+    expect(html).not.toContain("grace@example.com");
     expect(html).toContain("注册时间：2026-04-12");
     expect(html).toContain("Token 用量");
     expect(modelConfigHtml).toContain("模型库");
@@ -613,8 +613,8 @@ describe("SettingsPageView", () => {
     expect(html).toContain("未配置");
     expect(html).toContain("Token 用量");
     expect(html).toContain("查看用量详情");
-    expect(html).toContain("查看自有 API Key 消耗");
-    expect(html).not.toContain("分别查看平台赠送额度和自有 API Key 消耗");
+    expect(html).toContain("查看自定义 API Key 消耗");
+    expect(html).not.toContain("分别查看平台赠送额度和自定义 API Key 消耗");
     expect(html).not.toContain("切换回平台 Token");
     expect(html).not.toContain("当前模式：");
     expect(html).not.toContain("默认任务模型");
@@ -744,9 +744,9 @@ describe("SettingsPageView", () => {
 
     expect(html).toContain("settings-account-summary");
     expect(html).toContain("悠然麦穗春日记忆助手版");
-    expect(html).toContain("grace@superlongcompanydomain.example.com");
+    expect(html).toContain("g***@superlongcompanydomain.example.com");
     expect(html).not.toContain("悠然麦穗春日记忆助手…");
-    expect(html).not.toContain("grace@superlongcompany…");
+    expect(html).not.toContain("g***@superlongcompanydom…");
     expect(source).toContain("OverflowTooltipText");
     const overflowSource = readFileSync(overflowTooltipSourcePath, "utf8");
     expect(overflowSource).toContain("function OverflowTooltipText");
