@@ -38,7 +38,8 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.merged == true &&
-       startsWith(github.event.pull_request.head.ref, 'release/v'))
+       (startsWith(github.event.pull_request.head.ref, 'v') ||
+        startsWith(github.event.pull_request.head.ref, 'release/v')))
     runs-on: ubuntu-latest
     environment: release
     env:
@@ -59,11 +60,11 @@ jobs:
           preflight_level="$PREFLIGHT_LEVEL_INPUT"
           create_draft="false"
           if [[ "$EVENT_NAME" == "pull_request_target" ]]; then
-            if [[ ! "$PR_HEAD_REF" =~ ^release/v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))$ ]]; then
-              echo "Release branch must match release/vX.Y.Z" >&2
+            if [[ ! "$PR_HEAD_REF" =~ ^(release/)?v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))$ ]]; then
+              echo "Release branch must match vX.Y.Z or release/vX.Y.Z" >&2
               exit 1
             fi
-            version="${BASH_REMATCH[1]}"
+            version="${BASH_REMATCH[2]}"
             target_sha="$PR_MERGE_SHA"
             preflight_level="full"
             create_draft="true"
@@ -234,30 +235,298 @@ jobs:
           TAG: ${{ steps.release.outputs.tag }}
           TARGET_SHA: ${{ steps.release.outputs.target_sha }}
           PREVIOUS_TAG: ${{ steps.previous.outputs.previous_tag }}
+          DOC_AGENT_RELEASE_NOTES_DRAFT_URL: ${{ vars.DOC_AGENT_RELEASE_NOTES_DRAFT_URL || secrets.DOC_AGENT_RELEASE_NOTES_DRAFT_URL }}
+          DOC_AGENT_RELEASE_NOTES_DRAFT_TOKEN: ${{ secrets.DOC_AGENT_RELEASE_NOTES_DRAFT_TOKEN }}
         run: |
           set -euo pipefail
           notes="release-assets/RELEASE_NOTES.md"
           manual_notes=".github/release-notes/$TAG.md"
           manual_object="${TARGET_SHA}:${manual_notes}"
+          notes_source="unknown"
+          needs_review="false"
+          : > "$notes"
+          jq -n '{source: "unknown", needs_review: true, warnings: ["release notes source has not been selected yet"]}' > release-assets/RELEASE_NOTES_SOURCE.json
+          jq -n '{ok: false, needs_review: true, warnings: ["release notes quality report has not been generated yet"]}' > release-assets/QUALITY_REPORT.json
+
           if git cat-file -e "$manual_object" 2>/dev/null; then
             git show "$manual_object" > "$notes"
-            printf '\n\n' >> "$notes"
+            notes_source="manual"
+            jq -n \
+              --arg source "$notes_source" \
+              --arg file "$manual_notes" \
+              '{source: $source, manual_file: $file, needs_review: false, warnings: []}' \
+              > release-assets/RELEASE_NOTES_SOURCE.json
+            jq -n \
+              --arg source "$notes_source" \
+              --arg file "$manual_notes" \
+              '{ok: true, needs_review: false, source: $source, manual_file: $file, warnings: []}' \
+              > release-assets/QUALITY_REPORT.json
           else
-            : > "$notes"
-          fi
+            compare_base="$PREVIOUS_TAG"
+            if [[ -z "$compare_base" ]]; then
+              compare_base="$(git rev-list --max-parents=0 "$TARGET_SHA" | head -n 1)"
+            fi
+            test -n "$compare_base"
 
-          generate_args=(
-            --method POST
-            "repos/${GITHUB_REPOSITORY}/releases/generate-notes"
-            -f tag_name="$TAG"
-            -f target_commitish="$TARGET_SHA"
-          )
-          if [[ -n "$PREVIOUS_TAG" ]]; then
-            generate_args+=(-f previous_tag_name="$PREVIOUS_TAG")
-          fi
-          if ! gh api "${generate_args[@]}" --jq '.body' >> "$notes"; then
-            echo "::error title=Release notes generation failed::GitHub could not generate release notes for $TAG. Manual recovery: re-run after GitHub API recovers, or add .github/release-notes/$TAG.md and retry." >&2
-            exit 1
+            if ! gh api "repos/${GITHUB_REPOSITORY}/compare/${compare_base}...${TARGET_SHA}" \
+              > release-assets/DRAFT_COMPARE.json; then
+              echo "::error title=Draft evidence compare failed::Could not compare ${compare_base}...${TARGET_SHA}. Manual recovery: confirm previous tag and target SHA are reachable, then re-run." >&2
+              exit 1
+            fi
+            total_commits="$(jq -r '.total_commits // (.commits | length)' release-assets/DRAFT_COMPARE.json)"
+            received_commits="$(jq -r '.commits | length' release-assets/DRAFT_COMPARE.json)"
+            compare_head="$(jq -r '.head_commit.sha // empty' release-assets/DRAFT_COMPARE.json)"
+            if [[ "$total_commits" != "$received_commits" ]]; then
+              echo "::error title=Draft evidence is truncated::GitHub returned $received_commits of $total_commits commits. Manual recovery: reduce release scope or inspect compare evidence manually before retrying." >&2
+              exit 1
+            fi
+            if [[ "$compare_head" != "$TARGET_SHA" ]]; then
+              echo "::error title=Draft evidence target mismatch::Compare head $compare_head does not match target $TARGET_SHA. Manual recovery: verify the previous tag and release target." >&2
+              exit 1
+            fi
+
+            : > release-assets/DRAFT_PULL_REQUESTS.jsonl
+            while IFS= read -r commit_sha; do
+              if ! gh api \
+                -H "Accept: application/vnd.github+json" \
+                "repos/${GITHUB_REPOSITORY}/commits/${commit_sha}/pulls" \
+                --jq '.[] | {
+                  number,
+                  title,
+                  htmlUrl: .html_url,
+                  mergedAt: .merged_at,
+                  baseRef: .base.ref,
+                  headRef: .head.ref
+                }' >> release-assets/DRAFT_PULL_REQUESTS.jsonl; then
+                echo "::error title=Draft PR evidence failed::Could not fetch associated PRs for commit $commit_sha. Manual recovery: re-run after GitHub API recovers or inspect the commit manually." >&2
+                exit 1
+              fi
+            done < <(jq -r '.commits[].sha' release-assets/DRAFT_COMPARE.json)
+            jq -s 'unique_by(.number) | sort_by(.number)' \
+              release-assets/DRAFT_PULL_REQUESTS.jsonl > release-assets/DRAFT_PULL_REQUESTS.json
+
+            jq -Rn '
+              [inputs
+                | select(length > 0)
+                | capture("^(?<sha256>[0-9a-f]{64})  (?<name>.+)$")
+              ]
+            ' < release-assets/SHA256SUMS.txt > release-assets/ARTIFACTS.json
+
+            root_version="$(node -p "require('./package.json').version")"
+            memory_version="$(node -p "require('./Memory/package.json').version")"
+            memory_cli_version="$(node -p "require('./Memory/src/cli/npm/package.json').version")"
+            agent_version="$(node -p "require('./App/memmy-agent/package.json').version")"
+            desktop_version="$(node -p "require('./App/shell/desktop/package.json').version")"
+
+          node <<'NODE' > release-assets/MEMMY_RELEASE_STYLE_EXAMPLES.json
+          const { execFileSync } = require("node:child_process");
+          const path = require("node:path");
+
+          const target = process.env.TARGET_SHA;
+          const currentTag = process.env.TAG;
+
+          function git(args) {
+            try {
+              return execFileSync("git", args, { encoding: "utf8" });
+            } catch {
+              return "";
+            }
+          }
+
+          function versionKey(tag) {
+            const match = /^v(\d+)\.(\d+)\.(\d+)$/.exec(tag);
+            return match ? match.slice(1).map(Number) : [0, 0, 0];
+          }
+
+          const files = git(["ls-tree", "-r", "--name-only", target, ".github/release-notes"])
+            .split(/\r?\n/)
+            .filter(Boolean)
+            .filter((file) => /^\.github\/release-notes\/v\d+\.\d+\.\d+\.md$/.test(file))
+            .filter((file) => path.basename(file, ".md") !== currentTag)
+            .sort((left, right) => {
+              const a = versionKey(path.basename(left, ".md"));
+              const b = versionKey(path.basename(right, ".md"));
+              return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+            })
+            .slice(-3);
+
+          const githubReleaseNotes = files.map((file) => ({
+            tag: path.basename(file, ".md"),
+            path: file,
+            body: git(["show", `${target}:${file}`]).slice(0, 12000),
+          }));
+
+          const websiteChangelog = [
+            {
+              tag: "v1.0.5",
+              title_cn: "记忆支持时间感知、飞书接入更便捷",
+              contract: "官网短摘要只保留新功能和改进与问题修复，普通版本约 6-8 条。",
+            },
+            {
+              tag: "v1.0.4",
+              title_cn: "项目工作区、浏览器自动化与长期记忆",
+              contract: "跨 Agent/Memory 的同一用户结果只写一条，多 surfaces 复用，All 不重复。",
+            },
+          ];
+
+          process.stdout.write(JSON.stringify({
+            github_release_notes: githubReleaseNotes,
+            website_changelog: websiteChangelog,
+          }, null, 2));
+          NODE
+
+            jq -n \
+              --arg sourceId "memmy-official-changelog-v2" \
+              --arg repository "$GITHUB_REPOSITORY" \
+              --arg version "$VERSION" \
+              --arg tag "$TAG" \
+              --arg previousTag "$PREVIOUS_TAG" \
+              --arg targetSha "$TARGET_SHA" \
+              --arg rootVersion "$root_version" \
+              --arg memoryVersion "$memory_version" \
+              --arg memoryCliVersion "$memory_cli_version" \
+              --arg agentVersion "$agent_version" \
+              --arg desktopVersion "$desktop_version" \
+              --slurpfile compare release-assets/DRAFT_COMPARE.json \
+              --slurpfile pullRequests release-assets/DRAFT_PULL_REQUESTS.json \
+              --slurpfile artifacts release-assets/ARTIFACTS.json \
+              --slurpfile styleExamples release-assets/MEMMY_RELEASE_STYLE_EXAMPLES.json \
+              '{
+                source_id: $sourceId,
+                sourceId: $sourceId,
+                repository: $repository,
+                repo: $repository,
+                version: $version,
+                tag: $tag,
+                tag_name: $tag,
+                previous_tag: $previousTag,
+                previousTag: $previousTag,
+                target_sha: $targetSha,
+                targetSha: $targetSha,
+                commits: ($compare[0].commits | map({
+                  sha,
+                  short_sha: .sha[0:8],
+                  shortSha: .sha[0:8],
+                  html_url: .html_url,
+                  htmlUrl: .html_url,
+                  subject: (.commit.message | split("\n")[0]),
+                  message: .commit.message
+                })),
+                pull_requests: $pullRequests[0],
+                pullRequests: $pullRequests[0],
+                changed_files: ($compare[0].files | map({
+                  path: .filename,
+                  previous_path: (.previous_filename // null),
+                  previousPath: (.previous_filename // null),
+                  status,
+                  additions,
+                  deletions,
+                  changes
+                })),
+                version_files: [
+                  {path: "package.json", version: $rootVersion},
+                  {path: "Memory/package.json", version: $memoryVersion},
+                  {path: "Memory/src/cli/npm/package.json", version: $memoryCliVersion},
+                  {path: "App/memmy-agent/package.json", version: $agentVersion},
+                  {path: "App/shell/desktop/package.json", version: $desktopVersion}
+                ],
+                artifacts: $artifacts[0],
+                style_examples: $styleExamples[0],
+                release_note_quality_request: {
+                  candidate_count: 3,
+                  require_source_refs: true,
+                  require_bilingual_output: true,
+                  require_surfaces: true,
+                  max_items: 10,
+                  max_added_items: 5,
+                  max_improved_fixed_items: 5,
+                  dedupe_same_user_result: true,
+                  fail_closed: true,
+                  allowed_surfaces: ["general", "desktop", "agent", "memory", "cli"]
+                },
+                release_context: {
+                  release_kind: "memmy_official_desktop_agent_memory_cli",
+                  public_release_body: "github_draft_release_notes",
+                  docs_product_extraction: "release_published_revalidated_by_106",
+                  manual_release_notes_file: ".github/release-notes/vX.Y.Z.md is optional"
+                }
+              }' > release-assets/DOC_AGENT_RELEASE_NOTES_REQUEST.json
+
+            if [[ -n "$DOC_AGENT_RELEASE_NOTES_DRAFT_URL" && -n "$DOC_AGENT_RELEASE_NOTES_DRAFT_TOKEN" ]]; then
+              if curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+                --connect-timeout 10 --max-time 120 \
+                --header "Content-Type: application/json" \
+                --header "Authorization: Bearer $DOC_AGENT_RELEASE_NOTES_DRAFT_TOKEN" \
+                --data-binary @release-assets/DOC_AGENT_RELEASE_NOTES_REQUEST.json \
+                "$DOC_AGENT_RELEASE_NOTES_DRAFT_URL" \
+                > release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json; then
+                if jq -e '((.release_notes_md // .release_notes_markdown // "") | length) > 0' \
+                  release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json >/dev/null; then
+                  jq -r '.release_notes_md // .release_notes_markdown' \
+                    release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json > "$notes"
+                  jq '{
+                    source: (.source // "doc-agent"),
+                    ok: (.ok // false),
+                    needs_review: (.needs_review // false),
+                    confidence: (.confidence // "medium"),
+                    candidate_selection: (.quality_report.candidate_selection // .candidate_selection // {}),
+                    warnings: (.quality_report.warnings // .warnings // [])
+                  }' release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json \
+                    > release-assets/RELEASE_NOTES_SOURCE.json
+                  jq '.quality_report // {
+                    ok: (.ok // false),
+                    needs_review: (.needs_review // false),
+                    confidence: (.confidence // "medium"),
+                    warnings: (.warnings // []),
+                    coverage: (.coverage // {}),
+                    candidate_selection: (.candidate_selection // {}),
+                    attempts: (.attempts // [])
+                  }' release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json \
+                    > release-assets/QUALITY_REPORT.json
+                  notes_source="doc-agent"
+                  needs_review="$(jq -r '.needs_review // .quality_report.needs_review // false' release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json)"
+                else
+                  echo "::warning title=Doc Agent returned no release notes::Falling back to GitHub generated release notes."
+                fi
+              else
+                echo "::warning title=Doc Agent draft generation failed::Falling back to GitHub generated release notes."
+              fi
+            else
+              echo "::notice title=Doc Agent draft generation skipped::DOC_AGENT_RELEASE_NOTES_DRAFT_URL or DOC_AGENT_RELEASE_NOTES_DRAFT_TOKEN is not configured."
+            fi
+
+            if [[ ! -s "$notes" ]]; then
+              generate_args=(
+                --method POST
+                "repos/${GITHUB_REPOSITORY}/releases/generate-notes"
+                -f tag_name="$TAG"
+                -f target_commitish="$TARGET_SHA"
+              )
+              if [[ -n "$PREVIOUS_TAG" ]]; then
+                generate_args+=(-f previous_tag_name="$PREVIOUS_TAG")
+              fi
+              if ! gh api "${generate_args[@]}" --jq '.body' > "$notes"; then
+                echo "::error title=Release notes generation failed::Both Doc Agent and GitHub generated notes failed for $TAG. Manual recovery: re-run after service recovery, or add .github/release-notes/$TAG.md and retry." >&2
+                exit 1
+              fi
+              notes_source="github-generated"
+              needs_review="true"
+              tmp_notes="$(mktemp)"
+              {
+                echo "> **Needs review:** Doc Agent was unavailable, so this Draft uses GitHub generated notes. Review and edit before publishing."
+                echo
+                cat "$notes"
+              } > "$tmp_notes"
+              mv "$tmp_notes" "$notes"
+              jq -n \
+                --arg source "$notes_source" \
+                '{source: $source, needs_review: true, warnings: ["Doc Agent unavailable; used GitHub generated release notes fallback"]}' \
+                > release-assets/RELEASE_NOTES_SOURCE.json
+              jq -n \
+                --arg source "$notes_source" \
+                '{ok: false, needs_review: true, source: $source, warnings: ["Doc Agent unavailable; used GitHub generated release notes fallback"]}' \
+                > release-assets/QUALITY_REPORT.json
+            fi
           fi
 
           cat >> "$notes" <<EOF
@@ -271,11 +540,11 @@ jobs:
 
           ## Installation
 
-          On Windows, download the appropriate signed `.exe` and run the installer. On Apple Silicon Macs, download the appropriate signed `.dmg`, open it, and drag Memmy to Applications.
+          On Windows, download the appropriate signed exe and run the installer. On Apple Silicon Macs, download the appropriate signed dmg, open it, and drag Memmy to Applications.
 
           ## Checksums
 
-          Verify downloads with `MD5SUMS.txt` or `SHA256SUMS.txt` attached to this release. The workflow also verifies every OSS object against its `Content-MD5` header before publishing.
+          Verify downloads with MD5SUMS.txt or SHA256SUMS.txt attached to this release. The workflow also verifies every OSS object against its Content-MD5 header before publishing.
 
           <!-- doc-agent: source-id=memmy-official-changelog-v2 -->
           <!-- memmy-release-evidence
@@ -283,6 +552,8 @@ jobs:
           source_id: $GITHUB_REPOSITORY@$TAG
           previous_tag: $PREVIOUS_TAG
           target_sha: $TARGET_SHA
+          release_notes_source: $notes_source
+          release_notes_needs_review: $needs_review
           artifact_manifest: SHA256SUMS.txt
           -->
           EOF
@@ -360,6 +631,8 @@ jobs:
           desktop_version="$(node -p "require('./App/shell/desktop/package.json').version")"
           generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           release_notes_sha256="$(sha256sum release-assets/RELEASE_NOTES.md | awk '{print $1}')"
+          release_notes_source="$(jq -r '.source // "unknown"' release-assets/RELEASE_NOTES_SOURCE.json)"
+          release_notes_needs_review="$(jq -r '.needs_review // false' release-assets/RELEASE_NOTES_SOURCE.json)"
 
           jq -n \
             --arg repository "$GITHUB_REPOSITORY" \
@@ -369,6 +642,8 @@ jobs:
             --arg targetSha "$TARGET_SHA" \
             --arg generatedAt "$generated_at" \
             --arg releaseNotesSha256 "$release_notes_sha256" \
+            --arg releaseNotesSource "$release_notes_source" \
+            --argjson releaseNotesNeedsReview "$release_notes_needs_review" \
             --arg rootVersion "$root_version" \
             --arg memoryVersion "$memory_version" \
             --arg memoryCliVersion "$memory_cli_version" \
@@ -417,6 +692,8 @@ jobs:
                 {path: "App/shell/desktop/package.json", version: $desktopVersion}
               ],
               releaseNotesSha256: $releaseNotesSha256,
+              releaseNotesSource: $releaseNotesSource,
+              releaseNotesNeedsReview: $releaseNotesNeedsReview,
               artifactManifest: "SHA256SUMS.txt",
               artifacts: $artifacts[0]
             }' > release-assets/RELEASE_EVIDENCE.json
@@ -429,7 +706,23 @@ jobs:
             echo "- Changed files: $changed_file_count"
             echo "- Pull requests: $(jq 'length' release-assets/PULL_REQUESTS.json)"
             echo "- Version metadata: $VERSION"
+            echo "- Release notes source: $release_notes_source"
+            echo "- Release notes needs review: $release_notes_needs_review"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload release audit artifact
+        if: ${{ steps.release.outputs.preflight_level == 'full' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: memmy-release-audit-${{ steps.release.outputs.tag }}
+          if-no-files-found: error
+          path: |
+            release-assets/RELEASE_NOTES.md
+            release-assets/RELEASE_NOTES_SOURCE.json
+            release-assets/QUALITY_REPORT.json
+            release-assets/RELEASE_EVIDENCE.json
+            release-assets/MD5SUMS.txt
+            release-assets/SHA256SUMS.txt
 
       - name: Create draft release and upload every asset
         if: ${{ steps.release.outputs.create_draft == 'true' }}
@@ -459,7 +752,7 @@ jobs:
             exit 1
           fi
           draft_created=1
-          if ! gh release upload "$TAG" release-assets/Memmy-* release-assets/MD5SUMS.txt release-assets/SHA256SUMS.txt release-assets/RELEASE_EVIDENCE.json \
+          if ! gh release upload "$TAG" release-assets/Memmy-* release-assets/MD5SUMS.txt release-assets/SHA256SUMS.txt release-assets/RELEASE_NOTES.md release-assets/RELEASE_NOTES_SOURCE.json release-assets/QUALITY_REPORT.json release-assets/RELEASE_EVIDENCE.json \
             --repo "$GITHUB_REPOSITORY"; then
             echo "::error title=Draft asset upload failed::Asset upload failed after Draft Release creation. Automatic recovery: the workflow will delete the half-created Draft Release and tag so it can be safely re-run." >&2
             exit 1

@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import YAML from "yaml";
@@ -80,7 +81,25 @@ describe("Memmy release workflow metadata", () => {
 });
 
 describe("GitHub Draft Release v2 workflow", () => {
-  it("creates Draft Releases from merged release/vX.Y.Z PRs and keeps manual fallback", () => {
+  it("keeps every shell block syntactically valid", () => {
+    const tempDir = mkdtempSync(resolve(tmpdir(), "memmy-release-workflow-"));
+
+    for (const [index, step] of draftSteps.entries()) {
+      const script = String(step.run ?? "");
+      if (!script) continue;
+
+      const scriptPath = resolve(tempDir, `step-${index}.sh`);
+      writeFileSync(scriptPath, script);
+      const result = spawnSync("bash", ["-n", scriptPath], {
+        cwd: repoRoot,
+        encoding: "utf8",
+      });
+
+      expect(result.status, `${String(step.name)}\n${result.stderr}`).toBe(0);
+    }
+  });
+
+  it("creates Draft Releases from merged vX.Y.Z PRs and keeps manual fallback", () => {
     expect(draftWorkflow.on.pull_request_target).toEqual({
       types: ["closed"],
       branches: ["main"],
@@ -94,14 +113,16 @@ describe("GitHub Draft Release v2 workflow", () => {
     ]);
     expect(draftWorkflow.on.workflow_dispatch.inputs.create_draft.default).toBe(false);
     expect(draftJob.if).toContain("github.event.pull_request.merged == true");
+    expect(draftJob.if).toContain("startsWith(github.event.pull_request.head.ref, 'v')");
     expect(draftJob.if).toContain("startsWith(github.event.pull_request.head.ref, 'release/v')");
 
     const resolve = draftScript("Resolve and validate release");
     expect(resolve).toContain('if [[ "$EVENT_NAME" == "pull_request_target" ]]');
     expect(resolve).toContain(
-      "^release/v((0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*))$",
+      "^(release/)?v((0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*))$",
     );
-    expect(resolve).toContain('version="${BASH_REMATCH[1]}"');
+    expect(resolve).toContain("vX.Y.Z or release/vX.Y.Z");
+    expect(resolve).toContain('version="${BASH_REMATCH[2]}"');
     expect(resolve).toContain('target_sha="$PR_MERGE_SHA"');
     expect(resolve).toContain('preflight_level="full"');
     expect(resolve).toContain('create_draft="true"');
@@ -200,7 +221,18 @@ describe("GitHub Draft Release v2 workflow", () => {
     expect(draftScript("Resolve previous stable release tag")).toContain(
       "Release version is not newer",
     );
-    expect(draftScript("Build release notes")).toContain("Release notes generation failed");
+    const releaseNotes = draftScript("Build release notes");
+    expect(releaseNotes).toContain("DOC_AGENT_RELEASE_NOTES_DRAFT_URL");
+    expect(releaseNotes).toContain("DOC_AGENT_RELEASE_NOTES_DRAFT_TOKEN");
+    expect(releaseNotes).toContain("DOC_AGENT_RELEASE_NOTES_REQUEST.json");
+    expect(releaseNotes).toContain("MEMMY_RELEASE_STYLE_EXAMPLES.json");
+    expect(releaseNotes).toContain("candidate_count: 3");
+    expect(releaseNotes).toContain(".release_notes_md // .release_notes_markdown");
+    expect(releaseNotes).toContain("Doc Agent draft generation failed");
+    expect(releaseNotes).toContain("GitHub generated release notes fallback");
+    expect(releaseNotes).toContain("Release notes generation failed");
+    expect(releaseNotes).toContain("RELEASE_NOTES_SOURCE.json");
+    expect(releaseNotes).toContain("QUALITY_REPORT.json");
     const evidence = draftScript("Build auditable release evidence");
     expect(evidence).toContain("compare/${compare_base}...${TARGET_SHA}");
     expect(evidence).toContain("commits/${commit_sha}/pulls");
@@ -213,12 +245,22 @@ describe("GitHub Draft Release v2 workflow", () => {
     expect(evidence).toContain("changedFiles");
     expect(evidence).toContain("versionFiles");
     expect(evidence).toContain("releaseNotesSha256");
+    expect(evidence).toContain("releaseNotesSource");
+    expect(evidence).toContain("releaseNotesNeedsReview");
     expect(evidence).toContain("artifacts");
-    expect(draftScript("Build release notes")).toContain(
+    expect(releaseNotes).toContain(
       "doc-agent: source-id=memmy-official-changelog-v2",
     );
+    const uploadAudit = draftSteps.find((step) => step.name === "Upload release audit artifact");
+    expect(uploadAudit?.uses).toBe("actions/upload-artifact@v4");
+    expect(JSON.stringify(uploadAudit)).toContain("RELEASE_NOTES.md");
+    expect(JSON.stringify(uploadAudit)).toContain("RELEASE_NOTES_SOURCE.json");
+    expect(JSON.stringify(uploadAudit)).toContain("QUALITY_REPORT.json");
     expect(draftScript("Create draft release and upload every asset")).toContain(
       "RELEASE_EVIDENCE.json",
+    );
+    expect(draftScript("Create draft release and upload every asset")).toContain(
+      "RELEASE_NOTES_SOURCE.json",
     );
   });
 
