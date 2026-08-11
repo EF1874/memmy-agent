@@ -168,7 +168,12 @@ function setupMemmyMemoryConfig(
   const memmyMemory: Record<string, unknown> = {
     ...existing,
     version: 1,
-    activeProfile: memoryProfileName(existing.activeProfile) ?? "byok",
+    userId: optionalString(existing.userId) ?? options.appUserId ?? "local-user",
+    roleRouting: {
+      summary: memoryRoleRouting(asRecord(existing.roleRouting).summary),
+      evolution: memoryRoleRouting(asRecord(existing.roleRouting).evolution)
+    },
+    embedding: normalizedEmbeddingForSetup(asRecord(existing.embedding)),
     storage: {
       mode: "local",
       backend: "sqlite",
@@ -183,15 +188,8 @@ function setupMemmyMemoryConfig(
       enableQueryRewrite: false
     }
   };
-  const profiles = memoryProfiles(existing);
-  if (!profiles.byok) {
-    profiles.byok = byokProfileFromExisting(existing, options.appUserId);
-  }
-  memmyMemory.profiles = profiles;
-  delete memmyMemory.userId;
-  delete memmyMemory.summary;
-  delete memmyMemory.evolution;
-  delete memmyMemory.embedding;
+  delete memmyMemory.activeProfile;
+  delete memmyMemory.profiles;
   return memmyMemory;
 }
 
@@ -213,26 +211,10 @@ function supportedAlgorithmConfig(input: Record<string, unknown>): Record<string
   );
 }
 
-function memoryProfiles(memmyMemory: Record<string, unknown>): Record<string, unknown> {
-  const profiles = asRecord(memmyMemory.profiles);
-  return {
-    ...(Object.keys(asRecord(profiles.account)).length ? { account: { ...asRecord(profiles.account) } } : {}),
-    ...(Object.keys(asRecord(profiles.byok)).length ? { byok: { ...asRecord(profiles.byok) } } : {})
-  };
-}
-
-function byokProfileFromExisting(existing: Record<string, unknown>, appUserId?: string): Record<string, unknown> {
-  const userId = optionalString(existing.userId) ?? appUserId;
-  const legacy = {
-    ...(userId ? { userId } : {}),
-    ...(Object.keys(asRecord(existing.summary)).length ? { summary: { ...asRecord(existing.summary) } } : {}),
-    ...(Object.keys(asRecord(existing.evolution)).length ? { evolution: { ...asRecord(existing.evolution) } } : {}),
-    embedding: byokEmbeddingFromExisting(asRecord(existing.embedding))
-  };
-  return legacy;
-}
-
-function byokEmbeddingFromExisting(existing: Record<string, unknown>): Record<string, unknown> {
+function normalizedEmbeddingForSetup(existing: Record<string, unknown>): Record<string, unknown> {
+  if (existing.mode === "cloud" || existing.mode === "local" || existing.mode === "custom") {
+    return { ...existing };
+  }
   const provider = optionalString(existing.provider);
   if (
     provider === "openai_compatible" ||
@@ -241,19 +223,18 @@ function byokEmbeddingFromExisting(existing: Record<string, unknown>): Record<st
     provider === "voyage" ||
     provider === "mistral"
   ) {
-    return { ...existing };
+    return { mode: "custom", custom: { ...existing } };
   }
   if (!provider || provider === "local") {
     return {
-      provider: "local"
+      mode: "local"
     };
   }
   return {
-    provider: "local"
+    mode: "local"
   };
 }
 
-function memoryProfileName(value: unknown): "account" | "byok" | undefined {
-  const profile = optionalString(value);
-  return profile === "account" || profile === "byok" ? profile : undefined;
+function memoryRoleRouting(value: unknown): "follow" | "fixed" {
+  return value === "fixed" ? "fixed" : "follow";
 }

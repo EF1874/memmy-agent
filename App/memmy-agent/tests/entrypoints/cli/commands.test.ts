@@ -28,6 +28,7 @@ import {
 } from "../../../src/utils/restart.js";
 import {
   agent,
+  app,
   cliRuntimeLogsEnabled,
   deleteOauthFiles,
   gateway,
@@ -54,11 +55,17 @@ import {
 } from "../../../src/entrypoints/cli/commands.js";
 import { API_MAX_BODY_BYTES } from "../../../src/entrypoints/openai-like-api/server.js";
 import { setQuestionary } from "../../../src/entrypoints/cli/onboard.js";
+import { prepareStartupMigrations } from "../../../src/entrypoints/cli/startup-migrations.js";
 import { VERSION } from "../../../src/version.js";
 
 const ENV_KEYS = [
   "MEMMY_AGENT_DATA_DIR",
+  "MEMMY_AGENT_WORKSPACE",
   "MEMMY_CONFIG",
+  "MEMMY_MIGRATIONS_READY_CONFIG",
+  "MEMMY_MIGRATIONS_READY_SESSION_DAG",
+  "MEMMY_MIGRATIONS_READY_WORKSPACE",
+  "MEMMY_AGENT_SESSION_DAG_DIR",
   "MEMMY_CLOUD_SERVICE",
   "OAUTH_CLI_KIT_TOKEN_PATH",
   "OPENAI_CODEX_TOKEN_PATH",
@@ -79,6 +86,7 @@ const originalStdinIsTty = (process.stdin as any).isTTY;
 function tempRoot(prefix = "memmy-cli-"): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   roots.push(root);
+  process.env.MEMMY_AGENT_SESSION_DAG_DIR = path.join(root, "session-dag");
   return root;
 }
 
@@ -203,6 +211,9 @@ describe("CLI command helpers", () => {
   });
 
   it("routes bare memmy to the Ink TUI", async () => {
+    const root = tempRoot();
+    setConfigPath(writeConfig(root, {}));
+    process.env.MEMMY_AGENT_WORKSPACE = path.join(root, "workspace");
     const runRoot = vi.fn(async () => undefined);
     setRootInteractiveRunnerForTest(runRoot);
 
@@ -210,6 +221,37 @@ describe("CLI command helpers", () => {
     await main(["node", "memmy"]);
 
     expect(runRoot).toHaveBeenCalledOnce();
+  });
+
+  it("shows terminal target options in root help", () => {
+    const help = app.helpInformation();
+
+    expect(help).toContain("-s, --session <sessionId>");
+    expect(help).toContain("--standalone");
+    expect(help).toContain("--project <path>");
+  });
+
+  it("stops before the root TUI when startup migrations fail", async () => {
+    const root = tempRoot("memmy-root-migration-failure-");
+    const workspace = path.join(root, "workspace");
+    const statePath = path.join(
+      workspace,
+      ".memmy-migrations",
+      "agent-workspace.json",
+    );
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    fs.writeFileSync(statePath, "{invalid-json", "utf8");
+    setConfigPath(writeConfig(root, {
+      agents: { defaults: { workspace } },
+    }));
+    process.env.MEMMY_AGENT_WORKSPACE = workspace;
+    const runRoot = vi.fn(async () => undefined);
+    setRootInteractiveRunnerForTest(runRoot);
+
+    await expect(main(["node", "memmy"])).rejects.toMatchObject({
+      code: "migration_state_invalid",
+    });
+    expect(runRoot).not.toHaveBeenCalled();
   });
 
   it("matches explicit provider prefixes", () => {
@@ -269,6 +311,8 @@ describe("CLI command helpers", () => {
     expect(raw.channels.websocket).toEqual(expect.objectContaining({ enabled: true }));
     expect(raw.channels.slack).toEqual(expect.objectContaining({ enabled: false }));
     expect(raw.fileMemory).toEqual({ enabled: false });
+    expect(raw.providers).toEqual({});
+    expect(raw.modelPresets).toEqual({});
     expect(config.fileMemory.enabled).toBe(false);
     expect(fs.existsSync(path.join(workspace, "memory", "history.jsonl"))).toBe(
       true,
@@ -374,7 +418,9 @@ describe("CLI command helpers", () => {
 
   it("runs memmy config set app.userId", async () => {
     const root = tempRoot("memmy-config-set-cli-");
-    const configPath = writeConfig(root, {});
+    const configPath = writeConfig(root, {
+      agents: { defaults: { workspace: path.join(root, "workspace") } },
+    });
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
 
     await main(["node", "memmy", "config", "set", "app.userId", "user_cli_123", "-c", configPath]);
@@ -434,13 +480,6 @@ describe("CLI command helpers", () => {
   it("serve connects MCP on startup and closes it when the API server closes", async () => {
     const root = tempRoot("memmy-serve-mcp-");
     const workspace = path.join(root, "workspace");
-    const migrationStatePath = path.join(
-      workspace,
-      ".memmy-migrations",
-      "agent-workspace.json",
-    );
-    fs.mkdirSync(path.dirname(migrationStatePath), { recursive: true });
-    fs.writeFileSync(migrationStatePath, "invalid migration state", "utf8");
     const configPath = writeConfig(root, {
       agents: { defaults: { workspace, model: "openai/test-model" } },
       api: { host: "127.0.0.1", port: 0, timeout: 1 },
@@ -451,7 +490,6 @@ describe("CLI command helpers", () => {
 
     const server = await serve({ config: configPath });
     expect(loop.connectMcp).toHaveBeenCalledTimes(1);
-    expect(fs.readFileSync(migrationStatePath, "utf8")).toBe("invalid migration state");
     await closeServer(server);
 
     expect(loop.closeMcp).toHaveBeenCalledTimes(1);
@@ -563,7 +601,10 @@ describe("CLI command helpers", () => {
       dispatchMessage: vi.fn(async () => undefined),
       processMessage: vi.fn(async () => null),
       processDirect: vi.fn(async () => null),
-      llmRuntime: vi.fn(() => ({ provider: {}, model: "openai/test-model" })),
+      llmRuntime: vi.fn(() => {
+        fakeLoop.refreshProviderSnapshot();
+        return { provider: {}, model: fakeLoop.model };
+      }),
       scheduleBackground: vi.fn((promise: Promise<any>) => {
         void promise.catch(() => undefined);
       }),
@@ -598,6 +639,7 @@ describe("CLI command helpers", () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.spyOn(console, "info").mockImplementation(() => undefined);
 
+    await prepareStartupMigrations({ config: configPath });
     const runtime = await gateway({ config: configPath });
     const address = runtime.healthServer.address();
     const actualPort = typeof address === "object" && address ? address.port : 0;
@@ -617,12 +659,16 @@ describe("CLI command helpers", () => {
       ".memmy-migrations",
       "agent-workspace.json",
     );
-    expect(JSON.parse(fs.readFileSync(migrationStatePath, "utf8")).applied).toEqual([
+    expect(JSON.parse(fs.readFileSync(migrationStatePath, "utf8")).applied).toEqual(expect.arrayContaining([
       expect.objectContaining({
         id: "v1.0.4/0001-add-webui-session-binding",
         introducedIn: "1.0.4",
       }),
-    ]);
+      expect.objectContaining({
+        id: "v1.0.5/0001-flatten-memory-model-config",
+        introducedIn: "1.0.5",
+      }),
+    ]));
     expect(missing.status).toBe(404);
     expect(runtime.heartbeat.enabled).toBe(false);
     expect(runtime.heartbeat.intervalS).toBe(900);
@@ -692,7 +738,7 @@ describe("CLI command helpers", () => {
     const migratedBytes = fs.readFileSync(legacySessionPath);
     const secondRuntime = await gateway({ config: configPath });
     expect(fs.readFileSync(legacySessionPath)).toEqual(migratedBytes);
-    expect(JSON.parse(fs.readFileSync(migrationStatePath, "utf8")).applied).toHaveLength(1);
+    expect(JSON.parse(fs.readFileSync(migrationStatePath, "utf8")).applied).toHaveLength(4);
     await secondRuntime.stop();
     expect(fakeLoop.stop).toHaveBeenCalledTimes(2);
   });
@@ -718,7 +764,7 @@ describe("CLI command helpers", () => {
     const fromConfig = vi.spyOn(AgentLoop, "fromConfig");
     vi.spyOn(console, "error").mockImplementation(() => undefined);
 
-    await expect(gateway({ config: configPath })).rejects.toMatchObject({
+    await expect(prepareStartupMigrations({ config: configPath })).rejects.toMatchObject({
       code: "migration_state_invalid",
     });
     expect(fromConfig).not.toHaveBeenCalled();
@@ -1107,6 +1153,14 @@ describe("CLI command helpers", () => {
         }),
         closeMcp: vi.fn(async () => undefined),
         config,
+        sessions: {
+          get: vi.fn(() => null),
+        },
+        resolveTurnModelSelection: vi.fn(() => ({
+          preset: "default",
+          provider: "openai",
+          model: "test-model",
+        })),
       } as any;
     });
 
@@ -1486,13 +1540,22 @@ describe("CLI command parity with memmy test_commands", () => {
 
   it("onboard existing config refresh", async () => {
     const root = tempRoot();
-    const configPath = writeConfig(root, { agents: { defaults: { model: "openai/test-model" } } });
+    const configPath = writeConfig(root, {
+      agents: { defaults: { model: "openai/test-model" } },
+      providers: {
+        openai: { apiKey: "openai-key" },
+        anthropic: {},
+      },
+    });
     const workspace = path.join(root, "workspace");
     vi.spyOn(console, "log").mockImplementation(() => undefined);
 
     const config = await onboard({ config: configPath, workspace });
+    const raw = YAML.parse(fs.readFileSync(configPath, "utf8"));
 
     expect(config.agents.defaults.model).toBe("openai/test-model");
+    expect(raw.providers.openai.apiKey).toBe("openai-key");
+    expect(raw.providers).not.toHaveProperty("anthropic");
     expect(fs.existsSync(path.join(workspace, "AGENTS.md"))).toBe(true);
   });
 

@@ -169,7 +169,6 @@ export function createMemosSqliteMemoryClient(options: CreateMemosSqliteMemoryCl
         version: "memmy-memory-sqlite",
         uptimeMs: 0,
         mode: "dev",
-        activeProfile: "byok",
         storage: {
           backend: "sqlite",
           schemaVersion: "memory-service",
@@ -179,17 +178,20 @@ export function createMemosSqliteMemoryClient(options: CreateMemosSqliteMemoryCl
           summary: {
             provider: "sqlite-local",
             configured: false,
-            remote: false
+            remote: false,
+            routing: null
           },
           evolution: {
             provider: "sqlite-local",
             configured: false,
-            remote: false
+            remote: false,
+            routing: null
           },
           embedding: {
             provider: "sqlite-local",
             configured: false,
-            remote: false
+            remote: false,
+            mode: null
           }
         },
         capabilities: {

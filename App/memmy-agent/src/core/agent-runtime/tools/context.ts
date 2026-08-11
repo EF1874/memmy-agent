@@ -7,6 +7,7 @@ export class RequestContext {
   workspace?: string | null;
   messageId?: string | null;
   sessionKey?: string | null;
+  browserScope?: { sessionKey: string; channel: string; chatId: string } | null;
   metadata: Record<string, any>;
 
   constructor(init: Partial<RequestContext> = {}) {
@@ -15,6 +16,7 @@ export class RequestContext {
     this.senderId = init.senderId ?? null;
     this.messageId = init.messageId ?? null;
     this.sessionKey = init.sessionKey ?? null;
+    this.browserScope = init.browserScope ?? null;
     this.metadata = init.metadata ?? {};
   }
 }
@@ -43,6 +45,7 @@ export class ToolContext extends RequestContext {
   providerSnapshotLoader?: (() => any) | null;
   execSessionManager?: any;
   browserSessionManager?: any;
+  goalRuntime?: any;
   readonlySkillRoots?: readonly string[];
   timezone: string;
 
@@ -55,6 +58,7 @@ export class ToolContext extends RequestContext {
     this.providerSnapshotLoader = init.providerSnapshotLoader ?? null;
     this.execSessionManager = init.execSessionManager;
     this.browserSessionManager = init.browserSessionManager;
+    this.goalRuntime = init.goalRuntime;
     this.readonlySkillRoots = init.readonlySkillRoots;
     this.timezone = init.timezone ?? "UTC";
   }

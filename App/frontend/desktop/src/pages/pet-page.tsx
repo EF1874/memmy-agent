@@ -101,6 +101,7 @@ export interface MiniTaskListItem {
 
 /** Contract for pet task reconcile target. */
 export interface PetTaskReconcileTarget {
+  taskId: string;
   chatId: string;
   sessionKey: string;
   isRunning: boolean;
@@ -132,7 +133,10 @@ export interface PetMeasuredLayout {
 export type PetAgentEventAction =
   | { type: "ignore" }
   | { type: "append"; text: string }
+  | { type: "bind_goal"; goalId: string }
+  | { type: "turn_status"; running: boolean }
   | { type: "complete"; text: string }
+  | { type: "cancel" }
   | { type: "error"; message: string };
 
 /** Definition for pet transparent root class. */
@@ -349,6 +353,7 @@ export function resolvePetTaskReconcileTargets(input: {
     const session = sessionByKey.get(sessionKey);
     seen.add(chatId);
     targets.push({
+      taskId: item.taskId,
       chatId,
       sessionKey,
       isRunning: session ? typeof session.run_started_at === "number" : true
@@ -360,7 +365,9 @@ export function resolvePetTaskReconcileTargets(input: {
 
 /** Maps map pet thread messages to task bus. */
 export function mapPetThreadMessagesToTaskBus(messages: Array<Record<string, unknown>>): TaskBusAgentMessage[] {
-  return messages.map((message) => {
+  return messages
+    .filter((message) => message.internal_context !== "goal_continuation")
+    .map((message) => {
     const role = message.role === "user" || message.role === "tool" ? message.role : "assistant";
     const content = typeof message.content === "string" ? message.content : String(message.content ?? "");
     const createdAt = typeof message.createdAt === "number" ? message.createdAt : undefined;
@@ -371,7 +378,7 @@ export function mapPetThreadMessagesToTaskBus(messages: Array<Record<string, unk
       ...(createdAt == null ? {} : { createdAt }),
       ...(isStreaming ? { isStreaming } : {})
     };
-  });
+    });
 }
 
 /** Checks has pet thread latest answer. */
@@ -508,7 +515,12 @@ export function isPetDoubleClick(input: PetDoubleClickInput): boolean {
  * @param fallbackError The fallback text to show when there is no detailed error.
  * @returns A lightweight action that can be applied to the TaskBus.
  */
-export function resolvePetAgentEventAction(event: MemmyAgentWsEvent, currentText: string, fallbackError: string): PetAgentEventAction {
+export function resolvePetAgentEventAction(
+  event: MemmyAgentWsEvent,
+  currentText: string,
+  fallbackError: string,
+  context: { goalId?: string | null; turnRunning?: boolean } = {},
+): PetAgentEventAction {
   if (event.event === "delta") {
     const text = stringEventText(event);
     return text ? { type: "append", text } : { type: "ignore" };
@@ -516,7 +528,7 @@ export function resolvePetAgentEventAction(event: MemmyAgentWsEvent, currentText
 
   if (event.event === "stream_end") {
     const text = stringEventText(event) || currentText;
-    return text ? { type: "complete", text } : { type: "ignore" };
+    return text && !currentText ? { type: "append", text } : { type: "ignore" };
   }
 
   if (event.event === "message") {
@@ -525,15 +537,48 @@ export function resolvePetAgentEventAction(event: MemmyAgentWsEvent, currentText
     }
 
     const text = stringEventText(event);
-    return text ? { type: "complete", text } : { type: "ignore" };
+    return text && !currentText ? { type: "append", text } : { type: "ignore" };
   }
 
   if (event.event === "turn_end") {
-    return currentText ? { type: "complete", text: currentText } : { type: "ignore" };
+    const goalId = typeof event.goal_id === "string" ? event.goal_id : null;
+    const outcome = event.goal_outcome;
+    if (!goalId && outcome === undefined) {
+      return { type: "complete", text: currentText || fallbackError };
+    }
+    if (!goalId || typeof outcome !== "string" || (context.goalId && context.goalId !== goalId)) {
+      return { type: "ignore" };
+    }
+    if (outcome === "active") {
+      return context.goalId ? { type: "turn_status", running: false } : { type: "bind_goal", goalId };
+    }
+    if (outcome === "completed") return { type: "complete", text: currentText || fallbackError };
+    if (outcome === "paused") return { type: "cancel" };
+    if (outcome === "blocked" || outcome === "usage_limited" || outcome === "budget_limited") {
+      return { type: "error", message: currentText || fallbackError };
+    }
+    return { type: "ignore" };
   }
 
-  if (event.event === "goal_status" && event.status !== "running") {
-    return currentText ? { type: "complete", text: currentText } : { type: "ignore" };
+  if (event.event === "run_status") {
+    return { type: "turn_status", running: event.status === "running" };
+  }
+
+  if (event.event === "goal_state") {
+    const goal = event.goal_state;
+    const goalId = goal?.goal_id ?? null;
+    if (!goal || !goalId) {
+      return context.goalId && !context.turnRunning ? { type: "cancel" } : { type: "ignore" };
+    }
+    if (context.goalId && context.goalId !== goalId) return { type: "ignore" };
+    if (!context.goalId) return { type: "bind_goal", goalId };
+    if (context.turnRunning) return { type: "ignore" };
+    if (goal.status === "paused") return { type: "cancel" };
+    if (goal.status === "blocked" || goal.status === "usage_limited" || goal.status === "budget_limited") {
+      return { type: "error", message: currentText || fallbackError };
+    }
+    if (goal.status === "completed") return { type: "complete", text: currentText || fallbackError };
+    return { type: "ignore" };
   }
 
   if (event.event === "error") {
@@ -651,6 +696,8 @@ export function PetPage() {
   const chatUnsubscribersRef = useRef<Map<string, MemmyAgentUnsubscribe>>(new Map());
   const taskIdByChatIdRef = useRef<Map<string, string>>(new Map());
   const answerTextByTaskIdRef = useRef<Map<string, string>>(new Map());
+  const goalIdByTaskIdRef = useRef<Map<string, string>>(new Map());
+  const turnRunningByTaskIdRef = useRef<Map<string, boolean>>(new Map());
   const cancelledTaskIdsRef = useRef<Set<string>>(new Set());
   const recoveryTracker = useMemo(() => clients?.memmyAgent ? new PetReconnectRecoveryTracker({
     client: clients.memmyAgent,
@@ -662,6 +709,14 @@ export function PetPage() {
     errorTask: (taskId, message) => {
       cleanupPetTaskById(taskId);
       busRef.current.errorTask(taskId, message);
+    },
+    cancelTask: (taskId) => {
+      cleanupPetTaskById(taskId);
+      busRef.current.cancelTask(taskId);
+    },
+    bindTaskGoal: (taskId, goalId) => {
+      goalIdByTaskIdRef.current.set(taskId, goalId);
+      busRef.current.bindTaskGoal(taskId, goalId);
     },
     emptyResponseMessage: t("pet.agentEmptyResponse"),
     recoveryTimeoutMessage: t("home.agent.recoveryTimeout"),
@@ -678,6 +733,8 @@ export function PetPage() {
       chatUnsubscribersRef.current.delete(chatId);
     }
     answerTextByTaskIdRef.current.delete(taskId);
+    goalIdByTaskIdRef.current.delete(taskId);
+    turnRunningByTaskIdRef.current.delete(taskId);
   }
 
   useEffect(() => {
@@ -705,7 +762,10 @@ export function PetPage() {
       }
 
       const currentText = answerTextByTaskIdRef.current.get(taskId) ?? "";
-      const action = resolvePetAgentEventAction(event, currentText, t("pet.agentUnavailable"));
+      const action = resolvePetAgentEventAction(event, currentText, t("pet.agentUnavailable"), {
+        goalId: goalIdByTaskIdRef.current.get(taskId) ?? null,
+        turnRunning: turnRunningByTaskIdRef.current.get(taskId) === true
+      });
       if (action.type === "ignore") {
         return;
       }
@@ -716,11 +776,23 @@ export function PetPage() {
         return;
       }
 
-      taskIdByChatIdRef.current.delete(chatId);
-      answerTextByTaskIdRef.current.delete(taskId);
+      if (action.type === "bind_goal") {
+        goalIdByTaskIdRef.current.set(taskId, action.goalId);
+        busRef.current.bindTaskGoal(taskId, action.goalId);
+        return;
+      }
+
+      if (action.type === "turn_status") {
+        turnRunningByTaskIdRef.current.set(taskId, action.running);
+        return;
+      }
+
+      cleanupPetTaskById(taskId);
       recoveryTracker?.remove(taskId);
       if (action.type === "complete") {
         busRef.current.completeTask(taskId, action.text);
+      } else if (action.type === "cancel") {
+        busRef.current.cancelTask(taskId);
       } else {
         busRef.current.errorTask(taskId, action.message);
       }
@@ -741,6 +813,8 @@ export function PetPage() {
         }
       }
       answerTextByTaskIdRef.current.delete(task.id);
+      goalIdByTaskIdRef.current.delete(task.id);
+      turnRunningByTaskIdRef.current.delete(task.id);
       recoveryTracker?.remove(task.id);
     },
     [clients?.memmyAgent, recoveryTracker]
@@ -794,6 +868,8 @@ export function PetPage() {
       cancelledTaskIdsRef.current.delete(task.id);
       taskIdByChatIdRef.current.set(chatId, task.id);
       answerTextByTaskIdRef.current.set(task.id, "");
+      if (task.goalId) goalIdByTaskIdRef.current.set(task.id, task.goalId);
+      turnRunningByTaskIdRef.current.set(task.id, false);
 
       void ensurePetAgentConnection()
         .then(async (connection) => {
@@ -811,7 +887,12 @@ export function PetPage() {
           if (expectedGeneration === null) {
             throw new Error(t("pet.agentUnavailable"));
           }
-          recoveryTracker?.register({ taskId: task.id, chatId, submittedContent: content });
+          recoveryTracker?.register({
+            taskId: task.id,
+            chatId,
+            submittedContent: content,
+            goalId: task.goalId ?? null
+          });
           try {
             if (!agentClient) {
               throw new Error(t("pet.agentUnavailable"));
@@ -841,6 +922,8 @@ export function PetPage() {
 
           taskIdByChatIdRef.current.delete(chatId);
           answerTextByTaskIdRef.current.delete(task.id);
+          goalIdByTaskIdRef.current.delete(task.id);
+          turnRunningByTaskIdRef.current.delete(task.id);
           busRef.current.errorTask(task.id, resolvePetAgentErrorMessage(error, t("pet.agentUnavailable")));
         });
     },
@@ -888,6 +971,8 @@ export function PetPage() {
       connectionPromiseRef.current = null;
       taskIdByChatIdRef.current.clear();
       answerTextByTaskIdRef.current.clear();
+      goalIdByTaskIdRef.current.clear();
+      turnRunningByTaskIdRef.current.clear();
       cancelledTaskIdsRef.current.clear();
       recoveryTracker?.close();
     };
@@ -1020,13 +1105,14 @@ export function PetPageView({ bus, mainRoute = "/main", onNavigate, onPetWindowC
               appendChunk: bus.appendChunk,
               completeTask: bus.completeTask,
               errorTask: bus.errorTask,
-              cancelTask: bus.cancelTask
+              cancelTask: bus.cancelTask,
+              bindTaskGoal: bus.bindTaskGoal
             },
             unavailableMessage: agentUnavailableMessage,
             emptyResponseMessage: t("pet.agentEmptyResponse")
           })
         : null,
-    [agentUnavailableMessage, bus.appendChunk, bus.cancelTask, bus.completeTask, bus.errorTask, memmyAgentClient, t]
+    [agentUnavailableMessage, bus.appendChunk, bus.bindTaskGoal, bus.cancelTask, bus.completeTask, bus.errorTask, memmyAgentClient, t]
   );
 
   useEffect(() => {
@@ -1079,13 +1165,40 @@ export function PetPageView({ bus, mainRoute = "/main", onNavigate, onPetWindowC
             }
 
             const messages = mapPetThreadMessagesToTaskBus(thread.messages);
-            if (messages.length === 0 || !hasPetThreadLatestAnswer(messages)) {
+            if (messages.length === 0 || (
+              !hasPetThreadLatestAnswer(messages)
+              && !(thread.last_turn_goal_id && thread.last_turn_goal_outcome)
+            )) {
               return;
             }
 
             const currentFocusedTask = focusedTaskRef.current;
             const focusedChatId = currentFocusedTask ? normalizePetTaskChatId(currentFocusedTask.sessionId, memmyAgentClient) : null;
-            const isRunning = target.isRunning && thread.last_turn_closed !== true;
+            const currentTask = bus.tasks.find((task) => task.id === target.taskId) ?? null;
+            const lastGoalId = thread.last_turn_goal_id ?? null;
+            const lastGoalOutcome = thread.last_turn_goal_outcome ?? null;
+            if (lastGoalId && lastGoalOutcome && currentTask) {
+              if (currentTask.goalId && currentTask.goalId !== lastGoalId) return;
+              if (!currentTask.goalId) bus.bindTaskGoal(currentTask.id, lastGoalId);
+              const answer = [...messages].reverse().find((message) => message.role === "assistant" && message.content.trim())?.content
+                ?? t("pet.agentUnavailable");
+              if (lastGoalOutcome === "paused") {
+                bus.cancelTask(currentTask.id);
+                return;
+              }
+              if (lastGoalOutcome === "blocked" || lastGoalOutcome === "usage_limited" || lastGoalOutcome === "budget_limited") {
+                bus.errorTask(currentTask.id, answer);
+                return;
+              }
+              if (lastGoalOutcome === "completed") {
+                bus.completeTask(currentTask.id, answer);
+                return;
+              }
+            } else if (currentTask?.goalId) {
+              return;
+            }
+            const isRunning = (target.isRunning && thread.last_turn_closed !== true)
+              || lastGoalOutcome === "active";
             bus.syncAgentConversation({
               sessionIds: [target.chatId, target.sessionKey],
               messages,
@@ -1112,7 +1225,7 @@ export function PetPageView({ bus, mainRoute = "/main", onNavigate, onPetWindowC
         window.clearInterval(timer);
       }
     };
-  }, [bus.syncAgentConversation, memmyAgentClient, runningSessionReconcileKey]);
+  }, [bus, memmyAgentClient, runningSessionReconcileKey, t]);
 
   /**
    * Resets the pet input state.

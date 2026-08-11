@@ -6,6 +6,7 @@ import type { LLMRuntimeResolver } from "../../utils/llm-runtime.js";
 import { truncateText } from "../../utils/helpers.js";
 import type { ByokTokenUsageRecorderLike } from "../../integrations/byok-token-usage/recorder.js";
 import { Session, SessionManager } from "./manager.js";
+import { goalObjectiveFromCommand, webuiTitleUserText } from "./webui-user-content.js";
 import {
   cleanGeneratedTitle,
   TITLE_GENERATION_MAX_TOKENS,
@@ -17,6 +18,7 @@ import {
 
 export type WebuiTitleTrackInput = {
   chatId: string;
+  sessionKey?: string;
   content: string;
   metadata: Record<string, any>;
   mediaPaths?: string[];
@@ -60,22 +62,27 @@ export class WebuiTitleService {
     if (input.metadata?.[WEBUI_SESSION_METADATA_KEY] !== true) return;
     if (input.metadata?.webui_ephemeral_command != null) return;
     const mediaPaths = Array.isArray(input.mediaPaths) ? input.mediaPaths.filter((path): path is string => typeof path === "string" && path.trim().length > 0) : [];
-    if (isCommandOnlyText(input.content, mediaPaths)) return;
+    const goalObjective = goalObjectiveFromCommand(input.content);
+    if (isCommandOnlyText(input.content, mediaPaths) && !goalObjective) return;
 
     let runtime: ReturnType<LLMRuntimeResolver>;
     try {
-      runtime = this.llmRuntime();
+      runtime = this.llmRuntime(
+        typeof input.metadata?.model_preset === "string"
+          ? input.metadata.model_preset
+          : null,
+      );
     } catch (error) {
       console.error("WebUI title runtime capture failed:", error);
       return;
     }
 
     if (!runtime?.provider) return;
-    const sessionKey = `websocket:${input.chatId}`;
+    const sessionKey = input.sessionKey ?? `websocket:${input.chatId}`;
     this.pendingByChatId.set(input.chatId, {
       chatId: input.chatId,
       sessionKey,
-      content: input.content,
+      content: goalObjective ?? input.content,
       mediaPaths,
       provider: runtime.provider,
       model: runtime.model,
@@ -100,10 +107,9 @@ export class WebuiTitleService {
   }
 
   discard(sessionKey: string): void {
-    if (!sessionKey.startsWith("websocket:")) return;
-    const chatId = sessionKey.slice("websocket:".length);
-    const pending = this.pendingByChatId.get(chatId);
-    if (pending?.sessionKey === sessionKey) this.pendingByChatId.delete(chatId);
+    for (const [chatId, pending] of this.pendingByChatId) {
+      if (pending.sessionKey === sessionKey) this.pendingByChatId.delete(chatId);
+    }
   }
 
   private async generateTitle(pending: PendingTitleRequest): Promise<boolean> {
@@ -209,12 +215,8 @@ export class WebuiTitleService {
 
 export function firstTitleUserMessage(session: Session | any): string {
   for (const message of session?.messages ?? []) {
-    if (message?.commandMessage === true) continue;
-    if (message?.role !== "user") continue;
-    const content = typeof message?.content === "string" ? message.content.trim() : "";
-    if (!content) continue;
-    if (isCommandOnlyText(content, [])) continue;
-    return content;
+    const content = webuiTitleUserText(message);
+    if (content) return content;
   }
   return "";
 }
@@ -222,8 +224,7 @@ export function firstTitleUserMessage(session: Session | any): string {
 function countTitleUserMessages(session: Session | any): number {
   let count = 0;
   for (const message of session?.messages ?? []) {
-    if (message?.commandMessage === true) continue;
-    if (message?.role === "user") count += 1;
+    if (webuiTitleUserText(message)) count += 1;
   }
   return count;
 }

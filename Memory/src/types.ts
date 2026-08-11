@@ -405,7 +405,6 @@ export interface HealthResponse {
   version: string;
   uptimeMs: number;
   mode: "local" | "cloud" | "dev";
-  activeProfile: "account" | "byok";
   storage: {
     backend: "sqlite" | "openmem-cloud-rest";
     backendId?: "sqlite-local" | "openmem-cloud-rest";
@@ -427,6 +426,7 @@ export interface HealthResponse {
       remote: boolean;
       lastOkAt?: string;
       lastError?: string;
+      routing: "follow" | "fixed" | null;
     };
     evolution: {
       provider: string;
@@ -435,6 +435,7 @@ export interface HealthResponse {
       remote: boolean;
       lastOkAt?: string;
       lastError?: string;
+      routing: "follow" | "fixed" | null;
     };
     embedding: {
       provider: string;
@@ -443,6 +444,7 @@ export interface HealthResponse {
       remote: boolean;
       lastOkAt?: string;
       lastError?: string;
+      mode: "cloud" | "local" | "custom" | null;
     };
   };
   capabilities: {
@@ -460,7 +462,6 @@ export interface MemoryReloadConfigRequest extends RequestEnvelope {
 }
 
 export interface MemoryReloadConfigResponse {
-  activeProfile: "account" | "byok";
   changed: boolean;
   requiresRestart: boolean;
   models: HealthResponse["models"];

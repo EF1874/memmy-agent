@@ -34,13 +34,17 @@ import { decideTaskDoneNotification } from "../state/task-done-notification.js";
 import { maskAccountIdentifier } from "../utils/mask-account-identifier.js";
 import { openExternalUrl } from "../utils/open-url.js";
 import { isComposingKeyboardEvent } from "../utils/keyboard.js";
+import { ImChannelTitleIcon, imChannelTitleDisplay } from "../integrations/integration-meta.js";
 import { ImprovementProgramModal } from "./improvement-program-modal.js";
 import { writeMemorySubPage } from "./memory-page.js";
 import { SearchPalette } from "../components/search-palette.js";
 import { SidebarResizeHandle, useCodexResizableSidebar } from "./sidebar-resize.js";
 import {
   Archive,
+  ArrowLeft,
+  BarChart3,
   BrainCircuit,
+  Info,
   LayoutList,
   ListChecks,
   Link2,
@@ -54,15 +58,24 @@ import {
   Search,
   Settings2,
   Trash2,
-  User
+  User,
+  Wand2
 } from "./memory/memory-prototype-icons.js";
+import { SETTINGS_NAV_ITEMS, type SettingsTabId } from "./settings-nav.js";
 import { Check, CheckCheck, ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown, Folder, FolderOpen, FolderPlus, ListFilter, MoreHorizontal, Plus, RotateCcw } from "lucide-react";
+
+export interface SettingsSidebarNav {
+  activeTab: SettingsTabId;
+  onSelectTab: (tab: SettingsTabId) => void;
+}
 
 export interface AppFrameProps {
   title: string;
   reserveTopBar?: boolean;
   topBar?: ReactNode;
   topBarBorder?: boolean;
+  /** When set, replaces the main app sidebar with settings section navigation. */
+  settingsNav?: SettingsSidebarNav;
   children: ReactNode;
 }
 
@@ -354,9 +367,10 @@ export function AppFrame(props: AppFrameProps) {
       tasks: state.agent.tasks.map((task) => ({
         sessionIds: [task.chatId, task.sessionKey],
         isRunning: task.runStartedAt != null
+          || state.agent.goalStatesByChatId[task.chatId]?.status === "active"
       }))
     });
-  }, [state.agent.tasks, syncAgentTaskStatuses]);
+  }, [state.agent.goalStatesByChatId, state.agent.tasks, syncAgentTaskStatuses]);
 
   useEffect(() => {
     const current = new Set(state.agent.sessions.map((session) => session.key));
@@ -1048,6 +1062,56 @@ export function AppFrame(props: AppFrameProps) {
           </button>
         </div>
 
+        {props.settingsNav ? (
+          <>
+            <div className="memory-page-return-row">
+              <button
+                type="button"
+                aria-label={t("settings.leave")}
+                title={t("settings.leave")}
+                onClick={openSettingsFromSidebar}
+                className="memory-page-back-button"
+              >
+                <ArrowLeft size={16} />
+                <span>{t("settings.leave")}</span>
+              </button>
+            </div>
+            <div className="app-frame-settings-nav flex-1 min-h-0 pb-4 overflow-y-auto" aria-label={t("settings.title")}>
+              <nav className="space-y-1" aria-label={t("settings.title")}>
+                {SETTINGS_NAV_ITEMS.map((item) => {
+                  const active = props.settingsNav?.activeTab === item.id;
+                  const icon = item.id === "account"
+                    ? <User size={16} />
+                    : item.id === "model"
+                      ? <BrainCircuit size={16} />
+                      : item.id === "tokens"
+                        ? <BarChart3 size={16} />
+                        : item.id === "preferences"
+                          ? <Wand2 size={16} />
+                          : <Info size={16} />;
+                  return (
+                    <div key={item.id}>
+                      <button
+                        type="button"
+                        id={`settings-tab-${item.id}`}
+                        aria-current={active ? "page" : undefined}
+                        className={`app-frame-nav-button relative flex items-center gap-2.5 px-3 py-2 transition-all cursor-pointer ${
+                          active
+                            ? "app-frame-nav-button--active"
+                            : "text-text-ink/75 hover:bg-canvas-oat/60 hover:text-text-ink/85"
+                        }`}
+                        onClick={() => props.settingsNav?.onSelectTab(item.id)}
+                      >
+                        <span className="shrink-0">{icon}</span>
+                        <span className="flex-1 text-left">{t(item.labelKey)}</span>
+                      </button>
+                    </div>
+                  );
+                })}
+              </nav>
+            </div>
+          </>
+        ) : (
         <nav className="space-y-1.5">
           {navItems.map((item) => {
             const key = item.path ?? item.action ?? "unknown";
@@ -1120,7 +1184,9 @@ export function AppFrame(props: AppFrameProps) {
             );
           })}
         </nav>
+        )}
 
+        {props.settingsNav ? null : (
         <div ref={taskScrollRef} className={`app-frame-task-scroll flex-1 overflow-y-auto${taskScrollFade ? " app-frame-task-scroll--faded" : ""}`}>
           <div className="app-frame-task-list">
             <div className="app-frame-task-list-header">
@@ -1369,42 +1435,45 @@ export function AppFrame(props: AppFrameProps) {
             />
           ) : null}
         </div>
+        )}
 
-        <button
-          type="button"
-          onClick={openSettingsFromSidebar}
-          title={t("settings.title")}
-          aria-label={t("settings.title")}
-          className="app-frame-sidebar-footer app-frame-sidebar-footer--button"
-        >
-          <span className="flex w-full items-center gap-2 px-2 py-1.5">
-            <span className="w-6 h-6 rounded-full bg-action-sky/15 flex items-center justify-center shrink-0" aria-hidden="true">
-              <User size={13} className="text-action-sky" />
+        {props.settingsNav ? null : (
+          <button
+            type="button"
+            onClick={openSettingsFromSidebar}
+            title={t("settings.title")}
+            aria-label={t("settings.title")}
+            className="app-frame-sidebar-footer app-frame-sidebar-footer--button"
+          >
+            <span className="flex w-full items-center gap-2 px-2 py-1.5">
+              <span className="w-6 h-6 rounded-full bg-action-sky/15 flex items-center justify-center shrink-0" aria-hidden="true">
+                <User size={13} className="text-action-sky" />
+              </span>
+              <span className="app-frame-profile-text flex-1 min-w-0">
+                <SidebarProfileTextLine
+                  className="app-frame-profile-name text-text-ink/70 truncate"
+                  fullText={accountSummary.name}
+                  line={accountNameLine}
+                />
+                <SidebarProfileTextLine
+                  className="app-frame-profile-meta text-text-ink/45 truncate"
+                  fullText={accountSummary.meta}
+                  line={accountMetaLine}
+                />
+              </span>
+              <span
+                className={`app-frame-profile-settings shrink-0 inline-flex items-center justify-center transition-colors ${
+                  state.navigation.currentPath === "/settings"
+                    ? "app-frame-profile-settings--active text-action-sky"
+                    : "text-text-ink/45"
+                }`}
+                aria-hidden="true"
+              >
+                <Settings2 size={14} />
+              </span>
             </span>
-            <span className="app-frame-profile-text flex-1 min-w-0">
-              <SidebarProfileTextLine
-                className="app-frame-profile-name text-text-ink/70 truncate"
-                fullText={accountSummary.name}
-                line={accountNameLine}
-              />
-              <SidebarProfileTextLine
-                className="app-frame-profile-meta text-text-ink/45 truncate"
-                fullText={accountSummary.meta}
-                line={accountMetaLine}
-              />
-            </span>
-            <span
-              className={`app-frame-profile-settings shrink-0 inline-flex items-center justify-center transition-colors ${
-                state.navigation.currentPath === "/settings"
-                  ? "app-frame-profile-settings--active text-action-sky"
-                  : "text-text-ink/45"
-              }`}
-              aria-hidden="true"
-            >
-              <Settings2 size={14} />
-            </span>
-          </span>
-        </button>
+          </button>
+        )}
       </aside>
 
       {sidebarHidden && (
@@ -2248,6 +2317,7 @@ export function TaskRow(props: {
   const renaming = Boolean(props.renaming);
   const depth = props.depth ?? 0;
   const hasTaskStatus = props.task.runStartedAt != null || props.task.completedUnseen;
+  const imTitleDisplay = imChannelTitleDisplay(props.task.title);
   const projectIssueLabel = props.task.projectId == null || props.task.groupProjectId != null
     ? null
     : props.projectRegistryState === "corrupt"
@@ -2304,7 +2374,13 @@ export function TaskRow(props: {
           {archived ? (
             <span className="app-frame-task-row__title-row">
               <Archive size={14} className="app-frame-task-row__archive-icon" aria-hidden="true" />
-              <SidebarMarqueeText text={props.task.title} className="app-frame-task-title" />
+              {imTitleDisplay ? <ImChannelTitleIcon slug={imTitleDisplay.slug} name={imTitleDisplay.channelName} /> : null}
+              <SidebarMarqueeText text={imTitleDisplay?.title ?? props.task.title} className="app-frame-task-title" />
+            </span>
+          ) : imTitleDisplay ? (
+            <span className="app-frame-task-row__title-row">
+              <ImChannelTitleIcon slug={imTitleDisplay.slug} name={imTitleDisplay.channelName} />
+              <SidebarMarqueeText text={imTitleDisplay.title} className="app-frame-task-title" />
             </span>
           ) : (
             <SidebarMarqueeText text={props.task.title} className="app-frame-task-title" />

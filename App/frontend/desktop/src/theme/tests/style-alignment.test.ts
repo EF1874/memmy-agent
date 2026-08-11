@@ -241,7 +241,7 @@ describe("prototype style alignment", () => {
     expect(conversationTitleRule).toContain("user-select: none;");
     expect(conversationTitleRule).toContain("white-space: nowrap;");
     expect(conversationScrollRule).toContain("padding-top: 12px;");
-    expect(conversationScrollRule).toContain("padding-bottom: 120px;");
+    expect(conversationScrollRule).toContain("padding-bottom: calc(var(--agent-composer-overlay-height, 120px) + 8px);");
     expect(conversationScrollRule).not.toContain("var(--color-action-sky)");
     expect(globalCss).not.toContain(".agent-conversation-scroll::-webkit-scrollbar");
   });

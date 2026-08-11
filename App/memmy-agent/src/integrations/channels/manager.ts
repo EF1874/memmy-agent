@@ -3,6 +3,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { MessageBus, OutboundMessage } from "../../core/runtime-messages/index.js";
+import type {
+  RemoveQueuedWebuiMessageResult,
+  WebuiQueueSnapshotDescriptor,
+} from "../../core/agent-runtime/loop.js";
 import { consumeRestartNoticeFromEnv, formatRestartCompletedMessage } from "../../utils/restart.js";
 import { BaseChannel } from "./base.js";
 import { discoverChannelNames, discoverEnabled, normalizeChannelName } from "./registry.js";
@@ -49,9 +53,19 @@ export class ChannelManager {
   originReplyFingerprints = new Map<string, string>();
   sessionManager: any = null;
   webuiRuntimeModelName: (() => string | null) | null = null;
+  webuiRuntimeToolNames: (() => string[]) | null = null;
+  webuiModelSelectionResolver: ((input: {
+    requestedPreset?: string | null;
+    sessionPreset?: string | null;
+  }) => any | null) | null = null;
   workspacePath: string | null = null;
   cancelActiveTasks: ((sessionKey: string) => Promise<number>) | null = null;
   closeBrowserChat: ((channel: string, chatId: string) => Promise<void>) | null = null;
+  goalControlHandler: ((request: any) => Promise<any>) | null = null;
+  activeGoalStopHandler: ((sessionKey: string) => Promise<boolean>) | null = null;
+  getWebuiQueueSnapshot: ((sessionKey: string) => WebuiQueueSnapshotDescriptor | Promise<WebuiQueueSnapshotDescriptor>) | null = null;
+  removeQueuedWebuiMessage: ((sessionKey: string, clientRequestId: string) => RemoveQueuedWebuiMessageResult | Promise<RemoveQueuedWebuiMessageResult>) | null = null;
+  stopExpectedTurn: ((sessionKey: string, expectedTurnId: string) => Promise<"stopped" | "already_finished" | "not_owned">) | null = null;
 
   constructor(
     configOrBus: any = defaultConfig(),
@@ -59,9 +73,19 @@ export class ChannelManager {
     options: {
       sessionManager?: any;
       webuiRuntimeModelName?: (() => string | null) | null;
+      webuiRuntimeToolNames?: (() => string[]) | null;
+      webuiModelSelectionResolver?: ((input: {
+        requestedPreset?: string | null;
+        sessionPreset?: string | null;
+      }) => any | null) | null;
       workspacePath?: string | null;
       cancelActiveTasks?: ((sessionKey: string) => Promise<number>) | null;
       closeBrowserChat?: ((channel: string, chatId: string) => Promise<void>) | null;
+      goalControlHandler?: ((request: any) => Promise<any>) | null;
+      activeGoalStopHandler?: ((sessionKey: string) => Promise<boolean>) | null;
+      getWebuiQueueSnapshot?: ((sessionKey: string) => WebuiQueueSnapshotDescriptor | Promise<WebuiQueueSnapshotDescriptor>) | null;
+      removeQueuedWebuiMessage?: ((sessionKey: string, clientRequestId: string) => RemoveQueuedWebuiMessageResult | Promise<RemoveQueuedWebuiMessageResult>) | null;
+      stopExpectedTurn?: ((sessionKey: string, expectedTurnId: string) => Promise<"stopped" | "already_finished" | "not_owned">) | null;
     } = {},
   ) {
     if (configOrBus instanceof MessageBus) {
@@ -73,11 +97,18 @@ export class ChannelManager {
     }
     this.sessionManager = options.sessionManager ?? null;
     this.webuiRuntimeModelName = options.webuiRuntimeModelName ?? null;
+    this.webuiRuntimeToolNames = options.webuiRuntimeToolNames ?? null;
+    this.webuiModelSelectionResolver = options.webuiModelSelectionResolver ?? null;
     this.workspacePath = options.workspacePath
       ? path.resolve(options.workspacePath)
       : null;
     this.cancelActiveTasks = options.cancelActiveTasks ?? null;
     this.closeBrowserChat = options.closeBrowserChat ?? null;
+    this.goalControlHandler = options.goalControlHandler ?? null;
+    this.activeGoalStopHandler = options.activeGoalStopHandler ?? null;
+    this.getWebuiQueueSnapshot = options.getWebuiQueueSnapshot ?? null;
+    this.removeQueuedWebuiMessage = options.removeQueuedWebuiMessage ?? null;
+    this.stopExpectedTurn = options.stopExpectedTurn ?? null;
     this.initChannels();
   }
 
@@ -87,6 +118,12 @@ export class ChannelManager {
 
   getChannel(name: string): BaseChannel | null {
     return this.channels[name] ?? null;
+  }
+
+  channelCapabilities(name: string): { supportsStreaming: boolean } | null {
+    const channel = this.getChannel(normalizeChannelName(name));
+    if (!channel) return null;
+    return { supportsStreaming: channel.config?.streaming === true };
   }
 
   channelSection(name: string): any {
@@ -135,8 +172,17 @@ export class ChannelManager {
       ?? this.config?.workspace_path;
     if (workspacePath) options.workspacePath = workspacePath;
     if (this.webuiRuntimeModelName) options.runtimeModelName = this.webuiRuntimeModelName;
+    if (this.webuiRuntimeToolNames) options.runtimeToolNames = this.webuiRuntimeToolNames;
+    if (this.webuiModelSelectionResolver) {
+      options.modelSelectionResolver = this.webuiModelSelectionResolver;
+    }
     if (this.cancelActiveTasks) options.cancelActiveTasks = this.cancelActiveTasks;
     if (this.closeBrowserChat) options.closeBrowserChat = this.closeBrowserChat;
+    if (this.goalControlHandler) options.goalControlHandler = this.goalControlHandler;
+    if (this.activeGoalStopHandler) options.activeGoalStopHandler = this.activeGoalStopHandler;
+    if (this.getWebuiQueueSnapshot) options.getWebuiQueueSnapshot = this.getWebuiQueueSnapshot;
+    if (this.removeQueuedWebuiMessage) options.removeQueuedWebuiMessage = this.removeQueuedWebuiMessage;
+    if (this.stopExpectedTurn) options.stopExpectedTurn = this.stopExpectedTurn;
     return options;
   }
 

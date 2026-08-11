@@ -280,25 +280,26 @@ describe("AgentLoop pending queues", () => {
     expect(loop.pendingQueues.has(msg.sessionKey)).toBe(false);
   });
 
-  it("routes unified-session follow-ups to an active pending queue", async () => {
+  it("keeps default unified-session input out of a direct pending queue", async () => {
     const root = tmpRoot();
     const bus = new MessageBus();
     const loop = new AgentLoop({ bus, provider: makeProvider(async () => new LLMResponse({ content: "done" })), workspace: root, model: "test-model" });
     loop.unifiedSession = true;
-    loop.dispatchMessage = vi.fn(async () => undefined) as any;
+    loop.processMessageInternal = vi.fn(async () => null) as any;
     const pending = new AsyncQueue<InboundMessage>();
     loop.pendingQueues.set(UNIFIED_SESSION_KEY, pending);
 
     const runTask = loop.run();
     await bus.publishInbound(new InboundMessage({ channel: "discord", senderId: "u", chatId: "c", content: "follow-up" }));
-    await waitUntil(() => pending.size > 0);
+    await waitUntil(() => (loop.processMessageInternal as any).mock.calls.length > 0);
     loop.stop();
     await runTask;
 
-    expect(loop.dispatchMessage).not.toHaveBeenCalled();
-    const queued = pending.getNowait()!;
+    expect(pending.size).toBe(0);
+    const [queued, sessionKey] = (loop.processMessageInternal as any).mock.calls[0];
     expect(queued.content).toBe("follow-up");
-    expect(queued.sessionKey).toBe(UNIFIED_SESSION_KEY);
+    expect(queued.turnAdmission).toBe("queue");
+    expect(sessionKey).toBe(UNIFIED_SESSION_KEY);
   });
 
   it("preserves pending queue overflow for later injection cycles", async () => {
@@ -326,20 +327,20 @@ describe("AgentLoop pending queues", () => {
     for (let i = 0; i < total; i += 1) expect(flattened).toContain(`follow-up-${i}`);
   });
 
-  it("falls back to dispatch when an active pending queue rejects a put", async () => {
+  it("does not put default input into an active direct pending queue", async () => {
     const root = tmpRoot();
     const bus = new MessageBus();
     const loop = new AgentLoop({ bus, provider: makeProvider(async () => new LLMResponse({ content: "done" })), workspace: root, model: "test-model" });
-    loop.dispatchMessage = vi.fn(async () => undefined) as any;
+    loop.processMessageInternal = vi.fn(async () => null) as any;
     loop.pendingQueues.set("cli:c", { put: () => { throw new Error("full"); } } as any);
 
     const runTask = loop.run();
     await bus.publishInbound(inbound("follow-up"));
-    await waitUntil(() => (loop.dispatchMessage as any).mock.calls.length > 0);
+    await waitUntil(() => (loop.processMessageInternal as any).mock.calls.length > 0);
     loop.stop();
     await runTask;
 
-    expect(loop.dispatchMessage).toHaveBeenCalledOnce();
+    expect(loop.processMessageInternal).toHaveBeenCalledOnce();
   });
 
   it("re-publishes leftover pending queue messages after dispatch cleanup", async () => {

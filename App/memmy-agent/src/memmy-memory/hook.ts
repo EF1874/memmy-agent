@@ -131,10 +131,16 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
     const sessionKey = this.sessionKeyFromContext(ctx);
     if (!sessionKey) return;
     const messages = ctx.messages ?? ctx.spec?.initialMessages ?? [];
+    const internalTurnContext = ctx.spec?.internalTurnContext;
+    const isGoalContinuation = internalTurnContext?.kind === "goal_continuation";
+    const internalObjective = typeof internalTurnContext?.objective === "string"
+      ? internalTurnContext.objective.trim()
+      : "";
+    if (isGoalContinuation && !internalObjective) return;
     try {
       const sessionId = await this.ensureSession(ctx, sessionKey);
       const turnId = randomUUID();
-      const userText = lastUserText(messages);
+      const userText = isGoalContinuation ? internalObjective : lastUserText(messages);
       const turn: MemmyMemoryTurnState = {
         sessionKey,
         sessionId,
@@ -593,6 +599,7 @@ function lastUserText(messages: JsonRecord[]): string {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
     if (message?.role !== "user") continue;
+    if (message.internal_context === "goal_continuation") continue;
     return extractCurrentUserRequestText(stripRuntimeContext(messageContentText(message.content))).trim();
   }
   return "";

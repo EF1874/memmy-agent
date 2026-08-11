@@ -171,6 +171,8 @@ describe("memory LLM token usage recording", () => {
 
     const embedder = createEmbedder({
       provider: "openai_compatible",
+      mode: "custom",
+      sourceProvider: "openai",
       endpoint: "https://api.example.test/v1",
       model: "embedding-model",
       apiKey: "sk-test",
