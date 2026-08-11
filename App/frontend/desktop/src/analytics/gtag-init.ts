@@ -1,4 +1,4 @@
-import { mergeAnalyticsEventParams } from "./analytics-context.js";
+import { setDesktopAnalyticsClientId, trackCloudAnalyticsEvent } from "./cloud-analytics.js";
 import {
   resolveAnalyticsAppEdition,
   resolveAnalyticsAppEnv,
@@ -49,6 +49,8 @@ export function initGtag(): void {
     console.log("[analytics] gtag.js script loaded successfully");
     window.gtag("get", MEASUREMENT_ID, "client_id", (clientId: unknown) => {
       if (typeof clientId === "string" && clientId) {
+        // Memory gate for Desktop → cloud UI events (do not read shared file here).
+        setDesktopAnalyticsClientId(clientId);
         window.memmy?.sendAnalyticsClientId({
           clientId,
           appEnv: resolveAnalyticsAppEnv(),
@@ -58,22 +60,20 @@ export function initGtag(): void {
       }
     });
 
-    // app_launch is reported directly by gtag (GA4's automatic session_start/first_visit collection is also triggered here)
+    // app_launch stays on gtag so GA4 can auto-collect session_start/first_visit.
     window.gtag("event", "app_launch");
     console.log("[analytics] app_launch sent via gtag");
   };
 }
 
-/** Sends a single GA4 event (wraps the gtag('event', ...) call). */
+/**
+ * Desktop UI events go through cloud `/api/analytics/events`.
+ * Kept as `gtagEvent` for call-site compatibility; only `app_launch` uses gtag directly.
+ */
 export function gtagEvent(
   name: string,
   params?: Record<string, string | number | boolean>
 ): void {
-  if (!MEASUREMENT_ID || typeof window === "undefined" || typeof window.gtag !== "function") {
-    console.log("[analytics] gtagEvent skipped (gtag not ready):", name, params);
-    return;
-  }
-  const mergedParams = mergeAnalyticsEventParams(params);
-  console.log("[analytics] gtagEvent:", name, mergedParams);
-  window.gtag("event", name, mergedParams);
+  console.log("[analytics] gtagEvent → cloud:", name, params);
+  trackCloudAnalyticsEvent(name, params);
 }
