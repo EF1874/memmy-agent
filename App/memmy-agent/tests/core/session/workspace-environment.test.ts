@@ -9,6 +9,7 @@ import {
   captureGoalWorkspaceBaseline,
   readWorkspaceEnvironment,
   readWorkspaceFileDiff,
+  type WorkspaceEnvironmentContext,
 } from "../../../src/core/session/workspace-environment.js";
 
 const roots: string[] = [];
@@ -42,6 +43,14 @@ function sessionFor(root: string): Session {
   return session;
 }
 
+function contextFor(session: Session): WorkspaceEnvironmentContext {
+  return {
+    scope: { kind: "session", key: session.key },
+    cwd: String(session.metadata.webuiWorkspaceCwd),
+    metadata: session.metadata,
+  };
+}
+
 function activateGoal(session: Session, goalId: string): void {
   const now = new Date().toISOString();
   session.metadata[GOAL_STATE_KEY] = {
@@ -57,17 +66,17 @@ function activateGoal(session: Session, goalId: string): void {
 }
 
 describe("workspace environment", () => {
-  it("attributes Goal changes without claiming pre-existing dirty files", () => {
+  it("attributes Goal changes without claiming pre-existing dirty files", async () => {
     const root = repository();
     const session = sessionFor(root);
     const goalId = "8f59f58a-7295-4c34-8e03-55e7035a5a8d";
     fs.writeFileSync(path.join(root, "tracked.txt"), "dirty before goal\n", "utf8");
 
-    captureGoalWorkspaceBaseline(session, goalId);
+    await captureGoalWorkspaceBaseline(session, goalId);
     activateGoal(session, goalId);
     fs.writeFileSync(path.join(root, "goal-file.ts"), "export const goal = true;\n", "utf8");
 
-    const { snapshot, files } = readWorkspaceEnvironment(session);
+    const { snapshot, files } = await readWorkspaceEnvironment(contextFor(session));
     expect(snapshot).toMatchObject({
       status: "ready",
       repository: { worktree: "dirty" },
@@ -84,50 +93,52 @@ describe("workspace environment", () => {
     expect(files.find((file) => file.path === "goal-file.ts")?.attribution).toBe("goal");
   });
 
-  it("marks a pre-existing dirty file uncertain when it changes during the Goal", () => {
+  it("marks a pre-existing dirty file uncertain when it changes during the Goal", async () => {
     const root = repository();
     const session = sessionFor(root);
     const goalId = "8f59f58a-7295-4c34-8e03-55e7035a5a8d";
     fs.writeFileSync(path.join(root, "tracked.txt"), "dirty before goal\n", "utf8");
-    captureGoalWorkspaceBaseline(session, goalId);
+    await captureGoalWorkspaceBaseline(session, goalId);
     activateGoal(session, goalId);
     fs.writeFileSync(path.join(root, "tracked.txt"), "changed during goal\n", "utf8");
 
-    const { snapshot, files } = readWorkspaceEnvironment(session);
+    const { snapshot, files } = await readWorkspaceEnvironment(contextFor(session));
     expect(files[0]?.attribution).toBe("uncertain");
     expect(snapshot.goal).toMatchObject({ uncertain_files: 1, completion_audit: "risk" });
   });
 
-  it("treats staging a pre-existing dirty file as a Goal-time mutation", () => {
+  it("treats staging a pre-existing dirty file as a Goal-time mutation", async () => {
     const root = repository();
     const session = sessionFor(root);
     const goalId = "8f59f58a-7295-4c34-8e03-55e7035a5a8d";
     fs.writeFileSync(path.join(root, "tracked.txt"), "dirty before goal\n", "utf8");
-    captureGoalWorkspaceBaseline(session, goalId);
+    await captureGoalWorkspaceBaseline(session, goalId);
     activateGoal(session, goalId);
 
     git(root, ["add", "tracked.txt"]);
 
-    expect(readWorkspaceEnvironment(session).files[0]?.attribution).toBe("uncertain");
+    expect((await readWorkspaceEnvironment(contextFor(session))).files[0]?.attribution).toBe("uncertain");
   });
 
-  it("returns a bounded diff only for a currently changed tracked file", () => {
+  it("returns a bounded diff only for a currently changed tracked file", async () => {
     const root = repository();
     const session = sessionFor(root);
     fs.writeFileSync(path.join(root, "tracked.txt"), "changed\n", "utf8");
 
-    expect(readWorkspaceFileDiff(session, "tracked.txt")).toMatchObject({
+    const environment = await readWorkspaceEnvironment(contextFor(session));
+    expect(await readWorkspaceFileDiff(environment, "tracked.txt")).toMatchObject({
       path: "tracked.txt",
       unavailable_reason: null,
     });
-    expect(readWorkspaceFileDiff(session, "tracked.txt")?.diff).toContain("+changed");
-    expect(readWorkspaceFileDiff(session, "../outside.txt")).toBeNull();
+    expect((await readWorkspaceFileDiff(environment, "tracked.txt"))?.diff).toContain("+changed");
+    expect(await readWorkspaceFileDiff(environment, "../outside.txt")).toBeNull();
   });
 
-  it("reports non-Git workspaces explicitly", () => {
+  it("reports non-Git workspaces explicitly", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-workspace-no-git-"));
     roots.push(root);
-    expect(readWorkspaceEnvironment(sessionFor(root)).snapshot).toMatchObject({
+    const session = sessionFor(root);
+    expect((await readWorkspaceEnvironment(contextFor(session))).snapshot).toMatchObject({
       status: "not_git",
       repository: null,
       changes: null,

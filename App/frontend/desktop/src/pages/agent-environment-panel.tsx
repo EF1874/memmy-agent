@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -15,7 +15,7 @@ import type {
   MemmyAgentUiLanguage,
   WorkspaceEnvironmentDiff,
   WorkspaceEnvironmentFile,
-  WorkspaceEnvironmentSnapshot,
+  WorkspaceEnvironmentState,
 } from "../api/memmy-agent-client.js";
 
 type AgentEnvironmentPanelProps = {
@@ -23,7 +23,10 @@ type AgentEnvironmentPanelProps = {
   scope: "session" | "project";
   scopeKey: string;
   language: MemmyAgentUiLanguage;
-  running: boolean;
+  environment: WorkspaceEnvironmentState | null;
+  loading: boolean;
+  error: string | null;
+  onRefresh: () => Promise<void>;
   onClose: () => void;
 };
 
@@ -35,83 +38,33 @@ function countLabel(value: number | null, prefix: "+" | "-"): string {
   return value == null ? "?" : `${prefix}${value.toLocaleString()}`;
 }
 
-async function loadEnvironment(client: MemmyAgentClient, scope: "session" | "project", scopeKey: string) {
-  const readSnapshot = scope === "session"
-    ? () => client.readWorkspaceEnvironment(scopeKey)
-    : () => client.readProjectWorkspaceEnvironment(scopeKey);
-  const readFiles = scope === "session"
-    ? () => client.listWorkspaceEnvironmentFiles(scopeKey)
-    : () => client.listProjectWorkspaceEnvironmentFiles(scopeKey);
-  let [snapshot, fileEnvelope] = await Promise.all([
-    readSnapshot(),
-    readFiles(),
-  ]);
-  if (snapshot.session_key !== fileEnvelope.session_key || snapshot.revision !== fileEnvelope.revision) {
-    [snapshot, fileEnvelope] = await Promise.all([
-      readSnapshot(),
-      readFiles(),
-    ]);
-  }
-  if (snapshot.session_key !== fileEnvelope.session_key || snapshot.revision !== fileEnvelope.revision) {
-    throw new Error("workspace_environment_stale");
-  }
-  return { snapshot, files: fileEnvelope.files };
-}
-
 export function AgentEnvironmentPanel({
   client,
   scope,
   scopeKey,
   language,
-  running,
+  environment,
+  loading,
+  error,
+  onRefresh,
   onClose,
 }: AgentEnvironmentPanelProps) {
   const zh = language === "zh-CN";
-  const [snapshot, setSnapshot] = useState<WorkspaceEnvironmentSnapshot | null>(null);
-  const [files, setFiles] = useState<WorkspaceEnvironmentFile[]>([]);
   const [diff, setDiff] = useState<WorkspaceEnvironmentDiff | null>(null);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [filesOpen, setFilesOpen] = useState(true);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const refresh = useCallback(async () => {
-    if (!client || !scopeKey) return;
-    setLoading(true);
-    setError(null);
-    try {
-      const next = await loadEnvironment(client, scope, scopeKey);
-      setSnapshot(next.snapshot);
-      setFiles(next.files);
-      setDiff(null);
-      setSelectedPath(null);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setLoading(false);
-    }
-  }, [client, scope, scopeKey]);
+  const diffRequestIdRef = useRef(0);
+  const snapshot = environment?.snapshot ?? null;
+  const files = environment?.files ?? [];
 
   useEffect(() => {
-    let active = true;
-    if (!client || !scopeKey) return;
-    setLoading(true);
-    setError(null);
-    void loadEnvironment(client, scope, scopeKey).then((next) => {
-      if (!active) return;
-      setSnapshot(next.snapshot);
-      setFiles(next.files);
-      setDiff(null);
-      setSelectedPath(null);
-    }).catch((cause) => {
-      if (active) setError(cause instanceof Error ? cause.message : String(cause));
-    }).finally(() => {
-      if (active) setLoading(false);
-    });
+    diffRequestIdRef.current += 1;
+    setDiff(null);
+    setSelectedPath(null);
     return () => {
-      active = false;
+      diffRequestIdRef.current += 1;
     };
-  }, [client, scope, scopeKey, running]);
+  }, [scope, scopeKey, snapshot?.revision]);
 
   useEffect(() => {
     function closeOnEscape(event: globalThis.KeyboardEvent) {
@@ -124,24 +77,34 @@ export function AgentEnvironmentPanel({
   async function selectFile(file: WorkspaceEnvironmentFile) {
     if (!client) return;
     if (selectedPath === file.path) {
+      diffRequestIdRef.current += 1;
       setSelectedPath(null);
       setDiff(null);
       return;
     }
+    const requestId = ++diffRequestIdRef.current;
     setSelectedPath(file.path);
     setDiff(null);
     try {
-      setDiff(scope === "session"
-        ? await client.readWorkspaceEnvironmentDiff(scopeKey, file.path)
-        : await client.readProjectWorkspaceEnvironmentDiff(scopeKey, file.path));
+      const next = await client.readWorkspaceEnvironmentDiff({ kind: scope, key: scopeKey }, file.path);
+      if (requestId === diffRequestIdRef.current) setDiff(next);
     } catch (cause) {
-      setDiff({
-        path: file.path,
-        diff: "",
-        truncated: false,
-        unavailable_reason: cause instanceof Error ? cause.message : "diff_unavailable",
-      });
+      if (requestId === diffRequestIdRef.current) {
+        setDiff({
+          path: file.path,
+          diff: "",
+          truncated: false,
+          unavailable_reason: cause instanceof Error ? cause.message : "diff_unavailable",
+        });
+      }
     }
+  }
+
+  async function refresh() {
+    diffRequestIdRef.current += 1;
+    setDiff(null);
+    setSelectedPath(null);
+    await onRefresh();
   }
 
   const statusLabel = snapshot?.status === "not_git"

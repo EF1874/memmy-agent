@@ -48,6 +48,7 @@ import { TerminalRunControl } from "../../core/session/terminal-session-control.
 import {
   readWorkspaceEnvironment,
   readWorkspaceFileDiff,
+  type WorkspaceEnvironmentContext,
 } from "../../core/session/workspace-environment.js";
 import { scrubSubagentMessagesForChannel } from "../../utils/subagent-channel-display.js";
 import {
@@ -103,6 +104,9 @@ import { MAX_FILE_SIZE } from "../../utils/media-decode.js";
 type Query = Record<string, string[]>;
 type HttpRequestLike = { path: string; method?: string; headers?: http.IncomingHttpHeaders | Record<string, any>; body?: Buffer | string };
 type HttpLikeResponse = { status: number; headers: Record<string, string>; body: Buffer | string };
+type WorkspaceEnvironmentContextResult =
+  | { ok: true; context: WorkspaceEnvironmentContext }
+  | { ok: false; response: HttpLikeResponse };
 type RuntimeModelNameResolver = (() => string | null | undefined) | null;
 type RuntimeToolNamesResolver = (() => string[] | null | undefined) | null;
 type WebuiMediaKind = "image" | "video" | "file";
@@ -1600,11 +1604,11 @@ export class WebSocketChannel extends BaseChannel {
     }
   }
 
-  handleProjectWorkspaceEnvironment(
+  async handleProjectWorkspaceEnvironment(
     request: HttpRequestLike,
     rawId: string,
-    view: "snapshot" | "files" | "diff",
-  ): HttpLikeResponse {
+    view: "environment" | "diff",
+  ): Promise<HttpLikeResponse> {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
     if ((request.method ?? "GET").toUpperCase() !== "GET") return httpError(405, "method not allowed");
     try {
@@ -1613,30 +1617,32 @@ export class WebSocketChannel extends BaseChannel {
       const project = this.activeProject(id);
       const cwd = assertWebuiWorkspaceAvailable(project.rootPath);
       if (cwd !== project.rootPath) throw new WebuiProjectError("project_directory_unavailable", 422);
-      const context = {
-        key: `project:${id}`,
+      const context: WorkspaceEnvironmentContext = {
+        scope: { kind: "project", key: id },
+        cwd,
         metadata: {
           [WEBUI_PROJECT_ID_METADATA_KEY]: id,
           [WEBUI_WORKSPACE_CWD_METADATA_KEY]: cwd,
         },
       };
-      const environment = readWorkspaceEnvironment(context);
-      if (view === "snapshot") return httpJsonResponse(environment.snapshot);
-      if (view === "files") {
-        return httpJsonResponse({
-          session_key: environment.snapshot.session_key,
-          revision: environment.snapshot.revision,
-          files: environment.files,
-        });
-      }
-      const [, query] = parseRequestPath(String(request?.path ?? ""));
-      const relativePath = queryFirst(query, "path");
-      if (!relativePath) return httpError(400, "missing path");
-      const diff = readWorkspaceFileDiff(context, relativePath);
-      return diff ? httpJsonResponse(diff) : httpError(404, "changed file not found");
+      return await this.workspaceEnvironmentResponse(request, context, view);
     } catch (error) {
       return this.projectErrorResponse(error);
     }
+  }
+
+  private async workspaceEnvironmentResponse(
+    request: HttpRequestLike,
+    context: WorkspaceEnvironmentContext,
+    view: "environment" | "diff",
+  ): Promise<HttpLikeResponse> {
+    const environment = await readWorkspaceEnvironment(context);
+    if (view === "environment") return httpJsonResponse(environment);
+    const [, query] = parseRequestPath(String(request.path ?? ""));
+    const relativePath = queryFirst(query, "path");
+    if (!relativePath) return httpError(400, "missing path");
+    const diff = await readWorkspaceFileDiff(environment, relativePath);
+    return diff ? httpJsonResponse(diff) : httpError(404, "changed file not found");
   }
 
   settingsErrorResponse(error: any): HttpLikeResponse {
@@ -1807,37 +1813,40 @@ export class WebSocketChannel extends BaseChannel {
     return httpJsonResponse(data);
   }
 
-  private workspaceEnvironmentSession(key: string): Session | HttpLikeResponse {
-    if (!this.sessionManager) return httpError(503, "session manager unavailable");
+  private workspaceEnvironmentSession(key: string): WorkspaceEnvironmentContextResult {
+    if (!this.sessionManager) return { ok: false, response: httpError(503, "session manager unavailable") };
     const decodedKey = decodeGuiSessionApiKey(key);
-    if (decodedKey == null) return invalidGuiSessionKeyResponse(key);
+    if (decodedKey == null) return { ok: false, response: invalidGuiSessionKeyResponse(key) };
     const resolved = this.resolveGuiSessionResponse(decodedKey);
-    if ("status" in resolved) return resolved;
+    if ("status" in resolved) return { ok: false, response: resolved };
     const session = this.sessionManager.get?.(resolved.canonicalSessionKey) as Session | null;
-    return session ?? httpError(404, "session not found");
+    if (!session) return { ok: false, response: httpError(404, "session not found") };
+    let cwd: string | null = null;
+    try {
+      cwd = readWebuiSessionBinding(session).cwd;
+    } catch {
+      // Preserve the session scope so the service can report workspace_unavailable.
+    }
+    return {
+      ok: true,
+      context: {
+        scope: { kind: "session", key: resolved.guiSessionKey },
+        cwd,
+        metadata: session.metadata,
+      },
+    };
   }
 
-  handleWorkspaceEnvironment(request: any, key: string, view: "snapshot" | "files" | "diff"): HttpLikeResponse {
+  async handleWorkspaceEnvironment(
+    request: HttpRequestLike,
+    key: string,
+    view: "environment" | "diff",
+  ): Promise<HttpLikeResponse> {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
     if ((request.method ?? "GET").toUpperCase() !== "GET") return httpError(405, "method not allowed");
-    const session = this.workspaceEnvironmentSession(key);
-    if ("status" in session) return session;
-    const environment = readWorkspaceEnvironment(session);
-    const publicSessionKey = decodeGuiSessionApiKey(key) ?? environment.snapshot.session_key;
-    const snapshot = { ...environment.snapshot, session_key: publicSessionKey };
-    if (view === "snapshot") return httpJsonResponse(snapshot);
-    if (view === "files") {
-      return httpJsonResponse({
-        session_key: snapshot.session_key,
-        revision: snapshot.revision,
-        files: environment.files,
-      });
-    }
-    const [, query] = parseRequestPath(String(request?.path ?? ""));
-    const relativePath = queryFirst(query, "path");
-    if (!relativePath) return httpError(400, "missing path");
-    const diff = readWorkspaceFileDiff(session, relativePath);
-    return diff ? httpJsonResponse(diff) : httpError(404, "changed file not found");
+    const result = this.workspaceEnvironmentSession(key);
+    if (!result.ok) return result.response;
+    return this.workspaceEnvironmentResponse(request, result.context, view);
   }
 
   handleWebuiThreadGet(request: any, key: string): HttpLikeResponse {
@@ -2617,9 +2626,7 @@ export class WebSocketChannel extends BaseChannel {
     let match = got.match(/^\/api\/sessions\/([^/]+)\/messages$/);
     if (match) return this.handleSessionMessages(request, match[1]);
     match = got.match(/^\/api\/sessions\/([^/]+)\/environment$/);
-    if (match) return this.handleWorkspaceEnvironment(request, match[1], "snapshot");
-    match = got.match(/^\/api\/sessions\/([^/]+)\/environment\/files$/);
-    if (match) return this.handleWorkspaceEnvironment(request, match[1], "files");
+    if (match) return this.handleWorkspaceEnvironment(request, match[1], "environment");
     match = got.match(/^\/api\/sessions\/([^/]+)\/environment\/diff$/);
     if (match) return this.handleWorkspaceEnvironment(request, match[1], "diff");
     match = got.match(/^\/api\/sessions\/([^/]+)\/webui-thread$/);
@@ -2631,9 +2638,7 @@ export class WebSocketChannel extends BaseChannel {
     match = got.match(/^\/api\/sessions\/([^/]+)\/title$/);
     if (match) return this.handleSessionTitleUpdate(request, match[1]);
     match = got.match(/^\/api\/projects\/([^/]+)\/environment$/);
-    if (match) return this.handleProjectWorkspaceEnvironment(request, match[1], "snapshot");
-    match = got.match(/^\/api\/projects\/([^/]+)\/environment\/files$/);
-    if (match) return this.handleProjectWorkspaceEnvironment(request, match[1], "files");
+    if (match) return this.handleProjectWorkspaceEnvironment(request, match[1], "environment");
     match = got.match(/^\/api\/projects\/([^/]+)\/environment\/diff$/);
     if (match) return this.handleProjectWorkspaceEnvironment(request, match[1], "diff");
     match = got.match(/^\/api\/projects\/([^/]+)\/reveal$/);

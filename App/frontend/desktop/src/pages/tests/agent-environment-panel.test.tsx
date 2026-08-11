@@ -9,7 +9,8 @@ import { AgentEnvironmentPanel } from "../agent-environment-panel.js";
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const snapshot: WorkspaceEnvironmentSnapshot = {
-  session_key: "websocket:chat-1",
+  scope_kind: "session",
+  scope_key: "websocket:chat-1",
   cwd: "/workspace/memmy-agent",
   status: "ready",
   revision: "rev-1",
@@ -39,6 +40,14 @@ const snapshot: WorkspaceEnvironmentSnapshot = {
   },
 };
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
 describe("AgentEnvironmentPanel", () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -57,23 +66,19 @@ describe("AgentEnvironmentPanel", () => {
 
   it("renders repository and Goal evidence and loads a selected diff", async () => {
     const onClose = vi.fn();
+    const onRefresh = vi.fn(async () => undefined);
+    const files = [{
+      path: "src/panel.tsx",
+      status: ".M",
+      staged: false,
+      unstaged: true,
+      untracked: false,
+      conflict: false,
+      additions: 8,
+      deletions: 1,
+      attribution: "goal" as const,
+    }];
     const client = {
-      readWorkspaceEnvironment: vi.fn(async () => snapshot),
-      listWorkspaceEnvironmentFiles: vi.fn(async () => ({
-        session_key: "websocket:chat-1",
-        revision: "rev-1",
-        files: [{
-          path: "src/panel.tsx",
-          status: ".M",
-          staged: false,
-          unstaged: true,
-          untracked: false,
-          conflict: false,
-          additions: 8,
-          deletions: 1,
-          attribution: "goal" as const,
-        }],
-      })),
       readWorkspaceEnvironmentDiff: vi.fn(async () => ({
         path: "src/panel.tsx",
         diff: "+export function Panel() {}",
@@ -89,7 +94,10 @@ describe("AgentEnvironmentPanel", () => {
           scope="session"
           scopeKey="websocket:chat-1"
           language="zh-CN"
-          running={false}
+          environment={{ snapshot, files }}
+          loading={false}
+          error={null}
+          onRefresh={onRefresh}
           onClose={onClose}
         />
       );
@@ -103,7 +111,10 @@ describe("AgentEnvironmentPanel", () => {
     expect(fileButton).toBeTruthy();
     await act(async () => fileButton!.click());
 
-    expect(client.readWorkspaceEnvironmentDiff).toHaveBeenCalledWith("websocket:chat-1", "src/panel.tsx");
+    expect(client.readWorkspaceEnvironmentDiff).toHaveBeenCalledWith(
+      { kind: "session", key: "websocket:chat-1" },
+      "src/panel.tsx",
+    );
     expect(container.textContent).toContain("+export function Panel() {}");
 
     act(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })));
@@ -111,15 +122,8 @@ describe("AgentEnvironmentPanel", () => {
   });
 
   it("loads project environment before a Session exists", async () => {
-    const projectSnapshot = { ...snapshot, session_key: "project:project-1", goal: null };
-    const client = {
-      readProjectWorkspaceEnvironment: vi.fn(async () => projectSnapshot),
-      listProjectWorkspaceEnvironmentFiles: vi.fn(async () => ({
-        session_key: "project:project-1",
-        revision: "rev-1",
-        files: [],
-      })),
-    } as unknown as MemmyAgentClient;
+    const projectSnapshot = { ...snapshot, scope_kind: "project" as const, scope_key: "project-1", goal: null };
+    const client = {} as MemmyAgentClient;
 
     await act(async () => {
       root.render(
@@ -128,14 +132,75 @@ describe("AgentEnvironmentPanel", () => {
           scope="project"
           scopeKey="project-1"
           language="zh-CN"
-          running={false}
+          environment={{ snapshot: projectSnapshot, files: [] }}
+          loading={false}
+          error={null}
+          onRefresh={vi.fn(async () => undefined)}
           onClose={vi.fn()}
         />
       );
     });
 
-    expect(client.readProjectWorkspaceEnvironment).toHaveBeenCalledWith("project-1");
     expect(container.textContent).toContain("zy_git_v1.0.7");
     expect(container.textContent).not.toContain("Goal 证据");
+  });
+
+  it("ignores an older diff response after another file is selected", async () => {
+    const first = deferred<{
+      path: string;
+      diff: string;
+      truncated: boolean;
+      unavailable_reason: null;
+    }>();
+    const second = deferred<{
+      path: string;
+      diff: string;
+      truncated: boolean;
+      unavailable_reason: null;
+    }>();
+    const client = {
+      readWorkspaceEnvironmentDiff: vi.fn()
+        .mockReturnValueOnce(first.promise)
+        .mockReturnValueOnce(second.promise),
+    } as unknown as MemmyAgentClient;
+    const files = ["src/a.ts", "src/b.ts"].map((path) => ({
+      path,
+      status: ".M",
+      staged: false,
+      unstaged: true,
+      untracked: false,
+      conflict: false,
+      additions: 1,
+      deletions: 0,
+      attribution: "goal" as const,
+    }));
+
+    await act(async () => {
+      root.render(
+        <AgentEnvironmentPanel
+          client={client}
+          scope="session"
+          scopeKey="websocket:chat-1"
+          language="zh-CN"
+          environment={{ snapshot, files }}
+          loading={false}
+          error={null}
+          onRefresh={vi.fn(async () => undefined)}
+          onClose={vi.fn()}
+        />
+      );
+    });
+
+    const buttons = [...container.querySelectorAll("button")];
+    const firstButton = buttons.find((button) => button.textContent?.includes("src/a.ts"));
+    const secondButton = buttons.find((button) => button.textContent?.includes("src/b.ts"));
+    await act(async () => firstButton!.click());
+    await act(async () => secondButton!.click());
+    await act(async () => second.resolve({ path: "src/b.ts", diff: "+new-b", truncated: false, unavailable_reason: null }));
+    expect(container.textContent).toContain("+new-b");
+
+    await act(async () => first.resolve({ path: "src/a.ts", diff: "+stale-a", truncated: false, unavailable_reason: null }));
+    expect(container.textContent).toContain("+new-b");
+    expect(container.textContent).not.toContain("+stale-a");
   });
 });

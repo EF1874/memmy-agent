@@ -2,15 +2,16 @@
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { MemmyAgentClient, WorkspaceEnvironmentSnapshot } from "../../api/memmy-agent-client.js";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { WorkspaceEnvironmentSnapshot } from "../../api/memmy-agent-client.js";
 import { AgentWorkspaceContext } from "../agent-workspace-context.js";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 function environment(branch: string | null = "zy_git_v1.0.7"): WorkspaceEnvironmentSnapshot {
   return {
-    session_key: "project:project-1",
+    scope_kind: "project",
+    scope_key: "project-1",
     cwd: "/workspace/memmy-agent",
     status: "ready",
     revision: `revision-${branch ?? "detached"}`,
@@ -44,39 +45,25 @@ describe("AgentWorkspaceContext", () => {
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
-    vi.restoreAllMocks();
   });
 
-  it("shows the real local mode and current branch for a Git project", async () => {
-    const readProjectWorkspaceEnvironment = vi.fn()
-      .mockResolvedValueOnce(environment())
-      .mockResolvedValueOnce(environment("feature/refine-composer"));
-    const client = { readProjectWorkspaceEnvironment } as unknown as MemmyAgentClient;
-
-    await act(async () => {
-      root.render(<AgentWorkspaceContext client={client} projectId="project-1" language="zh-CN" />);
+  it("shows the local mode and current branch from the shared snapshot", () => {
+    act(() => {
+      root.render(<AgentWorkspaceContext snapshot={environment()} language="zh-CN" />);
     });
 
     expect(container.textContent).toContain("本地");
     expect(container.textContent).toContain("zy_git_v1.0.7");
-
-    await act(async () => window.dispatchEvent(new Event("focus")));
-    expect(container.textContent).toContain("feature/refine-composer");
-    expect(readProjectWorkspaceEnvironment).toHaveBeenCalledTimes(2);
   });
 
-  it("renders nothing for a non-Git project", async () => {
-    const client = {
-      readProjectWorkspaceEnvironment: vi.fn(async () => ({
+  it("renders nothing when the shared snapshot is not a Git repository", () => {
+    act(() => {
+      root.render(<AgentWorkspaceContext snapshot={{
         ...environment(),
-        status: "not_git" as const,
+        status: "not_git",
         repository: null,
         changes: null,
-      })),
-    } as unknown as MemmyAgentClient;
-
-    await act(async () => {
-      root.render(<AgentWorkspaceContext client={client} projectId="project-1" language="zh-CN" />);
+      }} language="zh-CN" />);
     });
 
     expect(container.innerHTML).toBe("");

@@ -68,6 +68,7 @@ import { AgentAttachmentCard, splitAgentAttachmentName } from "./agent-file-atta
 import { AgentGoalBar, type AgentGoalControlRequest } from "./agent-goal-bar.js";
 import { AgentEnvironmentPanel } from "./agent-environment-panel.js";
 import { AgentWorkspaceContext } from "./agent-workspace-context.js";
+import { resolveWorkspaceEnvironmentScope, useWorkspaceEnvironment } from "./use-workspace-environment.js";
 import { AgentQueuedMessageList } from "./agent-queued-message-list.js";
 import { AgentThreadMessages, ChatImageLightbox } from "./agent-thread-messages.js";
 import { AppFrame } from "./app-frame.js";
@@ -854,11 +855,10 @@ export function HomePage() {
   const selectedDraftProject = draftTarget.kind === "project"
     ? state.agent.projects.find((project) => project.id === draftTarget.projectId) ?? null
     : null;
-  const environmentScope = state.agent.currentSessionKey
-    ? { kind: "session" as const, key: state.agent.currentSessionKey }
-    : selectedDraftProject
-      ? { kind: "project" as const, key: selectedDraftProject.id }
-      : null;
+  const environmentScope = resolveWorkspaceEnvironmentScope(
+    state.agent.currentSessionKey,
+    selectedDraftProject?.id ?? null,
+  );
   const currentSessionProjectBlocked = state.agent.projectRegistryState === "corrupt"
     && Boolean(
       state.agent.currentSessionKey
@@ -898,6 +898,11 @@ export function HomePage() {
       state.agent.runStartedAtByChatId[state.agent.currentChatId] ||
       state.agent.optimisticSendingByChatId[state.agent.currentChatId]
     )
+  );
+  const workspaceEnvironment = useWorkspaceEnvironment(
+    clients?.memmyAgent ?? null,
+    environmentScope,
+    environmentScope?.kind === "session" && isCurrentAgentRunning,
   );
   const currentGoal = state.agent.goalState?.goal_id ? state.agent.goalState : null;
   const isCurrentGoalActive = currentGoal?.status === "active";
@@ -2433,7 +2438,10 @@ export function HomePage() {
       scope={environmentScope.kind}
       scopeKey={environmentScope.key}
       language={language}
-      running={environmentScope.kind === "session" && isCurrentAgentRunning}
+      environment={workspaceEnvironment.data}
+      loading={workspaceEnvironment.loading}
+      error={workspaceEnvironment.error}
+      onRefresh={workspaceEnvironment.refresh}
       onClose={() => setEnvironmentPanelPreference(false)}
     />
   ) : null;
@@ -2569,8 +2577,7 @@ export function HomePage() {
                     onChooseOther={() => void selectOtherProjectFolder()}
                   />
                   <AgentWorkspaceContext
-                    client={clients?.memmyAgent ?? null}
-                    projectId={selectedDraftProject?.id ?? null}
+                    snapshot={workspaceEnvironment.data?.snapshot ?? null}
                     language={language}
                   />
                 </div>

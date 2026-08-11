@@ -14,11 +14,13 @@ const routeMocks = vi.hoisted(() => ({
   mcpPresetsSettingsAction: vi.fn(),
 }));
 const childProcessMocks = vi.hoisted(() => ({
+  execFile: vi.fn((_command?: string, _args?: string[], _options?: unknown, callback?: (...args: any[]) => void) => callback?.(null, "", "")),
   spawn: vi.fn(() => ({ unref: vi.fn() })),
   spawnSync: vi.fn((_command?: string, _args?: string[]) => ({ status: 0, stderr: "" })),
 }));
 
 vi.mock("node:child_process", () => ({
+  execFile: childProcessMocks.execFile,
   spawn: childProcessMocks.spawn,
   spawnSync: childProcessMocks.spawnSync,
 }));
@@ -44,6 +46,8 @@ afterEach(async () => {
   childProcessMocks.spawn.mockImplementation(() => ({ unref: vi.fn() }));
   childProcessMocks.spawnSync.mockReset();
   childProcessMocks.spawnSync.mockImplementation((_command?: string, _args?: string[]) => ({ status: 0, stderr: "" }));
+  childProcessMocks.execFile.mockReset();
+  childProcessMocks.execFile.mockImplementation((_command?: string, _args?: string[], _options?: unknown, callback?: (...args: any[]) => void) => callback?.(null, "", ""));
   routeMocks.mcpPresetsSettingsAction.mockReset();
   if (originalMemmyAgentConfig === undefined) delete process.env.MEMMY_CONFIG;
   else process.env.MEMMY_CONFIG = originalMemmyAgentConfig;
@@ -183,20 +187,16 @@ describe("WebSocket HTTP route helpers", () => {
   }
 
   function mockDirtyGitWorkspace(root: string): void {
-    childProcessMocks.spawnSync.mockImplementation((_command?: string, args: string[] = []) => {
-      if (args[0] === "rev-parse") return { status: 0, stdout: `${root}\n`, stderr: "" };
+    childProcessMocks.execFile.mockImplementation((_command?: string, args: string[] = [], _options?: unknown, callback?: (...args: any[]) => void) => {
+      if (args[0] === "rev-parse") return callback?.(null, `${root}\n`, "");
       if (args[0] === "status") {
-        return {
-          status: 0,
-          stdout: "# branch.oid 84d10f8f00\u0000# branch.head zy_git_v1.0.7\u00001 .M N... 100644 100644 100644 abc abc tracked.ts\u0000",
-          stderr: "",
-        };
+        return callback?.(null, "# branch.oid 84d10f8f00\u0000# branch.head zy_git_v1.0.7\u00001 .M N... 100644 100644 100644 abc abc tracked.ts\u0000", "");
       }
       if (args[0] === "diff" && args.includes("--numstat")) {
-        return { status: 0, stdout: "2\t1\ttracked.ts\0", stderr: "" };
+        return callback?.(null, "2\t1\ttracked.ts\0", "");
       }
-      if (args[0] === "diff") return { status: 0, stdout: "+changed\n", stderr: "" };
-      return { status: 1, stdout: "", stderr: "unexpected git command" };
+      if (args[0] === "diff") return callback?.(null, "+changed\n", "");
+      return callback?.(new Error("unexpected git command"), "", "unexpected git command");
     });
   }
 
@@ -288,7 +288,7 @@ describe("WebSocket HTTP route helpers", () => {
     expect(admin.stop).toHaveBeenCalledWith("feishu");
   });
 
-  it("serves read-only workspace environment snapshot, files, and diff routes", async () => {
+  it("serves a read-only workspace environment and selected diff", async () => {
     const root = tmpRoot();
     fs.writeFileSync(path.join(root, "tracked.ts"), "changed\n", "utf8");
     const manager = seedSession(path.join(root, "sessions"), "websocket:environment", root);
@@ -303,16 +303,15 @@ describe("WebSocket HTTP route helpers", () => {
     });
     expect(snapshotResponse?.status).toBe(200);
     expect(responseJson(snapshotResponse!)).toMatchObject({
-      status: "ready",
-      repository: { branch: "zy_git_v1.0.7", head_sha: "84d10f8f00" },
-      changes: { file_count: 1, additions: 2, deletions: 1 },
+      snapshot: {
+        scope_kind: "session",
+        scope_key: "websocket:environment",
+        status: "ready",
+        repository: { branch: "zy_git_v1.0.7", head_sha: "84d10f8f00" },
+        changes: { file_count: 1, additions: 2, deletions: 1 },
+      },
+      files: [{ path: "tracked.ts", status: ".M" }],
     });
-
-    const filesResponse = await channel.dispatchHttp(localConnection, {
-      path: `/api/sessions/${encoded}/environment/files`,
-      headers,
-    });
-    expect(responseJson(filesResponse!).files).toMatchObject([{ path: "tracked.ts", status: ".M" }]);
 
     const diffResponse = await channel.dispatchHttp(localConnection, {
       path: `/api/sessions/${encoded}/environment/diff?path=tracked.ts`,
@@ -339,11 +338,14 @@ describe("WebSocket HTTP route helpers", () => {
 
     expect(response?.status).toBe(200);
     expect(responseJson(response!)).toMatchObject({
-      session_key: `project:${project.id}`,
-      cwd: fs.realpathSync(workspace),
-      status: "ready",
-      repository: { branch: "zy_git_v1.0.7" },
-      goal: null,
+      snapshot: {
+        scope_kind: "project",
+        scope_key: project.id,
+        cwd: fs.realpathSync(workspace),
+        status: "ready",
+        repository: { branch: "zy_git_v1.0.7" },
+        goal: null,
+      },
     });
   });
 

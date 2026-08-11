@@ -10,6 +10,7 @@ import { AppProviders } from "../../app/providers.js";
 import { FOCUSED_AGENT_CHAT_STORAGE_KEY } from "../../app/routes.js";
 import type { SlashCommandStorageLike } from "../agent-command-palette.js";
 import { buildAgentDisplayUnits } from "../agent-thread-messages.js";
+import { resolveWorkspaceEnvironmentScope } from "../use-workspace-environment.js";
 import {
   AGENT_RESTART_STATE_STORAGE_KEY,
   AGENT_MEDIA_ACCEPT,
@@ -66,15 +67,13 @@ function mockCallOrder(fn: { mock: { invocationCallOrder: readonly number[] } },
 }
 
 describe("HomePage", () => {
-  it("shows project environment controls on the new-task screen before a Session exists", () => {
-    const source = readFileSync(homePageSourcePath, "utf8");
-
-    expect(source).toContain('selectedDraftProject\n      ? { kind: "project" as const, key: selectedDraftProject.id }');
-    expect(source).toContain('topBar={hasActiveConversation || environmentScope ? (');
-    expect(source.match(/\{environmentPanel\}/g)).toHaveLength(2);
-    expect(source).toContain('scope={environmentScope.kind}');
-    expect(source).toContain('<AgentWorkspaceContext');
-    expect(source).toContain('projectId={selectedDraftProject?.id ?? null}');
+  it("resolves a selected project before a Session exists and prioritizes an active Session", () => {
+    expect(resolveWorkspaceEnvironmentScope(null, "project-1")).toEqual({ kind: "project", key: "project-1" });
+    expect(resolveWorkspaceEnvironmentScope("websocket:chat-1", "project-1")).toEqual({
+      kind: "session",
+      key: "websocket:chat-1",
+    });
+    expect(resolveWorkspaceEnvironmentScope(null, null)).toBeNull();
   });
 
   it("renders the first-phase agent input controls", () => {

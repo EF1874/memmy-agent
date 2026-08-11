@@ -1,11 +1,22 @@
 import crypto from "node:crypto";
-import fs from "node:fs";
+import fs from "node:fs/promises";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { readGoalState } from "./goal-state.js";
 import { readWebuiSessionBinding, type Session } from "./manager.js";
 
 export const GOAL_WORKSPACE_BASELINE_KEY = "goalWorkspaceBaselineV1";
+
+export type WorkspaceEnvironmentScope = {
+  kind: "session" | "project";
+  key: string;
+};
+
+export type WorkspaceEnvironmentContext = {
+  scope: WorkspaceEnvironmentScope;
+  cwd: string | null;
+  metadata: Session["metadata"];
+};
 
 export type WorkspaceEnvironmentFile = {
   path: string;
@@ -20,7 +31,8 @@ export type WorkspaceEnvironmentFile = {
 };
 
 export type WorkspaceEnvironmentSnapshot = {
-  session_key: string;
+  scope_kind: WorkspaceEnvironmentScope["kind"];
+  scope_key: string;
   cwd: string;
   status: "ready" | "not_git" | "workspace_unavailable" | "error";
   revision: string;
@@ -59,8 +71,6 @@ export type WorkspaceEnvironmentSnapshot = {
 };
 
 type GitStatusEntry = Omit<WorkspaceEnvironmentFile, "attribution">;
-type WorkspaceEnvironmentContext = Pick<Session, "key" | "metadata">;
-
 type GitState = {
   root: string;
   head: string;
@@ -87,21 +97,22 @@ const GIT_TIMEOUT_MS = 5_000;
 const GIT_OUTPUT_LIMIT = 8 * 1024 * 1024;
 const DIFF_OUTPUT_LIMIT = 512 * 1024;
 
-function runGit(cwd: string, args: string[], maxBuffer = GIT_OUTPUT_LIMIT): GitCommandResult {
-  const result = spawnSync("git", args, {
-    cwd,
-    encoding: "utf8",
-    timeout: GIT_TIMEOUT_MS,
-    maxBuffer,
-    windowsHide: true,
+function runGit(cwd: string, args: string[], maxBuffer = GIT_OUTPUT_LIMIT): Promise<GitCommandResult> {
+  return new Promise((resolve) => {
+    execFile("git", args, {
+      cwd,
+      encoding: "utf8",
+      timeout: GIT_TIMEOUT_MS,
+      maxBuffer,
+      windowsHide: true,
+    }, (error, stdout, stderr) => {
+      if (error) {
+        resolve({ ok: false, stderr: String(stderr || error.message || "git command failed").trim() });
+        return;
+      }
+      resolve({ ok: true, stdout: String(stdout ?? "") });
+    });
   });
-  if (result.error || result.status !== 0) {
-    return {
-      ok: false,
-      stderr: String(result.stderr || result.error?.message || "git command failed").trim(),
-    };
-  }
-  return { ok: true, stdout: String(result.stdout ?? "") };
 }
 
 function parseBranchHeader(record: string, state: Pick<GitState, "head" | "branch" | "upstream" | "ahead" | "behind">): void {
@@ -159,7 +170,7 @@ function parseStatus(cwd: string, raw: string): GitState {
     if (kind === "!" || kind === "#") continue;
     let xy = "??";
     let filePath = "";
-    if (kind === "?" ) {
+    if (kind === "?") {
       filePath = record.slice(2);
     } else {
       const fields = record.split(" ");
@@ -185,17 +196,17 @@ function parseStatus(cwd: string, raw: string): GitState {
   return state;
 }
 
-function readGitState(cwd: string): { status: "ready"; state: GitState } | { status: "not_git" | "error" } {
-  const rootResult = runGit(cwd, ["rev-parse", "--show-toplevel"]);
+async function readGitState(cwd: string): Promise<{ status: "ready"; state: GitState } | { status: "not_git" | "error" }> {
+  const rootResult = await runGit(cwd, ["rev-parse", "--show-toplevel"]);
   if (!rootResult.ok) {
     return { status: /not a git repository/i.test(rootResult.stderr) ? "not_git" : "error" };
   }
   const root = path.resolve(rootResult.stdout.trim());
-  const statusResult = runGit(root, ["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"]);
+  const statusResult = await runGit(root, ["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"]);
   if (!statusResult.ok) return { status: "error" };
   const state = parseStatus(root, statusResult.stdout);
   state.root = root;
-  const numstatResult = runGit(root, ["diff", "HEAD", "--numstat", "-z", "--no-renames"]);
+  const numstatResult = await runGit(root, ["diff", "HEAD", "--numstat", "-z", "--no-renames"]);
   if (numstatResult.ok) {
     const stats = parseNumstat(numstatResult.stdout);
     state.files = state.files.map((file) => ({ ...file, ...(stats.get(file.path) ?? {}) }));
@@ -203,39 +214,39 @@ function readGitState(cwd: string): { status: "ready"; state: GitState } | { sta
   return { status: "ready", state };
 }
 
-function fileFingerprint(root: string, relativePath: string): string | null {
+async function fileFingerprint(root: string, relativePath: string): Promise<string | null> {
   const candidate = path.resolve(root, relativePath);
   if (candidate !== root && !candidate.startsWith(`${root}${path.sep}`)) return null;
   try {
-    const stat = fs.lstatSync(candidate);
+    const stat = await fs.lstat(candidate);
     if (!stat.isFile() || stat.size > 4 * 1024 * 1024) return null;
-    return crypto.createHash("sha256").update(fs.readFileSync(candidate)).digest("hex");
+    return crypto.createHash("sha256").update(await fs.readFile(candidate)).digest("hex");
   } catch {
     return null;
   }
 }
 
-function fileSignature(root: string, file: GitStatusEntry): string {
-  const fingerprint = fileFingerprint(root, file.path);
+async function fileSignature(root: string, file: GitStatusEntry): Promise<string> {
+  const fingerprint = await fileFingerprint(root, file.path);
   return `${file.status}:${fingerprint ?? "unavailable"}`;
 }
 
-function readBaseline(session: WorkspaceEnvironmentContext, goalId: string): GoalWorkspaceBaseline | null {
-  const raw = session.metadata?.[GOAL_WORKSPACE_BASELINE_KEY];
+function readBaseline(context: WorkspaceEnvironmentContext, goalId: string): GoalWorkspaceBaseline | null {
+  const raw = context.metadata?.[GOAL_WORKSPACE_BASELINE_KEY];
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const baseline = raw as Partial<GoalWorkspaceBaseline>;
   if (baseline.version !== 1 || baseline.goalId !== goalId || !baseline.files || typeof baseline.files !== "object") return null;
   return baseline as GoalWorkspaceBaseline;
 }
 
-export function captureGoalWorkspaceBaseline(session: Session, goalId: string): void {
+export async function captureGoalWorkspaceBaseline(session: Session, goalId: string): Promise<void> {
   let cwd: string;
   try {
     cwd = readWebuiSessionBinding(session).cwd;
   } catch {
     return;
   }
-  const result = readGitState(cwd);
+  const result = await readGitState(cwd);
   const capturedAt = new Date().toISOString();
   if (result.status !== "ready") {
     session.metadata[GOAL_WORKSPACE_BASELINE_KEY] = {
@@ -256,45 +267,46 @@ export function captureGoalWorkspaceBaseline(session: Session, goalId: string): 
     status: "captured",
     head: result.state.head || null,
     branch: result.state.branch,
-    files: Object.fromEntries(result.state.files.map((file) => [file.path, fileSignature(result.state.root, file)])),
+    files: Object.fromEntries(await Promise.all(
+      result.state.files.map(async (file) => [file.path, await fileSignature(result.state.root, file)] as const),
+    )),
   } satisfies GoalWorkspaceBaseline;
 }
 
-function attributedFiles(session: WorkspaceEnvironmentContext, state: GitState): WorkspaceEnvironmentFile[] {
-  const goal = readGoalState(session.metadata);
+async function attributedFiles(context: WorkspaceEnvironmentContext, state: GitState): Promise<WorkspaceEnvironmentFile[]> {
+  const goal = readGoalState(context.metadata);
   if (!goal) return state.files.map((file) => ({ ...file, attribution: "unattributed" }));
-  const baseline = readBaseline(session, goal.goalId);
+  const baseline = readBaseline(context, goal.goalId);
   if (!baseline || baseline.status !== "captured") {
     return state.files.map((file) => ({ ...file, attribution: "uncertain" }));
   }
-  return state.files.map((file) => {
+  return Promise.all(state.files.map(async (file) => {
     if (!Object.prototype.hasOwnProperty.call(baseline.files, file.path)) {
       return { ...file, attribution: "goal" };
     }
-    const currentSignature = fileSignature(state.root, file);
+    const currentSignature = await fileSignature(state.root, file);
     const attribution = currentSignature === baseline.files[file.path] ? "preexisting" : "uncertain";
     return { ...file, attribution };
-  });
+  }));
 }
 
 function revisionFor(value: unknown): string {
   return crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 16);
 }
 
-export function readWorkspaceEnvironment(session: WorkspaceEnvironmentContext): {
+export async function readWorkspaceEnvironment(context: WorkspaceEnvironmentContext): Promise<{
   snapshot: WorkspaceEnvironmentSnapshot;
   files: WorkspaceEnvironmentFile[];
-} {
-  let cwd = "";
-  try {
-    cwd = readWebuiSessionBinding(session).cwd;
-  } catch {
+}> {
+  const cwd = context.cwd ?? "";
+  if (!context.cwd) {
     const captured_at = new Date().toISOString();
     const snapshot: WorkspaceEnvironmentSnapshot = {
-      session_key: session.key,
+      scope_kind: context.scope.kind,
+      scope_key: context.scope.key,
       cwd,
       status: "workspace_unavailable",
-      revision: revisionFor([session.key, "workspace_unavailable"]),
+      revision: revisionFor([context.scope, "workspace_unavailable"]),
       captured_at,
       repository: null,
       changes: null,
@@ -303,13 +315,14 @@ export function readWorkspaceEnvironment(session: WorkspaceEnvironmentContext): 
     return { snapshot, files: [] };
   }
   const captured_at = new Date().toISOString();
-  const result = readGitState(cwd);
+  const result = await readGitState(cwd);
   if (result.status !== "ready") {
     const snapshot: WorkspaceEnvironmentSnapshot = {
-      session_key: session.key,
+      scope_kind: context.scope.kind,
+      scope_key: context.scope.key,
       cwd,
       status: result.status,
-      revision: revisionFor([session.key, cwd, result.status]),
+      revision: revisionFor([context.scope, cwd, result.status]),
       captured_at,
       repository: null,
       changes: null,
@@ -317,9 +330,9 @@ export function readWorkspaceEnvironment(session: WorkspaceEnvironmentContext): 
     };
     return { snapshot, files: [] };
   }
-  const files = attributedFiles(session, result.state);
-  const goalState = readGoalState(session.metadata);
-  const baseline = goalState ? readBaseline(session, goalState.goalId) : null;
+  const files = await attributedFiles(context, result.state);
+  const goalState = readGoalState(context.metadata);
+  const baseline = goalState ? readBaseline(context, goalState.goalId) : null;
   const hasIncompleteStats = files.some((file) => file.additions == null || file.deletions == null);
   const changes = {
     file_count: files.length,
@@ -359,7 +372,8 @@ export function readWorkspaceEnvironment(session: WorkspaceEnvironmentContext): 
   const revision = revisionFor({ repository, changes, goal, files });
   return {
     snapshot: {
-      session_key: session.key,
+      scope_kind: context.scope.kind,
+      scope_key: context.scope.key,
       cwd,
       status: "ready",
       revision,
@@ -372,20 +386,22 @@ export function readWorkspaceEnvironment(session: WorkspaceEnvironmentContext): 
   };
 }
 
-export function readWorkspaceFileDiff(session: WorkspaceEnvironmentContext, relativePath: string): {
+export async function readWorkspaceFileDiff(environment: {
+  snapshot: WorkspaceEnvironmentSnapshot;
+  files: WorkspaceEnvironmentFile[];
+}, relativePath: string): Promise<{
   path: string;
   diff: string;
   truncated: boolean;
   unavailable_reason: string | null;
-} | null {
-  const environment = readWorkspaceEnvironment(session);
+} | null> {
   if (environment.snapshot.status !== "ready" || !environment.snapshot.repository) return null;
   const file = environment.files.find((entry) => entry.path === relativePath);
   if (!file) return null;
   if (file.untracked) {
     return { path: relativePath, diff: "", truncated: false, unavailable_reason: "untracked_diff_unavailable" };
   }
-  const result = runGit(environment.snapshot.repository.root, [
+  const result = await runGit(environment.snapshot.repository.root, [
     "diff", "--no-ext-diff", "--no-color", "HEAD", "--", relativePath,
   ], DIFF_OUTPUT_LIMIT);
   if (!result.ok) return { path: relativePath, diff: "", truncated: false, unavailable_reason: "diff_unavailable" };

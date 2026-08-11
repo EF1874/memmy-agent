@@ -142,7 +142,8 @@ const WorkspaceEnvironmentFileSchema = z.object({
 });
 
 const WorkspaceEnvironmentSnapshotSchema = z.object({
-  session_key: z.string(),
+  scope_kind: z.union([z.literal("session"), z.literal("project")]),
+  scope_key: z.string(),
   cwd: z.string(),
   status: z.union([
     z.literal("ready"),
@@ -191,9 +192,8 @@ const WorkspaceEnvironmentSnapshotSchema = z.object({
   }).nullable()
 });
 
-const WorkspaceEnvironmentFilesSchema = z.object({
-  session_key: z.string(),
-  revision: z.string(),
+const WorkspaceEnvironmentStateSchema = z.object({
+  snapshot: WorkspaceEnvironmentSnapshotSchema,
   files: z.array(WorkspaceEnvironmentFileSchema)
 });
 
@@ -378,8 +378,9 @@ export type MemmyAgentSettings = z.infer<typeof AgentSettingsSchema>;
 export type MemmyAgentSessionSummary = z.infer<typeof SessionSummarySchema>;
 export type WorkspaceEnvironmentSnapshot = z.infer<typeof WorkspaceEnvironmentSnapshotSchema>;
 export type WorkspaceEnvironmentFile = z.infer<typeof WorkspaceEnvironmentFileSchema>;
-export type WorkspaceEnvironmentFiles = z.infer<typeof WorkspaceEnvironmentFilesSchema>;
+export type WorkspaceEnvironmentState = z.infer<typeof WorkspaceEnvironmentStateSchema>;
 export type WorkspaceEnvironmentDiff = z.infer<typeof WorkspaceEnvironmentDiffSchema>;
+export type WorkspaceEnvironmentScope = { kind: "session" | "project"; key: string };
 export type MemmyAgentProject = z.infer<typeof ProjectSchema>;
 export type MemmyAgentSessionSnapshot = z.infer<typeof SessionSnapshotSchema>;
 export type MemmyAgentSidebarState = z.infer<typeof SidebarStateSchema>;
@@ -560,12 +561,8 @@ export interface MemmyAgentClient {
   getSettings(): Promise<MemmyAgentSettings>;
   getSessionSnapshot(options?: MemmyAgentRequestOptions): Promise<MemmyAgentSessionSnapshot>;
   listSessions(): Promise<MemmyAgentSessionSummary[]>;
-  readWorkspaceEnvironment(sessionKey: string): Promise<WorkspaceEnvironmentSnapshot>;
-  listWorkspaceEnvironmentFiles(sessionKey: string): Promise<WorkspaceEnvironmentFiles>;
-  readWorkspaceEnvironmentDiff(sessionKey: string, path: string): Promise<WorkspaceEnvironmentDiff>;
-  readProjectWorkspaceEnvironment(projectId: string): Promise<WorkspaceEnvironmentSnapshot>;
-  listProjectWorkspaceEnvironmentFiles(projectId: string): Promise<WorkspaceEnvironmentFiles>;
-  readProjectWorkspaceEnvironmentDiff(projectId: string, path: string): Promise<WorkspaceEnvironmentDiff>;
+  readWorkspaceEnvironment(scope: WorkspaceEnvironmentScope): Promise<WorkspaceEnvironmentState>;
+  readWorkspaceEnvironmentDiff(scope: WorkspaceEnvironmentScope, path: string): Promise<WorkspaceEnvironmentDiff>;
   listSlashCommands(): Promise<MemmyAgentSlashCommand[]>;
   readSidebarState(): Promise<MemmyAgentSidebarState>;
   writeSidebarState(
@@ -887,46 +884,19 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
     return (await this.getSessionSnapshot()).sessions;
   }
 
-  async readWorkspaceEnvironment(sessionKey: string): Promise<WorkspaceEnvironmentSnapshot> {
+  async readWorkspaceEnvironment(scope: WorkspaceEnvironmentScope): Promise<WorkspaceEnvironmentState> {
+    const collection = scope.kind === "session" ? "sessions" : "projects";
     return this.request(
-      `/api/sessions/${encodeURIComponent(sessionKey)}/environment`,
-      WorkspaceEnvironmentSnapshotSchema
+      `/api/${collection}/${encodeURIComponent(scope.key)}/environment`,
+      WorkspaceEnvironmentStateSchema
     );
   }
 
-  async listWorkspaceEnvironmentFiles(sessionKey: string): Promise<WorkspaceEnvironmentFiles> {
-    return this.request(
-      `/api/sessions/${encodeURIComponent(sessionKey)}/environment/files`,
-      WorkspaceEnvironmentFilesSchema
-    );
-  }
-
-  async readWorkspaceEnvironmentDiff(sessionKey: string, path: string): Promise<WorkspaceEnvironmentDiff> {
+  async readWorkspaceEnvironmentDiff(scope: WorkspaceEnvironmentScope, path: string): Promise<WorkspaceEnvironmentDiff> {
+    const collection = scope.kind === "session" ? "sessions" : "projects";
     const query = new URLSearchParams({ path });
     return this.request(
-      `/api/sessions/${encodeURIComponent(sessionKey)}/environment/diff?${query.toString()}`,
-      WorkspaceEnvironmentDiffSchema
-    );
-  }
-
-  async readProjectWorkspaceEnvironment(projectId: string): Promise<WorkspaceEnvironmentSnapshot> {
-    return this.request(
-      `/api/projects/${encodeURIComponent(projectId)}/environment`,
-      WorkspaceEnvironmentSnapshotSchema
-    );
-  }
-
-  async listProjectWorkspaceEnvironmentFiles(projectId: string): Promise<WorkspaceEnvironmentFiles> {
-    return this.request(
-      `/api/projects/${encodeURIComponent(projectId)}/environment/files`,
-      WorkspaceEnvironmentFilesSchema
-    );
-  }
-
-  async readProjectWorkspaceEnvironmentDiff(projectId: string, path: string): Promise<WorkspaceEnvironmentDiff> {
-    const query = new URLSearchParams({ path });
-    return this.request(
-      `/api/projects/${encodeURIComponent(projectId)}/environment/diff?${query.toString()}`,
+      `/api/${collection}/${encodeURIComponent(scope.key)}/environment/diff?${query.toString()}`,
       WorkspaceEnvironmentDiffSchema
     );
   }
