@@ -96,7 +96,7 @@ config_has_agent_model`;
     expect(result.status, result.stderr || result.stdout).toBe(0);
   });
 
-  it("does not accept legacy provider/model defaults without a model preset", () => {
+  it("recognizes legacy provider/model defaults when the model preset is unset", () => {
     const script = String.raw`set -euo pipefail
 source scripts/dev-start.sh
 test_dir="$(mktemp -d)"
@@ -104,17 +104,22 @@ trap 'rm -rf "$test_dir"' EXIT
 cat > "$test_dir/config.yaml" <<'YAML'
 agents:
   defaults:
-    provider: memmy_account
-    model: agent_chat
+    modelPreset: null
+    provider: anthropic
+    model: claude-sonnet
 providers:
+  anthropic:
+    apiKey: byok-token
   memmy_account:
     apiKey: account-token
+modelPresets:
+  memmy-account:
+    provider: memmy_account
+    model: agent_chat
 YAML
 MEMMY_CONFIG_PATH="$test_dir/config.yaml"
 
-if config_has_agent_model; then
-  exit 1
-fi`;
+config_has_agent_model`;
     const result = spawnSync("bash", ["-s"], { cwd: repoRoot, encoding: "utf8", input: script });
 
     expect(result.status, result.stderr || result.stdout).toBe(0);
