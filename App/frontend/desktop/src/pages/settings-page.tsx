@@ -311,7 +311,21 @@ export function shouldSaveAccountNicknameOnKeyDown(event: import("react").Keyboa
  * @returns The settings page content node matching the prototype structure.
  */
 export function SettingsPageView(props: SettingsPageViewProps) {
-  const { state, dispatch, platform, accountClient, configClient, byokTokenUsageClient, tokenQuotaClient, update, track = noopTrackAnalyticsEvent, onUsageDetailVisibleChange } = props;
+  const {
+    state,
+    dispatch,
+    platform,
+    accountClient,
+    configClient,
+    byokTokenUsageClient,
+    tokenQuotaClient,
+    update,
+    track = noopTrackAnalyticsEvent,
+    activeTab: activeTabProp,
+    onActiveTabChange,
+    showUsageDetail: showUsageDetailProp,
+    onUsageDetailVisibleChange
+  } = props;
   const { t, language } = useTranslation();
   const bootstrap = state.bootstrap;
   const { workspace: modelWorkspace, commit: commitModelWorkspace } = useModelWorkspace(state.modelConfig);
