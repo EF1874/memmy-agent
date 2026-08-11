@@ -99,6 +99,18 @@ describe("SessionManager history and previews", () => {
     });
   });
 
+  it("uses the Goal objective instead of its command wrapper in previews", () => {
+    const manager = new SessionManager(tempRoot());
+    const session = manager.getOrCreate("websocket:chat-goal-preview");
+    session.addMessage("user", "/goal 编写亚洲流行文化网页", { commandMessage: true });
+    manager.save(session);
+
+    expect(manager.listSessions()[0]).toMatchObject({
+      key: "websocket:chat-goal-preview",
+      preview: "编写亚洲流行文化网页",
+    });
+  });
+
   it("listSessions isolates a WebUI Session with a partially invalid binding", () => {
     const root = tempRoot();
     const manager = new SessionManager(root, {
@@ -361,6 +373,50 @@ describe("SessionManager history and previews", () => {
         reasoning_content: "hidden chain of thought",
         thinking_blocks: [{ type: "thinking", thinking: "hidden chain of thought", signature: "sig" }],
         extra_content: { cache_control: { type: "ephemeral" } },
+      },
+    ]);
+  });
+
+  it("removes provider-specific reasoning state after a Session switches providers", () => {
+    const session = new Session({ key: "test:cross-provider-replay" });
+    session.messages.push({ role: "user", content: "hi" });
+    session.messages.push({
+      role: "assistant",
+      content: "done",
+      model_provider: "anthropic",
+      reasoning_content: "anthropic reasoning",
+      thinking_blocks: [{ type: "thinking", thinking: "anthropic reasoning", signature: "sig" }],
+      extra_content: { cache_control: { type: "ephemeral" } },
+      tool_calls: [{
+        id: "tc_1",
+        type: "function",
+        provider_specific_fields: { signature: "anthropic" },
+        function: {
+          name: "read_file",
+          arguments: "{}",
+          provider_specific_fields: { signature: "anthropic" },
+        },
+      }],
+    });
+
+    const history = session.getHistory({
+      maxMessages: 500,
+      targetProvider: "openai",
+    });
+
+    expect(history).toEqual([
+      { role: "user", content: "hi" },
+      {
+        role: "assistant",
+        content: "done",
+        tool_calls: [{
+          id: "tc_1",
+          type: "function",
+          function: {
+            name: "read_file",
+            arguments: "{}",
+          },
+        }],
       },
     ]);
   });

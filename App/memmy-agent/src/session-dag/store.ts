@@ -78,15 +78,20 @@ export class SessionDagStore {
     const now = new Date().toISOString();
     this.db.prepare(
       `INSERT INTO dag_turns (
-        turn_id, message_start, message_end, user_text, assistant_text, created_at, updated_at, dag_status
+        turn_id, message_start, message_end, user_text, assistant_text,
+        goal_id, goal_objective, goal_status, created_at, updated_at, dag_status
       ) VALUES (
-        @turn_id, @message_start, @message_end, @user_text, @assistant_text, @now, @now, 'pending'
+        @turn_id, @message_start, @message_end, @user_text, @assistant_text,
+        @goal_id, @goal_objective, @goal_status, @now, @now, 'pending'
       )
       ON CONFLICT(turn_id) DO UPDATE SET
         message_start=excluded.message_start,
         message_end=excluded.message_end,
         user_text=excluded.user_text,
         assistant_text=excluded.assistant_text,
+        goal_id=excluded.goal_id,
+        goal_objective=excluded.goal_objective,
+        goal_status=excluded.goal_status,
         updated_at=excluded.updated_at`,
     ).run({
       turn_id: input.turn_id,
@@ -94,6 +99,9 @@ export class SessionDagStore {
       message_end: input.message_end,
       user_text: input.user_text ?? "",
       assistant_text: input.assistant_text ?? "",
+      goal_id: input.goal_context?.goalId ?? null,
+      goal_objective: input.goal_context?.objective ?? null,
+      goal_status: input.goal_context?.status ?? null,
       now,
     });
     return this.getTurn(input.turn_id)!;
@@ -191,6 +199,30 @@ export class SessionDagStore {
       const addedTaskNodeIds: string[] = [];
       const now = new Date().toISOString();
 
+      if (
+        options.turn.goal_context
+        && prePatchRoot?.goal_id === options.turn.goal_context.goalId
+        && options.patch.ops.some((op) => op.op === "add_node" && op.kind === "task")
+      ) throw new Error("Goal turn cannot create a second task");
+
+      if (options.turn.goal_context && prePatchRoot?.goal_id === options.turn.goal_context.goalId) {
+        const rootStatusUpdates = options.patch.ops.filter((op): op is UpdateNodePatchOp => (
+          op.op === "update_node"
+          && op.node_id === prePatchRoot.id
+          && op.status !== undefined
+        ));
+        if (
+          options.turn.goal_context.status !== "completed"
+          && rootStatusUpdates.some((op) => ["done", "failed", "frozen"].includes(op.status!))
+        ) {
+          throw new Error("Unfinished Goal turn cannot close its task");
+        }
+        if (
+          options.turn.goal_context.status === "completed"
+          && rootStatusUpdates.some((op) => op.status !== "done")
+        ) throw new Error("Completed Goal turn can only close its task as done");
+      }
+
       for (const op of options.patch.ops) {
         if (op.op === "add_node") {
           const id = this.insertNode(op, options.turn, writeSource, now);
@@ -207,10 +239,69 @@ export class SessionDagStore {
 
       this.assertAddedChildNodesReachableFromTaskRoot(addedChildNodeIds);
       this.assertTaskTransitionIntegrity(prePatchRoot?.id ?? null, addedTaskNodeIds);
+      this.assertGoalBoundary(options.turn, prePatchRoot, addedTaskNodeIds);
       this.markTurnDone(options.turn.turn_id, options.buildMode);
       return { nodeIds: tempNodeIds, edgeIds };
     });
     return transaction();
+  }
+
+  private assertGoalBoundary(
+    turn: DagTurnInput,
+    previousRoot: DagNode | null,
+    addedTaskNodeIds: string[],
+  ): void {
+    const goal = turn.goal_context ?? null;
+    const nodes = this.readNodes();
+    const edges = this.readEdges();
+    const goalTask = goal ? nodes.find((node) => node.goal_id === goal.goalId) ?? null : null;
+
+    for (const edge of edges.filter((item) => item.type === "side_branch")) {
+      const source = nodes.find((node) => node.id === edge.source_id);
+      const target = nodes.find((node) => node.id === edge.target_id);
+      if (!source?.goal_id || source.kind !== "task" || !target || target.kind === "task") {
+        throw new Error("side_branch must connect a Goal task to a child node");
+      }
+      if (edge.created_turn_id === turn.turn_id && (!goalTask || edge.source_id !== goalTask.id)) {
+        throw new Error("side_branch must start at the current Goal task");
+      }
+    }
+
+    if (!goal) {
+      if (
+        previousRoot?.goal_id
+        && (previousRoot.status === "active" || previousRoot.status === "blocked")
+        && addedTaskNodeIds.length
+      ) {
+        const updatedRoot = nodes.find((node) => node.id === previousRoot.id);
+        const nextTask = nodes.find((node) => node.id === addedTaskNodeIds[0]);
+        const transition = edges.find((edge) => (
+          edge.source_id === previousRoot.id
+          && edge.target_id === nextTask?.id
+          && edge.type === "supersedes"
+        ));
+        if (updatedRoot?.status !== "frozen" || !transition) {
+          throw new Error("A cleared Goal task must be frozen and superseded by the next task");
+        }
+      }
+      return;
+    }
+
+    if (!goalTask) throw new Error("Goal turn must have one Goal task");
+    if (addedTaskNodeIds.length > 1) throw new Error("Goal turn may create at most one task");
+    if (previousRoot?.goal_id === goal.goalId && addedTaskNodeIds.length) {
+      throw new Error("Goal turn cannot switch tasks");
+    }
+    if (previousRoot?.goal_id !== goal.goalId && !addedTaskNodeIds.length) {
+      throw new Error("A new Goal must create a new task");
+    }
+    if (goal.status === "completed") {
+      this.db.prepare(
+        "UPDATE dag_nodes SET status='done', updated_turn_id=?, updated_at=? WHERE id=?",
+      ).run(turn.turn_id, new Date().toISOString(), goalTask.id);
+    } else if (["done", "failed", "frozen"].includes(goalTask.status)) {
+      throw new Error("Unfinished Goal task must remain open");
+    }
   }
 
   readGraphForHistoryDag(): DagGraph {
@@ -232,7 +323,13 @@ export class SessionDagStore {
     const nodes = this.readNodes();
     const edges = this.readEdges();
     if (!nodes.length) {
-      return { root_task_id: null, nodes: [], edges: [], active_path: [], active_path_edges: [] };
+      return {
+        root_task_id: null,
+        nodes: [],
+        edges: [],
+        active_path: [],
+        active_path_edges: [],
+      };
     }
     const activePath = deriveActivePathSelection(nodes, edges);
     const rootId = activePath.nodeIds[0] ?? null;
@@ -391,11 +488,11 @@ export class SessionDagStore {
     const sourceRefs = sanitizeSourceRefs(op.source_refs, turn.turn_id);
     this.db.prepare(
       `INSERT INTO dag_nodes (
-        id, session_key, kind, status, title, summary, detail_json, importance,
+        id, session_key, kind, status, title, summary, detail_json, importance, goal_id,
         created_turn_id, updated_turn_id, first_message_index, last_message_index,
         source_refs_json, created_by, updated_by, created_at, updated_at
       ) VALUES (
-        @id, @session_key, @kind, @status, @title, @summary, @detail_json, @importance,
+        @id, @session_key, @kind, @status, @title, @summary, @detail_json, @importance, @goal_id,
         @turn_id, @turn_id, @first_message_index, @last_message_index,
         @source_refs_json, @write_source, @write_source, @now, @now
       )`,
@@ -408,6 +505,7 @@ export class SessionDagStore {
       summary: op.summary,
       detail_json: JSON.stringify(detail),
       importance: op.importance,
+      goal_id: op.kind === "task" ? turn.goal_context?.goalId ?? null : null,
       turn_id: turn.turn_id,
       first_message_index: turn.message_start,
       last_message_index: turn.message_end,
@@ -598,7 +696,9 @@ export function deriveActivePathSelection(nodes: DagNode[], edges: DagEdge[]): D
   const root = selectRootTask(nodes);
   if (!root) return { nodeIds: [], edgeIds: [] };
 
+  const sideBranchIds = sideBranchSuccessorNodeIds(nodes, edges);
   const subgraphIds = taskSubgraphNodeIds(root.id, nodes, edges);
+  for (const id of sideBranchIds) subgraphIds.delete(id);
   const incoming = new Map<string, DagEdge[]>();
   for (const edge of edges) {
     if (!subgraphIds.has(edge.source_id) || !subgraphIds.has(edge.target_id)) continue;
@@ -663,6 +763,31 @@ function taskSubgraphNodeIds(rootId: string, nodes: DagNode[], edges: DagEdge[])
   }
   const out = new Set<string>();
   const queue = [rootId];
+  while (queue.length) {
+    const id = queue.shift()!;
+    if (out.has(id)) continue;
+    out.add(id);
+    for (const edge of bySource.get(id) ?? []) {
+      const target = byId.get(edge.target_id);
+      if (target && target.kind !== "task") queue.push(target.id);
+    }
+  }
+  return out;
+}
+
+function sideBranchSuccessorNodeIds(nodes: DagNode[], edges: DagEdge[]): Set<string> {
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const bySource = new Map<string, DagEdge[]>();
+  for (const edge of edges) {
+    const list = bySource.get(edge.source_id) ?? [];
+    list.push(edge);
+    bySource.set(edge.source_id, list);
+  }
+
+  const out = new Set<string>();
+  const queue = edges
+    .filter((edge) => edge.type === "side_branch" && byId.get(edge.target_id)?.kind !== "task")
+    .map((edge) => edge.target_id);
   while (queue.length) {
     const id = queue.shift()!;
     if (out.has(id)) continue;
@@ -835,6 +960,7 @@ function toContextNode(node: DagNode): DagContextNode {
     updated_turn_id: node.updated_turn_id,
     first_message_index: node.first_message_index,
     last_message_index: node.last_message_index,
+    goal_id: node.goal_id,
   };
 }
 
@@ -903,6 +1029,9 @@ CREATE TABLE IF NOT EXISTS dag_turns (
   next_retry_at TEXT,
   last_error TEXT,
   processed_at TEXT,
+  goal_id TEXT,
+  goal_objective TEXT,
+  goal_status TEXT CHECK(goal_status IN ('active', 'paused', 'blocked', 'usage_limited', 'budget_limited', 'completed')),
   CHECK(message_end > message_start)
 );
 
@@ -915,6 +1044,7 @@ CREATE TABLE IF NOT EXISTS dag_nodes (
   summary TEXT NOT NULL,
   detail_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(detail_json)),
   importance INTEGER NOT NULL DEFAULT 0 CHECK(importance BETWEEN 0 AND 100),
+  goal_id TEXT CHECK(goal_id IS NULL OR kind = 'task'),
   created_turn_id TEXT REFERENCES dag_turns(turn_id),
   updated_turn_id TEXT REFERENCES dag_turns(turn_id),
   first_message_index INTEGER NOT NULL DEFAULT 0,
@@ -931,7 +1061,7 @@ CREATE TABLE IF NOT EXISTS dag_edges (
   id TEXT PRIMARY KEY,
   source_id TEXT NOT NULL REFERENCES dag_nodes(id),
   target_id TEXT NOT NULL REFERENCES dag_nodes(id),
-  type TEXT NOT NULL CHECK(type IN ('decomposes', 'continues', 'blocks', 'supersedes')),
+  type TEXT NOT NULL CHECK(type IN ('decomposes', 'continues', 'blocks', 'supersedes', 'side_branch')),
   created_turn_id TEXT REFERENCES dag_turns(turn_id),
   created_by TEXT NOT NULL DEFAULT 'llm_patch' CHECK(created_by IN ('llm_patch', 'deterministic_fallback', 'repair')),
   created_at TEXT NOT NULL,
@@ -953,6 +1083,7 @@ CREATE INDEX IF NOT EXISTS idx_dag_turns_status_message_start ON dag_turns(dag_s
 CREATE INDEX IF NOT EXISTS idx_dag_turns_message_end ON dag_turns(message_end);
 CREATE INDEX IF NOT EXISTS idx_dag_nodes_kind_status ON dag_nodes(kind, status);
 CREATE INDEX IF NOT EXISTS idx_dag_nodes_importance ON dag_nodes(importance DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_dag_nodes_goal_id_unique ON dag_nodes(goal_id) WHERE goal_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_dag_edges_source ON dag_edges(source_id);
 CREATE INDEX IF NOT EXISTS idx_dag_edges_target ON dag_edges(target_id);
 `;

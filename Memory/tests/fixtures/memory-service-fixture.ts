@@ -140,10 +140,14 @@ export function accountRuntimeConfig(): typeof DEFAULT_MEMMY_CONFIG {
   const apiKey = "cloud-uuid";
   return {
     ...DEFAULT_MEMMY_CONFIG,
-    activeProfile: "account",
+    roleRouting: {
+      summary: "follow",
+      evolution: "follow"
+    },
     summary: {
       ...DEFAULT_MEMMY_CONFIG.summary,
       provider: "openai_compatible",
+      sourceProvider: "memmy_account",
       endpoint,
       model: "memory_summary",
       apiKey
@@ -151,12 +155,15 @@ export function accountRuntimeConfig(): typeof DEFAULT_MEMMY_CONFIG {
     evolution: {
       ...DEFAULT_MEMMY_CONFIG.evolution,
       provider: "openai_compatible",
+      sourceProvider: "memmy_account",
       endpoint,
       model: "memory_evolution",
       apiKey
     },
     embedding: {
       ...DEFAULT_MEMMY_CONFIG.embedding,
+      mode: "cloud",
+      sourceProvider: "memmy_account",
       provider: "openai_compatible",
       endpoint,
       model: "embedding",

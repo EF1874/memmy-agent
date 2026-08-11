@@ -65,10 +65,16 @@ describe("SettingsPage platform scene quota details", () => {
         ]
       }
     };
-    const state = appReducer(
+    const bootstrapped = appReducer(
       createInitialAppState(),
       appActions.bootstrapLoaded(bootstrap, "/settings")
     );
+    const state = appReducer(bootstrapped, appActions.accountUpdated({
+      nickname: "测试账户",
+      email: "tester@example.com",
+      phoneNumber: null,
+      registeredAt: "2026-04-12T00:00:00.000Z"
+    }));
 
     act(() => {
       root.render(

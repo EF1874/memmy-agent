@@ -56,7 +56,7 @@ describe("memory runtime contracts", () => {
     { name: "RawTurnSummary", schema: RawTurnSummarySchema, valid: rawTurnSummary(), invalid: { ...rawTurnSummary(), rawTurnId: "" } },
     { name: "JobRef", schema: JobRefSchema, valid: jobRef(), invalid: { ...jobRef(), jobType: "unknown" } },
     { name: "MemoryHealthSnapshot", schema: MemoryHealthSnapshotSchema, valid: healthOutput(), invalid: { ...healthOutput(), storage: { backend: "memory", schemaVersion: "3", ready: true } } },
-    { name: "MemoryReloadConfigOutput", schema: MemoryReloadConfigOutputSchema, valid: reloadConfigOutput(), invalid: { ...reloadConfigOutput(), activeProfile: "personal" } },
+    { name: "MemoryReloadConfigOutput", schema: MemoryReloadConfigOutputSchema, valid: reloadConfigOutput(), invalid: { ...reloadConfigOutput(), models: { ...modelStatuses(), summary: { ...modelStatuses().summary, routing: "personal" } } } },
     { name: "OpenSessionOutput", schema: OpenSessionOutputSchema, valid: openSessionOutput(), invalid: { sessionId: "session-1", status: "closed", resumed: false, serverTime: ISO } },
     { name: "CloseSessionOutput", schema: CloseSessionOutputSchema, valid: closeSessionOutput(), invalid: { ok: false, sessionId: "session-1", status: "closed", closedEpisodeIds: [], serverTime: ISO } },
     { name: "StartTurnOutput", schema: StartTurnOutputSchema, valid: startTurnOutput(), invalid: { contextPacketId: "context-1", sessionId: "session-1" } },
@@ -192,7 +192,6 @@ function healthOutput() {
     mode: "local",
     storage: { backend: "sqlite", schemaVersion: "3", ready: true, lastMigrationId: "0003" },
     capabilities: { routes: ["/api/v1/health"], tools: [], memoryLayers: ["L1", "L2", "L3", "Skill"], supportsCli: true },
-    activeProfile: "byok",
     models: modelStatuses(),
     serverTime: ISO
   };
@@ -200,7 +199,6 @@ function healthOutput() {
 
 function reloadConfigOutput() {
   return {
-    activeProfile: "account",
     changed: true,
     requiresRestart: false,
     models: modelStatuses(),
@@ -210,9 +208,9 @@ function reloadConfigOutput() {
 
 function modelStatuses() {
   return {
-    summary: { provider: "openai_compatible", model: "memory_summary", configured: true, remote: true },
-    evolution: { provider: "openai_compatible", model: "memory_evolution", configured: true, remote: true },
-    embedding: { provider: "local", model: "hash-embedding-v1", configured: true, remote: false }
+    summary: { provider: "openai_compatible", model: "memory_summary", configured: true, remote: true, routing: "fixed" },
+    evolution: { provider: "openai_compatible", model: "memory_evolution", configured: true, remote: true, routing: "follow" },
+    embedding: { provider: "local", model: "hash-embedding-v1", configured: true, remote: false, mode: "local" }
   };
 }
 

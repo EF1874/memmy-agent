@@ -1,5 +1,6 @@
 import type {
   ByokTokenUsageByKind,
+  ByokTokenUsageByProvider,
   ByokTokenUsageEvent,
   ByokTokenUsageKind,
   ByokTokenUsageSummary
@@ -20,6 +21,10 @@ interface SummaryRow {
 interface ByKindRow extends SummaryRow {
   kind: ByokTokenUsageKind;
   event_count: number | null;
+}
+
+interface ByProviderKindRow extends ByKindRow {
+  provider: string;
 }
 
 export interface ByokTokenUsageRepository {
@@ -105,6 +110,22 @@ export function createByokTokenUsageRepository(db: DatabaseSync): ByokTokenUsage
           GROUP BY kind`
         )
         .all() as unknown as ByKindRow[];
+      const providerRows = db
+        .prepare(
+          `SELECT
+            json_extract(metadata_json, '$.provider') AS provider,
+            kind,
+            COALESCE(SUM(input_tokens), 0) AS input_tokens,
+            COALESCE(SUM(output_tokens), 0) AS output_tokens,
+            COALESCE(SUM(total_tokens), 0) AS total_tokens,
+            COALESCE(SUM(cached_input_tokens), 0) AS cached_input_tokens,
+            COALESCE(SUM(cache_creation_input_tokens), 0) AS cache_creation_input_tokens,
+            COUNT(*) AS event_count,
+            MAX(created_at) AS updated_at
+          FROM byok_token_usage_events
+          GROUP BY json_extract(metadata_json, '$.provider'), kind`
+        )
+        .all() as unknown as ByProviderKindRow[];
 
       return {
         inputTokens: numberValue(total.input_tokens),
@@ -114,6 +135,7 @@ export function createByokTokenUsageRepository(db: DatabaseSync): ByokTokenUsage
         cacheCreationInputTokens: numberValue(total.cache_creation_input_tokens),
         updatedAt: total.updated_at,
         byKind: rows.sort(byKindOrder).map(toByKind),
+        byProvider: toByProvider(providerRows),
       };
     },
   };
@@ -138,6 +160,40 @@ function toByKind(row: ByKindRow): ByokTokenUsageByKind {
 
 function byKindOrder(left: ByKindRow, right: ByKindRow): number {
   return KIND_ORDER.indexOf(left.kind) - KIND_ORDER.indexOf(right.kind);
+}
+
+function toByProvider(rows: ByProviderKindRow[]): ByokTokenUsageByProvider[] {
+  const grouped = new Map<string, ByProviderKindRow[]>();
+  for (const row of rows) {
+    if (typeof row.provider !== "string" || !row.provider.trim()) continue;
+    const current = grouped.get(row.provider) ?? [];
+    current.push(row);
+    grouped.set(row.provider, current);
+  }
+  return [...grouped.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([provider, providerRows]) => ({
+      provider,
+      inputTokens: sumRows(providerRows, "input_tokens"),
+      outputTokens: sumRows(providerRows, "output_tokens"),
+      totalTokens: sumRows(providerRows, "total_tokens"),
+      cachedInputTokens: sumRows(providerRows, "cached_input_tokens"),
+      cacheCreationInputTokens: sumRows(providerRows, "cache_creation_input_tokens"),
+      eventCount: sumRows(providerRows, "event_count"),
+      updatedAt: providerRows
+        .map((row) => row.updated_at)
+        .filter((value): value is string => Boolean(value))
+        .sort()
+        .at(-1) ?? null,
+      byKind: providerRows.sort(byKindOrder).map(toByKind),
+    }));
+}
+
+function sumRows(
+  rows: readonly ByProviderKindRow[],
+  field: "input_tokens" | "output_tokens" | "total_tokens" | "cached_input_tokens" | "cache_creation_input_tokens" | "event_count"
+): number {
+  return rows.reduce((total, row) => total + numberValue(row[field]), 0);
 }
 
 function numberValue(value: number | null): number {

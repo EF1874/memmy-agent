@@ -253,11 +253,13 @@ export function ProductTourGuide(props: ProductTourGuideProps) {
   const current = steps[Math.min(step, steps.length - 1)]!;
   const [layout, setLayout] = useState(() => null as ReturnType<typeof resolveProductTourStepLayout>);
   const lastViewedStepKeyRef = useRef<string | null>(null);
-
   const onTabChangeRef = useRef(onTabChange);
-  onTabChangeRef.current = onTabChange;
   const onStepViewedRef = useRef(onStepViewed);
-  onStepViewedRef.current = onStepViewed;
+
+  useEffect(() => {
+    onTabChangeRef.current = onTabChange;
+    onStepViewedRef.current = onStepViewed;
+  }, [onStepViewed, onTabChange]);
 
   useEffect(() => {
     onTabChangeRef.current(current.tab);

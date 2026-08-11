@@ -1,12 +1,13 @@
 /** Agent chat slice tests. */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { MemmyAgentSessionSummary, MemmyAgentSidebarState } from "../../api/memmy-agent-client.js";
+import type { MemmyAgentSessionSummary, MemmyAgentSidebarState, WebuiQueuedMessage } from "../../api/memmy-agent-client.js";
 import type { PendingAttachment } from "../agent-composer-state.js";
 import {
   agentReducer,
   buildAgentTasks,
   defaultAgentSidebarState,
   initialAgentState,
+  selectedModelPresetForScope,
   type AgentState,
   updateSidebarStateForTask
 } from "../agent-chat-slice.js";
@@ -32,11 +33,414 @@ const sessions: MemmyAgentSessionSummary[] = [
   }
 ];
 
+const goalId = "8f59f58a-7295-4c34-8e03-55e7035a5a8d";
+
+function goalState(status: "active" | "paused" | "blocked" | "usage_limited" | "budget_limited" | "completed") {
+  return {
+    goal_id: goalId,
+    status,
+    objective: "整理 PRD",
+    token_budget: 12_000,
+    tokens_used: 500,
+    time_used_seconds: 30,
+    created_at: "2026-08-04T08:00:00.000Z",
+    updated_at: "2026-08-04T08:00:30.000Z"
+  } as const;
+}
+
+function queuedWire(
+  clientRequestId: string,
+  text: string,
+  queuedAt: string,
+  source: WebuiQueuedMessage["source"] = { kind: "gui", channel: "websocket" },
+): WebuiQueuedMessage {
+  return {
+    client_request_id: clientRequestId,
+    text,
+    media_urls: [],
+    queued_at: queuedAt,
+    source
+  };
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
 });
 
 describe("agent chat slice", () => {
+  it("treats message_queued as a transport-only event", () => {
+    const state = agentReducer(initialAgentState, { type: "agent/sessionsLoaded", sessions });
+    const next = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message_queued",
+        chat_id: "chat-1",
+        client_request_id: "11111111-1111-4111-8111-111111111111"
+      }
+    });
+
+    expect(next).toBe(state);
+  });
+
+  it("projects only visible queued items without changing messages or task state", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/sessionsLoaded", sessions });
+    const first = queuedWire("queue-1", "第一条", "2026-08-09T12:00:00.000Z");
+    const second = queuedWire("queue-2", "第二条", "2026-08-09T12:00:01.000Z");
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "message_queued", chat_id: "chat-1", client_request_id: "queue-1", item: first }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "message_accepted", chat_id: "chat-1", client_request_id: "queue-1" }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "message_queued", chat_id: "chat-1", client_request_id: "queue-2", item: second }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "message_queued", chat_id: "chat-1", client_request_id: "queue-1", item: first }
+    });
+
+    expect(state.queuedMessagesByChatId["chat-1"]?.map((item) => item.clientRequestId))
+      .toEqual(["queue-1", "queue-2"]);
+    expect(state.queuedMessagesByChatId["chat-1"]?.map((item) => item.source.kind))
+      .toEqual(["gui", "gui"]);
+    expect(state.messagesByChatId["chat-1"]).toBeUndefined();
+    expect(state.optimisticSendingByChatId["chat-1"]).toBeUndefined();
+    expect(state.optimisticTasksByChatId["chat-1"]).toBeUndefined();
+
+    state = agentReducer(state, {
+      type: "agent/queueItemRemoveStarted",
+      chatId: "chat-1",
+      clientRequestId: "queue-1"
+    });
+    expect(state.queuedMessagesByChatId["chat-1"]?.map((item) => item.status))
+      .toEqual(["removing", "queued"]);
+    state = agentReducer(state, {
+      type: "agent/queueItemRemoveFailed",
+      chatId: "chat-1",
+      clientRequestId: "queue-1",
+      error: { id: "queue-error", source: "queue", message: "home.queue.removeFailed", createdAt: 1 }
+    });
+    expect(state.queuedMessagesByChatId["chat-1"]?.map((item) => item.status))
+      .toEqual(["queued", "queued"]);
+    expect(state.operationErrorsBySurface.chat?.source).toBe("queue");
+
+    state = agentReducer(state, { type: "agent/sessionsLoaded", sessions: [] });
+    expect(state.queuedMessagesByChatId["chat-1"]).toBeUndefined();
+  });
+
+  it("uses GUI as the compatibility source when an old server omits source", () => {
+    const legacy = queuedWire("legacy", "legacy queue", "2026-08-09T12:00:00.000Z");
+    delete legacy.source;
+    const state = agentReducer(initialAgentState, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message_queued",
+        chat_id: "chat-legacy",
+        client_request_id: "legacy",
+        item: legacy
+      }
+    });
+
+    expect(state.queuedMessagesByChatId["chat-legacy"]?.[0]?.source)
+      .toEqual({ kind: "gui", channel: "websocket" });
+  });
+
+  it("applies consecutive queue revisions, ignores duplicates, and requests snapshot reconciliation on gaps", () => {
+    let state = agentReducer(initialAgentState, {
+      type: "agent/wsEvent",
+      event: { event: "ready", chat_id: "default", connection_generation: 7 }
+    });
+    const first = queuedWire(
+      "queue-1",
+      "from TUI",
+      "2026-08-09T12:00:00.000Z",
+      { kind: "tui", channel: "websocket" }
+    );
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message_queue_snapshot",
+        chat_id: "chat-2",
+        revision: 2,
+        items: [first],
+        started_items: []
+      }
+    });
+    const second = queuedWire(
+      "queue-2",
+      "from Slack",
+      "2026-08-09T12:00:01.000Z",
+      { kind: "im", channel: "slack" }
+    );
+    const revisionThree = {
+      event: "message_queued",
+      chat_id: "chat-2",
+      client_request_id: "queue-2",
+      revision: 3,
+      item: second
+    } as const;
+    state = agentReducer(state, { type: "agent/wsEvent", event: revisionThree });
+    state = agentReducer(state, { type: "agent/wsEvent", event: revisionThree });
+    expect(state.queuedMessagesByChatId["chat-2"]?.map((item) => [item.clientRequestId, item.source.kind]))
+      .toEqual([["queue-1", "tui"], ["queue-2", "im"]]);
+    expect(state.queueRevisionByChatId["chat-2"]).toBe(3);
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message_dequeued",
+        chat_id: "chat-2",
+        client_request_id: "queue-1",
+        revision: 5,
+        item: first
+      }
+    });
+    expect(state.queuedMessagesByChatId["chat-2"]?.map((item) => item.clientRequestId))
+      .toEqual(["queue-1", "queue-2"]);
+    expect(state.messagesByChatId["chat-2"]).toBeUndefined();
+    expect(state.queueDesyncedByChatId["chat-2"]).toEqual({ generation: 7, observedRevision: 5 });
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message_queue_snapshot",
+        chat_id: "chat-2",
+        revision: 4,
+        items: [first, second],
+        started_items: []
+      }
+    });
+    expect(state.queueDesyncedByChatId["chat-2"])
+      .toEqual({ generation: 7, observedRevision: 5 });
+    expect(state.queueRevisionByChatId["chat-2"]).toBe(3);
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message_queue_snapshot",
+        chat_id: "chat-2",
+        revision: 5,
+        items: [second],
+        started_items: [first]
+      }
+    });
+    expect(state.queueDesyncedByChatId["chat-2"]).toBeUndefined();
+    expect(state.queueRevisionByChatId["chat-2"]).toBe(5);
+    expect(state.messagesByChatId["chat-2"]?.filter((message) => message.clientRequestId === "queue-1"))
+      .toHaveLength(1);
+    expect(state.currentChatId).toBe("default");
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { ...revisionThree, revision: 4 }
+    });
+    expect(state.queuedMessagesByChatId["chat-2"]?.map((item) => item.clientRequestId))
+      .toEqual(["queue-2"]);
+  });
+
+  it("replaces only the snapshot chat and promotes started items exactly once", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/sessionsLoaded", sessions });
+    const background = queuedWire("background", "后台排队", "2026-08-09T12:00:02.000Z");
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "message_queued", chat_id: "chat-2", client_request_id: "background", item: background }
+    });
+    const later = queuedWire("later", "稍后", "2026-08-09T12:00:03.000Z");
+    const earlier = queuedWire("earlier", "较早", "2026-08-09T12:00:01.000Z");
+    const started = queuedWire("started", "已经开始", "2026-08-09T12:00:00.000Z");
+    const snapshot = {
+      event: "message_queue_snapshot",
+      chat_id: "chat-1",
+      items: [later, earlier],
+      started_items: [started]
+    } as const;
+
+    state = agentReducer(state, { type: "agent/wsEvent", event: snapshot });
+    state = agentReducer(state, { type: "agent/wsEvent", event: snapshot });
+
+    expect(state.queuedMessagesByChatId["chat-1"]?.map((item) => item.clientRequestId))
+      .toEqual(["earlier", "later"]);
+    expect(state.queuedMessagesByChatId["chat-2"]?.map((item) => item.clientRequestId))
+      .toEqual(["background"]);
+    expect(state.messagesByChatId["chat-1"]?.filter((message) => message.clientRequestId === "started"))
+      .toHaveLength(1);
+    expect(state.currentChatId).toBeNull();
+  });
+
+  it("removes a dequeued background item and never duplicates its optimistic user message", () => {
+    let state = agentReducer(initialAgentState, {
+      type: "agent/historyLoading",
+      sessionKey: "websocket:chat-1",
+      chatId: "chat-1",
+      requestId: "focus-chat-1"
+    });
+    const item = queuedWire("racing", "竞态问题", "2026-08-09T12:00:00.000Z");
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "message_queued", chat_id: "chat-2", client_request_id: "racing", item }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "queue_remove_result",
+        chat_id: "chat-2",
+        client_request_id: "racing",
+        outcome: "already_dequeued"
+      }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "message_dequeued", chat_id: "chat-2", client_request_id: "racing", item }
+    });
+
+    expect(state.currentChatId).toBe("chat-1");
+    expect(state.queuedMessagesByChatId["chat-2"]).toBeUndefined();
+    expect(state.messagesByChatId["chat-2"]?.filter((message) => message.clientRequestId === "racing"))
+      .toHaveLength(1);
+  });
+
+  it("clears a delete result immediately but reconciles a leading revision by snapshot", () => {
+    const item = queuedWire("remove-race", "remove race", "2026-08-09T12:00:00.000Z");
+    let state = agentReducer(initialAgentState, {
+      type: "agent/wsEvent",
+      event: { event: "ready", chat_id: "default", connection_generation: 3 }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message_queue_snapshot",
+        chat_id: "chat-race",
+        revision: 2,
+        items: [item],
+        started_items: []
+      }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "queue_remove_result",
+        chat_id: "chat-race",
+        client_request_id: "remove-race",
+        outcome: "removed",
+        revision: 4
+      }
+    });
+
+    expect(state.queuedMessagesByChatId["chat-race"]).toBeUndefined();
+    expect(state.queueRevisionByChatId["chat-race"]).toBe(2);
+    expect(state.queueDesyncedByChatId["chat-race"]).toEqual({
+      generation: 3,
+      observedRevision: 4
+    });
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message_queue_snapshot",
+        chat_id: "chat-race",
+        revision: 4,
+        items: [],
+        started_items: []
+      }
+    });
+    expect(state.queueRevisionByChatId["chat-race"]).toBe(4);
+    expect(state.queueDesyncedByChatId["chat-race"]).toBeUndefined();
+  });
+
+  it("rolls back only the rejected queued request", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/sessionsLoaded", sessions });
+    const first = queuedWire("rejected", "失败问题", "2026-08-09T12:00:00.000Z");
+    const second = queuedWire("remaining", "保留问题", "2026-08-09T12:00:01.000Z");
+    for (const item of [first, second]) {
+      state = agentReducer(state, {
+        type: "agent/wsEvent",
+        event: {
+          event: "message_queued",
+          chat_id: "chat-1",
+          client_request_id: item.client_request_id,
+          item
+        }
+      });
+    }
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "message_dequeued", chat_id: "chat-1", client_request_id: "rejected", item: first }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "error",
+        chat_id: "chat-1",
+        client_request_id: "rejected",
+        detail: "provider rejected",
+        reason: "provider_error"
+      }
+    });
+
+    expect(state.queuedMessagesByChatId["chat-1"]?.map((item) => item.clientRequestId))
+      .toEqual(["remaining"]);
+    expect(state.messagesByChatId["chat-1"]?.some((message) => message.clientRequestId === "rejected"))
+      .toBe(false);
+  });
+
+  it("moves deleted Session and draft selections to the latest available default", () => {
+    const state: AgentState = {
+      ...initialAgentState,
+      modelPresets: [
+        { name: "model-a", provider: "openai", model: "gpt-a", is_default: true, available: true },
+        { name: "model-b", provider: "anthropic", model: "claude-b", is_default: false, available: true }
+      ],
+      defaultModelPreset: "model-a",
+      pendingPresetByScope: { "draft:1": "model-a" },
+      committedPresetByScope: { "chat-1": "model-a" }
+    };
+
+    const refreshed = agentReducer(state, {
+      type: "agent/modelCatalogLoaded",
+      presets: [
+        { name: "model-b", provider: "anthropic", model: "claude-b", is_default: true, available: true }
+      ],
+      defaultPreset: "model-b"
+    });
+
+    expect(refreshed.pendingPresetByScope).not.toHaveProperty("draft:1");
+    expect(refreshed.committedPresetByScope["chat-1"]).toBeNull();
+    expect(selectedModelPresetForScope(refreshed, "draft:1")).toBe("model-b");
+    expect(selectedModelPresetForScope(refreshed, "chat-1")).toBe("model-b");
+  });
+
+  it("keeps a Session model change temporary until the gateway confirms a sent message", () => {
+    const state: AgentState = {
+      ...initialAgentState,
+      modelPresets: [
+        { name: "model-a", provider: "openai", model: "gpt-a", is_default: true, available: true },
+        { name: "model-b", provider: "anthropic", model: "claude-b", is_default: false, available: true }
+      ],
+      defaultModelPreset: "model-a",
+      pendingPresetByScope: { "chat-1": "model-b" },
+      committedPresetByScope: { "chat-1": "model-a" }
+    };
+
+    expect(selectedModelPresetForScope(state, "chat-1")).toBe("model-b");
+
+    const confirmed = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message_accepted",
+        chat_id: "chat-1",
+        client_request_id: "11111111-1111-4111-8111-111111111111",
+        model_preset: "model-b"
+      }
+    });
+
+    expect(confirmed.pendingPresetByScope).not.toHaveProperty("chat-1");
+    expect(confirmed.committedPresetByScope["chat-1"]).toBe("model-b");
+  });
+
   it("starts with the chat view marked invisible until routing bootstrap resolves", () => {
     expect(initialAgentState.chatViewVisible).toBe(false);
   });
@@ -127,7 +531,7 @@ describe("agent chat slice", () => {
     state = agentReducer(state, { type: "agent/newChatCreated", chatId: "chat-1" });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
     });
 
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "turn_end", chat_id: "chat-1" } });
@@ -145,7 +549,7 @@ describe("agent chat slice", () => {
     state = agentReducer(state, { type: "agent/newChatCreated", chatId: "chat-1" });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
     });
 
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "turn_end", chat_id: "chat-1" } });
@@ -201,10 +605,10 @@ describe("agent chat slice", () => {
     state = agentReducer(state, { type: "agent/newChatCreated", chatId: "chat-1" });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
     });
 
-    state = agentReducer(state, { type: "agent/wsEvent", event: { event: "goal_status", chat_id: "chat-1", status: "idle" } });
+    state = agentReducer(state, { type: "agent/wsEvent", event: { event: "run_status", chat_id: "chat-1", status: "idle" } });
 
     expect(state.runStartedAtByChatId["chat-1"]).toBeNull();
     expect(state.completedUnseenByChatId["chat-1"]).toBeUndefined();
@@ -347,6 +751,216 @@ describe("agent chat slice", () => {
       latencyMs: 42
     });
     expect(state.messages[4]?.isStreaming).not.toBe(true);
+  });
+
+  it("appends live external user events to the current chat with normalized media", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "user",
+        chat_id: "chat-1",
+        turn_id: "turn-external-1",
+        text: "来自 Telegram 的图片",
+        media_urls: [
+          { kind: "image", url: " /api/media/image-1 ", name: " photo.png " },
+          { kind: "file", url: "/api/media/file-1", name: "report.pdf" }
+        ]
+      }
+    });
+
+    expect(state.messages).toHaveLength(1);
+    expect(state.messages[0]).toEqual({
+      id: "user-1",
+      role: "user",
+      content: "来自 Telegram 的图片",
+      turnId: "turn-external-1",
+      media: [
+        { kind: "image", url: "/api/media/image-1", name: "photo.png" },
+        { kind: "file", url: "/api/media/file-1", name: "report.pdf" }
+      ]
+    });
+    expect(state.messagesByChatId["chat-1"]).toEqual(state.messages);
+  });
+
+  it("stores background external user events without changing the current chat", () => {
+    let state = loadHistory(initialAgentState, "websocket:chat-1", [{ role: "user", content: "当前会话" }]);
+    state = {
+      ...state,
+      composerDraftsByScope: {
+        ...state.composerDraftsByScope,
+        "chat:chat-1": "尚未发送的草稿"
+      }
+    };
+    const currentMessages = state.messages;
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "user",
+        chat_id: "chat-2",
+        turn_id: "turn-background",
+        text: "后台会话消息"
+      }
+    });
+
+    expect(state.currentChatId).toBe("chat-1");
+    expect(state.messages).toBe(currentMessages);
+    expect(state.messages.map((message) => message.content)).toEqual(["当前会话"]);
+    expect(state.messagesByChatId["chat-2"]).toEqual([
+      {
+        id: "user-1",
+        role: "user",
+        content: "后台会话消息",
+        turnId: "turn-background"
+      }
+    ]);
+    expect(state.composerDraftsByScope["chat:chat-1"]).toBe("尚未发送的草稿");
+  });
+
+  it("deduplicates external user events by turn id without collapsing repeated text from different turns", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+    const externalUserEvent = {
+      event: "user",
+      chat_id: "chat-1",
+      turn_id: "turn-same",
+      text: "相同内容"
+    };
+
+    state = agentReducer(state, { type: "agent/wsEvent", event: externalUserEvent });
+    state = agentReducer(state, { type: "agent/wsEvent", event: externalUserEvent });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { ...externalUserEvent, turn_id: "turn-next" }
+    });
+
+    expect(state.messages.map((message) => [message.content, message.turnId])).toEqual([
+      ["相同内容", "turn-same"],
+      ["相同内容", "turn-next"]
+    ]);
+  });
+
+  it("allows pure-media and repeated no-turn-id external user messages", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "user",
+        chat_id: "chat-1",
+        media_urls: [{ kind: "video", url: "/api/media/video-1", name: "clip.mp4" }]
+      }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "user", chat_id: "chat-1", content: "重复内容" }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "user", chat_id: "chat-1", content: "重复内容" }
+    });
+
+    expect(state.messages).toHaveLength(3);
+    expect(state.messages[0]).toMatchObject({
+      role: "user",
+      content: "",
+      media: [{ kind: "video", url: "/api/media/video-1", name: "clip.mp4" }]
+    });
+    expect(state.messages.slice(1).map((message) => message.content)).toEqual(["重复内容", "重复内容"]);
+  });
+
+  it("does not change assistant or retry lifecycle state when an external user event arrives", () => {
+    let state = loadHistory(initialAgentState, "websocket:chat-1", [
+      { role: "assistant", content: "仍在输出", isStreaming: true, reasoningStreaming: true }
+    ]);
+    state = {
+      ...state,
+      activeTurnIdByChatId: { "chat-1": "turn-active" },
+      retryWaitStatusByChatId: {
+        "chat-1": {
+          id: "retry-turn-active",
+          chatId: "chat-1",
+          turnId: "turn-active",
+          text: "等待重试",
+          isRunning: true,
+          createdAt: 1,
+          updatedAt: 1
+        }
+      },
+      suppressAssistantStreamUntilTurnEndByChatId: { "chat-1": true }
+    };
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "user",
+        chat_id: "chat-1",
+        turn_id: "turn-external-next",
+        text: "下一条外部消息"
+      }
+    });
+
+    expect(state.messages[0]).toMatchObject({
+      role: "assistant",
+      content: "仍在输出",
+      isStreaming: true,
+      reasoningStreaming: true
+    });
+    expect(state.messages[1]).toMatchObject({
+      role: "user",
+      content: "下一条外部消息",
+      turnId: "turn-external-next"
+    });
+    expect(state.activeTurnIdByChatId["chat-1"]).toBe("turn-active");
+    expect(state.retryWaitStatusByChatId["chat-1"]?.isRunning).toBe(true);
+    expect(state.suppressAssistantStreamUntilTurnEndByChatId["chat-1"]).toBe(true);
+  });
+
+  it("keeps closed-turn protection for late external user events", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+    state = {
+      ...state,
+      closedTurnIdsByChatId: {
+        "chat-1": { "turn-closed": "ended" }
+      }
+    };
+
+    const next = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "user",
+        chat_id: "chat-1",
+        turn_id: "turn-closed",
+        text: "迟到的外部消息"
+      }
+    });
+
+    expect(next).toBe(state);
+    expect(next.messages).toHaveLength(0);
+  });
+
+  it("lets canonical history replace a live external user event without duplication", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "user",
+        chat_id: "chat-1",
+        turn_id: "turn-history",
+        text: "服务端已保存"
+      }
+    });
+
+    state = loadHistory(state, "websocket:chat-1", [
+      { role: "user", content: "服务端已保存" }
+    ], "canonical-history");
+
+    expect(state.messages).toHaveLength(1);
+    expect(state.messages[0]).toMatchObject({
+      role: "user",
+      content: "服务端已保存"
+    });
   });
 
   it("replaces a live assistant draft with a structured quota terminal message", () => {
@@ -783,7 +1397,7 @@ describe("agent chat slice", () => {
 
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
     });
     state = agentReducer(state, {
       type: "agent/wsEvent",
@@ -913,7 +1527,7 @@ describe("agent chat slice", () => {
     let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
     });
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "reasoning_delta", chat_id: "chat-1", text: "先分析。" } });
 
@@ -1201,7 +1815,7 @@ describe("agent chat slice", () => {
     let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
     });
     state = agentReducer(state, {
       type: "agent/wsEvent",
@@ -1336,6 +1950,258 @@ describe("agent chat slice", () => {
     expect(fileEditMessage?.activitySegmentId).toBe(toolTraceMessage?.activitySegmentId);
     expect(traceTexts).not.toContain("write_file(/tmp/a.txt)");
     expect(traceTexts).not.toContain('write_file({"path": "/tmp/a.txt", "content": "草泥马"})');
+  });
+
+  it("keeps a no-op file edit terminal and its unchanged marker", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-noop" } });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "file_edit",
+        chat_id: "chat-noop",
+        edits: [{
+          call_id: "call-noop",
+          ui_tool_call_id: "ui-noop",
+          tool: "edit_file",
+          path: "/tmp/same.txt",
+          phase: "start",
+          status: "editing",
+          added: 1,
+        }],
+      },
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "file_edit",
+        chat_id: "chat-noop",
+        edits: [{
+          call_id: "call-noop",
+          ui_tool_call_id: "ui-noop",
+          tool: "edit_file",
+          path: "/tmp/same.txt",
+          phase: "end",
+          status: "done",
+          added: 0,
+          deleted: 0,
+          unchanged: true,
+        }],
+      },
+    });
+
+    const fileEdits = state.messages.flatMap((message) => message.fileEdits ?? []);
+    expect(fileEdits).toHaveLength(1);
+    expect(fileEdits[0]).toMatchObject({
+      phase: "end",
+      status: "done",
+      unchanged: true,
+      added: 0,
+      deleted: 0,
+    });
+  });
+
+  it("keeps one file row across stale hydrate and final Provider call ids", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 100, turn_id: "turn-b" }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "file_edit",
+        chat_id: "chat-1",
+        turn_id: "turn-b",
+        edits: [{
+          call_id: "stream-id",
+          ui_tool_call_id: "ui-write",
+          tool: "write_file",
+          path: "src/a.ts",
+          absolute_path: "/workspace/src/a.ts",
+          phase: "start",
+          added: 20
+        }]
+      }
+    });
+    state = agentReducer(state, {
+      type: "agent/historyHydrateLoading",
+      sessionKey: "websocket:chat-1",
+      chatId: "chat-1",
+      requestId: "stale-turn-a"
+    });
+    state = agentReducer(state, {
+      type: "agent/historyHydrateLoaded",
+      requestId: "stale-turn-a",
+      thread: {
+        schemaVersion: 3,
+        sessionKey: "websocket:chat-1",
+        last_turn_id: "turn-a",
+        last_turn_closed: true,
+        messages: []
+      }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "file_edit",
+        chat_id: "chat-1",
+        turn_id: "turn-b",
+        edits: [{
+          call_id: "provider-final",
+          ui_tool_call_id: "ui-write",
+          tool: "write_file",
+          path: "src/a.ts",
+          absolute_path: "/workspace/src/a.ts",
+          phase: "end",
+          added: 487
+        }]
+      }
+    });
+
+    const fileRows = state.messages.filter((message) => message.fileEdits);
+    expect(state.activeTurnIdByChatId["chat-1"]).toBe("turn-b");
+    expect(state.isSending).toBe(true);
+    expect(fileRows).toHaveLength(1);
+    expect(fileRows[0].turnId).toBe("turn-b");
+    expect(fileRows[0].fileEdits).toEqual([
+      expect.objectContaining({ ui_tool_call_id: "ui-write", call_id: "provider-final", status: "done", added: 487 })
+    ]);
+  });
+
+  it("keeps separate UI tool invocations distinct even for the same Provider id and path", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+    for (const uiToolCallId of ["ui-1", "ui-2"]) {
+      state = agentReducer(state, {
+        type: "agent/wsEvent",
+        event: {
+          event: "file_edit",
+          chat_id: "chat-1",
+          turn_id: "turn-1",
+          edits: [{
+            call_id: "duplicate-provider-id",
+            ui_tool_call_id: uiToolCallId,
+            tool: "edit_file",
+            path: "src/a.ts",
+            phase: "end",
+            added: 1
+          }]
+        }
+      });
+    }
+
+    const fileRows = state.messages.filter((message) => message.fileEdits);
+    expect(fileRows).toHaveLength(2);
+    expect(fileRows.map((message) => message.fileEdits?.[0]?.ui_tool_call_id)).toEqual(["ui-1", "ui-2"]);
+  });
+
+  it("ignores a closed hydrate for an older turn and keeps reasoning continuous", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 100, turn_id: "turn-b" }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "reasoning_delta", chat_id: "chat-1", turn_id: "turn-b", text: "先分析" }
+    });
+    state = agentReducer(state, {
+      type: "agent/historyHydrateLoading",
+      sessionKey: "websocket:chat-1",
+      chatId: "chat-1",
+      requestId: "reasoning-stale"
+    });
+    state = agentReducer(state, {
+      type: "agent/historyHydrateLoaded",
+      requestId: "reasoning-stale",
+      thread: {
+        schemaVersion: 3,
+        sessionKey: "websocket:chat-1",
+        last_turn_id: "turn-a",
+        last_turn_closed: true,
+        messages: [{ role: "assistant", turnId: "turn-a", content: "旧结果" }]
+      }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "reasoning_delta", chat_id: "chat-1", turn_id: "turn-b", text: "，再执行" }
+    });
+
+    const reasoningRows = state.messages.filter((message) => message.turnId === "turn-b" && message.reasoning);
+    expect(state.activeTurnIdByChatId["chat-1"]).toBe("turn-b");
+    expect(state.isSending).toBe(true);
+    expect(reasoningRows).toHaveLength(1);
+    expect(reasoningRows[0].reasoning).toBe("先分析，再执行");
+    expect(reasoningRows[0].stoppedByUser).not.toBe(true);
+  });
+
+  it("accepts only a matching closed hydrate for the active turn", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 100, turn_id: "turn-b" }
+    });
+    state = agentReducer(state, {
+      type: "agent/historyHydrateLoading",
+      sessionKey: "websocket:chat-1",
+      chatId: "chat-1",
+      requestId: "matching-turn"
+    });
+    state = agentReducer(state, {
+      type: "agent/historyHydrateLoaded",
+      requestId: "matching-turn",
+      thread: {
+        schemaVersion: 3,
+        sessionKey: "websocket:chat-1",
+        last_turn_id: "turn-b",
+        last_turn_closed: true,
+        messages: [{ role: "assistant", turnId: "turn-b", content: "完成" }]
+      }
+    });
+
+    expect(state.activeTurnIdByChatId["chat-1"]).toBeNull();
+    expect(state.isSending).toBe(false);
+    expect(state.messages.map((message) => message.content)).toEqual(["完成"]);
+  });
+
+  it("continues reasoning from an open snapshot for the active turn", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 100, turn_id: "turn-b" }
+    });
+    state = agentReducer(state, {
+      type: "agent/historyHydrateLoading",
+      sessionKey: "websocket:chat-1",
+      chatId: "chat-1",
+      requestId: "open-turn"
+    });
+    state = agentReducer(state, {
+      type: "agent/historyHydrateLoaded",
+      requestId: "open-turn",
+      thread: {
+        schemaVersion: 3,
+        sessionKey: "websocket:chat-1",
+        last_turn_id: "turn-b",
+        last_turn_closed: false,
+        messages: [{
+          role: "assistant",
+          turnId: "turn-b",
+          content: "",
+          reasoning: "先分析",
+          reasoningStreaming: true,
+          isStreaming: true
+        }]
+      }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "reasoning_delta", chat_id: "chat-1", turn_id: "turn-b", text: "，再执行" }
+    });
+
+    const reasoningRows = state.messages.filter((message) => message.turnId === "turn-b" && message.reasoning);
+    expect(reasoningRows).toHaveLength(1);
+    expect(reasoningRows[0].reasoning).toBe("先分析，再执行");
+    expect(reasoningRows[0].reasoningStreaming).toBe(true);
   });
 
   it("keeps a shared activity segment running until both file edit and tool trace complete", () => {
@@ -1791,7 +2657,7 @@ describe("agent chat slice", () => {
     });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
     });
     state = agentReducer(state, {
       type: "agent/wsEvent",
@@ -1889,11 +2755,11 @@ describe("agent chat slice", () => {
     });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
     });
     expect(state.isSending).toBe(true);
 
-    state = agentReducer(state, { type: "agent/wsEvent", event: { event: "goal_status", chat_id: "chat-1", status: "idle" } });
+    state = agentReducer(state, { type: "agent/wsEvent", event: { event: "run_status", chat_id: "chat-1", status: "idle" } });
 
     expect(state.isSending).toBe(false);
     expect(state.tasks.find((task) => task.chatId === "chat-1")?.runStartedAt).toBeNull();
@@ -1908,12 +2774,12 @@ describe("agent chat slice", () => {
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
     });
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "delta", chat_id: "chat-1", text: "最终回答" } });
     expect(state.messages[0]).toMatchObject({ content: "最终回答", isStreaming: true });
 
-    state = agentReducer(state, { type: "agent/wsEvent", event: { event: "goal_status", chat_id: "chat-1", status: "idle" } });
+    state = agentReducer(state, { type: "agent/wsEvent", event: { event: "run_status", chat_id: "chat-1", status: "idle" } });
 
     expect(state.isSending).toBe(true);
     expect(state.messages[0]).toMatchObject({ content: "最终回答", isStreaming: true });
@@ -1930,7 +2796,7 @@ describe("agent chat slice", () => {
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800, turn_id: "turn-1" }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800, turn_id: "turn-1" }
     });
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "reasoning_delta", chat_id: "chat-1", text: "先分析" } });
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "delta", chat_id: "chat-1", text: "最终回答" } });
@@ -1986,7 +2852,7 @@ describe("agent chat slice", () => {
     let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800, turn_id: "turn-closed" }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800, turn_id: "turn-closed" }
     });
     state = agentReducer(state, {
       type: "agent/wsEvent",
@@ -2033,7 +2899,7 @@ describe("agent chat slice", () => {
     state = agentReducer(state, { type: "agent/userMessageQueued", chatId: "chat-1", content: "停止这轮" });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800, turn_id: "turn-stop" }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800, turn_id: "turn-stop" }
     });
     state = agentReducer(state, { type: "agent/stopRequested", chatId: "chat-1" });
     expect(state.stopInFlightByChatId["chat-1"]).toBe(true);
@@ -2101,7 +2967,7 @@ describe("agent chat slice", () => {
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
     });
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "delta", chat_id: "chat-1", text: "处理中" } });
     expect(state.isSending).toBe(true);
@@ -2155,7 +3021,7 @@ describe("agent chat slice", () => {
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 100, turn_id: "turn-1" }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 100, turn_id: "turn-1" }
     });
     state = agentReducer(state, { type: "agent/sessionsLoading", requestId: "req-stale-running" });
     const requestVersion = state.currentSessionsRequestRunStatusVersionByChatId?.["chat-1"];
@@ -2220,7 +3086,7 @@ describe("agent chat slice", () => {
     state = agentReducer(state, { type: "agent/newChatCreated", chatId: "chat-1" });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 100, turn_id: "turn-1" }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 100, turn_id: "turn-1" }
     });
     state = agentReducer(state, { type: "agent/sessionsLoading", requestId: "req-two-chats" });
     state = agentReducer(state, {
@@ -2340,7 +3206,7 @@ describe("agent chat slice", () => {
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
     });
     state = agentReducer(state, {
       type: "agent/historyLoading",
@@ -2375,7 +3241,7 @@ describe("agent chat slice", () => {
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
     });
 
     // There should be no completion signal before the task has ended.
@@ -2397,22 +3263,211 @@ describe("agent chat slice", () => {
   });
 
   it("updates task run status and current goal state from websocket events", () => {
+    const activeGoal = goalState("active");
     let state = agentReducer(initialAgentState, { type: "agent/sessionsLoaded", sessions });
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
     });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_state", chat_id: "chat-1", goal_state: { active: true, objective: "整理 PRD" } }
+      event: { event: "goal_state", chat_id: "chat-1", goal_state: activeGoal }
     });
 
     expect(state.tasks.find((task) => task.chatId === "chat-1")?.runStartedAt).toBe(1780732800);
-    expect(state.goalState).toEqual({ active: true, objective: "整理 PRD" });
+    expect(state.goalState).toEqual(activeGoal);
 
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "turn_end", chat_id: "chat-1" } });
     expect(state.tasks.find((task) => task.chatId === "chat-1")?.runStartedAt).toBeNull();
+    expect(state.goalState).toEqual(activeGoal);
+  });
+
+  it("keeps a per-Goal clock stable through settlement updates and clears it on the matching Turn end", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/sessionsLoaded", sessions });
+    state = agentReducer(state, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "goal_state", chat_id: "chat-1", goal_state: goalState("active") }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1_780_732_800, turn_id: "turn-1" }
+    });
+
+    expect(state.goalRunClockByChatId["chat-1"]).toEqual({
+      goalId,
+      turnId: "turn-1",
+      startedAt: 1_780_732_800,
+      baseSeconds: 30
+    });
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "goal_state",
+        chat_id: "chat-1",
+        goal_state: { ...goalState("paused"), time_used_seconds: 35 }
+      }
+    });
+    expect(state.goalRunClockByChatId["chat-1"]?.baseSeconds).toBe(30);
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "turn_end", chat_id: "chat-1", turn_id: "turn-old", goal_id: goalId, goal_outcome: "paused" }
+    });
+    expect(state.goalRunClockByChatId["chat-1"]).not.toBeNull();
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "turn_end", chat_id: "chat-1", turn_id: "turn-1", goal_id: goalId, goal_outcome: "paused" }
+    });
+    expect(state.goalRunClockByChatId["chat-1"]).toBeNull();
+  });
+
+  it("starts a Goal clock when active Goal state arrives after the running event", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/sessionsLoaded", sessions });
+    state = agentReducer(state, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1_780_732_800, turn_id: "turn-1" }
+    });
+    expect(state.goalRunClockByChatId["chat-1"] ?? null).toBeNull();
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "goal_state", chat_id: "chat-1", goal_state: goalState("active") }
+    });
+    expect(state.goalRunClockByChatId["chat-1"]).toEqual({
+      goalId,
+      turnId: "turn-1",
+      startedAt: 1_780_732_800,
+      baseSeconds: 30
+    });
+  });
+
+  it("does not start or leak Goal clocks for paused Goals or other chats", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/sessionsLoaded", sessions });
+    state = agentReducer(state, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "goal_state", chat_id: "chat-1", goal_state: goalState("paused") }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1_780_732_800, turn_id: "turn-1" }
+    });
+    expect(state.goalRunClockByChatId["chat-1"] ?? null).toBeNull();
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "goal_state", chat_id: "chat-2", goal_state: goalState("active") }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "run_status", chat_id: "chat-2", status: "running", started_at: 1_780_732_900, turn_id: "turn-2" }
+    });
+    expect(state.goalRunClockByChatId["chat-1"] ?? null).toBeNull();
+    expect(state.goalRunClockByChatId["chat-2"]).toMatchObject({ turnId: "turn-2", baseSeconds: 30 });
+  });
+
+  it("closes intermediate Goal Turns without completion and completes only the terminal Turn", () => {
+    vi.spyOn(Date, "now").mockReturnValue(1781240000000);
+    let state = agentReducer(initialAgentState, { type: "agent/sessionsLoaded", sessions });
+    state = agentReducer(state, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "goal_state", chat_id: "chat-1", goal_state: goalState("active") }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800, turn_id: "turn-1" }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "turn_end", chat_id: "chat-1", turn_id: "turn-1", goal_id: goalId, goal_outcome: "active" }
+    });
+
+    expect(state.tasks.find((task) => task.chatId === "chat-1")).toMatchObject({
+      runStartedAt: null,
+      completedUnseen: false
+    });
+    expect(state.lastTaskCompletion).toBeNull();
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732900, turn_id: "turn-2" }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "turn_end", chat_id: "chat-1", turn_id: "turn-2", goal_id: goalId, goal_outcome: "completed" }
+    });
+
+    expect(state.lastTaskCompletion).toEqual({ chatId: "chat-1", at: 1781240000000 });
+  });
+
+  it.each(["paused", "blocked", "usage_limited", "budget_limited"] as const)(
+    "does not emit completion for the Goal terminal status %s",
+    (outcome) => {
+      let state = agentReducer(initialAgentState, { type: "agent/sessionsLoaded", sessions });
+      state = agentReducer(state, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+      state = agentReducer(state, {
+        type: "agent/wsEvent",
+        event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800, turn_id: "turn-terminal" }
+      });
+      state = agentReducer(state, {
+        type: "agent/wsEvent",
+        event: { event: "turn_end", chat_id: "chat-1", turn_id: "turn-terminal", goal_id: goalId, goal_outcome: outcome }
+      });
+
+      expect(state.lastTaskCompletion).toBeNull();
+      expect(state.tasks.find((task) => task.chatId === "chat-1")?.completedUnseen).toBe(false);
+    }
+  );
+
+  it("keeps Goal mutation pending isolated by chat and ignores stale settlements", () => {
+    let state = agentReducer(initialAgentState, {
+      type: "agent/goalMutationStarted",
+      chatId: "chat-1",
+      requestId: "request-1",
+      goalId,
+      action: "pause"
+    });
+    state = agentReducer(state, {
+      type: "agent/goalMutationStarted",
+      chatId: "chat-2",
+      requestId: "request-2",
+      goalId: "1d7e1916-5871-4d57-a477-e3b2f443fa31",
+      action: "clear"
+    });
+    state = agentReducer(state, { type: "agent/goalMutationSettled", chatId: "chat-1", requestId: "stale" });
+    expect(state.goalMutationPendingByChatId).toHaveProperty("chat-1");
+    expect(state.goalMutationPendingByChatId).toHaveProperty("chat-2");
+
+    state = agentReducer(state, { type: "agent/goalMutationSettled", chatId: "chat-1", requestId: "request-1" });
+    expect(state.goalMutationPendingByChatId).not.toHaveProperty("chat-1");
+    expect(state.goalMutationPendingByChatId["chat-2"]).toMatchObject({ requestId: "request-2" });
+  });
+
+  it("does not let a late old Turn close the currently running Goal Turn", () => {
+    let state = agentReducer(initialAgentState, { type: "agent/sessionsLoaded", sessions });
+    state = agentReducer(state, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800, turn_id: "turn-old" }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732900, turn_id: "turn-current" }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "turn_end", chat_id: "chat-1", turn_id: "turn-old", goal_id: goalId, goal_outcome: "completed" }
+    });
+
+    expect(state.tasks.find((task) => task.chatId === "chat-1")?.runStartedAt).toBe(1780732900);
+    expect(state.activeTurnIdByChatId["chat-1"]).toBe("turn-current");
+    expect(state.lastTaskCompletion).toBeNull();
   });
 
   it("tracks stop in-flight and clears local busy on stop_result without appending messages", () => {
@@ -2425,7 +3480,7 @@ describe("agent chat slice", () => {
     });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
     });
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "delta", chat_id: "chat-1", text: "处理中" } });
 
@@ -2448,7 +3503,7 @@ describe("agent chat slice", () => {
     state = agentReducer(state, { type: "agent/userMessageQueued", chatId: "chat-1", content: "停止这轮" });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
     });
     state = agentReducer(state, { type: "agent/stopRequested", chatId: "chat-1" });
     expect(state.stopInFlightByChatId["chat-1"]).toBe(true);
@@ -2471,7 +3526,7 @@ describe("agent chat slice", () => {
     state = agentReducer(state, { type: "agent/userMessageQueued", chatId: "chat-1", content: "停止这轮" });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
     });
     state = agentReducer(state, { type: "agent/sessionsLoading", requestId: "req-before-stop-timeout" });
     state = agentReducer(state, { type: "agent/stopRequested", chatId: "chat-1" });
@@ -2547,7 +3602,7 @@ describe("agent chat slice", () => {
     });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
     });
     state = agentReducer(state, { type: "agent/stopRequested", chatId: "chat-1" });
 
@@ -2588,7 +3643,7 @@ describe("agent chat slice", () => {
     });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
     });
     state = agentReducer(state, { type: "agent/stopRequested", chatId: "chat-1" });
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "stop_result", chat_id: "chat-1", stopped: 1 } });
@@ -2650,7 +3705,7 @@ describe("agent chat slice", () => {
     });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800, turn_id: "turn-retry" }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800, turn_id: "turn-retry" }
     });
     state = agentReducer(state, {
       type: "agent/wsEvent",
@@ -2676,7 +3731,7 @@ describe("agent chat slice", () => {
     });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800, turn_id: "turn-stop" }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800, turn_id: "turn-stop" }
     });
     state = agentReducer(state, { type: "agent/stopRequested", chatId: "chat-1" });
 
@@ -2814,7 +3869,7 @@ describe("agent chat slice", () => {
     });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800, turn_id: "turn-old" }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800, turn_id: "turn-old" }
     });
     state = agentReducer(state, {
       type: "agent/wsEvent",
@@ -2893,13 +3948,13 @@ describe("agent chat slice", () => {
     });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
     });
     state = agentReducer(state, { type: "agent/stopRequested", chatId: "chat-1" });
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "stop_result", chat_id: "chat-1", stopped: 1 } });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732900 }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732900 }
     });
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "delta", chat_id: "chat-1", text: "新一轮回答" } });
 
@@ -2933,7 +3988,7 @@ describe("agent chat slice", () => {
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
     });
     state = agentReducer(state, { type: "agent/newChatRequested" });
 
@@ -3177,7 +4232,7 @@ describe("agent chat slice", () => {
     let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
     });
     state = agentReducer(state, {
       type: "agent/userMessageQueued",
@@ -3216,7 +4271,7 @@ describe("agent chat slice", () => {
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
     });
     state = agentReducer(state, {
       type: "agent/historyHydrateLoading",
@@ -3245,7 +4300,7 @@ describe("agent chat slice", () => {
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
     });
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "delta", chat_id: "chat-1", text: "处理中" } });
     state = agentReducer(state, {
@@ -3375,10 +4430,10 @@ describe("agent chat slice", () => {
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
     });
     state = agentReducer(state, { type: "agent/newChatRequested" });
-    state = agentReducer(state, { type: "agent/wsEvent", event: { event: "goal_status", chat_id: "chat-1", status: "idle" } });
+    state = agentReducer(state, { type: "agent/wsEvent", event: { event: "run_status", chat_id: "chat-1", status: "idle" } });
 
     expect(state.currentChatId).toBeNull();
     expect(state.currentSessionKey).toBeNull();
@@ -3394,7 +4449,7 @@ describe("agent chat slice", () => {
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
     });
     state = agentReducer(state, {
       type: "agent/historyLoading",
@@ -3402,7 +4457,7 @@ describe("agent chat slice", () => {
       chatId: "chat-2",
       requestId: "chat-2-request"
     });
-    state = agentReducer(state, { type: "agent/wsEvent", event: { event: "goal_status", chat_id: "chat-1", status: "idle" } });
+    state = agentReducer(state, { type: "agent/wsEvent", event: { event: "run_status", chat_id: "chat-1", status: "idle" } });
     expect(state.tasks.find((task) => task.chatId === "chat-1")).toMatchObject({
       runStartedAt: null,
       completedUnseen: false
@@ -3410,7 +4465,7 @@ describe("agent chat slice", () => {
 
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732900 }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732900 }
     });
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "turn_end", chat_id: "chat-1" } });
     expect(state.tasks.find((task) => task.chatId === "chat-1")).toMatchObject({
@@ -3424,7 +4479,7 @@ describe("agent chat slice", () => {
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
     });
     state = agentReducer(state, {
       type: "agent/historyLoading",
@@ -3434,7 +4489,7 @@ describe("agent chat slice", () => {
     });
     const before = state;
 
-    state = agentReducer(state, { type: "agent/wsEvent", event: { event: "goal_status", status: "idle" } });
+    state = agentReducer(state, { type: "agent/wsEvent", event: { event: "run_status", status: "idle" } });
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "turn_end" } });
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "session_updated" } });
 
@@ -3471,7 +4526,7 @@ describe("agent chat slice", () => {
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
     });
     expect(state.isSending).toBe(true);
 
@@ -3493,7 +4548,7 @@ describe("agent chat slice", () => {
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
     });
     state = agentReducer(state, {
       type: "agent/historyLoading",
@@ -3516,7 +4571,7 @@ describe("agent chat slice", () => {
     let state = agentReducer(initialAgentState, { type: "agent/wsEvent", event: { event: "ready", chat_id: "chat-1" } });
     state = agentReducer(state, {
       type: "agent/wsEvent",
-      event: { event: "goal_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
+      event: { event: "run_status", chat_id: "chat-1", status: "running", started_at: 1780732800 }
     });
     state = agentReducer(state, { type: "agent/newChatRequested" });
     state = agentReducer(state, { type: "agent/wsEvent", event: { event: "message", chat_id: "chat-1", text: "旧会话消息" } });
@@ -3663,6 +4718,7 @@ describe("agent chat slice", () => {
       thread: {
         schemaVersion: 1,
         sessionKey: "websocket:chat-1",
+        last_turn_id: "turn-stale",
         last_turn_closed: true,
         messages: [
           { role: "user", content: "已提交消息" },
@@ -4069,7 +5125,7 @@ describe("agent chat slice", () => {
     state = agentReducer(state, {
       type: "agent/wsEvent",
       event: {
-        event: "goal_status",
+        event: "run_status",
         chat_id: "chat-1",
         status: "running",
         started_at: 4_000,

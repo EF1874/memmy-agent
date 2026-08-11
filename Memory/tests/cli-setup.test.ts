@@ -54,19 +54,19 @@ describe("memmy-memory CLI setup commands", () => {
     expect(saved).toMatchObject({
       memmyMemory: {
         version: 1,
-        activeProfile: "byok",
+        userId: "local-user",
+        roleRouting: {
+          summary: "follow",
+          evolution: "follow"
+        },
         storage: {
           mode: "local",
           backend: "sqlite",
           sqlitePath: dbPath,
           endpoint: "http://127.0.0.1:18888"
         },
-        profiles: {
-          byok: {
-            embedding: {
-              provider: "local"
-            }
-          }
+        embedding: {
+          mode: "local"
         },
         algorithm: {
           enableMemoryAdd: true,
@@ -279,20 +279,19 @@ describe("memmy-memory CLI setup commands", () => {
     expect(saved.agents.defaults.model).toBe("keep");
     expect(saved.memmyMemory).toMatchObject({
       version: 1,
-      activeProfile: "byok",
+      userId: "user_123",
+      roleRouting: {
+        summary: "follow",
+        evolution: "follow"
+      },
       storage: {
         mode: "local",
         backend: "sqlite",
         sqlitePath: dbPath,
         endpoint: "http://new.local"
       },
-      profiles: {
-        byok: {
-          userId: "user_123",
-          embedding: {
-            provider: "local"
-          }
-        }
+      embedding: {
+        mode: "local"
       },
       algorithm: {
         enableMemoryAdd: true,

@@ -10,7 +10,7 @@ import { CronTool } from "./cron.js";
 import { ListExecSessionsTool, WriteStdinTool } from "./exec-session.js";
 import { ReadFileTool, WriteFileTool, EditFileTool, ListDirTool } from "./filesystem.js";
 import { ImageGenerationTool } from "./image-generation.js";
-import { CompleteGoalTool, LongTaskTool } from "./long-task.js";
+import { CreateGoalTool, GetGoalTool, UpdateGoalTool } from "./goal.js";
 import { MessageTool } from "./message.js";
 import { FindFilesTool, GrepTool } from "./search.js";
 import { ExecTool } from "./shell.js";
@@ -41,7 +41,7 @@ type ToolClass = (new (...args: any[]) => Tool) & {
 const BUILTIN_TOOL_CLASSES: ToolClass[] = [
   AgentSourceTool,
   ApplyPatchTool,
-  CompleteGoalTool,
+  CreateGoalTool,
   CronTool,
   EditFileTool,
   ExecTool,
@@ -50,12 +50,13 @@ const BUILTIN_TOOL_CLASSES: ToolClass[] = [
   ImageGenerationTool,
   ListDirTool,
   ListExecSessionsTool,
-  LongTaskTool,
+  GetGoalTool,
   MessageTool,
   ReadFileTool,
   SpawnTool,
   WebFetchTool,
   WebSearchTool,
+  UpdateGoalTool,
   WriteFileTool,
   WriteStdinTool,
   ...BROWSER_TOOL_CLASSES,

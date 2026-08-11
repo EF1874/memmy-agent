@@ -1,4 +1,7 @@
 import { addWebuiSessionBindingV104 } from "./migrations/v1.0.4/0001-add-webui-session-binding.js";
+import { flattenMemoryModelConfigV105 } from "./migrations/v1.0.5/0001-flatten-memory-model-config.js";
+import { normalizeGoalStateV105 } from "./migrations/v1.0.5/0002-normalize-goal-state.js";
+import { addGoalDagBoundaryV105 } from "./migrations/v1.0.5/0003-add-goal-dag-boundary.js";
 import { MigrationError, type MigrationDefinition } from "./types.js";
 
 const STABLE_SEMVER_PATTERN =
@@ -8,6 +11,9 @@ const MIGRATION_ID_PATTERN =
 
 export const migrations: readonly MigrationDefinition[] = [
   addWebuiSessionBindingV104,
+  flattenMemoryModelConfigV105,
+  normalizeGoalStateV105,
+  addGoalDagBoundaryV105,
 ];
 
 function definitionError(message: string, migrationId: string | null = null): never {
@@ -55,7 +61,11 @@ export function validateMigrationRegistry(
         definition.id,
       );
     }
-    if (definition.scope !== "agent-workspace") {
+    if (
+      definition.scope !== "agent-workspace"
+      && definition.scope !== "runtime-config"
+      && definition.scope !== "session-dag"
+    ) {
       definitionError(`Unsupported migration scope: ${definition.id}`, definition.id);
     }
     if (

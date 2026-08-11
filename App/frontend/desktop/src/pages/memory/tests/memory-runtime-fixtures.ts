@@ -295,24 +295,22 @@ export function createMockMemoryRuntimeClient(): MemoryRuntimeClient {
         mode: "dev",
         storage: { backend: "sqlite", schemaVersion: "mock", ready: true },
         capabilities: { routes: [...MEMORY_RUNTIME_ENDPOINTS], tools: ["memmy_memory_search"], memoryLayers: ["L1", "L2", "L3", "Skill"], supportsCli: true },
-        activeProfile: "byok",
         models: {
-        summary: { provider: "openai_compatible", model: "memory_summary", configured: true, remote: true },
-          evolution: { provider: "openai_compatible", model: "memory_evolution", configured: true, remote: true },
-          embedding: { provider: "local", model: "hash-embedding-v1", configured: true, remote: false }
+          summary: { provider: "openai_compatible", model: "memory_summary", configured: true, remote: true, routing: "fixed" },
+          evolution: { provider: "openai_compatible", model: "memory_evolution", configured: true, remote: true, routing: "fixed" },
+          embedding: { provider: "local", model: "hash-embedding-v1", configured: true, remote: false, mode: "local" }
         },
         serverTime: now
       };
     },
     async reloadConfig(): Promise<MemoryReloadConfigOutput> {
       return {
-        activeProfile: "byok",
         changed: false,
         requiresRestart: false,
         models: {
-        summary: { provider: "openai_compatible", model: "memory_summary", configured: true, remote: true },
-          evolution: { provider: "openai_compatible", model: "memory_evolution", configured: true, remote: true },
-          embedding: { provider: "local", model: "hash-embedding-v1", configured: true, remote: false }
+          summary: { provider: "openai_compatible", model: "memory_summary", configured: true, remote: true, routing: "fixed" },
+          evolution: { provider: "openai_compatible", model: "memory_evolution", configured: true, remote: true, routing: "fixed" },
+          embedding: { provider: "local", model: "hash-embedding-v1", configured: true, remote: false, mode: "local" }
         },
         reloadedAt: now
       };

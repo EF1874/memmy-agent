@@ -2,19 +2,19 @@
 import {
   ASR_DEFAULT_BASE_URL,
   ASR_PROVIDER,
-  ModelConfigViewSchema,
+  LegacyModelConfigViewSchema,
   QWEN_ASR_MODEL_ID,
   type AsrModelConfigInput,
   type AsrModelConfigView,
   type AsrModelId,
   type AsrProvider,
-  type EmbeddingConfigView,
+  type LegacyEmbeddingConfigView,
   type ImageGenModelConfigView,
   type ImageGenProvider,
-  type MemmyMemoryModelConfigInput,
-  type ModelConfigInput,
+  type LegacyMemmyMemoryModelConfigInput,
+  type LegacyModelConfigInput,
   type ModelConfigTestSecretTarget,
-  type ModelConfigView,
+  type LegacyModelConfigView,
   type RoleModelConfigInput,
   type RoleModelConfigView
 } from "@memmy/local-api-contracts";
@@ -23,8 +23,8 @@ import { ensureLocalByokModelConfigDefaults } from "../account-context.js";
 import type { SecretStore } from "../secret-store.js";
 
 export interface ModelConfigRepository {
-  get(): ModelConfigView;
-  upsert(input: ModelConfigInput): ModelConfigView;
+  get(): LegacyModelConfigView;
+  upsert(input: LegacyModelConfigInput): LegacyModelConfigView;
   getAsrRuntimeConfig(): AsrRuntimeConfig;
   getImageGenRuntimeConfig(): ImageGenRuntimeConfig | null;
   getTestApiKey?(target: ModelConfigTestSecretTarget): string | null;
@@ -384,11 +384,11 @@ function getOptionalRow(db: DatabaseSync, uuid: string): ModelConfigRow | null {
  * @param secretStore the secret store.
  * @returns a model-config view without the plaintext key.
  */
-function toView(row: ModelConfigRow, secretStore: SecretStore): ModelConfigView {
+function toView(row: ModelConfigRow, secretStore: SecretStore): LegacyModelConfigView {
   const apiKey = row.api_key_ref ? secretStore.get(row.api_key_ref) : null;
   const embedding = toEmbeddingView(row, secretStore);
 
-  return ModelConfigViewSchema.parse({
+  return LegacyModelConfigViewSchema.parse({
     provider: row.provider,
     baseUrl: row.base_url,
     modelId: row.model_id,
@@ -429,7 +429,7 @@ function toView(row: ModelConfigRow, secretStore: SecretStore): ModelConfigView 
  * @param secretStore the secret store.
  * @returns the embedding view.
  */
-function toEmbeddingView(row: ModelConfigRow, secretStore: SecretStore): EmbeddingConfigView {
+function toEmbeddingView(row: ModelConfigRow, secretStore: SecretStore): LegacyEmbeddingConfigView {
   if (row.embedding_mode !== "custom") {
     return {
       mode: "local",
@@ -575,7 +575,7 @@ function toImageGenRuntimeConfig(row: ModelConfigRow, secretStore: SecretStore):
  * @param input the model-config write input.
  * @returns the expanded Memory role-model config.
  */
-function normalizeMemmyMemoryInput(input: ModelConfigInput): MemmyMemoryModelConfigInput {
+function normalizeMemmyMemoryInput(input: LegacyModelConfigInput): LegacyMemmyMemoryModelConfigInput {
   return input.memmyMemory ?? {
     summary: toRoleModelConfigInput(input),
     evolution: toRoleModelConfigInput(input)
@@ -588,7 +588,7 @@ function normalizeMemmyMemoryInput(input: ModelConfigInput): MemmyMemoryModelCon
  * @param input the model-config write input.
  * @returns the expanded ASR model config.
  */
-function normalizeAsrInput(input: ModelConfigInput): AsrModelConfigInput {
+function normalizeAsrInput(input: LegacyModelConfigInput): AsrModelConfigInput {
   return input.asr ?? {
     provider: ASR_PROVIDER,
     baseUrl: ASR_DEFAULT_BASE_URL,
@@ -602,7 +602,7 @@ function normalizeAsrInput(input: ModelConfigInput): AsrModelConfigInput {
  * @param input the model-config write input.
  * @returns the role-model config.
  */
-function toRoleModelConfigInput(input: ModelConfigInput): RoleModelConfigInput {
+function toRoleModelConfigInput(input: LegacyModelConfigInput): RoleModelConfigInput {
   return {
     provider: input.provider,
     baseUrl: input.baseUrl,

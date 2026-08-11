@@ -250,7 +250,9 @@ function messageForEvent(component: string, event: string, fields: MemoryLogFiel
 
 function configDetails(fields: MemoryLogFields): string {
   const parts = [
-    pair("activeProfile", fields.activeProfile),
+    pair("summaryRouting", fields.summaryRouting),
+    pair("evolutionRouting", fields.evolutionRouting),
+    pair("embeddingMode", fields.embeddingMode),
     pair("memoryAddEnabled", fields.memoryAddEnabled),
     pair("memorySearchEnabled", fields.memorySearchEnabled),
     compactObject("summaryModel", fields.summaryModel),

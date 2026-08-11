@@ -37,6 +37,8 @@ export type EmbeddingProviderName =
 export type StorageModeName = "local" | "cloud" | "dev";
 export type StorageBackendName = "sqlite" | "openmem-cloud-rest";
 export type MemoryProfileName = "account" | "byok";
+export type MemoryRoleRoutingName = "follow" | "fixed";
+export type MemoryEmbeddingModeName = "cloud" | "local" | "custom";
 export type MemoryDomainName = "" | "research";
 export type ReadOnlyInjectionProfile =
   | "all"
@@ -49,6 +51,7 @@ export type LongEpisodeReflectMode = "per_step_parallel" | "per_step_downstream"
 
 export interface LlmConfig {
   provider: LlmProviderName;
+  sourceProvider?: string;
   vendor?: LlmVendorName;
   endpoint?: string;
   model?: string;
@@ -64,6 +67,8 @@ export interface LlmConfig {
 
 export interface EmbeddingConfig {
   provider: EmbeddingProviderName;
+  mode: MemoryEmbeddingModeName;
+  sourceProvider?: string;
   endpoint?: string;
   model?: string;
   apiKey?: string;
@@ -232,7 +237,10 @@ export interface AlgorithmConfig {
 export interface MemmyConfig {
   version: 1;
   domain: MemoryDomainName;
-  activeProfile: MemoryProfileName;
+  roleRouting: {
+    summary: MemoryRoleRoutingName;
+    evolution: MemoryRoleRoutingName;
+  };
   userId?: string;
   timeZone?: string;
   storage: StorageConfig;
@@ -249,7 +257,10 @@ export const MEMORY_SUMMARY_MAX_TOKENS = 512;
 export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
   version: 1,
   domain: "",
-  activeProfile: "byok",
+  roleRouting: {
+    summary: "follow",
+    evolution: "follow"
+  },
   storage: {
     mode: "local",
     backend: "sqlite",
@@ -285,6 +296,7 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
   },
   embedding: {
     provider: "local",
+    mode: "local",
     endpoint: undefined,
     model: "Xenova/all-MiniLM-L6-v2",
     apiKey: undefined,
@@ -461,7 +473,7 @@ export function loadMemmyConfig(configPath?: string): {
     : {};
   const configuredTimeZone = optionalString(asRecord(asRecord(rootConfig.agents).defaults).timezone);
   const memmyMemoryConfig = asRecord(rootConfig.memmyMemory);
-  const fileConfig = resolveRuntimeMemmyMemoryConfig(memmyMemoryConfig);
+  const fileConfig = resolveRuntimeMemmyMemoryConfig(memmyMemoryConfig, rootConfig);
   const envConfig = configFromEnv();
   const merged = normalizeConfig(deepMerge(
     DEFAULT_MEMMY_CONFIG as unknown as Record<string, unknown>,
@@ -559,9 +571,8 @@ function normalizeConfig(input: Record<string, unknown>): MemmyConfig {
     ...normalizeLlm(asRecord(input.summary), DEFAULT_MEMMY_CONFIG.summary),
     enableThinking: false
   };
-  const activeProfile = memoryProfileName(input.activeProfile, DEFAULT_MEMMY_CONFIG.activeProfile);
   const normalizedEvolution = normalizeLlm(asRecord(input.evolution), DEFAULT_MEMMY_CONFIG.evolution);
-  const evolution = activeProfile === "account"
+  const evolution = input.evolutionSourceProvider === "memmy_account"
     ? {
         ...normalizedEvolution,
         thinkingBudget: ACCOUNT_EVOLUTION_THINKING_BUDGET,
@@ -573,7 +584,7 @@ function normalizeConfig(input: Record<string, unknown>): MemmyConfig {
   return {
     version: 1,
     domain: memoryDomainName(input.domain, DEFAULT_MEMMY_CONFIG.domain),
-    activeProfile,
+    roleRouting: normalizeRoleRouting(asRecord(input.roleRouting)),
     userId: optionalString(input.userId),
     storage,
     summary,
@@ -583,48 +594,56 @@ function normalizeConfig(input: Record<string, unknown>): MemmyConfig {
   };
 }
 
-function resolveRuntimeMemmyMemoryConfig(input: Record<string, unknown>): Record<string, unknown> {
-  const profiles = isRecord(input.profiles) ? input.profiles : undefined;
-  if (!profiles) {
-    return input;
-  }
-
-  const activeProfile = optionalMemoryProfileName(input.activeProfile);
-  if (!activeProfile) {
-    throw new Error("memmyMemory.activeProfile must be byok or account when memmyMemory.profiles is configured");
-  }
-
-  const profile = asRecord(profiles[activeProfile]);
-  if (!isRecord(profile)) {
-    throw new Error(`memmyMemory.profiles.${activeProfile} is required`);
-  }
-
-  const base = omitKeys(input, ["profiles", "summary", "evolution", "embedding", "userId"]);
-  const merged = deepMerge(base, profile, { activeProfile });
-  if (activeProfile === "account") {
-    merged.summary = withForcedLlmProvider(asRecord(merged.summary), "openai_compatible", "qwen");
-    merged.evolution = withForcedLlmProvider(asRecord(merged.evolution), "openai_compatible", "qwen");
-    merged.embedding = withForcedEmbeddingProvider(asRecord(merged.embedding), "openai_compatible");
-  }
-  return merged;
-}
-
-function withForcedLlmProvider(
+function resolveRuntimeMemmyMemoryConfig(
   input: Record<string, unknown>,
-  provider: LlmProviderName,
-  vendor: LlmVendorName
+  rootConfig: Record<string, unknown>
 ): Record<string, unknown> {
-  return {
-    ...input,
-    provider,
-    vendor
-  };
-}
+  const profiles = isRecord(input.profiles) ? input.profiles : undefined;
+  let flattened = input;
+  if (profiles) {
+    const activeProfile = optionalMemoryProfileName(input.activeProfile);
+    if (!activeProfile) {
+      throw new Error("memmyMemory.activeProfile must be byok or account when memmyMemory.profiles is configured");
+    }
 
-function withForcedEmbeddingProvider(input: Record<string, unknown>, provider: EmbeddingProviderName): Record<string, unknown> {
+    const profile = asRecord(profiles[activeProfile]);
+    if (!isRecord(profile)) {
+      throw new Error(`memmyMemory.profiles.${activeProfile} is required`);
+    }
+
+    const base = omitKeys(input, ["profiles", "summary", "evolution", "embedding", "userId"]);
+    flattened = deepMerge(base, profile);
+    flattened.roleRouting = {
+      summary: activeProfile === "account" ? "follow" : "fixed",
+      evolution: activeProfile === "account" ? "follow" : "fixed"
+    };
+    if (activeProfile === "account") {
+      flattened.embedding = { mode: "cloud" };
+    } else {
+      const legacyEmbedding = asRecord(flattened.embedding);
+      flattened.embedding = legacyEmbedding.provider === "local"
+        ? { ...legacyEmbedding, mode: "local" }
+        : {
+            mode: "custom",
+            custom: legacyEmbedding
+          };
+    }
+  }
+
+  const routing = normalizeRoleRouting(asRecord(flattened.roleRouting));
+  const summary = routing.summary === "follow"
+    ? resolveAgentDefaultLlm(rootConfig, DEFAULT_MEMMY_CONFIG.summary)
+    : asRecord(flattened.summary);
+  const evolution = routing.evolution === "follow"
+    ? resolveAgentDefaultLlm(rootConfig, DEFAULT_MEMMY_CONFIG.evolution)
+    : asRecord(flattened.evolution);
   return {
-    ...input,
-    provider
+    ...flattened,
+    roleRouting: routing,
+    summary,
+    evolution,
+    evolutionSourceProvider: optionalString(evolution.sourceProvider),
+    embedding: resolveEmbeddingInput(flattened, rootConfig)
   };
 }
 
@@ -641,6 +660,10 @@ function normalizeStorage(input: Record<string, unknown>): StorageConfig {
 function normalizeLlm(input: Record<string, unknown>, defaults: LlmConfig): LlmConfig {
   return {
     provider: llmProvider(input.provider, defaults.provider),
+    sourceProvider: optionalString(input.sourceProvider)
+      ?? optionalString(input.vendor)
+      ?? optionalString(input.provider)
+      ?? defaults.sourceProvider,
     vendor: llmVendor(input.vendor, defaults.vendor ?? ""),
     endpoint: optionalString(input.endpoint),
     model: optionalString(input.model) ?? defaults.model,
@@ -657,6 +680,8 @@ function normalizeLlm(input: Record<string, unknown>, defaults: LlmConfig): LlmC
 function normalizeEmbedding(input: Record<string, unknown>): EmbeddingConfig {
   return {
     provider: embeddingProvider(input.provider, DEFAULT_MEMMY_CONFIG.embedding.provider),
+    mode: memoryEmbeddingMode(input.mode, DEFAULT_MEMMY_CONFIG.embedding.mode),
+    sourceProvider: optionalString(input.sourceProvider),
     endpoint: optionalString(input.endpoint),
     model: optionalString(input.model) ?? DEFAULT_MEMMY_CONFIG.embedding.model,
     apiKey: optionalString(input.apiKey),
@@ -666,6 +691,165 @@ function normalizeEmbedding(input: Record<string, unknown>): EmbeddingConfig {
     cache: booleanValue(input.cache, DEFAULT_MEMMY_CONFIG.embedding.cache),
     normalize: booleanValue(input.normalize, DEFAULT_MEMMY_CONFIG.embedding.normalize)
   };
+}
+
+function normalizeRoleRouting(
+  input: Record<string, unknown>
+): MemmyConfig["roleRouting"] {
+  return {
+    summary: memoryRoleRouting(input.summary, DEFAULT_MEMMY_CONFIG.roleRouting.summary),
+    evolution: memoryRoleRouting(input.evolution, DEFAULT_MEMMY_CONFIG.roleRouting.evolution)
+  };
+}
+
+function resolveAgentDefaultLlm(
+  rootConfig: Record<string, unknown>,
+  defaults: LlmConfig
+): Record<string, unknown> {
+  const agentDefaults = asRecord(asRecord(rootConfig.agents).defaults);
+  const presetName = optionalString(agentDefaults.modelPreset);
+  const preset = presetName && presetName !== "default"
+    ? asRecord(asRecord(rootConfig.modelPresets)[presetName])
+    : agentDefaults;
+  const model = optionalString(preset.model);
+  const providerName = resolvePresetProviderName(
+    optionalString(preset.provider),
+    model,
+    asRecord(rootConfig.providers)
+  );
+  if (!model || !providerName) {
+    return {
+      ...defaults,
+      provider: "",
+      sourceProvider: providerName ?? undefined,
+      model: model ?? ""
+    };
+  }
+  const providerConfig = asRecord(asRecord(rootConfig.providers)[providerName]);
+  const runtimeProvider = memoryLlmProvider(providerName);
+  return {
+    ...defaults,
+    provider: runtimeProvider,
+    sourceProvider: providerName,
+    vendor: memoryLlmVendor(providerName, runtimeProvider),
+    endpoint: optionalString(providerConfig.apiBase)
+      ?? optionalString(providerConfig.baseUrl)
+      ?? defaults.endpoint,
+    model,
+    apiKey: optionalString(providerConfig.apiKey),
+    temperature: numberValue(preset.temperature, defaults.temperature),
+    maxTokens: numberValue(preset.maxTokens, defaults.maxTokens ?? 1200),
+    enableThinking: Boolean(optionalString(preset.reasoningEffort))
+      || booleanValue(preset.enableThinking, defaults.enableThinking)
+  };
+}
+
+function resolvePresetProviderName(
+  configured: string | undefined,
+  model: string | undefined,
+  providers: Record<string, unknown>
+): string | undefined {
+  if (configured && configured !== "auto") return configured;
+  const prefix = model?.split("/", 1)[0];
+  if (prefix && isRecord(providers[prefix])) return prefix;
+  const names = Object.keys(providers);
+  return names.length === 1 ? names[0] : undefined;
+}
+
+function memoryLlmProvider(provider: string): LlmProviderName {
+  switch (provider) {
+    case "anthropic":
+      return "anthropic";
+    case "google":
+    case "gemini":
+      return "gemini";
+    case "bedrock":
+      return "bedrock";
+    case "host":
+      return "host";
+    default:
+      return "openai_compatible";
+  }
+}
+
+function memoryLlmVendor(
+  provider: string,
+  runtimeProvider: LlmProviderName
+): LlmVendorName {
+  switch (provider) {
+    case "anthropic":
+      return "anthropic";
+    case "google":
+    case "gemini":
+      return "google";
+    case "deepseek":
+    case "zhipu":
+    case "qwen":
+    case "kimi":
+    case "minimax":
+    case "baidu":
+    case "doubao":
+      return provider;
+    default:
+      return runtimeProvider === "openai_compatible" ? "openai_compatible" : "";
+  }
+}
+
+function resolveEmbeddingInput(
+  memory: Record<string, unknown>,
+  rootConfig: Record<string, unknown>
+): Record<string, unknown> {
+  const embedding = asRecord(memory.embedding);
+  const mode = memoryEmbeddingMode(
+    embedding.mode,
+    DEFAULT_MEMMY_CONFIG.embedding.mode
+  );
+  if (mode === "local") {
+    return {
+      ...embedding,
+      mode,
+      provider: "local",
+      sourceProvider: "local"
+    };
+  }
+  if (mode === "custom") {
+    const custom = asRecord(embedding.custom);
+    return {
+      ...embedding,
+      ...custom,
+      mode,
+      sourceProvider: optionalString(custom.sourceProvider)
+        ?? optionalString(custom.vendor)
+        ?? optionalString(custom.provider),
+      provider: memoryEmbeddingProvider(optionalString(custom.provider))
+    };
+  }
+  const account = asRecord(asRecord(rootConfig.providers).memmy_account);
+  return {
+    ...embedding,
+    mode,
+    sourceProvider: "memmy_account",
+    provider: "openai_compatible",
+    endpoint: optionalString(account.apiBase),
+    model: "embedding",
+    apiKey: optionalString(account.apiKey)
+  };
+}
+
+function memoryEmbeddingProvider(value: string | undefined): EmbeddingProviderName {
+  switch (value) {
+    case "gemini":
+    case "google":
+      return "gemini";
+    case "cohere":
+    case "voyage":
+    case "mistral":
+      return value;
+    case "local":
+      return "local";
+    default:
+      return "openai_compatible";
+  }
 }
 
 function normalizeAlgorithm(input: Record<string, unknown>): AlgorithmConfig {
@@ -953,6 +1137,24 @@ function storageMode(value: unknown, fallback: StorageModeName): StorageModeName
     return mode;
   }
   return fallback;
+}
+
+function memoryRoleRouting(
+  value: unknown,
+  fallback: MemoryRoleRoutingName
+): MemoryRoleRoutingName {
+  const routing = optionalString(value);
+  return routing === "follow" || routing === "fixed" ? routing : fallback;
+}
+
+function memoryEmbeddingMode(
+  value: unknown,
+  fallback: MemoryEmbeddingModeName
+): MemoryEmbeddingModeName {
+  const mode = optionalString(value);
+  return mode === "cloud" || mode === "local" || mode === "custom"
+    ? mode
+    : fallback;
 }
 
 function memoryProfileName(value: unknown, fallback: MemoryProfileName): MemoryProfileName {

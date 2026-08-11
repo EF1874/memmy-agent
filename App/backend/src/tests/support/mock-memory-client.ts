@@ -43,7 +43,6 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
           version: "mock-0.0.0",
           uptimeMs: Math.max(0, Date.now() - bootedAt),
           mode: "dev",
-          activeProfile: "byok",
           storage: {
             backend: "sqlite",
             schemaVersion: "mock",
@@ -64,7 +63,6 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
     async reloadConfig() {
       failIfNeeded();
       return {
-        activeProfile: "byok",
         changed: true,
         requiresRestart: false,
         models: mockModels(),
@@ -316,19 +314,22 @@ function mockModels() {
       provider: "mock",
       model: "mock-summary",
       configured: true,
-      remote: false
+      remote: false,
+      routing: "fixed" as const
     },
     evolution: {
       provider: "mock",
       model: "mock-skill",
       configured: true,
-      remote: false
+      remote: false,
+      routing: "follow" as const
     },
     embedding: {
       provider: "mock",
       model: "mock-embedding",
       configured: true,
-      remote: false
+      remote: false,
+      mode: "local" as const
     }
   };
 }

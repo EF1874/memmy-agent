@@ -193,7 +193,7 @@ describe("AgentRunner progress deltas", () => {
             content: null,
             toolCalls: [
               new ToolCallRequest({
-                id: "call-write",
+                id: "provider-final-write",
                 name: "write_file",
                 arguments: { path: "big.txt", content: "line\n".repeat(24) },
               }),
@@ -226,6 +226,9 @@ describe("AgentRunner progress deltas", () => {
     );
 
     expect(result.finalContent).toBe("done");
+    const uiToolCallIds = new Set(progressEvents.map((event) => event.ui_tool_call_id));
+    expect(uiToolCallIds.size).toBe(1);
+    expect([...uiToolCallIds][0]).toEqual(expect.any(String));
     expect(progressEvents.some((event) => event.approximate && event.added === 24)).toBe(true);
     expect(progressEvents.some((event) => (
       !event.approximate
@@ -233,6 +236,15 @@ describe("AgentRunner progress deltas", () => {
       && event.status === "done"
       && event.added === 24
     ))).toBe(true);
+    const secondRequestMessages = provider.chatStreamWithRetry.mock.calls[1][0].messages;
+    expect(secondRequestMessages).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        role: "assistant",
+        tool_calls: [expect.objectContaining({ id: "provider-final-write" })],
+      }),
+      expect.objectContaining({ role: "tool", tool_call_id: "provider-final-write" }),
+    ]));
+    expect(JSON.stringify(secondRequestMessages)).not.toContain("ui_tool_call_id");
     expect(provider.chatWithRetry).not.toHaveBeenCalled();
   });
 

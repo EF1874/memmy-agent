@@ -22,7 +22,15 @@ describe("local app route inventory", () => {
       {
         method: "PUT",
         url: "/api/app/model-config",
-        payload: { provider: "openai_compatible", baseUrl: "https://api.example.com/v1", modelId: "gpt-4.1-mini" }
+        payload: {
+          configRevision: "revision-before-save",
+          providers: [{
+            provider: "openai",
+            apiBase: "https://api.example.com/v1",
+            models: [{ presetName: "work-gpt", model: "gpt-4.1-mini" }]
+          }],
+          defaultModelPreset: "work-gpt"
+        }
       },
       {
         method: "POST",
@@ -86,25 +94,11 @@ function createServer(): FastifyInstance {
       async updateSettings(input) {
         return appSettings(input);
       },
-      async setModelConfig(input) {
-        return modelConfigView({
-          provider: input.provider,
-          baseUrl: input.baseUrl,
-          modelId: input.modelId,
-          hasApiKey: Boolean(input.apiKey),
-          apiKeyMasked: input.apiKey ? "sk-t••••cret" : "",
-          embedding: localEmbeddingView()
-        });
+      async setModelConfig() {
+        return modelConfigView({ configRevision: "revision-after-save" });
       },
       async getModelConfig() {
-        return modelConfigView({
-          provider: "openai_compatible",
-          baseUrl: "https://api.example.com/v1",
-          modelId: "gpt-4.1-mini",
-          hasApiKey: false,
-          apiKeyMasked: "",
-          embedding: localEmbeddingView()
-        });
+        return modelConfigView();
       },
       async testModelConfig() {
         return {
@@ -306,34 +300,37 @@ function createPermissionManager(): PermissionManager {
 }
 
 function modelConfigView(overrides: Record<string, unknown> = {}) {
-  const provider = (overrides.provider ?? "openai_compatible") as string;
-  const baseUrl = (overrides.baseUrl ?? "https://api.example.com/v1") as string;
-  const modelId = (overrides.modelId ?? "gpt-4.1-mini") as string;
-  const hasApiKey = Boolean(overrides.hasApiKey);
-  const apiKeyMasked = (overrides.apiKeyMasked ?? "") as string;
   return {
-    provider,
-    baseUrl,
-    modelId,
-    hasApiKey,
-    apiKeyMasked,
+    configRevision: overrides.configRevision ?? "revision-before-save",
+    providers: [{
+      provider: "openai",
+      apiBase: "https://api.example.com/v1",
+      apiType: "auto",
+      configured: true,
+      hasApiKey: false,
+      apiKeyMasked: "",
+      accountManaged: false,
+      editable: true,
+      models: [{
+        presetName: "work-gpt",
+        model: "gpt-4.1-mini",
+        isDefault: true,
+        available: true
+      }]
+    }],
+    defaultModelPreset: "work-gpt",
+    configured: true,
     embedding: overrides.embedding ?? localEmbeddingView(),
     asr: overrides.asr ?? asrView(),
     imageGen: overrides.imageGen ?? null,
     memmyMemory: {
       summary: {
-        provider,
-        baseUrl,
-        modelId,
-        hasApiKey,
-        apiKeyMasked
+        mode: "follow",
+        fixed: null
       },
       evolution: {
-        provider,
-        baseUrl,
-        modelId,
-        hasApiKey,
-        apiKeyMasked
+        mode: "follow",
+        fixed: null
       }
     },
     updatedAt: "2026-06-02T10:00:00.000Z"
@@ -353,10 +350,7 @@ function asrView() {
 function localEmbeddingView() {
   return {
     mode: "local",
-    baseUrl: null,
-    modelId: null,
-    hasApiKey: false,
-    apiKeyMasked: ""
+    custom: null
   };
 }
 

@@ -18,7 +18,7 @@ export class LLMRuntime {
   }
 }
 
-export type LLMRuntimeResolver = () => LLMRuntime;
+export type LLMRuntimeResolver = (modelPreset?: string | null) => LLMRuntime;
 
 export function staticLlmRuntime(provider: LLMProvider, model: string): LLMRuntimeResolver {
   const runtime = new LLMRuntime(provider, model);

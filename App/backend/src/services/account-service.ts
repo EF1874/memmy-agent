@@ -197,7 +197,7 @@ async function reloadMemoryConfigIfNeeded(
   projection: RuntimeProjectionResult | undefined,
   options: CreateAccountServiceOptions
 ): Promise<void> {
-  if (!projection?.changed || !projection.activeProfileAffected || !options.memoryClient) {
+  if (!projection?.changed || !projection.memoryConfigAffected || !options.memoryClient) {
     return;
   }
 
