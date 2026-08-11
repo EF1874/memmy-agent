@@ -48,6 +48,8 @@ import { TerminalRunControl } from "../../core/session/terminal-session-control.
 import {
   readWorkspaceEnvironment,
   readWorkspaceFileDiff,
+  switchWorkspaceBranch,
+  WorkspaceEnvironmentError,
   type WorkspaceEnvironmentContext,
 } from "../../core/session/workspace-environment.js";
 import { scrubSubagentMessagesForChannel } from "../../utils/subagent-channel-display.js";
@@ -1607,10 +1609,11 @@ export class WebSocketChannel extends BaseChannel {
   async handleProjectWorkspaceEnvironment(
     request: HttpRequestLike,
     rawId: string,
-    view: "environment" | "diff",
+    view: "environment" | "diff" | "branch",
   ): Promise<HttpLikeResponse> {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
-    if ((request.method ?? "GET").toUpperCase() !== "GET") return httpError(405, "method not allowed");
+    const expectedMethod = view === "branch" ? "POST" : "GET";
+    if ((request.method ?? "GET").toUpperCase() !== expectedMethod) return httpError(405, "method not allowed");
     try {
       const id = decodeApiKey(rawId);
       if (!id) throw new WebuiProjectError("project_not_found", 404);
@@ -1634,15 +1637,44 @@ export class WebSocketChannel extends BaseChannel {
   private async workspaceEnvironmentResponse(
     request: HttpRequestLike,
     context: WorkspaceEnvironmentContext,
-    view: "environment" | "diff",
+    view: "environment" | "diff" | "branch",
   ): Promise<HttpLikeResponse> {
-    const environment = await readWorkspaceEnvironment(context);
-    if (view === "environment") return httpJsonResponse(environment);
-    const [, query] = parseRequestPath(String(request.path ?? ""));
-    const relativePath = queryFirst(query, "path");
-    if (!relativePath) return httpError(400, "missing path");
-    const diff = await readWorkspaceFileDiff(environment, relativePath);
-    return diff ? httpJsonResponse(diff) : httpError(404, "changed file not found");
+    try {
+      const environment = await readWorkspaceEnvironment(context);
+      if (view === "environment") return httpJsonResponse(environment);
+      if (view === "branch") {
+        let body: unknown;
+        try {
+          body = JSON.parse(requestBodyText(request));
+        } catch {
+          return httpError(400, "workspace_branch_request_invalid");
+        }
+        if (
+          !body
+          || typeof body !== "object"
+          || Array.isArray(body)
+          || typeof (body as Record<string, unknown>).branch !== "string"
+          || typeof (body as Record<string, unknown>).expected_revision !== "string"
+        ) {
+          return httpError(400, "workspace_branch_request_invalid");
+        }
+        const next = await switchWorkspaceBranch(
+          context,
+          environment,
+          (body as Record<string, string>).branch,
+          (body as Record<string, string>).expected_revision,
+        );
+        return httpJsonResponse(next);
+      }
+      const [, query] = parseRequestPath(String(request.path ?? ""));
+      const relativePath = queryFirst(query, "path");
+      if (!relativePath) return httpError(400, "missing path");
+      const diff = await readWorkspaceFileDiff(environment, relativePath);
+      return diff ? httpJsonResponse(diff) : httpError(404, "changed file not found");
+    } catch (error) {
+      if (error instanceof WorkspaceEnvironmentError) return httpError(error.status, error.code);
+      throw error;
+    }
   }
 
   settingsErrorResponse(error: any): HttpLikeResponse {
@@ -1840,10 +1872,11 @@ export class WebSocketChannel extends BaseChannel {
   async handleWorkspaceEnvironment(
     request: HttpRequestLike,
     key: string,
-    view: "environment" | "diff",
+    view: "environment" | "diff" | "branch",
   ): Promise<HttpLikeResponse> {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
-    if ((request.method ?? "GET").toUpperCase() !== "GET") return httpError(405, "method not allowed");
+    const expectedMethod = view === "branch" ? "POST" : "GET";
+    if ((request.method ?? "GET").toUpperCase() !== expectedMethod) return httpError(405, "method not allowed");
     const result = this.workspaceEnvironmentSession(key);
     if (!result.ok) return result.response;
     return this.workspaceEnvironmentResponse(request, result.context, view);
@@ -2629,6 +2662,8 @@ export class WebSocketChannel extends BaseChannel {
     if (match) return this.handleWorkspaceEnvironment(request, match[1], "environment");
     match = got.match(/^\/api\/sessions\/([^/]+)\/environment\/diff$/);
     if (match) return this.handleWorkspaceEnvironment(request, match[1], "diff");
+    match = got.match(/^\/api\/sessions\/([^/]+)\/environment\/branch$/);
+    if (match) return this.handleWorkspaceEnvironment(request, match[1], "branch");
     match = got.match(/^\/api\/sessions\/([^/]+)\/webui-thread$/);
     if (match) return this.handleWebuiThreadGet(request, match[1]);
     match = got.match(/^\/api\/sessions\/([^/]+)\/last-compaction$/);
@@ -2641,6 +2676,8 @@ export class WebSocketChannel extends BaseChannel {
     if (match) return this.handleProjectWorkspaceEnvironment(request, match[1], "environment");
     match = got.match(/^\/api\/projects\/([^/]+)\/environment\/diff$/);
     if (match) return this.handleProjectWorkspaceEnvironment(request, match[1], "diff");
+    match = got.match(/^\/api\/projects\/([^/]+)\/environment\/branch$/);
+    if (match) return this.handleProjectWorkspaceEnvironment(request, match[1], "branch");
     match = got.match(/^\/api\/projects\/([^/]+)\/reveal$/);
     if (match) return this.handleProjectReveal(request, match[1]);
     match = got.match(/^\/api\/projects\/([^/]+)$/);

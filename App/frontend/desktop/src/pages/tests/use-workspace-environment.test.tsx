@@ -34,6 +34,7 @@ function environment(scope: WorkspaceEnvironmentScope): WorkspaceEnvironmentStat
       goal: null,
     },
     files: [],
+    branches: [scope.key],
   };
 }
 

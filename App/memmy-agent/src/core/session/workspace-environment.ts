@@ -78,6 +78,7 @@ type GitState = {
   upstream: string | null;
   ahead: number;
   behind: number;
+  branches: string[];
   files: GitStatusEntry[];
 };
 
@@ -92,6 +93,15 @@ type GoalWorkspaceBaseline = {
 };
 
 type GitCommandResult = { ok: true; stdout: string } | { ok: false; stderr: string };
+
+export class WorkspaceEnvironmentError extends Error {
+  constructor(
+    readonly code: "workspace_environment_stale" | "workspace_branch_invalid" | "workspace_branch_switch_failed",
+    readonly status: number,
+  ) {
+    super(code);
+  }
+}
 
 const GIT_TIMEOUT_MS = 5_000;
 const GIT_OUTPUT_LIMIT = 8 * 1024 * 1024;
@@ -156,6 +166,7 @@ function parseStatus(cwd: string, raw: string): GitState {
     upstream: null,
     ahead: 0,
     behind: 0,
+    branches: [],
     files: [],
   };
   const records = raw.split("\0");
@@ -206,11 +217,18 @@ async function readGitState(cwd: string): Promise<{ status: "ready"; state: GitS
   if (!statusResult.ok) return { status: "error" };
   const state = parseStatus(root, statusResult.stdout);
   state.root = root;
-  const numstatResult = await runGit(root, ["diff", "HEAD", "--numstat", "-z", "--no-renames"]);
+  const [numstatResult, branchesResult] = await Promise.all([
+    runGit(root, ["diff", "HEAD", "--numstat", "-z", "--no-renames"]),
+    runGit(root, ["for-each-ref", "--sort=-committerdate", "--format=%(refname:short)", "refs/heads"]),
+  ]);
   if (numstatResult.ok) {
     const stats = parseNumstat(numstatResult.stdout);
     state.files = state.files.map((file) => ({ ...file, ...(stats.get(file.path) ?? {}) }));
   }
+  if (branchesResult.ok) {
+    state.branches = branchesResult.stdout.split("\n").map((branch) => branch.trim()).filter(Boolean);
+  }
+  if (state.branch && !state.branches.includes(state.branch)) state.branches = [state.branch, ...state.branches];
   return { status: "ready", state };
 }
 
@@ -297,6 +315,7 @@ function revisionFor(value: unknown): string {
 export async function readWorkspaceEnvironment(context: WorkspaceEnvironmentContext): Promise<{
   snapshot: WorkspaceEnvironmentSnapshot;
   files: WorkspaceEnvironmentFile[];
+  branches: string[];
 }> {
   const cwd = context.cwd ?? "";
   if (!context.cwd) {
@@ -312,7 +331,7 @@ export async function readWorkspaceEnvironment(context: WorkspaceEnvironmentCont
       changes: null,
       goal: null,
     };
-    return { snapshot, files: [] };
+    return { snapshot, files: [], branches: [] };
   }
   const captured_at = new Date().toISOString();
   const result = await readGitState(cwd);
@@ -328,7 +347,7 @@ export async function readWorkspaceEnvironment(context: WorkspaceEnvironmentCont
       changes: null,
       goal: null,
     };
-    return { snapshot, files: [] };
+    return { snapshot, files: [], branches: [] };
   }
   const files = await attributedFiles(context, result.state);
   const goalState = readGoalState(context.metadata);
@@ -383,7 +402,26 @@ export async function readWorkspaceEnvironment(context: WorkspaceEnvironmentCont
       goal,
     },
     files,
+    branches: result.state.branches,
   };
+}
+
+export async function switchWorkspaceBranch(
+  context: WorkspaceEnvironmentContext,
+  environment: Awaited<ReturnType<typeof readWorkspaceEnvironment>>,
+  branch: string,
+  expectedRevision: string,
+): Promise<Awaited<ReturnType<typeof readWorkspaceEnvironment>>> {
+  if (environment.snapshot.revision !== expectedRevision) {
+    throw new WorkspaceEnvironmentError("workspace_environment_stale", 409);
+  }
+  if (!environment.snapshot.repository || !environment.branches.includes(branch)) {
+    throw new WorkspaceEnvironmentError("workspace_branch_invalid", 400);
+  }
+  if (environment.snapshot.repository.branch === branch) return environment;
+  const switched = await runGit(environment.snapshot.repository.root, ["switch", "--no-guess", branch]);
+  if (!switched.ok) throw new WorkspaceEnvironmentError("workspace_branch_switch_failed", 409);
+  return readWorkspaceEnvironment(context);
 }
 
 export async function readWorkspaceFileDiff(environment: {

@@ -60,50 +60,56 @@ afterEach(() => {
 describe("memmy-agent client", () => {
   it("reads the workspace snapshot, changed files, and a selected diff", async () => {
     const calls: string[] = [];
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const workspaceState = (project: boolean, branch = "zy_git_v1.0.7") => ({
+      snapshot: {
+        scope_kind: project ? "project" : "session",
+        scope_key: project ? "project-1" : "websocket:chat-1",
+        cwd: "/workspace",
+        status: "ready",
+        revision: `rev-${branch}`,
+        captured_at: "2026-08-11T08:00:00.000Z",
+        repository: {
+          display_name: "memmy-agent",
+          root: "/workspace",
+          head_sha: "84d10f8",
+          branch,
+          detached: false,
+          upstream: null,
+          ahead: 0,
+          behind: 0,
+          worktree: "dirty"
+        },
+        changes: { file_count: 1, additions: 8, deletions: 1, conflicts: 0, staged: 0, unstaged: 1, untracked: 0 },
+        goal: null
+      },
+      files: [{
+        path: "src/panel.tsx",
+        status: ".M",
+        staged: false,
+        unstaged: true,
+        untracked: false,
+        conflict: false,
+        additions: 8,
+        deletions: 1,
+        attribution: "goal"
+      }],
+      branches: ["zy_git_v1.0.7", "main"]
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input));
       calls.push(`${url.pathname}${url.search}`);
       if (url.pathname === "/webui/bootstrap") return json(bootstrap);
+      if (url.pathname.endsWith("/environment/branch")) {
+        expect(init?.method).toBe("POST");
+        expect(JSON.parse(String(init?.body))).toEqual({ branch: "main", expected_revision: "rev-zy_git_v1.0.7" });
+        return json(workspaceState(url.pathname.includes("/projects/"), "main"));
+      }
       if (url.pathname.endsWith("/environment/diff")) {
         expect(url.searchParams.get("path")).toBe("src/panel.tsx");
         return json({ path: "src/panel.tsx", diff: "+panel", truncated: false, unavailable_reason: null });
       }
       if (url.pathname.endsWith("/environment")) {
-        const project = url.pathname.includes("/projects/");
-        return json({
-          snapshot: {
-            scope_kind: project ? "project" : "session",
-            scope_key: project ? "project-1" : "websocket:chat-1",
-            cwd: "/workspace",
-            status: "ready",
-            revision: "rev-1",
-            captured_at: "2026-08-11T08:00:00.000Z",
-            repository: {
-              display_name: "memmy-agent",
-              root: "/workspace",
-              head_sha: "84d10f8",
-              branch: "zy_git_v1.0.7",
-              detached: false,
-              upstream: null,
-              ahead: 0,
-              behind: 0,
-              worktree: "dirty"
-            },
-            changes: { file_count: 1, additions: 8, deletions: 1, conflicts: 0, staged: 0, unstaged: 1, untracked: 0 },
-            goal: null
-          },
-          files: [{
-            path: "src/panel.tsx",
-            status: ".M",
-            staged: false,
-            unstaged: true,
-            untracked: false,
-            conflict: false,
-            additions: 8,
-            deletions: 1,
-            attribution: "goal"
-          }]
-        });
+        return json(workspaceState(url.pathname.includes("/projects/")));
       }
       return json({ error: "not found" }, 404);
     });
@@ -124,14 +130,21 @@ describe("memmy-agent client", () => {
     });
     await expect(client.readWorkspaceEnvironment({ kind: "project", key: "project-1" })).resolves.toMatchObject({
       snapshot: { repository: { branch: "zy_git_v1.0.7" } },
-      files: [{ path: "src/panel.tsx" }]
+      files: [{ path: "src/panel.tsx" }],
+      branches: ["zy_git_v1.0.7", "main"]
     });
     await expect(client.readWorkspaceEnvironmentDiff({ kind: "project", key: "project-1" }, "src/panel.tsx")).resolves.toMatchObject({
       diff: "+panel"
     });
+    await expect(client.switchWorkspaceEnvironmentBranch(
+      { kind: "project", key: "project-1" },
+      "main",
+      "rev-zy_git_v1.0.7"
+    )).resolves.toMatchObject({ snapshot: { repository: { branch: "main" } } });
     expect(calls).toContain("/api/sessions/websocket%3Achat-1/environment/diff?path=src%2Fpanel.tsx");
     expect(calls).toContain("/api/projects/project-1/environment");
     expect(calls).toContain("/api/projects/project-1/environment/diff?path=src%2Fpanel.tsx");
+    expect(calls).toContain("/api/projects/project-1/environment/branch");
   });
 
   it("prefers env override, then current origin, then local gateway default for base URL", () => {

@@ -232,7 +232,7 @@ describe("HomePage", () => {
     expect(source).toContain("{hasActiveConversation ? activeConversationTitleDisplay : selectedDraftProject?.name}");
     expect(source).toContain('<ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} />');
     expect(source).toContain("activeConversationTitleDisplay");
-    expect(source).toContain("topBarBorder={hasActiveConversation}");
+    expect(source).toContain("topBarBorder={Boolean(hasActiveConversation || environmentScope)}");
     expect(source).not.toContain("agent-conversation-titlebar");
     expect(source).toContain("app-frame-page-content agent-conversation-scroll flex-1 overflow-y-auto");
     expect(source).toContain("onScroll={handleAgentConversationScroll}");

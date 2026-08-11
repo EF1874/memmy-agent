@@ -9,6 +9,7 @@ import {
   captureGoalWorkspaceBaseline,
   readWorkspaceEnvironment,
   readWorkspaceFileDiff,
+  switchWorkspaceBranch,
   type WorkspaceEnvironmentContext,
 } from "../../../src/core/session/workspace-environment.js";
 
@@ -143,5 +144,20 @@ describe("workspace environment", () => {
       repository: null,
       changes: null,
     });
+  });
+
+  it("lists local branches and switches only from the expected environment revision", async () => {
+    const root = repository();
+    const session = sessionFor(root);
+    const context = contextFor(session);
+    git(root, ["branch", "alternate"]);
+    const environment = await readWorkspaceEnvironment(context);
+
+    expect(environment.branches).toContain("alternate");
+    const switched = await switchWorkspaceBranch(context, environment, "alternate", environment.snapshot.revision);
+    expect(switched.snapshot.repository?.branch).toBe("alternate");
+
+    await expect(switchWorkspaceBranch(context, switched, environment.snapshot.repository?.branch ?? "", "stale"))
+      .rejects.toMatchObject({ code: "workspace_environment_stale", status: 409 });
   });
 });

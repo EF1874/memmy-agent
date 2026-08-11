@@ -10,6 +10,7 @@ export type WorkspaceEnvironmentQuery = {
   loading: boolean;
   error: string | null;
   refresh: () => Promise<void>;
+  switchBranch: (branch: string) => Promise<boolean>;
 };
 
 export function resolveWorkspaceEnvironmentScope(
@@ -57,6 +58,30 @@ export function useWorkspaceEnvironment(
     }
   }, [client, scopeKey, scopeKind]);
 
+  const switchBranch = useCallback(async (branch: string): Promise<boolean> => {
+    if (!client || !scopeKind || !scopeKey || !data) return false;
+    const requestId = ++requestIdRef.current;
+    setLoading(true);
+    setError(null);
+    try {
+      const next = await client.switchWorkspaceEnvironmentBranch(
+        { kind: scopeKind, key: scopeKey },
+        branch,
+        data.snapshot.revision,
+      );
+      if (requestId !== requestIdRef.current) return false;
+      setData(next);
+      return true;
+    } catch (cause) {
+      if (requestId === requestIdRef.current) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
+      return false;
+    } finally {
+      if (requestId === requestIdRef.current) setLoading(false);
+    }
+  }, [client, data, scopeKey, scopeKind]);
+
   useEffect(() => {
     setData(null);
     void refresh();
@@ -80,5 +105,5 @@ export function useWorkspaceEnvironment(
     return () => window.removeEventListener("focus", refreshOnFocus);
   }, [refresh]);
 
-  return { data, loading, error, refresh };
+  return { data, loading, error, refresh, switchBranch };
 }

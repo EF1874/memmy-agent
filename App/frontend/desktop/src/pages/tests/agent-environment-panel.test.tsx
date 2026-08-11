@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MemmyAgentClient, WorkspaceEnvironmentSnapshot } from "../../api/memmy-agent-client.js";
+import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { AgentEnvironmentPanel } from "../agent-environment-panel.js";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -89,23 +90,25 @@ describe("AgentEnvironmentPanel", () => {
 
     await act(async () => {
       root.render(
-        <AgentEnvironmentPanel
-          client={client}
-          scope="session"
-          scopeKey="websocket:chat-1"
-          language="zh-CN"
-          environment={{ snapshot, files }}
-          loading={false}
-          error={null}
-          onRefresh={onRefresh}
-          onClose={onClose}
-        />
+        <I18nProvider language="zh-CN">
+          <AgentEnvironmentPanel
+            client={client}
+            scope="session"
+            scopeKey="websocket:chat-1"
+            environment={{ snapshot, files, branches: ["zy_git_v1.0.7", "main"] }}
+            loading={false}
+            error={null}
+            onRefresh={onRefresh}
+            onClose={onClose}
+          />
+        </I18nProvider>
       );
     });
 
     expect(container.textContent).toContain("zy_git_v1.0.7");
     expect(container.textContent).toContain("Goal 证据");
     expect(container.textContent).toContain("src/panel.tsx");
+    expect(container.querySelector('[role="dialog"]')?.getAttribute("aria-modal")).toBe("false");
 
     const fileButton = [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("src/panel.tsx"));
     expect(fileButton).toBeTruthy();
@@ -121,23 +124,55 @@ describe("AgentEnvironmentPanel", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it("closes on an outside pointer but ignores its environment toggle", async () => {
+    const onClose = vi.fn();
+    const toggle = document.createElement("button");
+    toggle.dataset.agentEnvironmentToggle = "";
+    document.body.append(toggle);
+
+    await act(async () => {
+      root.render(
+        <I18nProvider language="zh-CN">
+          <AgentEnvironmentPanel
+            client={null}
+            scope="session"
+            scopeKey="websocket:chat-1"
+            environment={{ snapshot, files: [], branches: ["zy_git_v1.0.7"] }}
+            loading={false}
+            error={null}
+            onRefresh={vi.fn(async () => undefined)}
+            onClose={onClose}
+          />
+        </I18nProvider>
+      );
+    });
+
+    act(() => toggle.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true })));
+    expect(onClose).not.toHaveBeenCalled();
+
+    act(() => document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true })));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    toggle.remove();
+  });
+
   it("loads project environment before a Session exists", async () => {
     const projectSnapshot = { ...snapshot, scope_kind: "project" as const, scope_key: "project-1", goal: null };
     const client = {} as MemmyAgentClient;
 
     await act(async () => {
       root.render(
-        <AgentEnvironmentPanel
-          client={client}
-          scope="project"
-          scopeKey="project-1"
-          language="zh-CN"
-          environment={{ snapshot: projectSnapshot, files: [] }}
-          loading={false}
-          error={null}
-          onRefresh={vi.fn(async () => undefined)}
-          onClose={vi.fn()}
-        />
+        <I18nProvider language="zh-CN">
+          <AgentEnvironmentPanel
+            client={client}
+            scope="project"
+            scopeKey="project-1"
+            environment={{ snapshot: projectSnapshot, files: [], branches: ["zy_git_v1.0.7", "main"] }}
+            loading={false}
+            error={null}
+            onRefresh={vi.fn(async () => undefined)}
+            onClose={vi.fn()}
+          />
+        </I18nProvider>
       );
     });
 
@@ -177,17 +212,18 @@ describe("AgentEnvironmentPanel", () => {
 
     await act(async () => {
       root.render(
-        <AgentEnvironmentPanel
-          client={client}
-          scope="session"
-          scopeKey="websocket:chat-1"
-          language="zh-CN"
-          environment={{ snapshot, files }}
-          loading={false}
-          error={null}
-          onRefresh={vi.fn(async () => undefined)}
-          onClose={vi.fn()}
-        />
+        <I18nProvider language="zh-CN">
+          <AgentEnvironmentPanel
+            client={client}
+            scope="session"
+            scopeKey="websocket:chat-1"
+            environment={{ snapshot, files, branches: ["zy_git_v1.0.7", "main"] }}
+            loading={false}
+            error={null}
+            onRefresh={vi.fn(async () => undefined)}
+            onClose={vi.fn()}
+          />
+        </I18nProvider>
       );
     });
 

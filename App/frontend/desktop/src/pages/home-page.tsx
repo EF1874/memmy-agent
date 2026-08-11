@@ -87,7 +87,7 @@ import {
 import { HistoryDagPanel, type HistoryDagPanelState } from "./history-dag-panel.js";
 import { LlmProviderLogo } from "./llm-provider-logo.js";
 import { Mic, Pause, Plus, Send } from "./memory/memory-prototype-icons.js";
-import { ArrowDown, Check, ChevronDown, CircleX, Folder, PanelRight, Plus as LucidePlus, RotateCw, X } from "lucide-react";
+import { ArrowDown, Check, ChevronDown, CircleX, Folder, Plus as LucidePlus, RotateCw, SlidersHorizontal, X } from "lucide-react";
 
 export { agentChatScopeKey, updateComposerDraftForScope };
 export { hydrateAgentThreadInBackground };
@@ -95,8 +95,6 @@ export { isComposingKeyboardEvent } from "../utils/keyboard.js";
 export type { PendingAttachment, PendingAttachmentBase, PendingFileAttachment, PendingImage };
 
 const NEW_TASK_MODEL_SCOPE_KEY = "draft-new-task";
-const AGENT_ENVIRONMENT_PANEL_STORAGE_KEY = "memmy.agent.environment-panel";
-
 const COMPOSER_MEDIA_STRIP_STYLE = { maxHeight: "min(7.5rem, 28vh)" } satisfies CSSProperties;
 const AGENT_WS_SAFE_FRAME_BYTES = 1024 * 1024;
 const COMPOSER_HEIGHT_EPSILON = 2;
@@ -790,17 +788,7 @@ export function HomePage() {
   const [statusPanel, setStatusPanel] = useState<StatusPanelState>({ open: false });
   const [lastCompactionPanel, setLastCompactionPanel] = useState<StatusPanelState>({ open: false });
   const [historyDagPanel, setHistoryDagPanel] = useState<HistoryDagPanelState>({ open: false });
-  const [environmentPanelOpen, setEnvironmentPanelOpen] = useState(() => {
-    if (typeof window === "undefined") return false;
-    try {
-      const preference = window.localStorage.getItem(AGENT_ENVIRONMENT_PANEL_STORAGE_KEY);
-      if (preference === "open") return true;
-      if (preference === "closed") return false;
-      return window.innerWidth >= 1280;
-    } catch {
-      return window.innerWidth >= 1280;
-    }
-  });
+  const [environmentPanelOpen, setEnvironmentPanelOpen] = useState(false);
   const [isCreatingChat, setIsCreatingChat] = useState(false);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const [projectPickerOperationId, setProjectPickerOperationId] = useState<string | null>(null);
@@ -2423,26 +2411,16 @@ export function HomePage() {
     });
   }
 
-  function setEnvironmentPanelPreference(open: boolean) {
-    setEnvironmentPanelOpen(open);
-    try {
-      window.localStorage.setItem(AGENT_ENVIRONMENT_PANEL_STORAGE_KEY, open ? "open" : "closed");
-    } catch {
-      // Storage is optional; the panel remains usable for the current page lifetime.
-    }
-  }
-
   const environmentPanel = environmentPanelOpen && environmentScope ? (
     <AgentEnvironmentPanel
       client={clients?.memmyAgent ?? null}
       scope={environmentScope.kind}
       scopeKey={environmentScope.key}
-      language={language}
       environment={workspaceEnvironment.data}
       loading={workspaceEnvironment.loading}
       error={workspaceEnvironment.error}
       onRefresh={workspaceEnvironment.refresh}
-      onClose={() => setEnvironmentPanelPreference(false)}
+      onClose={() => setEnvironmentPanelOpen(false)}
     />
   ) : null;
 
@@ -2460,19 +2438,20 @@ export function HomePage() {
           <button
             type="button"
             className={`agent-environment-toggle${environmentPanelOpen ? " agent-environment-toggle--active" : ""}`}
-            aria-label={language === "zh-CN" ? "环境信息" : "Environment information"}
+            data-agent-environment-toggle
+            aria-label={t("home.environment.title")}
             aria-pressed={environmentPanelOpen}
-            title={language === "zh-CN" ? "环境信息" : "Environment information"}
-            onClick={() => setEnvironmentPanelPreference(!environmentPanelOpen)}
+            title={t("home.environment.title")}
+            onClick={() => setEnvironmentPanelOpen((open) => !open)}
           >
-            <PanelRight size={16} aria-hidden="true" />
+            <SlidersHorizontal size={16} aria-hidden="true" />
           </button>
         </div>
       ) : null}
-      topBarBorder={hasActiveConversation}
+      topBarBorder={Boolean(hasActiveConversation || environmentScope)}
     >
       {!hasActiveConversation ? (
-        <div className={`agent-workspace-layout${environmentPanelOpen ? " agent-workspace-layout--environment-open" : ""}`}>
+        <div className="agent-workspace-layout">
           <section className="app-frame-page-content home-empty-screen flex flex-col items-center justify-center h-full">
             <div className="text-center mb-8">
               <div className="home-empty-brand-mascot flex justify-center">
@@ -2578,7 +2557,10 @@ export function HomePage() {
                   />
                   <AgentWorkspaceContext
                     snapshot={workspaceEnvironment.data?.snapshot ?? null}
-                    language={language}
+                    branches={workspaceEnvironment.data?.branches ?? []}
+                    loading={workspaceEnvironment.loading}
+                    error={workspaceEnvironment.error}
+                    onSwitchBranch={workspaceEnvironment.switchBranch}
                   />
                 </div>
               </div>
@@ -2592,7 +2574,7 @@ export function HomePage() {
           {environmentPanel}
         </div>
       ) : (
-        <div className={`agent-workspace-layout${environmentPanelOpen ? " agent-workspace-layout--environment-open" : ""}`}>
+        <div className="agent-workspace-layout">
           <section ref={conversationPanelRef} className="agent-conversation-panel flex flex-col h-full">
             <div
               ref={scrollRef}

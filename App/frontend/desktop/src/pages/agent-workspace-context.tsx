@@ -1,40 +1,179 @@
-import { GitBranch, Laptop } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import type { CSSProperties } from "react";
+import {
+  Check,
+  Cloud,
+  GitBranch,
+  GitFork,
+  Laptop,
+  Search,
+} from "lucide-react";
 import type {
-  MemmyAgentUiLanguage,
   WorkspaceEnvironmentSnapshot,
 } from "../api/memmy-agent-client.js";
+import { useTranslation } from "../i18n/use-translation.js";
 
 export type AgentWorkspaceContextProps = {
   snapshot: WorkspaceEnvironmentSnapshot | null;
-  language: MemmyAgentUiLanguage;
+  branches: string[];
+  loading: boolean;
+  error: string | null;
+  onSwitchBranch: (branch: string) => Promise<boolean>;
 };
 
-function displayedRevision(snapshot: WorkspaceEnvironmentSnapshot): string | null {
-  const repository = snapshot.repository;
-  if (!repository) return null;
-  if (repository.branch) return repository.branch;
-  return repository.head_sha ? `HEAD ${repository.head_sha.slice(0, 7)}` : "Detached HEAD";
-}
+const DEFAULT_VISIBLE_BRANCH_COUNT = 6;
 
-export function AgentWorkspaceContext({ snapshot, language }: AgentWorkspaceContextProps) {
-  const revision = snapshot?.status === "ready" ? displayedRevision(snapshot) : null;
+export function AgentWorkspaceContext({
+  snapshot,
+  branches,
+  loading,
+  error,
+  onSwitchBranch,
+}: AgentWorkspaceContextProps) {
+  const { t } = useTranslation();
+  const [openMenu, setOpenMenu] = useState<"mode" | "branch" | null>(null);
+  const [query, setQuery] = useState("");
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const branchSearchRef = useRef<HTMLInputElement | null>(null);
+  const repository = snapshot?.status === "ready" ? snapshot.repository : null;
+  const revision = repository?.branch
+    ?? (repository?.head_sha ? `HEAD ${repository.head_sha.slice(0, 7)}` : null);
+  const currentBranch = snapshot?.repository?.branch ?? null;
+  const filteredBranches = branches.filter((branch) => branch.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
+
+  useEffect(() => {
+    if (!openMenu) return;
+    function closeOnOutsidePointer(event: PointerEvent) {
+      if (!rootRef.current?.contains(event.target as Node)) setOpenMenu(null);
+    }
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setOpenMenu(null);
+    }
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointer);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [openMenu]);
+
+  useEffect(() => {
+    if (openMenu !== "branch") return;
+    setQuery("");
+    branchSearchRef.current?.focus();
+  }, [openMenu]);
+
   if (!revision) return null;
 
-  const localLabel = language === "zh-CN" ? "本地" : "Local";
-  const branchLabel = snapshot?.repository?.branch
-    ? (language === "zh-CN" ? `分支 ${revision}` : `Branch ${revision}`)
-    : revision;
+  const localLabel = t("home.environment.local");
+  const branchLabel = currentBranch
+    ? t("home.environment.branch.label", { branch: revision })
+    : t("home.environment.detachedHead");
+
+  async function selectBranch(branch: string) {
+    if (branch === currentBranch) {
+      setOpenMenu(null);
+      return;
+    }
+    if (
+      snapshot?.repository?.worktree === "dirty"
+      && !window.confirm(t("home.environment.branch.dirtyConfirm"))
+    ) {
+      return;
+    }
+    if (await onSwitchBranch(branch)) setOpenMenu(null);
+  }
 
   return (
-    <div className="home-workspace-context" aria-label={language === "zh-CN" ? "Git 工作区信息" : "Git workspace information"}>
-      <span className="home-workspace-context__mode" title={language === "zh-CN" ? "工作模式：本地" : "Work mode: Local"}>
-        <Laptop size={14} aria-hidden="true" />
-        <span>{localLabel}</span>
-      </span>
-      <span className="home-workspace-context__branch" title={branchLabel}>
-        <GitBranch size={14} aria-hidden="true" />
-        <span>{revision}</span>
-      </span>
+    <div ref={rootRef} className="home-workspace-context" aria-label={t("home.environment.gitWorkspace")}>
+      <div className="home-workspace-context__control">
+        <button
+          type="button"
+          className={`home-workspace-context__trigger home-workspace-context__mode${openMenu === "mode" ? " home-workspace-context__trigger--open" : ""}`}
+          aria-expanded={openMenu === "mode"}
+          aria-haspopup="menu"
+          onClick={() => setOpenMenu((current) => current === "mode" ? null : "mode")}
+        >
+          <Laptop size={14} aria-hidden="true" />
+          <span>{localLabel}</span>
+        </button>
+        {openMenu === "mode" ? (
+          <div className="home-workspace-menu home-workspace-menu--mode" role="menu">
+            <p className="home-workspace-menu__heading">{t("home.environment.mode.title")}</p>
+            <button type="button" className="home-workspace-menu__item" role="menuitemradio" aria-checked="true" onClick={() => setOpenMenu(null)}>
+              <Laptop size={17} aria-hidden="true" />
+              <span>{localLabel}</span>
+              <Check size={17} aria-hidden="true" />
+            </button>
+            <button type="button" className="home-workspace-menu__item" role="menuitem" disabled title={t("home.environment.mode.newWorktreeUnavailable")}>
+              <GitFork size={17} aria-hidden="true" />
+              <span>{t("home.environment.mode.newWorktree")}</span>
+            </button>
+            <button type="button" className="home-workspace-menu__item" role="menuitem" disabled title={t("home.environment.mode.connectCodexWebUnavailable")}>
+              <Cloud size={17} aria-hidden="true" />
+              <span>{t("home.environment.mode.connectCodexWeb")}</span>
+            </button>
+            <button type="button" className="home-workspace-menu__item" role="menuitem" disabled title={t("home.environment.mode.sendCloudUnavailable")}>
+              <Cloud size={17} aria-hidden="true" />
+              <span>{t("home.environment.mode.sendCloud")}</span>
+            </button>
+          </div>
+        ) : null}
+      </div>
+
+      <div className="home-workspace-context__control">
+        <button
+          type="button"
+          className={`home-workspace-context__trigger home-workspace-context__branch${openMenu === "branch" ? " home-workspace-context__trigger--open" : ""}`}
+          aria-expanded={openMenu === "branch"}
+          aria-haspopup="listbox"
+          title={branchLabel}
+          disabled={loading || !currentBranch}
+          onClick={() => setOpenMenu((current) => current === "branch" ? null : "branch")}
+        >
+          <GitBranch size={14} aria-hidden="true" />
+          <span>{revision}</span>
+        </button>
+        {openMenu === "branch" ? (
+          <div className="home-workspace-menu home-workspace-menu--branch">
+            <label className="home-workspace-menu__search">
+              <Search size={16} aria-hidden="true" />
+              <input
+                ref={branchSearchRef}
+                value={query}
+                placeholder={t("home.environment.branch.search", {
+                  repository: snapshot?.repository?.display_name ?? t("home.environment.branch.repositoryFallback"),
+                })}
+                aria-label={t("home.environment.branch.searchAria")}
+                onChange={(event) => setQuery(event.target.value)}
+              />
+            </label>
+            <p className="home-workspace-menu__heading">{t("home.environment.branch.title")}</p>
+            <div
+              className="home-workspace-menu__branch-list"
+              role="listbox"
+              aria-label={t("home.environment.branch.localList")}
+              style={{ "--visible-branch-count": DEFAULT_VISIBLE_BRANCH_COUNT } as CSSProperties}
+            >
+              {filteredBranches.length ? filteredBranches.map((branch) => (
+                <button
+                  key={branch}
+                  type="button"
+                  className="home-workspace-menu__item home-workspace-menu__branch-item"
+                  role="option"
+                  aria-selected={branch === currentBranch}
+                  onClick={() => void selectBranch(branch)}
+                >
+                  <GitBranch size={16} aria-hidden="true" />
+                  <span title={branch}>{branch}</span>
+                  {branch === currentBranch ? <Check size={17} aria-hidden="true" /> : null}
+                </button>
+              )) : <p className="home-workspace-menu__empty">{t("home.environment.branch.empty")}</p>}
+            </div>
+            {error ? <p className="home-workspace-menu__error" role="status">{error}</p> : null}
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }

@@ -194,7 +194,8 @@ const WorkspaceEnvironmentSnapshotSchema = z.object({
 
 const WorkspaceEnvironmentStateSchema = z.object({
   snapshot: WorkspaceEnvironmentSnapshotSchema,
-  files: z.array(WorkspaceEnvironmentFileSchema)
+  files: z.array(WorkspaceEnvironmentFileSchema),
+  branches: z.array(z.string())
 });
 
 const WorkspaceEnvironmentDiffSchema = z.object({
@@ -563,6 +564,11 @@ export interface MemmyAgentClient {
   listSessions(): Promise<MemmyAgentSessionSummary[]>;
   readWorkspaceEnvironment(scope: WorkspaceEnvironmentScope): Promise<WorkspaceEnvironmentState>;
   readWorkspaceEnvironmentDiff(scope: WorkspaceEnvironmentScope, path: string): Promise<WorkspaceEnvironmentDiff>;
+  switchWorkspaceEnvironmentBranch(
+    scope: WorkspaceEnvironmentScope,
+    branch: string,
+    expectedRevision: string
+  ): Promise<WorkspaceEnvironmentState>;
   listSlashCommands(): Promise<MemmyAgentSlashCommand[]>;
   readSidebarState(): Promise<MemmyAgentSidebarState>;
   writeSidebarState(
@@ -898,6 +904,19 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
     return this.request(
       `/api/${collection}/${encodeURIComponent(scope.key)}/environment/diff?${query.toString()}`,
       WorkspaceEnvironmentDiffSchema
+    );
+  }
+
+  async switchWorkspaceEnvironmentBranch(
+    scope: WorkspaceEnvironmentScope,
+    branch: string,
+    expectedRevision: string
+  ): Promise<WorkspaceEnvironmentState> {
+    const collection = scope.kind === "session" ? "sessions" : "projects";
+    return this.request(
+      `/api/${collection}/${encodeURIComponent(scope.key)}/environment/branch`,
+      WorkspaceEnvironmentStateSchema,
+      { method: "POST", body: { branch, expected_revision: expectedRevision } }
     );
   }
 

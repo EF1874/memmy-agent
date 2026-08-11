@@ -187,10 +187,16 @@ describe("WebSocket HTTP route helpers", () => {
   }
 
   function mockDirtyGitWorkspace(root: string): void {
+    let currentBranch = "zy_git_v1.0.7";
     childProcessMocks.execFile.mockImplementation((_command?: string, args: string[] = [], _options?: unknown, callback?: (...args: any[]) => void) => {
       if (args[0] === "rev-parse") return callback?.(null, `${root}\n`, "");
       if (args[0] === "status") {
-        return callback?.(null, "# branch.oid 84d10f8f00\u0000# branch.head zy_git_v1.0.7\u00001 .M N... 100644 100644 100644 abc abc tracked.ts\u0000", "");
+        return callback?.(null, `# branch.oid 84d10f8f00\u0000# branch.head ${currentBranch}\u00001 .M N... 100644 100644 100644 abc abc tracked.ts\u0000`, "");
+      }
+      if (args[0] === "for-each-ref") return callback?.(null, "zy_git_v1.0.7\nmain\n", "");
+      if (args[0] === "switch") {
+        currentBranch = args.at(-1) ?? currentBranch;
+        return callback?.(null, "", "");
       }
       if (args[0] === "diff" && args.includes("--numstat")) {
         return callback?.(null, "2\t1\ttracked.ts\0", "");
@@ -302,7 +308,8 @@ describe("WebSocket HTTP route helpers", () => {
       headers,
     });
     expect(snapshotResponse?.status).toBe(200);
-    expect(responseJson(snapshotResponse!)).toMatchObject({
+    const environment = responseJson(snapshotResponse!);
+    expect(environment).toMatchObject({
       snapshot: {
         scope_kind: "session",
         scope_key: "websocket:environment",
@@ -311,6 +318,7 @@ describe("WebSocket HTTP route helpers", () => {
         changes: { file_count: 1, additions: 2, deletions: 1 },
       },
       files: [{ path: "tracked.ts", status: ".M" }],
+      branches: ["zy_git_v1.0.7", "main"],
     });
 
     const diffResponse = await channel.dispatchHttp(localConnection, {
@@ -318,6 +326,16 @@ describe("WebSocket HTTP route helpers", () => {
       headers,
     });
     expect(responseJson(diffResponse!)).toMatchObject({ path: "tracked.ts", diff: "+changed\n" });
+
+    const branchResponse = await channel.dispatchHttp(localConnection, {
+      path: `/api/sessions/${encoded}/environment/branch`,
+      method: "POST",
+      headers,
+      body: JSON.stringify({ branch: "main", expected_revision: environment.snapshot.revision }),
+    });
+    expect(responseJson(branchResponse!)).toMatchObject({
+      snapshot: { scope_kind: "session", repository: { branch: "main" } },
+    });
   });
 
   it("serves the selected project environment before a Session exists", async () => {
