@@ -302,9 +302,6 @@ describe("WebSocket media route", () => {
     fs.writeFileSync(image, PNG_BYTES);
     const manager = new SessionManager(path.join(data, "sessions"));
     const session = new Session({ key: "websocket:abc" });
-    session.metadata.webui = true;
-    session.metadata.webuiProjectId = null;
-    session.metadata.webuiWorkspaceCwd = data;
     session.addMessage("user", "see image", { media: [image] });
     manager.save(session);
     const channel = new WebSocketChannel({}, new MessageBus(), { sessionManager: manager });
@@ -324,9 +321,6 @@ describe("WebSocket media route", () => {
     fs.mkdirSync(media, { recursive: true });
     const manager = new SessionManager(path.join(data, "sessions"));
     const session = new Session({ key: "websocket:vanished" });
-    session.metadata.webui = true;
-    session.metadata.webuiProjectId = null;
-    session.metadata.webuiWorkspaceCwd = data;
     session.addMessage("user", "missing pic", { media: [path.join(media, "absent.png")] });
     manager.save(session);
     const channel = new WebSocketChannel({}, new MessageBus(), { sessionManager: manager });

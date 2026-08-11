@@ -58,16 +58,12 @@ describe("writeAppCloudUuidToMemmyConfig", () => {
 
     const parsed = YAML.parse(readFileSync(configPath, "utf8")) as {
       app?: { cloudUuid?: unknown };
-      agents?: { defaults?: { modelPreset?: unknown } };
-      modelPresets?: { "memmy-account"?: { provider?: unknown; model?: unknown } };
+      agents?: { defaults?: { provider?: unknown; model?: unknown } };
       providers?: { memmy_account?: { apiBase?: unknown; apiKey?: unknown } };
       uuid?: unknown;
     };
     expect(parsed.app?.cloudUuid).toBe("cloud-login-uuid");
     expect(parsed.agents?.defaults).toMatchObject({
-      modelPreset: "memmy-account"
-    });
-    expect(parsed.modelPresets?.["memmy-account"]).toEqual({
       provider: "memmy_account",
       model: "agent_chat"
     });
@@ -163,15 +159,10 @@ describe("readRuntimeMemmyConfigState", () => {
         "  userId: user-1",
         "agents:",
         "  defaults:",
-        "    modelPreset: memmy-account",
-        "providers:",
-        "  memmy_account:",
-        `    apiBase: ${ACCOUNT_API_BASE}`,
-        "    apiKey: cloud-login-uuid",
-        "modelPresets:",
-        "  memmy-account:",
         "    provider: memmy_account",
         "    model: agent_chat",
+        "memmyMemory:",
+        "  activeProfile: account",
         ""
       ].join("\n"),
       "utf8"
@@ -193,29 +184,26 @@ describe("readRuntimeMemmyConfigState", () => {
       [
         "agents:",
         "  defaults:",
-        "    modelPreset: work-gpt",
+        "    provider: openai",
+        "    model: gpt-4o",
         "providers:",
         "  openai:",
         "    apiBase: https://api.openai.example/v1",
         "    apiKey: sk-main",
-        "modelPresets:",
-        "  work-gpt:",
-        "    provider: openai",
-        "    model: gpt-4o",
         "memmyMemory:",
-        "  roleRouting:",
-        "    summary: fixed",
-        "    evolution: fixed",
-        "  summary:",
-        "    provider: anthropic",
-        "    endpoint: https://api.anthropic.example",
-        "    model: claude-3-5-haiku",
-        "    apiKey: sk-memory",
-        "  evolution:",
-        "    provider: openai_compatible",
-        "    endpoint: https://dashscope.example/v1",
-        "    model: qwen-plus",
-        "    apiKey: sk-skill",
+        "  activeProfile: byok",
+        "  profiles:",
+        "    byok:",
+        "      summary:",
+        "        provider: anthropic",
+        "        endpoint: https://api.anthropic.example",
+        "        model: claude-3-5-haiku",
+        "        apiKey: sk-memory",
+        "      evolution:",
+        "        provider: openai_compatible",
+        "        endpoint: https://dashscope.example/v1",
+        "        model: qwen-plus",
+        "        apiKey: sk-skill",
         "tools:",
         "  imageGeneration:",
         "    activeProfile: byok",
@@ -261,7 +249,7 @@ describe("readRuntimeMemmyConfigState", () => {
     });
   });
 
-  it("reports an incomplete account projection as no model config", async () => {
+  it("reports conflicting agent defaults and memory active profile", async () => {
     tempDir = mkdtempSync(join(tmpdir(), "memmy-config-"));
     const configPath = resolveDefaultMemmyConfigPath(tempDir);
     mkdirSync(join(tempDir, ".memmy"), { recursive: true });
@@ -284,7 +272,7 @@ describe("readRuntimeMemmyConfigState", () => {
     );
 
     await expect(readRuntimeMemmyConfigState(configPath)).resolves.toMatchObject({
-      status: "no_model_config"
+      status: "conflict"
     });
   });
 });
@@ -300,31 +288,38 @@ describe("writeAppLoginFieldsToMemmyConfig", () => {
       app?: { cloudUuid?: unknown; userId?: unknown };
       memmyMemory?: {
         activeProfile?: unknown;
-        profiles?: unknown;
-        roleRouting?: { summary?: unknown; evolution?: unknown };
-        embedding?: { mode?: unknown };
+        profiles?: { account?: { userId?: unknown; summary?: unknown; evolution?: unknown; embedding?: unknown } };
         userId?: unknown;
       };
-      agents?: { defaults?: { modelPreset?: unknown } };
-      modelPresets?: { "memmy-account"?: { provider?: unknown; model?: unknown } };
+      agents?: { defaults?: { provider?: unknown; model?: unknown } };
       providers?: { memmy_account?: { apiBase?: unknown; apiKey?: unknown } };
       uuid?: unknown;
       identity?: unknown;
     };
     expect(parsed.app?.cloudUuid).toBe("cloud-login-uuid");
     expect(parsed.app?.userId).toBe("user-1");
-    expect(parsed.memmyMemory?.activeProfile).toBeUndefined();
-    expect(parsed.memmyMemory?.profiles).toBeUndefined();
+    expect(parsed.memmyMemory?.activeProfile).toBe("account");
     expect(parsed.memmyMemory?.userId).toBeUndefined();
-    expect(parsed.memmyMemory?.roleRouting).toEqual({
-      summary: "follow",
-      evolution: "follow"
+    expect(parsed.memmyMemory?.profiles?.account?.userId).toBe("user-1");
+    expect(parsed.memmyMemory?.profiles?.account?.summary).toEqual({
+      vendor: "qwen",
+      endpoint: ACCOUNT_API_BASE,
+      model: "memory_summary",
+      apiKey: "cloud-login-uuid"
     });
-    expect(parsed.memmyMemory?.embedding).toEqual({ mode: "cloud" });
+    expect(parsed.memmyMemory?.profiles?.account?.evolution).toEqual({
+      vendor: "qwen",
+      endpoint: ACCOUNT_API_BASE,
+      model: "memory_evolution",
+      apiKey: "cloud-login-uuid",
+      enableThinking: true
+    });
+    expect(parsed.memmyMemory?.profiles?.account?.embedding).toEqual({
+      endpoint: ACCOUNT_API_BASE,
+      model: "embedding",
+      apiKey: "cloud-login-uuid"
+    });
     expect(parsed.agents?.defaults).toMatchObject({
-      modelPreset: "memmy-account"
-    });
-    expect(parsed.modelPresets?.["memmy-account"]).toEqual({
       provider: "memmy_account",
       model: "agent_chat"
     });
@@ -370,8 +365,7 @@ describe("writeAppLoginFieldsToMemmyConfig", () => {
         enabled?: unknown;
         activeProfile?: unknown;
         userId?: unknown;
-        profiles?: unknown;
-        roleRouting?: { summary?: unknown; evolution?: unknown };
+        profiles?: { account?: { userId?: unknown } };
       };
       uuid?: unknown;
       identity?: unknown;
@@ -379,13 +373,9 @@ describe("writeAppLoginFieldsToMemmyConfig", () => {
     expect(parsed.app).toEqual({ locale: "zh-CN", cloudUuid: "cloud-login-uuid", userId: "user-1" });
     expect(parsed.fileMemory?.enabled).toBe(false);
     expect(parsed.memmyMemory?.enabled).toBe(true);
-    expect(parsed.memmyMemory?.activeProfile).toBeUndefined();
-    expect(parsed.memmyMemory?.userId).toBe("old-memory-user");
-    expect(parsed.memmyMemory?.profiles).toBeUndefined();
-    expect(parsed.memmyMemory?.roleRouting).toEqual({
-      summary: "follow",
-      evolution: "follow"
-    });
+    expect(parsed.memmyMemory?.activeProfile).toBe("account");
+    expect(parsed.memmyMemory?.userId).toBeUndefined();
+    expect(parsed.memmyMemory?.profiles?.account?.userId).toBe("user-1");
     expect(parsed.uuid).toBeUndefined();
     expect(parsed.identity).toBeUndefined();
   });
@@ -406,7 +396,8 @@ describe("writeAccountModelProjectionToMemmyConfig", () => {
       locale: "zh-CN"
     });
     expect(parsed.agents?.defaults).toMatchObject({
-      modelPreset: "memmy-account"
+      provider: "memmy_account",
+      model: "agent_chat"
     });
     expect(parsed.tools.imageGeneration).toMatchObject({
       enabled: true,
@@ -435,34 +426,30 @@ describe("writeAccountModelProjectionToMemmyConfig", () => {
         "  userId: user-1",
         "agents:",
         "  defaults:",
-        "    modelPreset: memmy-account",
+        "    provider: memmy_account",
+        "    model: agent_chat",
         "providers:",
         "  memmy_account:",
-        `    apiBase: ${ACCOUNT_API_BASE}`,
+        `    apiBase: `,
         "    apiKey: cloud-login-uuid",
         "  openai:",
         "    apiBase: https://api.openai.example/v1",
         "    apiKey: sk-main",
-        "modelPresets:",
-        "  memmy-account:",
-        "    provider: memmy_account",
-        "    model: agent_chat",
-        "  work-gpt:",
-        "    provider: openai",
-        "    model: gpt-4o",
         "memmyMemory:",
+        "  activeProfile: account",
         "  storage:",
         "    endpoint: http://127.0.0.1:18888",
-        "  roleRouting:",
-        "    summary: fixed",
-        "    evolution: follow",
-        "  summary:",
-        "    provider: openai_compatible",
-        "    endpoint: https://memory.example/v1",
-        "    model: memory-model",
-        "    apiKey: sk-memory",
-        "  embedding:",
-        "    mode: cloud",
+        "  profiles:",
+        "    account:",
+        "      userId: user-1",
+        "      summary:",
+        "        apiKey: cloud-login-uuid",
+        "    byok:",
+        "      summary:",
+        "        provider: openai_compatible",
+        "        endpoint: https://memory.example/v1",
+        "        model: memory-model",
+        "        apiKey: sk-memory",
         "tools:",
         "  imageGeneration:",
         "    activeProfile: account",
@@ -487,19 +474,13 @@ describe("writeAccountModelProjectionToMemmyConfig", () => {
 
     expect(result.changed).toBe(true);
     expect(parsed.app).toEqual({ locale: "zh-CN" });
-    expect(parsed.agents.defaults).toEqual({ modelPreset: "work-gpt" });
+    expect(parsed.agents).toBeUndefined();
     expect(parsed.providers.memmy_account).toBeUndefined();
     expect(parsed.providers.openai.apiKey).toBe("sk-main");
-    expect(parsed.modelPresets["memmy-account"]).toBeUndefined();
-    expect(parsed.modelPresets["work-gpt"]).toEqual({
-      provider: "openai",
-      model: "gpt-4o"
-    });
-    expect(parsed.memmyMemory.activeProfile).toBeUndefined();
+    expect(parsed.memmyMemory.activeProfile).toBe("byok");
     expect(parsed.memmyMemory.storage.endpoint).toBe("http://127.0.0.1:18888");
-    expect(parsed.memmyMemory.profiles).toBeUndefined();
-    expect(parsed.memmyMemory.summary.apiKey).toBe("sk-memory");
-    expect(parsed.memmyMemory.embedding.mode).toBe("local");
+    expect(parsed.memmyMemory.profiles.account).toBeUndefined();
+    expect(parsed.memmyMemory.profiles.byok.summary.apiKey).toBe("sk-memory");
     expect(parsed.tools.imageGeneration.activeProfile).toBeUndefined();
     expect(parsed.tools.imageGeneration.profiles.account).toBeUndefined();
     expect(parsed.tools.imageGeneration.profiles.byok).toMatchObject({
@@ -509,10 +490,7 @@ describe("writeAccountModelProjectionToMemmyConfig", () => {
       apiKey: "sk-image"
     });
     await expect(readRuntimeMemmyConfigState(configPath)).resolves.toMatchObject({
-      status: "valid_byok",
-      modelConfig: {
-        modelId: "gpt-4o"
-      }
+      status: "no_model_config"
     });
   });
 });
@@ -569,8 +547,7 @@ describe("writeByokModelProjectionToMemmyConfig", () => {
 
     const parsed = YAML.parse(readFileSync(configPath, "utf8")) as any;
     expect(parsed.app).toBeUndefined();
-    expect(parsed.agents.defaults.modelPreset).toMatch(/^desktop-openai-gpt-4o-/);
-    expect(parsed.modelPresets[parsed.agents.defaults.modelPreset]).toEqual({
+    expect(parsed.agents.defaults).toMatchObject({
       provider: "openai",
       model: "gpt-4o"
     });
@@ -579,21 +556,20 @@ describe("writeByokModelProjectionToMemmyConfig", () => {
       apiKey: "sk-main",
       apiType: "chatCompletions"
     });
-    expect(parsed.memmyMemory.activeProfile).toBeUndefined();
-    expect(parsed.memmyMemory.profiles).toBeUndefined();
-    expect(parsed.memmyMemory.userId).toBe("user-1");
-    expect(parsed.memmyMemory.roleRouting).toEqual({
-      summary: "fixed",
-      evolution: "fixed"
-    });
-    expect(parsed.memmyMemory.summary).toEqual({
+    expect(parsed.memmyMemory.activeProfile).toBe("byok");
+    expect(parsed.memmyMemory.userId).toBeUndefined();
+    expect(parsed.memmyMemory.summary).toBeUndefined();
+    expect(parsed.memmyMemory.evolution).toBeUndefined();
+    expect(parsed.memmyMemory.embedding).toBeUndefined();
+    expect(parsed.memmyMemory.profiles.byok.userId).toBe("user-1");
+    expect(parsed.memmyMemory.profiles.byok.summary).toEqual({
       provider: "anthropic",
       vendor: "anthropic",
       endpoint: "https://api.anthropic.example",
       model: "claude-3-5-haiku",
       apiKey: "sk-memory"
     });
-    expect(parsed.memmyMemory.evolution).toEqual({
+    expect(parsed.memmyMemory.profiles.byok.evolution).toEqual({
       provider: "openai_compatible",
       vendor: "qwen",
       endpoint: "https://dashscope.example/v1",
@@ -601,13 +577,11 @@ describe("writeByokModelProjectionToMemmyConfig", () => {
       apiKey: "sk-skill",
       enableThinking: true
     });
-    expect(parsed.memmyMemory.embedding).toEqual({
-      mode: "custom",
-      custom: {
-        endpoint: "https://embedding.example/v1",
-        model: "text-embedding-3-small",
-        apiKey: "sk-embedding"
-      }
+    expect(parsed.memmyMemory.profiles.byok.embedding).toEqual({
+      provider: "openai_compatible",
+      endpoint: "https://embedding.example/v1",
+      model: "text-embedding-3-small",
+      apiKey: "sk-embedding"
     });
     expect(parsed.memmyMemory.storage.endpoint).toBe("http://127.0.0.1:18888");
     expect(parsed.memmyMemory.algorithm.topK).toBe(8);
@@ -653,8 +627,12 @@ describe("writeByokModelProjectionToMemmyConfig", () => {
 
     const parsed = YAML.parse(readFileSync(configPath, "utf8")) as {
       memmyMemory: {
-        summary: { provider: string; vendor: string };
-        evolution: { provider: string; vendor: string; enableThinking: boolean };
+        profiles: {
+          byok: {
+            summary: { provider: string; vendor: string };
+            evolution: { provider: string; vendor: string; enableThinking: boolean };
+          };
+        };
       };
     };
     const expectedProtocol = provider === "anthropic"
@@ -662,12 +640,12 @@ describe("writeByokModelProjectionToMemmyConfig", () => {
       : provider === "google"
         ? "gemini"
         : "openai_compatible";
-    expect(parsed.memmyMemory.summary).toMatchObject({
+    expect(parsed.memmyMemory.profiles.byok.summary).toMatchObject({
       provider: expectedProtocol,
       vendor: provider
     });
-    expect(parsed.memmyMemory.summary).not.toHaveProperty("enableThinking");
-    expect(parsed.memmyMemory.evolution).toMatchObject({
+    expect(parsed.memmyMemory.profiles.byok.summary).not.toHaveProperty("enableThinking");
+    expect(parsed.memmyMemory.profiles.byok.evolution).toMatchObject({
       provider: expectedProtocol,
       vendor: provider,
       enableThinking: true
@@ -798,7 +776,7 @@ describe("writeByokModelProjectionToMemmyConfig", () => {
     expect(parsed.tools?.imageGeneration).toEqual({ activeProfile: "byok" });
   });
 
-  it("imports a BYOK preset without changing the existing default when activation is disabled", async () => {
+  it("updates BYOK profile without switching active account profile when activation is disabled", async () => {
     tempDir = mkdtempSync(join(tmpdir(), "memmy-config-"));
     const configPath = resolveDefaultMemmyConfigPath(tempDir);
     mkdirSync(join(tempDir, ".memmy"), { recursive: true });
@@ -852,24 +830,15 @@ describe("writeByokModelProjectionToMemmyConfig", () => {
     }, configPath, { activate: false });
 
     const parsed = YAML.parse(readFileSync(configPath, "utf8")) as any;
-    expect(result).toMatchObject({
-      changed: true,
-      memoryConfigAffected: true
-    });
+    expect(result.activeProfile).toBe("account");
+    expect(result.activeProfileAffected).toBe(false);
     expect(parsed.agents.defaults).toEqual({
       provider: "memmy_account",
       model: "agent_chat"
     });
-    expect(Object.keys(parsed.modelPresets)).toContainEqual(
-      expect.stringMatching(/^desktop-openai-gpt-4o-/)
-    );
-    expect(parsed.memmyMemory.activeProfile).toBeUndefined();
-    expect(parsed.memmyMemory.profiles).toBeUndefined();
-    expect(parsed.memmyMemory.roleRouting).toEqual({
-      summary: "fixed",
-      evolution: "fixed"
-    });
-    expect(parsed.memmyMemory.summary).toEqual({
+    expect(parsed.memmyMemory.activeProfile).toBe("account");
+    expect(parsed.memmyMemory.profiles.account.summary.model).toBe("memory_summary");
+    expect(parsed.memmyMemory.profiles.byok.summary).toEqual({
       provider: "openai_compatible",
       vendor: "openai_compatible",
       endpoint: "https://memory.example/v1",
@@ -883,7 +852,7 @@ describe("writeByokModelProjectionToMemmyConfig", () => {
     });
   });
 
-  it("sets the imported BYOK preset as default when activation is enabled", async () => {
+  it("switches agent defaults and active profile when BYOK activation is enabled", async () => {
     tempDir = mkdtempSync(join(tmpdir(), "memmy-config-"));
     const configPath = resolveDefaultMemmyConfigPath(tempDir);
     mkdirSync(join(tempDir, ".memmy"), { recursive: true });
@@ -928,23 +897,16 @@ describe("writeByokModelProjectionToMemmyConfig", () => {
     }, configPath, { activate: true });
 
     const parsed = YAML.parse(readFileSync(configPath, "utf8")) as any;
-    expect(result).toMatchObject({
-      changed: true,
-      memoryConfigAffected: true
-    });
-    expect(parsed.agents.defaults.modelPreset).toMatch(/^desktop-openai-gpt-4o-/);
-    expect(parsed.agents.defaults.timezone).toBe(currentUtcOffset());
-    expect(parsed.modelPresets[parsed.agents.defaults.modelPreset]).toEqual({
+    expect(result.activeProfile).toBe("byok");
+    expect(result.activeProfileChanged).toBe(true);
+    expect(parsed.agents.defaults).toEqual({
       provider: "openai",
-      model: "gpt-4o"
+      model: "gpt-4o",
+      timezone: currentUtcOffset()
     });
-    expect(parsed.memmyMemory.activeProfile).toBeUndefined();
-    expect(parsed.memmyMemory.profiles).toBeUndefined();
-    expect(parsed.memmyMemory.roleRouting).toEqual({
-      summary: "fixed",
-      evolution: "fixed"
-    });
-    expect(parsed.memmyMemory.evolution.model).toBe("skill-model");
+    expect(parsed.memmyMemory.activeProfile).toBe("byok");
+    expect(parsed.memmyMemory.profiles.account.userId).toBe("user-1");
+    expect(parsed.memmyMemory.profiles.byok.evolution.model).toBe("skill-model");
     expect(parsed.fileMemory.enabled).toBe(false);
   });
 });

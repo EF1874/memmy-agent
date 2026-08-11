@@ -1,9 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  TASK_BUS_STORAGE_KEY,
   addTaskToSnapshot,
   appendChunkToSnapshot,
-  bindTaskGoalInSnapshot,
   completeTaskInSnapshot,
   createEmptyTaskBusSnapshot,
   createTaskRecord,
@@ -303,49 +301,6 @@ describe("TaskBus snapshot helpers", () => {
     expect(restoredTask?.streamingChunks).toBeUndefined();
     expect(restored.focusedTaskId).toBe("task-1");
     expect(restored.pendingNewSession).toBe(true);
-  });
-
-  it("Goal identity 只首次绑定运行中的 Task，旧 Task 不会被后续 Goal 接管", () => {
-    const task = createTaskRecord({ input: "持续任务", source: "pet" }, { now: 1000, makeId: nextId(["task-1", "session-1"]) });
-    const initial = addTaskToSnapshot(createEmptyTaskBusSnapshot(), task);
-    const bound = bindTaskGoalInSnapshot(initial, task.id, " goal-1 ");
-    const rebound = bindTaskGoalInSnapshot(bound, task.id, "goal-2");
-    const completed = completeTaskInSnapshot(bound, task.id, "完成", 1200);
-
-    expect(bound.tasks[0]?.goalId).toBe("goal-1");
-    expect(rebound).toBe(bound);
-    expect(bindTaskGoalInSnapshot(completed, task.id, "goal-2")).toBe(completed);
-    expect(bindTaskGoalInSnapshot(initial, task.id, "   ")).toBe(initial);
-  });
-
-  it("localStorage 保留合法 goalId，并兼容没有 goalId 的历史 Task", () => {
-    const storage = new MemoryStorage();
-    const task = createTaskRecord({ input: "持久 Goal", source: "pet" }, { now: 1000, makeId: nextId(["task-1", "session-1"]) });
-    const bound = bindTaskGoalInSnapshot(addTaskToSnapshot(createEmptyTaskBusSnapshot(), task), task.id, "goal-1");
-
-    saveTaskBusSnapshot(storage, bound);
-    expect(loadTaskBusSnapshot(storage).tasks[0]?.goalId).toBe("goal-1");
-
-    const legacyTask = { ...task } as Record<string, unknown>;
-    delete legacyTask.goalId;
-    storage.setItem(TASK_BUS_STORAGE_KEY, JSON.stringify({ tasks: [legacyTask], focusedTaskId: task.id, pendingNewSession: false }));
-    const restoredLegacyTask = loadTaskBusSnapshot(storage).tasks[0];
-    expect(restoredLegacyTask?.id).toBe(task.id);
-    expect(restoredLegacyTask?.goalId).toBeUndefined();
-  });
-
-  it("localStorage 丢弃 goalId 为空或类型错误的 Task", () => {
-    const storage = new MemoryStorage();
-    const task = createTaskRecord({ input: "坏数据", source: "pet" }, { now: 1000, makeId: nextId(["task-1", "session-1"]) });
-
-    for (const goalId of ["", "   ", 42]) {
-      storage.setItem(TASK_BUS_STORAGE_KEY, JSON.stringify({
-        tasks: [{ ...task, goalId }],
-        focusedTaskId: task.id,
-        pendingNewSession: false
-      }));
-      expect(loadTaskBusSnapshot(storage)).toEqual(createEmptyTaskBusSnapshot());
-    }
   });
 });
 

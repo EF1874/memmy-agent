@@ -27,29 +27,26 @@ describe("syncRuntimeConfigWithAppState", () => {
     context.writeConfig([
       "agents:",
       "  defaults:",
-      "    modelPreset: work-gpt",
+      "    provider: openai",
+      "    model: gpt-4o",
       "providers:",
       "  openai:",
       "    apiBase: https://api.openai.example/v1",
       "    apiKey: sk-main",
-      "modelPresets:",
-      "  work-gpt:",
-      "    provider: openai",
-      "    model: gpt-4o",
       "memmyMemory:",
-      "  roleRouting:",
-      "    summary: fixed",
-      "    evolution: fixed",
-      "  summary:",
-      "    provider: anthropic",
-      "    endpoint: https://api.anthropic.example",
-      "    model: claude-3-5-haiku",
-      "    apiKey: sk-memory",
-      "  evolution:",
-      "    provider: openai_compatible",
-      "    endpoint: https://dashscope.example/v1",
-      "    model: qwen-plus",
-      "    apiKey: sk-skill",
+      "  activeProfile: byok",
+      "  profiles:",
+      "    byok:",
+      "      summary:",
+      "        provider: anthropic",
+      "        endpoint: https://api.anthropic.example",
+      "        model: claude-3-5-haiku",
+      "        apiKey: sk-memory",
+      "      evolution:",
+      "        provider: openai_compatible",
+      "        endpoint: https://dashscope.example/v1",
+      "        model: qwen-plus",
+      "        apiKey: sk-skill",
       "tools:",
       "  imageGeneration:",
       "    activeProfile: byok",
@@ -144,15 +141,14 @@ describe("syncRuntimeConfigWithAppState", () => {
       "  userId: user-1",
       "agents:",
       "  defaults:",
-      "    modelPreset: memmy-account",
+      "    provider: memmy_account",
+      "    model: agent_chat",
       "providers:",
       "  memmy_account:",
       `    apiBase: ${process.env.MEMMY_CLOUD_SERVICE}/api/agentExternal/v1`,
       "    apiKey: cloud.login.uuid.a",
-      "modelPresets:",
-      "  memmy-account:",
-      "    provider: memmy_account",
-      "    model: agent_chat",
+      "memmyMemory:",
+      "  activeProfile: account",
       ""
     ]);
 
@@ -210,23 +206,17 @@ describe("syncRuntimeConfigWithAppState", () => {
     });
 
     const parsed = YAML.parse(readFileSync(context.memmyConfigPath, "utf8")) as any;
-    expect(parsed.agents.defaults.modelPreset).toMatch(/^desktop-openai-gpt-4-1-mini-/);
-    expect(parsed.agents.defaults.timezone).toBe(systemUtcOffset());
+    expect(parsed.agents.defaults).toEqual({
+      provider: "openai",
+      model: "gpt-4.1-mini",
+      timezone: systemUtcOffset()
+    });
     expect(parsed.providers.openai).toMatchObject({
       apiBase: "https://api.example.com/v1",
       apiKey: "sk-main"
     });
-    expect(parsed.modelPresets[parsed.agents.defaults.modelPreset]).toEqual({
-      provider: "openai",
-      model: "gpt-4.1-mini"
-    });
-    expect(parsed.memmyMemory).not.toHaveProperty("activeProfile");
-    expect(parsed.memmyMemory).not.toHaveProperty("profiles");
-    expect(parsed.memmyMemory.roleRouting).toEqual({
-      summary: "fixed",
-      evolution: "fixed"
-    });
-    expect(parsed.memmyMemory.summary).toMatchObject({
+    expect(parsed.memmyMemory.activeProfile).toBe("byok");
+    expect(parsed.memmyMemory.profiles.byok.summary).toMatchObject({
       endpoint: "https://memory.example.com/v1",
       model: "memory-model",
       apiKey: "sk-memory"

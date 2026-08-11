@@ -86,16 +86,12 @@ export class FallbackProvider extends LLMProvider {
   }
 
   async chat(args: any): Promise<LLMResponse> {
-    if (!this.hasFallbacks) {
-      return annotateExecution(await this.primary.chat(args), this.primary, args.model);
-    }
+    if (!this.hasFallbacks) return this.primary.chat(args);
     return this.tryWithFallback((provider, nextArgs) => provider.chat(nextArgs), args, null);
   }
 
   async chatStream(args: any): Promise<LLMResponse> {
-    if (!this.hasFallbacks) {
-      return annotateExecution(await this.primary.chatStream(args), this.primary, args.model);
-    }
+    if (!this.hasFallbacks) return this.primary.chatStream(args);
     const hasStreamed = [false];
     const originalDelta = args.onContentDelta;
     args.onContentDelta = async (text: string) => {
@@ -113,11 +109,7 @@ export class FallbackProvider extends LLMProvider {
     const primaryModel = args.model ?? this.primary.getDefaultModel();
     let lastResponse: LLMResponse | null = null;
     if (this.primaryAvailable()) {
-      const response = annotateExecution(
-        await call(this.primary, args),
-        this.primary,
-        args.model ?? this.primary.getDefaultModel(),
-      );
+      const response = await call(this.primary, args);
       if (response.finishReason !== "error") {
         this.primaryFailures = 0;
         this.primaryTrippedAt = null;
@@ -159,7 +151,7 @@ export class FallbackProvider extends LLMProvider {
         args.reasoningEffort = reasoning;
       }
       try {
-        const response = annotateExecution(await call(fallbackProvider, args), fallbackProvider, fallback.model);
+        const response = await call(fallbackProvider, args);
         if (response.finishReason !== "error") return response;
         lastResponse = response;
       } finally {
@@ -197,26 +189,6 @@ export class FallbackProvider extends LLMProvider {
     return [kind, errorType, code, text].some((value) => FALLBACK_ERROR_TOKENS.some((token) => value.includes(token)));
   }
 
-}
-
-function annotateExecution(
-  response: LLMResponse,
-  provider: LLMProvider,
-  model: unknown,
-): LLMResponse {
-  response.actualProvider = providerName(provider);
-  response.actualModel = typeof model === "string" && model.trim()
-    ? model.trim()
-    : provider.getDefaultModel();
-  return response;
-}
-
-function providerName(provider: LLMProvider): string | null {
-  const value = (provider as LLMProvider & {
-    spec?: { name?: unknown };
-    providerName?: unknown;
-  }).spec?.name ?? (provider as { providerName?: unknown }).providerName;
-  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 function restoreArg(args: any, name: string, value: any): void {

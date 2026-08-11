@@ -14,7 +14,6 @@ import {
   prepareFileEditTrackers,
   readFileSnapshot,
 } from "../../src/utils/file-edit-events.js";
-import { getOrCreateUiToolCallId } from "../../src/utils/progress-events.js";
 
 const roots: string[] = [];
 
@@ -90,7 +89,6 @@ describe("file edit event helpers", () => {
     expect(buildFileEditStartEvent(tracker!, params)).toEqual({
       version: 1,
       call_id: "call-write",
-      ui_tool_call_id: expect.any(String),
       tool: "write_file",
       path: "notes.txt",
       absolute_path: slash(target),
@@ -107,36 +105,6 @@ describe("file edit event helpers", () => {
     expect(end.status).toBe("done");
     expect(end.approximate).toBe(false);
     expect([end.added, end.deleted]).toEqual([2, 1]);
-  });
-
-  it("builds an explicit completed event for a confirmed no-op", () => {
-    const root = tmpRoot();
-    const target = path.join(root, "same.txt");
-    fs.writeFileSync(target, "same\n", "utf8");
-    const tracker = prepareFileEditTracker({
-      callId: "call-noop",
-      toolName: "write_file",
-      tool: null,
-      workspace: root,
-      params: { path: "same.txt", content: "same\n" },
-    });
-
-    const event = buildFileEditEndEvent(
-      tracker!,
-      { path: "same.txt", content: "same\n" },
-      { changed: false },
-    );
-
-    expect(event).toMatchObject({
-      call_id: "call-noop",
-      phase: "end",
-      status: "done",
-      added: 0,
-      deleted: 0,
-      approximate: false,
-      unchanged: true,
-    });
-    expect(event.binary).toBeUndefined();
   });
 
   it("reports binary files without line counts", () => {
@@ -248,7 +216,6 @@ describe("file edit event helpers", () => {
     expect(events[0]).toEqual({
       version: 1,
       call_id: "call-live",
-      ui_tool_call_id: expect.any(String),
       tool: "write_file",
       path: "notes.md",
       absolute_path: slash(path.join(root, "notes.md")),
@@ -317,7 +284,6 @@ describe("file edit event helpers", () => {
     expect(events[0]).toEqual({
       version: 1,
       call_id: "call-live",
-      ui_tool_call_id: expect.any(String),
       tool: "write_file",
       path: "",
       phase: "start",
@@ -401,7 +367,6 @@ describe("file edit event helpers", () => {
     expect(events[0]).toEqual({
       version: 1,
       call_id: "call-edit",
-      ui_tool_call_id: expect.any(String),
       tool: "edit_file",
       path: "notes.md",
       absolute_path: slash(path.join(root, "notes.md")),
@@ -414,46 +379,29 @@ describe("file edit event helpers", () => {
     expect(events.at(-1)).toMatchObject({ path: "notes.md", status: "editing", approximate: true, added: 24, deleted: 2 });
   });
 
-  it("binds live and final calls without changing the Provider call id", async () => {
+  it("applies canonical call ids to matching final tool calls", async () => {
     const root = tmpRoot();
     const tracker = new StreamingFileEditTracker({ workspace: root, tools: {}, emit: () => undefined });
     await tracker.update({ index: 0, name: "write_file", arguments_delta: '{"path":"matched.md","content":"one\\n' });
     const final = { id: "provider-final-id", name: "write_file", arguments: { path: "matched.md", content: "one\n" } };
 
-    tracker.bindFinalToolCalls([final]);
+    tracker.applyFinalCallIds([final]);
 
-    expect(final.id).toBe("provider-final-id");
-    expect(getOrCreateUiToolCallId(final)).toBe(tracker.states.get("idx:0")?.uiToolCallId);
+    expect(final.id).toBe("idx:0");
   });
 
-  it("gives final calls distinct UI ids when streamed Provider ids repeat", async () => {
+  it("does not restore duplicate canonical ids", async () => {
     const root = tmpRoot();
     const tracker = new StreamingFileEditTracker({ workspace: root, tools: {}, emit: () => undefined });
     await tracker.update({ index: 0, call_id: "call_dup", name: "write_file", arguments_delta: '{"path":"a.md","content":"one\\n"}' });
     await tracker.update({ index: 1, call_id: "call_dup", name: "write_file", arguments_delta: '{"path":"b.md","content":"two\\n"}' });
     const finalA = { id: "call_dup", name: "write_file", arguments: { path: "a.md", content: "one\n" } };
-    const finalB = { id: "call_dup", name: "write_file", arguments: { path: "b.md", content: "two\n" } };
+    const finalB = { id: "call_unique", name: "write_file", arguments: { path: "b.md", content: "two\n" } };
 
-    tracker.bindFinalToolCalls([finalA, finalB]);
+    tracker.applyFinalCallIds([finalA, finalB]);
 
     expect(finalA.id).toBe("call_dup");
-    expect(finalB.id).toBe("call_dup");
-    expect(getOrCreateUiToolCallId(finalA)).not.toBe(getOrCreateUiToolCallId(finalB));
-  });
-
-  it("gives final calls distinct UI ids when Provider ids are missing", async () => {
-    const root = tmpRoot();
-    const tracker = new StreamingFileEditTracker({ workspace: root, tools: {}, emit: () => undefined });
-    await tracker.update({ index: 0, name: "write_file", arguments_delta: '{"path":"a.md","content":"one\\n"}' });
-    await tracker.update({ index: 1, name: "write_file", arguments_delta: '{"path":"b.md","content":"two\\n"}' });
-    const finalA = { id: "", name: "write_file", arguments: { path: "a.md", content: "one\n" } };
-    const finalB = { id: "", name: "write_file", arguments: { path: "b.md", content: "two\n" } };
-
-    tracker.bindFinalToolCalls([finalA, finalB]);
-
-    expect(finalA.id).toBe("");
-    expect(finalB.id).toBe("");
-    expect(getOrCreateUiToolCallId(finalA)).not.toBe(getOrCreateUiToolCallId(finalB));
+    expect(finalB.id).toBe("call_unique");
   });
 
   it("flushes a small pending edit_file count", async () => {

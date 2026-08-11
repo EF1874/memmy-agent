@@ -5,7 +5,6 @@ import { useAnalytics } from "../analytics/use-analytics.js";
 import { persistLoginModeSelection } from "../app/login-mode.js";
 import { useApiClients } from "../app/providers.js";
 import { PAGE_CORNER_ACTION_CONTAINER_STYLE, PageCornerActionButton } from "../components/language-toggle-button.js";
-import { ModelProviderLogo } from "../components/model-provider-logo.js";
 import { Select } from "../components/Select.js";
 import type { MessageKey } from "../i18n/messages.js";
 import { useTranslation } from "../i18n/use-translation.js";
@@ -77,6 +76,9 @@ export function ApiKeyPage() {
   const [apiKey, setApiKey] = useState(initialModelForm.apiKey);
   const [apiKeyMasked, setApiKeyMasked] = useState(initialModelForm.apiKeyMasked);
   const [showApiKey, setShowApiKey] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [maxTokens, setMaxTokens] = useState("");
+  const [dailyLimit, setDailyLimit] = useState("");
   const modelFormValues = {
     provider,
     endpoint,
@@ -235,8 +237,7 @@ export function ApiKeyPage() {
               className="select-control--subtle"
               options={providerOptions.map((option) => ({
                 value: option.value,
-                label: t(option.labelKey),
-                icon: <ModelProviderLogo provider={option.value} size={16} />
+                label: t(option.labelKey)
               }))}
             />
 
@@ -251,6 +252,20 @@ export function ApiKeyPage() {
               showPassword={showApiKey}
               onTogglePassword={() => setShowApiKey((value) => !value)}
             />
+
+            <button
+              type="button"
+              onClick={() => setShowAdvanced((value) => !value)}
+              className="flex items-center gap-1.5 text-xs text-text-ink/55 hover:text-text-ink/75 cursor-pointer transition-colors"
+            >
+              {showAdvanced ? "-" : "+"} {t("apiKey.advanced")}
+            </button>
+            {showAdvanced && (
+              <div className="space-y-3.5">
+                <ConfigField label={t("apiKey.maxTokens")} placeholder={t("apiKey.noLimit")} value={maxTokens} onChange={setMaxTokens} suffix="tokens" />
+                <ConfigField label={t("apiKey.dailyLimit")} placeholder={t("apiKey.noLimit")} value={dailyLimit} onChange={setDailyLimit} />
+              </div>
+            )}
 
             <div className="flex min-h-9 items-center justify-end gap-3">
               <ValidationMessage validation={llmValidation} stale={isTestStale} />

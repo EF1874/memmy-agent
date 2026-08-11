@@ -1,9 +1,9 @@
 /** Runtime config sync service module. */
 import {
-  LegacyModelConfigInputSchema,
+  ModelConfigInputSchema,
   type ImageGenProvider,
-  type LegacyMemmyMemoryModelConfigInput,
-  type LegacyModelConfigInput,
+  type MemmyMemoryModelConfigInput,
+  type ModelConfigInput,
   type ModelProvider,
   type UserMode
 } from "@memmy/local-api-contracts";
@@ -229,7 +229,7 @@ async function syncByokRuntimeConfigFromAppState(
 
 function readByokRuntimeProjectionInput(
   appStateStore: AppStateStore
-): (LegacyModelConfigInput & { memmyMemory: LegacyMemmyMemoryModelConfigInput }) | null {
+): (ModelConfigInput & { memmyMemory: MemmyMemoryModelConfigInput }) | null {
   const row = appStateStore.db
     .prepare(
       `SELECT
@@ -288,7 +288,7 @@ function readByokRuntimeProjectionInput(
     },
     imageGen: readImageGenProjectionInput(appStateStore, row)
   };
-  const parsed = LegacyModelConfigInputSchema.safeParse(input);
+  const parsed = ModelConfigInputSchema.safeParse(input);
   if (!parsed.success || !parsed.data.memmyMemory) {
     return null;
   }
@@ -302,7 +302,7 @@ function readByokRuntimeProjectionInput(
 function readImageGenProjectionInput(
   appStateStore: AppStateStore,
   row: ModelConfigProjectionRow
-): LegacyModelConfigInput["imageGen"] {
+): ModelConfigInput["imageGen"] {
   if (!row.image_provider || !row.image_base_url || !row.image_model_id) {
     return undefined;
   }
@@ -318,7 +318,7 @@ function readImageGenProjectionInput(
 function readEmbeddingProjectionInput(
   appStateStore: AppStateStore,
   row: ModelConfigProjectionRow
-): LegacyModelConfigInput["embedding"] {
+): ModelConfigInput["embedding"] {
   if (row.embedding_mode !== "custom") {
     return { mode: "local" };
   }
@@ -339,7 +339,7 @@ function readRoleProjectionInput(
     modelId: string;
     apiKeyRef: string | null;
   }
-): LegacyMemmyMemoryModelConfigInput["summary"] {
+): MemmyMemoryModelConfigInput["summary"] {
   return {
     provider: input.provider as ModelProvider,
     baseUrl: input.baseUrl,

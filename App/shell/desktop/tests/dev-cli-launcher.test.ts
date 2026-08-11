@@ -69,57 +69,6 @@ run_main`;
     expect(result.stdout).toBe("cn/phone\n");
   });
 
-  it("recognizes model-preset runtime config before starting agent services", () => {
-    const script = String.raw`set -euo pipefail
-source scripts/dev-start.sh
-test_dir="$(mktemp -d)"
-trap 'rm -rf "$test_dir"' EXIT
-cat > "$test_dir/config.yaml" <<'YAML'
-agents:
-  defaults:
-    modelPreset: memmy-account
-    provider: auto
-    model: stale-model
-providers:
-  memmy_account:
-    apiKey: account-token
-modelPresets:
-  memmy-account:
-    provider: memmy_account
-    model: agent_chat
-YAML
-MEMMY_CONFIG_PATH="$test_dir/config.yaml"
-
-config_has_agent_model`;
-    const result = spawnSync("bash", ["-s"], { cwd: repoRoot, encoding: "utf8", input: script });
-
-    expect(result.status, result.stderr || result.stdout).toBe(0);
-  });
-
-  it("does not accept legacy provider/model defaults without a model preset", () => {
-    const script = String.raw`set -euo pipefail
-source scripts/dev-start.sh
-test_dir="$(mktemp -d)"
-trap 'rm -rf "$test_dir"' EXIT
-cat > "$test_dir/config.yaml" <<'YAML'
-agents:
-  defaults:
-    provider: memmy_account
-    model: agent_chat
-providers:
-  memmy_account:
-    apiKey: account-token
-YAML
-MEMMY_CONFIG_PATH="$test_dir/config.yaml"
-
-if config_has_agent_model; then
-  exit 1
-fi`;
-    const result = spawnSync("bash", ["-s"], { cwd: repoRoot, encoding: "utf8", input: script });
-
-    expect(result.status, result.stderr || result.stdout).toBe(0);
-  });
-
   it("reinstalls memmy-agent dependencies when file validators are missing", () => {
     const script = String.raw`set -euo pipefail
 source scripts/dev-start.sh

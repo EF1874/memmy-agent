@@ -11,7 +11,7 @@ import { useAnalytics } from "../analytics/use-analytics.js";
 import type { AccountClient } from "../api/account-client.js";
 import type { ByokTokenUsageClient } from "../api/byok-token-usage-client.js";
 import type { TokenQuotaClient } from "../api/token-quota-client.js";
-import type { ConfigClient, ModelProviderConfig } from "../api/config-client.js";
+import type { ConfigClient } from "../api/config-client.js";
 import {
   readCloseMainWindowAction,
   writeCloseMainWindowAction,
@@ -26,27 +26,9 @@ import { useTranslation } from "../i18n/use-translation.js";
 import { appActions, type AppAction } from "../state/app-actions.js";
 import type { AppState } from "../state/app-reducer.js";
 import { useAppState } from "../state/app-state.js";
-import {
-  getModelCandidates,
-  getTaskModelCandidates,
-  prepareByokWorkspaceForAccountLogout,
-  type ModelWorkspaceMode
-} from "../state/model-workspace.js";
-import { useModelWorkspace } from "../state/use-model-workspace.js";
 import { AppFrame } from "./app-frame.js";
-import { ModelWorkspaceSection } from "./model-workspace-section.js";
-import {
-  SETTINGS_ADD_MODEL_RETURN_STORAGE_KEY,
-  readInitialSettingsTab,
-  readSettingsAddModelReturnRoute,
-  resolveSettingsTabFromHash,
-  writeSettingsTabHash,
-  type SettingsTabId
-} from "./settings-nav.js";
 import { formatTokenGiftAmount } from "./token-gift.js";
 import usageStyles from "./settings-token-usage.module.css";
-
-export { resolveSettingsTabFromHash, type SettingsTabId } from "./settings-nav.js";
 import {
   OptionalModelMissingWarningModal,
   resolveOptionalModelMissingWarning,
@@ -54,7 +36,6 @@ import {
 } from "./optional-model-missing-warning-modal.js";
 import { ConfirmDialog } from "../components/confirm-dialog.js";
 import { Memmy } from "../components/mascot/memmy.js";
-import { ModelProviderLogo } from "../components/model-provider-logo.js";
 import { Select, type SelectOption } from "../components/Select.js";
 import { canSubmitFeedback, feedbackLength, FEEDBACK_MIN_LENGTH } from "../feedback/quota-feedback.js";
 import {
@@ -97,7 +78,7 @@ type LogLevel = "error" | "warn" | "info" | "debug";
 type ModelMode = "platform" | "custom";
 type EmbeddingMode = "cloud" | "local" | "custom";
 type TestStatus = "idle" | "testing" | "success" | "error";
-type ConfirmKind = "logout" | null;
+type ConfirmKind = "logout" | "exitLocal" | null;
 type UsageLoadStatus = "idle" | "loading" | "ready" | "error";
 type DeveloperAction = "openLogs" | "exportDiagnostics";
 type DeveloperFeedbackTone = "success" | "error";
@@ -172,8 +153,7 @@ const EMPTY_BYOK_TOKEN_USAGE: ByokTokenUsageSummary = {
   cachedInputTokens: 0,
   cacheCreationInputTokens: 0,
   updatedAt: null,
-  byKind: [],
-  byProvider: []
+  byKind: []
 };
 
 // Display order for both panels. Platform Cloud scenes omit embedding; BYOK
@@ -230,27 +210,9 @@ export function SettingsPage() {
   const { t } = useTranslation();
   const update = useUpdateCoordinator();
   const [showUsageDetail, setShowUsageDetail] = useState(false);
-  const [activeTab, setActiveTab] = useState<SettingsTabId>(() => {
-    return readInitialSettingsTab(typeof window === "undefined" ? undefined : window.location.hash);
-  });
-
-  function selectSettingsTab(tab: SettingsTabId) {
-    // Sidebar clicks must leave the usage-detail sub-page; otherwise the
-    // highlighted section changes while the detail view stays on screen.
-    setShowUsageDetail(false);
-    setActiveTab(tab);
-    writeSettingsTabHash(tab);
-  }
 
   return (
-    <AppFrame
-      title={t("settings.title")}
-      reserveTopBar={!showUsageDetail}
-      settingsNav={{
-        activeTab,
-        onSelectTab: selectSettingsTab
-      }}
-    >
+    <AppFrame title={t("settings.title")} reserveTopBar={!showUsageDetail}>
       <SettingsPageView
         state={state}
         dispatch={dispatch}
@@ -261,8 +223,6 @@ export function SettingsPage() {
         tokenQuotaClient={clients?.tokenQuota}
         update={update}
         track={track}
-        activeTab={activeTab}
-        showUsageDetail={showUsageDetail}
         onUsageDetailVisibleChange={setShowUsageDetail}
       />
     </AppFrame>
@@ -293,9 +253,6 @@ export interface SettingsPageViewProps {
   tokenQuotaClient?: TokenQuotaClient;
   update: UpdateCoordinatorValue;
   track?: TrackAnalyticsEvent;
-  activeTab?: SettingsTabId;
-  onActiveTabChange?: (tab: SettingsTabId) => void;
-  showUsageDetail?: boolean;
   onUsageDetailVisibleChange?: (visible: boolean) => void;
 }
 
@@ -314,7 +271,6 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const { state, dispatch, platform, accountClient, configClient, byokTokenUsageClient, tokenQuotaClient, update, track = noopTrackAnalyticsEvent, onUsageDetailVisibleChange } = props;
   const { t, language } = useTranslation();
   const bootstrap = state.bootstrap;
-  const { workspace: modelWorkspace, commit: commitModelWorkspace } = useModelWorkspace(state.modelConfig);
   const [launchAtLogin, setLaunchAtLogin] = useState(false);
   const [closeAction, setCloseAction] = useState<CloseMainWindowAction>(() => {
     return readCloseMainWindowAction(typeof window === "undefined" ? undefined : window.localStorage);
@@ -330,33 +286,12 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const [nicknameDraft, setNicknameDraft] = useState("");
   const [accountBusy, setAccountBusy] = useState(false);
   const [accountError, setAccountError] = useState<string | null>(null);
-  const [showUsageDetailState, setShowUsageDetailState] = useState(false);
-  const [activeTabState, setActiveTabState] = useState<SettingsTabId>(() => {
-    return readInitialSettingsTab(typeof window === "undefined" ? undefined : window.location.hash);
-  });
-  const activeTab = activeTabProp ?? activeTabState;
-  const showUsageDetail = showUsageDetailProp ?? showUsageDetailState;
-
-  function setActiveTab(tab: SettingsTabId) {
-    if (showUsageDetail) {
-      updateShowUsageDetail(false);
-    }
-    if (onActiveTabChange) {
-      onActiveTabChange(tab);
-      return;
-    }
-    setActiveTabState(tab);
-    writeSettingsTabHash(tab);
-  }
+  const [showUsageDetail, setShowUsageDetail] = useState(false);
 
   /** Syncs the Token usage detail sub-page's visibility so the AppFrame draggable top bar does not cover the back button. */
   function updateShowUsageDetail(next: boolean) {
-    if (onUsageDetailVisibleChange) {
-      onUsageDetailVisibleChange(next);
-    }
-    if (showUsageDetailProp === undefined) {
-      setShowUsageDetailState(next);
-    }
+    setShowUsageDetail(next);
+    onUsageDetailVisibleChange?.(next);
   }
 
   const [showApplyMore, setShowApplyMore] = useState(false);
@@ -378,10 +313,6 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const isByokMode = appSettings?.userMode === "byok";
   const persistedMenuBarIconEnabled = appSettings?.menuBarIconEnabled;
   const isAccountMode = appSettings?.userMode === "account";
-  const workspaceMode: ModelWorkspaceMode = isByokMode ? "byok" : "account";
-  const setupReturnRoute = readSettingsAddModelReturnRoute(
-    typeof window === "undefined" ? undefined : window.sessionStorage
-  );
   const initialModelForm = hydrateModelConfigForm(state.modelConfig, isByokMode ? "local" : "cloud");
   const [showApiConfig, setShowApiConfig] = useState(false);
   const [protocol, setProtocol] = useState<Protocol>(initialModelForm.protocol);
@@ -390,6 +321,9 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const [apiKey, setApiKey] = useState(initialModelForm.apiKey);
   const [apiKeyMasked, setApiKeyMasked] = useState(initialModelForm.apiKeyMasked);
   const [showKey, setShowKey] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [maxTokens, setMaxTokens] = useState("");
+  const [dailyLimit, setDailyLimit] = useState("");
   const mainModelFormValues = {
     provider: fromProtocol(protocol),
     endpoint,
@@ -435,8 +369,8 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const accountIdentifier = resolveAccountIdentifier(state);
   const maskedAccountIdentifier = maskAccountIdentifier(accountIdentifier);
   const accountName = isByokMode
-    ? resolveAccountFallback(t)
-    : state.account.nickname || maskedAccountIdentifier || resolveAccountFallback(t);
+    ? resolveAccountFallback(appSettings?.userMode, t)
+    : state.account.nickname || maskedAccountIdentifier || resolveAccountFallback(appSettings?.userMode, t);
   const accountMeta = isByokMode ? resolveAccountMeta(appSettings?.userMode, t) : maskedAccountIdentifier || resolveAccountMeta(appSettings?.userMode, t);
   const accountInitial = isByokMode ? "·" : resolveAccountInitials(accountName);
   const registeredAtText = formatRegisteredAt(state.account.registeredAt, t);
@@ -699,29 +633,13 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   }, [byokTokenUsageClient]);
 
   useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    // Controlled pages already initialize activeTab from the hash in SettingsPage.
-    // Do not call onActiveTabChange here: sidebar handlers also close usage detail,
-    // which would immediately bounce "查看用量详情" back out after open.
-    if (activeTabProp === undefined) {
-      const tabFromHash = resolveSettingsTabFromHash(window.location.hash);
-      if (tabFromHash) {
-        setActiveTabState(tabFromHash);
-      }
-    }
-
-    if (window.location.hash !== "#pet-avatar") {
+    if (typeof window === "undefined" || window.location.hash !== "#pet-avatar") {
       return;
     }
 
     window.setTimeout(() => {
       document.getElementById("pet-avatar")?.scrollIntoView({ behavior: "smooth", block: "start" });
     }, 0);
-    // Mount-only deep-link sync; activeTabProp is read once for controlled vs local.
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional
   }, []);
 
   useEffect(() => {
@@ -731,7 +649,6 @@ export function SettingsPageView(props: SettingsPageViewProps) {
 
     const openRequestedApplyMore = () => {
       if (consumeTokenExhaustedApplyMoreRequest(window.sessionStorage)) {
-        setActiveTab("tokens");
         openApplyMore();
       }
     };
@@ -1292,36 +1209,37 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     }
   }
 
-  /** Handles the registered account logout confirmation. */
+  /**
+   * Handles the confirmation for logging out of the account or exiting local mode.
+   */
   async function handleConfirmAccountExit() {
     if (accountBusy) return;
-    setAccountBusy(true);
-    setAccountError(null);
-    try {
-      const preparedByok = prepareByokWorkspaceForAccountLogout(modelWorkspace);
-      await (accountClient?.logout() ?? Promise.resolve({ ok: true as const }));
-      track({ name: "account_logout", params: { page_path: "/settings" }, consentTier: "basic" });
-      dispatch(appActions.accountCleared());
-      const canEnterByok = preparedByok.hasTaskModel
-        && (
-          preparedByok.workspace === modelWorkspace
-          || commitModelWorkspace(preparedByok.workspace)
-        );
-      if (canEnterByok) {
-        dispatch(appActions.settingsUpdated({ userMode: "byok" }));
-        persistSettings({ userMode: "byok" });
-      } else {
+    const currentConfirm = confirm;
+    if (currentConfirm === "logout") {
+      setAccountBusy(true);
+      setAccountError(null);
+      try {
+        await (accountClient?.logout() ?? Promise.resolve({ ok: true as const }));
+        track({ name: "account_logout", params: { page_path: "/settings" }, consentTier: "basic" });
+        dispatch(appActions.accountCleared());
         persistSettings({ userMode: "unset" });
         dispatch(appActions.navigate("/welcome"));
+        setConfirm(null);
+      } catch (error) {
+        console.warn("logout account failed", error);
+        setAccountError(t("settings.account.logoutFailed"));
+        setConfirm(null);
+      } finally {
+        setAccountBusy(false);
       }
-      setConfirm(null);
-    } catch (error) {
-      console.warn("logout account failed", error);
-      setAccountError(t("settings.account.logoutFailed"));
-      setConfirm(null);
-    } finally {
-      setAccountBusy(false);
+      return;
     }
+
+    track({ name: "byok_exit_to_register", params: { page_path: "/settings" }, consentTier: "basic" });
+    persistSettings({ userMode: "unset" });
+    dispatch(appActions.accountCleared());
+    dispatch(appActions.navigate("/welcome"));
+    setConfirm(null);
   }
 
   if (showUsageDetail) {
@@ -1331,86 +1249,74 @@ export function SettingsPageView(props: SettingsPageViewProps) {
         platformUsage={tokenUsage}
         byokUsage={byokUsage}
         byokUsageStatus={byokUsageStatus}
-        workspaceMode={workspaceMode}
-        seedConfig={state.modelConfig}
         onBack={() => updateShowUsageDetail(false)}
       />
     );
   }
 
-  const confirmDialog = confirm ? resolveAccountConfirmDialog(t) : null;
+  const confirmDialog = confirm ? resolveAccountConfirmDialog(confirm, t) : null;
   return (
     <div
       className="settings-page h-full overflow-y-auto"
     >
       <div className="app-frame-page-content max-w-2xl mx-auto py-8">
-        <div
-          id="settings-panel-account"
-          role="tabpanel"
-          aria-labelledby="settings-tab-account"
-          hidden={activeTab !== "account"}
-        >
         <Section icon={<User size={16} className="text-text-ink/60" />} title={t("settings.account")}>
           <div className="settings-account-summary">
-            <div className="settings-account-summary__main">
-              {isAccountMode && (
-                <div className="w-12 h-12 rounded-full bg-action-sky/15 flex items-center justify-center shrink-0">
-                  <span className="text-base font-bold text-action-sky">{accountInitial}</span>
-                </div>
-              )}
-              <div className="settings-account-copy">
-                <div className="flex items-center gap-2 mb-1 min-w-0">
-                  {isEditingNickname ? (
-                    <div className="flex flex-1 min-w-0 items-center gap-2">
-                      <input
-                        type="text"
-                        aria-label={t("settings.account.nickname")}
-                        value={nicknameDraft}
-                        onChange={(event) => setNicknameDraft(event.target.value)}
-                        onKeyDown={(event) => {
-                          if (shouldSaveAccountNicknameOnKeyDown(event)) {
-                            void saveNickname();
-                          }
-                          if (event.key === "Escape") {
-                            setIsEditingNickname(false);
-                          }
-                        }}
-                        disabled={accountBusy}
-                        maxLength={32}
-                        className="min-w-0 flex-1 px-2.5 py-1.5 border border-border-stone/50 rounded-input bg-background-paper text-sm text-text-ink focus:outline-none disabled:opacity-60"
-                      />
-                      <button type="button" onClick={() => void saveNickname()} disabled={accountBusy} className="px-2.5 py-1.5 text-xs text-white bg-action-sky rounded-btn hover:bg-action-sky-hover disabled:opacity-60 cursor-pointer disabled:cursor-not-allowed">
-                        {t("common.save")}
+            <div className="w-12 h-12 rounded-full bg-action-sky/15 flex items-center justify-center shrink-0">
+              <span className="text-base font-bold text-action-sky">{accountInitial}</span>
+            </div>
+            <div className="settings-account-copy">
+              <div className="flex items-center gap-2 mb-1 min-w-0">
+                {isEditingNickname ? (
+                  <div className="flex flex-1 min-w-0 items-center gap-2">
+                    <input
+                      type="text"
+                      aria-label={t("settings.account.nickname")}
+                      value={nicknameDraft}
+                      onChange={(event) => setNicknameDraft(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (shouldSaveAccountNicknameOnKeyDown(event)) {
+                          void saveNickname();
+                        }
+                        if (event.key === "Escape") {
+                          setIsEditingNickname(false);
+                        }
+                      }}
+                      disabled={accountBusy}
+                      maxLength={32}
+                      className="min-w-0 flex-1 px-2.5 py-1.5 border border-border-stone/50 rounded-input bg-background-paper text-sm text-text-ink focus:outline-none disabled:opacity-60"
+                    />
+                    <button type="button" onClick={() => void saveNickname()} disabled={accountBusy} className="px-2.5 py-1.5 text-xs text-white bg-action-sky rounded-btn hover:bg-action-sky-hover disabled:opacity-60 cursor-pointer disabled:cursor-not-allowed">
+                      {t("common.save")}
+                    </button>
+                    <button type="button" onClick={() => setIsEditingNickname(false)} disabled={accountBusy} className="px-2.5 py-1.5 text-xs text-text-ink/60 border border-border-stone/40 rounded-btn hover:bg-canvas-oat/60 disabled:opacity-60 cursor-pointer disabled:cursor-not-allowed">
+                      {t("common.cancel")}
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <OverflowTooltipText
+                      className="settings-account-heading-name text-sm font-semibold text-text-ink truncate"
+                      text={accountName}
+                    />
+                    {isAccountMode && (
+                      <button type="button" aria-label={t("settings.account.editNickname")} onClick={startNicknameEdit} className="shrink-0 text-xs text-action-sky hover:underline cursor-pointer">
+                        {t("settings.account.editNickname")}
                       </button>
-                      <button type="button" onClick={() => setIsEditingNickname(false)} disabled={accountBusy} className="px-2.5 py-1.5 text-xs text-text-ink/60 border border-border-stone/40 rounded-btn hover:bg-canvas-oat/60 disabled:opacity-60 cursor-pointer disabled:cursor-not-allowed">
-                        {t("common.cancel")}
-                      </button>
-                    </div>
-                  ) : (
-                    <>
-                      <OverflowTooltipText
-                        className="settings-account-heading-name text-sm font-semibold text-text-ink truncate"
-                        text={accountName}
-                      />
-                      {isAccountMode && (
-                        <button type="button" aria-label={t("settings.account.editNickname")} onClick={startNicknameEdit} className="shrink-0 text-xs text-action-sky hover:underline cursor-pointer">
-                          {t("settings.account.editNickname")}
-                        </button>
-                      )}
-                    </>
-                  )}
-                </div>
-                <div className="min-w-0 text-xs text-text-ink/55 leading-relaxed">
-                  {isAccountMode ? (
-                    <div className="min-w-0 space-y-0.5">
-                      <OverflowTooltipText className="settings-account-meta-line block truncate" text={accountMeta} />
-                      <div className="text-text-ink/45">{t("settings.account.registeredAt", { value: registeredAtText })}</div>
-                      {accountError && <div className="text-status-error">{accountError}</div>}
-                    </div>
-                  ) : (
+                    )}
+                  </>
+                )}
+              </div>
+              <div className="min-w-0 text-xs text-text-ink/55 leading-relaxed">
+                {isAccountMode ? (
+                  <div className="min-w-0 space-y-0.5">
                     <OverflowTooltipText className="settings-account-meta-line block truncate" text={accountMeta} />
-                  )}
-                </div>
+                    <div className="text-text-ink/45">{t("settings.account.registeredAt", { value: registeredAtText })}</div>
+                    {accountError && <div className="text-status-error">{accountError}</div>}
+                  </div>
+                ) : (
+                  <OverflowTooltipText className="settings-account-meta-line block truncate" text={accountMeta} />
+                )}
               </div>
             </div>
             {isAccountMode && (
@@ -1426,84 +1332,290 @@ export function SettingsPageView(props: SettingsPageViewProps) {
             {isByokMode && (
               <button
                 type="button"
-                onClick={() => dispatch(appActions.navigate("/welcome"))}
-                className="settings-account-action shrink-0 px-3.5 py-1.5 text-xs text-white bg-action-sky rounded-btn hover:bg-action-sky-hover transition-colors cursor-pointer"
+                onClick={() => setConfirm("exitLocal")}
+                className="settings-account-action shrink-0 flex items-center gap-1.5 px-3.5 py-1.5 text-xs text-action-sky border border-action-sky/30 rounded-btn hover:bg-action-sky/8 transition-colors cursor-pointer"
               >
-                {t("login.continue")}
+                <Zap size={12} /> {t("settings.account.exitLocalShort")}
               </button>
             )}
           </div>
         </Section>
 
-        <Section icon={<Shield size={16} className="text-text-ink/60" />} title={t("settings.privacy")}>
-          <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <div className="flex-1">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm text-text-ink/70">{t("settings.privacy.shareData")}</span>
-                  <span className={`px-2 py-0.5 text-[10px] font-normal rounded-tag ${improvementPlan ? "bg-action-sky/10 text-action-sky" : "bg-canvas-oat text-text-ink/55"}`}>
-                    {improvementPlan ? t("settings.privacy.active") : t("settings.privacy.off")}
-                  </span>
+        <Section icon={<Brain size={16} className="text-text-ink/60" />} title={t("settings.model")} sectionId="model-config">
+          <div className={`flex items-center justify-between gap-3${modelHeaderSpacing}`}>
+            <div className="flex items-center gap-3 min-w-0">
+              <span className="text-sm text-text-ink/75 shrink-0">{t("settings.model.currentMode")}</span>
+              <span className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-normal rounded-tag ${modelModeClass}`}>
+                <span className={`w-1.5 h-1.5 rounded-full ${modelDotClass}`} />
+                {modelModeLabel}
+              </span>
+              {modelMode === "custom" && !showApiConfig && (
+                <button type="button" onClick={() => setShowApiConfig(true)} className="text-xs text-action-sky hover:underline cursor-pointer">
+                  {t("settings.model.editConfig")}
+                </button>
+              )}
+            </div>
+
+            {modelMode === "platform" && hasAccountSession ? (
+              <button
+                type="button"
+                onClick={handleSwitchToCustom}
+                className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 text-xs text-action-sky border border-action-sky/30 rounded-btn hover:bg-action-sky/8 transition-colors cursor-pointer"
+              >
+                {t("settings.model.switchToCustom")}
+                <ArrowRight size={13} />
+              </button>
+            ) : (
+              modelMode === "custom" && hasAccountSession && hasByokConfig && (
+                <button
+                  type="button"
+                  onClick={handleSwitchToPlatform}
+                  className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 text-xs text-action-sky border border-action-sky/30 rounded-btn hover:bg-action-sky/8 transition-colors cursor-pointer"
+                >
+                  {t("settings.model.switchToPlatform")}
+                  <ArrowRight size={13} />
+                </button>
+              )
+            )}
+          </div>
+
+          {modelMode === "custom" && !showApiConfig && (
+            <div className="space-y-2 p-3 bg-canvas-oat/40 rounded-card">
+              <ModuleRow label={t("settings.model.agentTask")} desc={t("settings.model.primary")} model={primaryModelId || t("settings.model.notSet")} />
+              <ModuleRow
+                label={t("settings.model.memorySummary")}
+                desc={t("settings.model.memoryDesc")}
+                model={memoryModel.reuse ? (primaryModelId ? t("settings.model.reusePrimary", { model: primaryModelId }) : t("settings.model.notSet")) : memoryModel.modelId || t("settings.model.notSet")}
+              />
+              <ModuleRow
+                label={t("settings.model.skillEvolution")}
+                desc={t("settings.model.skillDesc")}
+                model={skillModel.reuse ? (primaryModelId ? t("settings.model.reusePrimary", { model: primaryModelId }) : t("settings.model.notSet")) : skillModel.modelId || t("settings.model.notSet")}
+              />
+              <ModuleRow
+                label={t("settings.model.embeddingSearch")}
+                desc={t("settings.model.embeddingDesc")}
+                model={embeddingMode === "cloud" ? t("settings.model.cloudEmbedding") : embeddingMode === "local" ? t("settings.model.localEmbedding") : embModelId || t("settings.model.notSet")}
+              />
+              <ModuleRow
+                label={t("settings.model.asr")}
+                desc={t("settings.model.asrDesc")}
+                model={asrModelId || ASR_MODEL_ID}
+              />
+              <ModuleRow
+                label={t("apiKey.imageGen")}
+                desc={t("apiKey.imageGenHint")}
+                model={imageGenModel || t("settings.model.notSet")}
+              />
+            </div>
+          )}
+
+          {showApiConfig && (
+            <div className="space-y-5">
+              <div className="bg-canvas-oat/40 rounded-card p-5 space-y-3.5">
+                <div className="flex items-center gap-2 mb-1">
+                  <Brain size={16} className="text-action-sky" />
+                  <span className="text-sm font-normal text-text-ink/70">{t("apiKey.llm")}</span>
+                  <span className="text-xs text-status-error font-normal">{t("settings.model.required")}</span>
                 </div>
-                <p className="text-xs text-text-ink/55 mt-1 leading-relaxed">
-                  {improvementPlan
-                    ? t("settings.privacy.enabledDesc")
-                    : t("settings.privacy.disabledDesc")}
-                </p>
+                <p className="text-xs text-text-ink/50 -mt-1">{t("apiKey.llmHint")}</p>
+
+                <ProtocolSelect value={protocol} onChange={handleProtocolChange} />
+                <Field label={t("apiKey.model")} placeholder={`${t("apiKey.examplePrefix")} ${DEFAULT_MODEL_IDS[protocol]}`} value={modelId} onChange={setModelId} />
+                <Field label={t("apiKey.endpoint")} placeholder={`${t("apiKey.examplePrefix")} ${DEFAULT_ENDPOINTS[protocol]}`} value={endpoint} onChange={setEndpoint} />
+                <PasswordField label={t("apiKey.key")} placeholder="sk-..." maskedValue={apiKeyMasked} value={apiKey} onChange={setApiKey} show={showKey} onToggle={() => setShowKey(!showKey)} />
+
+                <button type="button" onClick={() => setShowAdvanced(!showAdvanced)} className="flex items-center gap-1.5 text-xs text-text-ink/55 hover:text-text-ink/75 cursor-pointer transition-colors">
+                  {showAdvanced ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                  {t("apiKey.advanced")}
+                </button>
+                {showAdvanced && (
+                  <div className="space-y-3.5">
+                    <Field label={t("apiKey.maxTokens")} placeholder={t("apiKey.noLimit")} value={maxTokens} onChange={setMaxTokens} suffix="tokens" />
+                    <Field label={t("apiKey.dailyLimit")} placeholder={t("apiKey.noLimit")} value={dailyLimit} onChange={setDailyLimit} />
+                  </div>
+                )}
+
+                <div className="flex min-h-9 items-center justify-end gap-3">
+                  <ValidationMessage validation={llmValidation} stale={isMainModelTestStale} />
+                  <TestButton status={llmValidation.status} onClick={testMainModelConnection} disabled={false} />
+                </div>
               </div>
-              <div className="shrink-0 ml-4">
-                <Toggle
-                  checked={improvementPlan}
-                  onChange={(checked) => persistPrivacy({ allowMemoryImprovementUpload: checked })}
-                  ariaLabel={t("settings.privacy.shareData")}
+
+              <ModelConfigCard
+                icon={<Brain size={16} className="text-action-sky" />}
+                title={t("apiKey.modelPage.memoryTitle")}
+                subtitle={t("apiKey.modelPage.memorySubtitle")}
+                hint={t("apiKey.modelPage.memoryHint")}
+                cfg={memoryModel}
+                onPatch={patchMemoryModel}
+                onTest={() => testModelConfigConnection(memoryModel, patchMemoryModel, "memory")}
+                primary={primaryModelValues}
+              />
+
+              <ModelConfigCard
+                icon={<Wrench size={16} className="text-action-sky" />}
+                title={t("apiKey.modelPage.skillTitle")}
+                subtitle={t("apiKey.modelPage.skillSubtitle")}
+                cfg={skillModel}
+                onPatch={patchSkillModel}
+                onTest={() => testModelConfigConnection(skillModel, patchSkillModel, "skill")}
+                primary={primaryModelValues}
+              />
+
+              <div className="bg-canvas-oat/40 rounded-card p-5 space-y-3.5">
+                <div className="flex items-center gap-2 mb-1">
+                  <Search size={16} className="text-action-sky" />
+                  <span className="text-sm font-normal text-text-ink/70">{t("apiKey.embedding")}</span>
+                </div>
+                <p className="text-xs text-text-ink/50 -mt-1">{t("apiKey.embeddingHint")}</p>
+
+                <Select
+                  label={t("apiKey.embeddingMode")}
+                  value={embeddingMode}
+                  onValueChange={(value) => setEmbeddingMode(value as EmbeddingMode)}
+                  className="select-control--paper"
+                  options={[
+                    ...(!isByokMode ? [{ value: "cloud", label: t("settings.model.cloudEmbeddingOption") }] : []),
+                    { value: "local", label: t("settings.model.localEmbeddingOffline") },
+                    { value: "custom", label: t("settings.model.customEmbeddingOption") }
+                  ]}
                 />
+
+                {embeddingMode === "local" && (
+                  <p className="text-[11px] text-text-ink/45 -mt-2">
+                    {t("settings.model.localEmbeddingModelHint")}
+                  </p>
+                )}
+
+                {embeddingMode === "cloud" && (
+                  <div className="flex items-start gap-2.5 p-3.5 bg-action-sky/5 rounded-card border border-action-sky/15">
+                    <Info size={14} className="text-action-sky mt-0.5 shrink-0" />
+                    <p className="text-xs text-text-ink/65 leading-relaxed">
+                      {t("settings.model.cloudEmbeddingHintPrefix")}<span className="font-semibold text-text-ink/80">{t("settings.model.cloudEmbeddingHintStrong")}</span>{t("settings.model.cloudEmbeddingHintSuffix")}
+                    </p>
+                  </div>
+                )}
+
+                {embeddingMode === "custom" && (
+                  <>
+                    <Field label={t("apiKey.model")} placeholder="text-embedding-3-small" value={embModelId} onChange={setEmbModelId} />
+                    <Field label={t("apiKey.endpoint")} placeholder="https://..." value={embEndpoint} onChange={setEmbEndpoint} />
+                    <PasswordField label={t("apiKey.key")} placeholder="sk-..." maskedValue={embApiKeyMasked} value={embApiKey} onChange={setEmbApiKey} show={showEmbKey} onToggle={() => setShowEmbKey(!showEmbKey)} />
+                    <div className="flex min-h-9 items-center justify-end gap-3">
+                      <ValidationMessage validation={embValidation} stale={isEmbeddingTestStale} />
+                      <TestButton status={embValidation.status} onClick={testEmbeddingConnection} disabled={false} />
+                    </div>
+                  </>
+                )}
+              </div>
+
+              <div className="bg-canvas-oat/40 rounded-card p-5 space-y-3.5">
+                <div className="flex items-center gap-2 mb-1">
+                  <Mic size={16} className="text-action-sky" />
+                  <span className="text-sm font-normal text-text-ink/70">{t("apiKey.asr")}</span>
+                </div>
+                <p className="text-xs text-text-ink/50 -mt-1">{t("apiKey.asrHint")}</p>
+
+                <Field
+                  label={t("apiKey.asrModel")}
+                  placeholder={ASR_MODEL_ID}
+                  value={asrModelId || ASR_MODEL_ID}
+                  onChange={setAsrModelId}
+                  readOnly
+                />
+                <Field
+                  label={t("apiKey.asrEndpoint")}
+                  placeholder={ASR_DEFAULT_ENDPOINT}
+                  value={asrEndpoint}
+                  onChange={setAsrEndpoint}
+                />
+                <PasswordField
+                  label={t("apiKey.asrKey")}
+                  placeholder="sk-..."
+                  maskedValue={asrApiKeyMasked}
+                  value={asrApiKey}
+                  onChange={(value) => {
+                    setAsrApiKey(value);
+                    setAsrWarningAcknowledged(false);
+                  }}
+                  show={showAsrKey}
+                  onToggle={() => setShowAsrKey(!showAsrKey)}
+                />
+                <div className="flex min-h-9 items-center justify-end gap-3">
+                  <ValidationMessage validation={asrValidation} stale={isAsrTestStale} />
+                  <TestButton status={asrValidation.status} onClick={testAsrConnection} disabled={false} />
+                </div>
+              </div>
+
+              <div className="bg-canvas-oat/40 rounded-card p-5 space-y-3.5">
+                <div className="flex items-center gap-2 mb-1">
+                  <ImageIcon size={16} className="text-action-sky" />
+                  <span className="text-sm font-normal text-text-ink/70">{t("apiKey.imageGen")}</span>
+                </div>
+                <p className="text-xs text-text-ink/50 -mt-1">{t("apiKey.imageGenHint")}</p>
+
+                <Select
+                  label={t("apiKey.provider")}
+                  value={imageGenProtocol}
+                  onValueChange={changeImageGenProtocol}
+                  className="select-control--paper"
+                  options={IMAGE_PROTOCOL_OPTIONS.map((option) => ({
+                    value: option.value,
+                    label: t(option.labelKey)
+                  }))}
+                />
+                <Field
+                  label={t("apiKey.imageGenModel")}
+                  placeholder={IMAGE_DEFAULT_MODEL_IDS[imageGenProtocol]}
+                  value={imageGenModel}
+                  onChange={setImageGenModel}
+                />
+                <Field
+                  label={t("apiKey.imageGenEndpoint")}
+                  placeholder={IMAGE_DEFAULT_ENDPOINTS[imageGenProtocol]}
+                  value={imageGenEndpoint}
+                  onChange={setImageGenEndpoint}
+                />
+                <PasswordField
+                  label={t("apiKey.imageGenKey")}
+                  placeholder="sk-..."
+                  maskedValue={imageGenApiKeyMasked}
+                  value={imageGenApiKey}
+                  onChange={(value) => {
+                    setImageGenApiKey(value);
+                    setImageGenWarningAcknowledged(false);
+                  }}
+                  show={showImageGenKey}
+                  onToggle={() => setShowImageGenKey(!showImageGenKey)}
+                />
+                <div className="flex min-h-9 items-center justify-end gap-3">
+                  <ValidationMessage validation={imageGenValidation} stale={isImageGenTestStale} />
+                  <TestButton status={imageGenValidation.status} onClick={testImageGenConnection} disabled={false} />
+                </div>
+              </div>
+
+              <div className="flex gap-3 justify-end">
+                <button
+                  type="button"
+                  onClick={() => setShowApiConfig(false)}
+                  className="px-5 py-2.5 text-sm text-text-ink/70 bg-canvas-oat border border-border-stone/40 rounded-btn hover:bg-canvas-oat/80 transition-colors cursor-pointer"
+                >
+                  {t("settings.model.cancelConfig")}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveApiConfig}
+                  disabled={!canSaveApiConfig}
+                  className="px-5 py-2.5 text-sm text-white bg-action-sky rounded-btn hover:bg-action-sky-hover transition-all cursor-pointer shadow-md disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {t("settings.model.saveConfig")}
+                </button>
               </div>
             </div>
-            <button
-              type="button"
-              onClick={() => void openExternalUrl(getLegalLinkUrl("data", language, bootstrap?.legal))}
-              className="inline-flex items-center gap-1 text-xs text-action-sky/70 hover:text-action-sky transition-colors cursor-pointer"
-            >
-              {t("settings.privacy.learnMore")}
-              <ExternalLink size={10} />
-            </button>
-          </div>
+          )}
         </Section>
-        </div>
 
-        <div
-          id="settings-panel-model"
-          role="tabpanel"
-          aria-labelledby="settings-tab-model"
-          hidden={activeTab !== "model"}
-        >
-        <div id="model-config">
-          <ModelWorkspaceSection
-            mode={workspaceMode}
-            seedConfig={state.modelConfig}
-            configClient={configClient}
-            onFinishSetup={setupReturnRoute === "/onboarding"
-              ? () => {
-                  window.sessionStorage.removeItem(SETTINGS_ADD_MODEL_RETURN_STORAGE_KEY);
-                  const nextUrl = `${window.location.pathname}${window.location.search}`;
-                  window.history.replaceState(window.history.state, "", nextUrl);
-                  dispatch(appActions.navigate("/onboarding"));
-                }
-              : undefined}
-            onReturnToMain={() => dispatch(appActions.navigate("/main"))}
-            autoOpenAddConnection={
-              setupReturnRoute === "/main"
-            }
-          />
-        </div>
-        </div>
-
-        <div
-          id="settings-panel-tokens"
-          role="tabpanel"
-          aria-labelledby="settings-tab-tokens"
-          hidden={activeTab !== "tokens"}
-        >
         <Section icon={<Zap size={16} className="text-text-ink/60" />} title={t("settings.tokens")} sectionId="token-usage">
           <div className="space-y-4">
             {showGiftQuota && (
@@ -1528,7 +1640,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
               </div>
             )}
 
-            <div className={`grid gap-3 ${showGiftQuota ? "grid-cols-2" : "grid-cols-1"}`}>
+            <div className="grid grid-cols-2 gap-3">
               {showGiftQuota && (
                 <ChannelStat
                   label={t("settings.token.platformModel")}
@@ -1580,7 +1692,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
                 <Search size={15} className="text-text-ink/55" />
                 {t("settings.token.viewDetail")}
                 <span className="text-xs text-text-ink/45">
-                  {t(showGiftQuota ? "settings.token.breakdown" : "settings.token.breakdownByok")}
+                  {t(isByokMode ? "settings.token.byokBreakdown" : "settings.token.breakdown")}
                 </span>
               </span>
               <ChevronRight size={16} className="text-text-ink/45" />
@@ -1671,14 +1783,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
             ) : null}
           </div>
         ) : null}
-        </div>
 
-        <div
-          id="settings-panel-preferences"
-          role="tabpanel"
-          aria-labelledby="settings-tab-preferences"
-          hidden={activeTab !== "preferences"}
-        >
         <Section icon={<Palette size={16} className="text-text-ink/60" />} title={t("settings.general")}>
           <SelectRow
             label={t("settings.language")}
@@ -1738,37 +1843,39 @@ export function SettingsPageView(props: SettingsPageViewProps) {
             <ToggleRow label={t("settings.notifications.sound")} description={t("settings.notifications.soundDesc")} checked={notificationSoundEnabled} onChange={(checked) => persistSettings({ notificationSoundEnabled: checked })} />
           </div>
         </Section>
-        </div>
 
-        <div
-          id="settings-panel-about"
-          role="tabpanel"
-          aria-labelledby="settings-tab-about"
-          hidden={activeTab !== "about"}
-        >
-        <Section icon={<Info size={16} className="text-text-ink/60" />} title={t("settings.about")}>
-          <div className="space-y-3">
-            <div className="flex items-center flex-wrap gap-3">
-              <span className="text-text-ink/70 font-mono text-xs">Memmy v{update.appVersion}</span>
-              <button
-                type="button"
-                onClick={() => void update.requestPrimaryAction()}
-                disabled={isUpdateBusy(update.phase)}
-                className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 text-xs text-action-sky border border-action-sky/30 rounded-btn hover:bg-action-sky/8 transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
-              >
-                {isUpdateBusy(update.phase) && <Loader2 size={12} className="animate-spin" />}
-                {resolveUpdateButtonLabel(update.phase, t)}
-              </button>
-              <LinkButton label={t("settings.about.terms")} onClick={() => void openExternalUrl(getLegalLinkUrl("terms", language, bootstrap?.legal))} />
-            </div>
-            {update.feedback && (
-              <div className={`text-xs ${update.phase === "error" ? "text-status-error" : "text-text-ink/45"}`}>
-                {t(update.feedback.key, update.feedback.values)}
+        <Section icon={<Shield size={16} className="text-text-ink/60" />} title={t("settings.privacy")}>
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex-1">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-text-ink/70">{t("settings.privacy.shareData")}</span>
+                  <span className={`px-2 py-0.5 text-[10px] font-normal rounded-tag ${improvementPlan ? "bg-action-sky/10 text-action-sky" : "bg-canvas-oat text-text-ink/55"}`}>
+                    {improvementPlan ? t("settings.privacy.active") : t("settings.privacy.off")}
+                  </span>
+                </div>
+                <p className="text-xs text-text-ink/55 mt-1 leading-relaxed">
+                  {improvementPlan
+                    ? t("settings.privacy.enabledDesc")
+                    : t("settings.privacy.disabledDesc")}
+                </p>
               </div>
-            )}
-            {update.phase === "downloading" && (
-              <UpdateDownloadProgress progress={update.downloadProgress} t={t} />
-            )}
+              <div className="shrink-0 ml-4">
+                <Toggle
+                  checked={improvementPlan}
+                  onChange={(checked) => persistPrivacy({ allowMemoryImprovementUpload: checked })}
+                  ariaLabel={t("settings.privacy.shareData")}
+                />
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => void openExternalUrl(getLegalLinkUrl("data", language, bootstrap?.legal))}
+              className="inline-flex items-center gap-1 text-xs text-action-sky/70 hover:text-action-sky transition-colors cursor-pointer"
+            >
+              {t("settings.privacy.learnMore")}
+              <ExternalLink size={10} />
+            </button>
           </div>
         </Section>
 
@@ -1814,7 +1921,32 @@ export function SettingsPageView(props: SettingsPageViewProps) {
             )}
           </div>
         </Section>
-        </div>
+
+        <Section icon={<Info size={16} className="text-text-ink/60" />} title={t("settings.about")}>
+          <div className="space-y-3">
+            <div className="flex items-center flex-wrap gap-3">
+              <span className="text-text-ink/70 font-mono text-xs">Memmy v{update.appVersion}</span>
+              <button
+                type="button"
+                onClick={() => void update.requestPrimaryAction()}
+                disabled={isUpdateBusy(update.phase)}
+                className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 text-xs text-action-sky border border-action-sky/30 rounded-btn hover:bg-action-sky/8 transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {isUpdateBusy(update.phase) && <Loader2 size={12} className="animate-spin" />}
+                {resolveUpdateButtonLabel(update.phase, t)}
+              </button>
+              <LinkButton label={t("settings.about.terms")} onClick={() => void openExternalUrl(getLegalLinkUrl("terms", language, bootstrap?.legal))} />
+            </div>
+            {update.feedback && (
+              <div className={`text-xs ${update.phase === "error" ? "text-status-error" : "text-text-ink/45"}`}>
+                {t(update.feedback.key, update.feedback.values)}
+              </div>
+            )}
+            {update.phase === "downloading" && (
+              <UpdateDownloadProgress progress={update.downloadProgress} t={t} />
+            )}
+          </div>
+        </Section>
 
         <div className="h-8" />
       </div>
@@ -1828,7 +1960,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
           closeLabel={t("common.close")}
           confirmLabel={confirmDialog?.ok ?? t("dialog.ok")}
           confirmDisabled={accountBusy}
-          confirmVariant="danger"
+          confirmVariant={confirm === "logout" ? "danger" : "primary"}
           ariaLabel={confirmDialog?.ariaLabel}
           width={360}
           onCancel={() => setConfirm(null)}
@@ -1979,8 +2111,6 @@ export interface UsageDetailViewProps {
   platformUsage: TokenUsageDto;
   byokUsage: ByokTokenUsageSummary;
   byokUsageStatus: UsageLoadStatus;
-  workspaceMode?: ModelWorkspaceMode;
-  seedConfig?: ModelProviderConfig | null;
   onBack: () => void;
 }
 
@@ -1992,71 +2122,13 @@ export interface UsageDetailViewProps {
  */
 export function UsageDetailView(props: UsageDetailViewProps) {
   const { t } = useTranslation();
-  const { workspace } = useModelWorkspace(props.seedConfig);
-  const [selectedUsageModelId, setSelectedUsageModelId] = useState("all");
   // Neither panel invents rows. The platform grants quota per scene and does
   // not currently budget embedding at all, while own-key spend only exists for
   // scenes that have actually run, so both lists come straight from the
   // backend payload; TOKEN_USAGE_SCENES only fixes the display order.
   const platformScenes = orderByScene(props.platformUsage.sceneUsages, (usage) => usage.scene);
-  const workspaceMode = props.workspaceMode ?? "account";
-  const byokUsageByKind = TOKEN_USAGE_SCENES.map((kind) => (
-    props.byokUsage.byKind.find((usage) => usage.kind === kind) ?? emptyByokUsage(kind)
-  ));
-  const byokTextModels = getModelCandidates(workspace, workspaceMode, "chat")
-    .filter((candidate) => candidate.source === "byok");
-  const byokTaskModels = getTaskModelCandidates(workspace, workspaceMode)
-    .filter((candidate) => candidate.source === "byok");
-  const byokEmbeddingModels = getModelCandidates(workspace, workspaceMode, "embedding")
-    .filter((candidate) => candidate.source === "byok");
-  const byokUsageModels = [...byokTextModels, ...byokEmbeddingModels].filter(
-    (candidate, index, items) => items.findIndex((item) => item.id === candidate.id) === index
-  );
-  const byokUsageModelOptions: SelectOption[] = [
-    {
-      value: "all",
-      label: t("settings.token.allModels"),
-      selectedLabel: t("settings.token.allModels")
-    },
-    ...byokUsageModels.map((candidate) => ({
-      value: candidate.id,
-      label: `${candidate.provider} · ${candidate.model}`,
-      selectedLabel: candidate.model
-    }))
-  ];
-  const displayedByokUsage = byokUsageByKind.map((usage) => {
-    if (selectedUsageModelId === "all") {
-      return { usage, breakdownUnavailable: false };
-    }
-    const models = usage.kind === "agent_chat"
-      ? byokTaskModels
-      : usage.kind === "embedding"
-        ? byokEmbeddingModels
-        : byokTextModels;
-    if (!models.some((model) => model.id === selectedUsageModelId)) {
-      return { usage: emptyByokUsage(usage.kind), breakdownUnavailable: false };
-    }
-    return models.length === 1
-      ? { usage, breakdownUnavailable: false }
-      : { usage: emptyByokUsage(usage.kind), breakdownUnavailable: true };
-  });
-  const selectedModelBreakdownUnavailable = selectedUsageModelId !== "all"
-    && displayedByokUsage.some((item) => item.breakdownUnavailable);
-  const displayedByokSummary = selectedUsageModelId === "all"
-    ? props.byokUsage
-    : selectedModelBreakdownUnavailable
-      ? null
-      : displayedByokUsage.reduce((summary, item) => ({
-          ...summary,
-          inputTokens: summary.inputTokens + item.usage.inputTokens,
-          outputTokens: summary.outputTokens + item.usage.outputTokens,
-          totalTokens: summary.totalTokens + item.usage.totalTokens,
-          cachedInputTokens: summary.cachedInputTokens + item.usage.cachedInputTokens,
-          cacheCreationInputTokens: summary.cacheCreationInputTokens + item.usage.cacheCreationInputTokens
-        }), {
-          ...EMPTY_BYOK_TOKEN_USAGE,
-          byKind: []
-        });
+  const byKind = orderByScene(props.byokUsage.byKind, (usage) => usage.kind);
+  const byokSummaryReady = props.byokUsageStatus !== "loading" && props.byokUsageStatus !== "error";
   const showPlatform = props.showPlatform && platformScenes.length > 0;
   // Sum the Cloud/Nacos scene budgets — same additive total the exhausted modal
   // uses — so the section heading mirrors the rows below it.
@@ -2114,6 +2186,13 @@ export function UsageDetailView(props: UsageDetailViewProps) {
           <UsageSectionHead
             icon={<KeyRound size={16} className="text-text-ink/60" />}
             title={t("settings.token.apiKeyConsumption")}
+            stats={byokSummaryReady && byKind.length > 0 ? [
+              {
+                label: t("settings.token.summaryLocalTotal"),
+                value: formatTokenSummary(props.byokUsage.totalTokens),
+                unit: "Token"
+              }
+            ] : undefined}
           />
           {props.byokUsageStatus === "loading" ? (
             <div className={usageStyles.usageState}>
@@ -2127,65 +2206,18 @@ export function UsageDetailView(props: UsageDetailViewProps) {
                 <div className="text-xs text-text-ink/45 mt-1">{t("settings.token.loadFailedHint")}</div>
               </div>
             </div>
-          ) : props.byokUsage.totalTokens <= 0 ? (
+          ) : byKind.length === 0 ? (
             <div className={usageStyles.usageState}>
               <div>
-                <div className="text-sm text-text-ink/65">{t("settings.token.noByokUsage")}</div>
+                <div className="text-sm">{t("settings.token.noByokUsage")}</div>
                 <div className="text-xs text-text-ink/45 mt-1">{t("settings.token.noByokUsageHint")}</div>
               </div>
             </div>
           ) : (
             <div className={usageStyles.byokUsageList}>
-              <div className={usageStyles.byokOverview}>
-                <div>
-                  <span>{t("settings.token.summaryLocalTotal")}</span>
-                  <strong>
-                    {displayedByokSummary ? formatTokenSummary(displayedByokSummary.totalTokens) : "—"}
-                    {displayedByokSummary && <em>Token</em>}
-                  </strong>
-                </div>
-                <Select
-                  label={t("settings.token.filterByModel")}
-                  labelClassName="sr-only"
-                  value={selectedUsageModelId}
-                  options={byokUsageModelOptions}
-                  onValueChange={setSelectedUsageModelId}
-                  className="select-control--compact select-control--subtle"
-                  menuClassName="model-assignment-select__menu"
-                />
-              </div>
-              <div className={usageStyles.byokSummaryMetrics}>
-                <UsageSummaryMetric
-                  label={t("settings.token.input")}
-                  value={displayedByokSummary?.inputTokens ?? null}
-                />
-                <UsageSummaryMetric
-                  label={t("settings.token.output")}
-                  value={displayedByokSummary?.outputTokens ?? null}
-                />
-                <UsageSummaryMetric
-                  label={t("settings.token.cacheHit")}
-                  value={displayedByokSummary?.cachedInputTokens ?? null}
-                />
-              </div>
-              {selectedModelBreakdownUnavailable && (
-                <p className={usageStyles.modelBreakdownNotice}>
-                  {t("settings.token.modelBreakdownPending")}
-                </p>
-              )}
-              <div className={usageStyles.byokPurposeTitle}>
-                {t("settings.token.byPurpose")}
-              </div>
-              <div className={usageStyles.byokPurposeRows}>
-                {displayedByokUsage.map((item) => (
-                  <ByokUsageRow
-                    key={item.usage.kind}
-                    usage={item.usage}
-                    showDesc={describeScenesInByok}
-                    breakdownUnavailable={item.breakdownUnavailable}
-                  />
-                ))}
-              </div>
+              {byKind.map((usage) => (
+                <ByokUsageRow key={usage.kind} usage={usage} showDesc={describeScenesInByok} />
+              ))}
             </div>
           )}
         </section>
@@ -2244,19 +2276,6 @@ function orderByScene<T>(items: readonly T[], sceneOf: (item: T) => ByokTokenUsa
   return TOKEN_USAGE_SCENES.flatMap((scene) => items.filter((item) => sceneOf(item) === scene));
 }
 
-function emptyByokUsage(kind: ByokTokenUsageKind): ByokTokenUsageByKind {
-  return {
-    kind,
-    inputTokens: 0,
-    outputTokens: 0,
-    totalTokens: 0,
-    cachedInputTokens: 0,
-    cacheCreationInputTokens: 0,
-    eventCount: 0,
-    updatedAt: null
-  };
-}
-
 interface PlatformQuotaRowProps {
   usage: TokenSceneUsageDto;
   showDesc: boolean;
@@ -2291,14 +2310,21 @@ function PlatformQuotaRow(props: PlatformQuotaRowProps) {
   );
 }
 
-function ByokUsageRow(props: {
-  usage: ByokTokenUsageByKind;
-  showDesc: boolean;
-  breakdownUnavailable: boolean;
-}) {
+/**
+ * Renders one own-key scene row.
+ *
+ * Own-key spend has no ceiling to fill up, so this row deliberately carries no
+ * meter: the figures alone say how much each scene cost. Cache hits trail the
+ * input/output pair so the primary spend reads first.
+ *
+ * @param props.usage The scene's cumulative local usage.
+ * @param props.showDesc Whether this panel spells out the scene descriptions.
+ * @returns A single own-key usage row.
+ */
+function ByokUsageRow(props: { usage: ByokTokenUsageByKind; showDesc: boolean }) {
   const { t } = useTranslation();
   const meta = usageSceneMeta(props.usage.kind, t);
-  const isActive = !props.breakdownUnavailable && props.usage.totalTokens > 0;
+  const isActive = props.usage.totalTokens > 0;
   const rowClassName = isActive
     ? usageStyles.byokUsageRow
     : `${usageStyles.byokUsageRow} ${usageStyles.inactive}`;
@@ -2326,25 +2352,12 @@ function ByokUsageRow(props: {
             )}
           </p>
         )}
-        {props.breakdownUnavailable && (
-          <p>{t("settings.token.modelBreakdownPending")}</p>
-        )}
       </div>
       <div className={usageStyles.byokUsageValue}>
-        <strong>{props.breakdownUnavailable ? "—" : formatCompactTokenCount(props.usage.totalTokens)}</strong>
-        {!props.breakdownUnavailable && <em>Token</em>}
+        <strong>{formatCompactTokenCount(props.usage.totalTokens)}</strong>
+        <em>Token</em>
       </div>
     </article>
-  );
-}
-
-function UsageSummaryMetric(props: { label: string; value: number | null }) {
-  return (
-    <div>
-      <span>{props.label}</span>
-      <strong>{props.value === null ? "—" : formatCompactTokenCount(props.value)}</strong>
-      {props.value !== null && <em>Token</em>}
-    </div>
   );
 }
 
@@ -3183,13 +3196,23 @@ interface AccountConfirmDialogContent {
 }
 
 function resolveAccountConfirmDialog(
+  kind: Exclude<ConfirmKind, null>,
   t: (key: MessageKey, values?: MessageValues) => string
 ): AccountConfirmDialogContent {
+  if (kind === "logout") {
+    return {
+      ariaLabel: t("settings.account.logoutTitle"),
+      title: t("settings.account.logoutTitle"),
+      desc: t("settings.account.logoutDesc"),
+      ok: t("settings.account.logoutOk")
+    };
+  }
+
   return {
-    ariaLabel: t("settings.account.logoutTitle"),
-    title: t("settings.account.logoutTitle"),
-    desc: t("settings.account.logoutDesc"),
-    ok: t("settings.account.logoutOk")
+    ariaLabel: t("settings.account.exitLocalTitle"),
+    title: t("settings.account.exitLocalTitle"),
+    desc: t("settings.account.exitLocalDesc"),
+    ok: t("settings.account.exitLocalOk")
   };
 }
 
@@ -3256,10 +3279,11 @@ function formatRegisteredAt(value: string | null, t: SettingsTranslate): string 
 /**
  * Resolves the fallback text for the account name.
  *
+ * @param userMode The current user mode.
  * @returns The display name for the account area.
  */
-function resolveAccountFallback(t: SettingsTranslate): string {
-  return t("settings.account.noAccount");
+function resolveAccountFallback(userMode: AppSettingsDto["userMode"] | undefined, t: SettingsTranslate): string {
+  return userMode === "byok" ? t("settings.account.localMode") : t("settings.account.noAccount");
 }
 
 /**
@@ -3269,7 +3293,7 @@ function resolveAccountFallback(t: SettingsTranslate): string {
  * @returns The account-area description; in account mode it favors neither email nor phone number.
  */
 function resolveAccountMeta(userMode: AppSettingsDto["userMode"] | undefined, t: SettingsTranslate): string {
-  return userMode === "byok" ? t("settings.account.customApiKeyMeta") : t("settings.account.noIdentifier");
+  return userMode === "byok" ? t("settings.account.localModeMeta") : t("settings.account.noIdentifier");
 }
 
 /**

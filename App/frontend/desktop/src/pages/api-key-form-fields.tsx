@@ -61,20 +61,16 @@ export function ConfigField(props: ConfigFieldProps) {
   return (
     <div>
       <label className="block text-xs text-text-ink/65 mb-1.5 font-normal">{props.label}</label>
-      <div className="relative">
+      <div className="flex items-center gap-2">
         <input
           type="text"
           placeholder={props.placeholder}
           value={props.value}
           readOnly={props.readOnly}
           onChange={(event) => props.onChange(event.target.value)}
-          className={`${API_KEY_INPUT_CLASS} w-full read-only:cursor-default${props.suffix ? " pr-14" : ""}`}
+          className={`${API_KEY_INPUT_CLASS} flex-1 read-only:cursor-default`}
         />
-        {props.suffix && (
-          <span className="pointer-events-none absolute inset-y-0 right-3 inline-flex items-center text-xs text-text-ink/45">
-            {props.suffix}
-          </span>
-        )}
+        {props.suffix && <span className="text-xs text-text-ink/55 shrink-0">{props.suffix}</span>}
       </div>
     </div>
   );

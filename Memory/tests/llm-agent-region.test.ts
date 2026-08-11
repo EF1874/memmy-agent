@@ -14,7 +14,6 @@ const roots: string[] = [];
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  vi.unstubAllEnvs();
   for (const root of roots.splice(0)) {
     rmSync(root, { recursive: true, force: true });
   }
@@ -37,7 +36,7 @@ describe("memory account model agent region", () => {
     [{ edition: "cn", accountChannel: "email" }, "cn"],
     [{ edition: "intl", accountChannel: "phone" }, "intl"]
   ] as const)("resolves account region from packaged identity %j", (manifest, expected) => {
-    expect(resolveMemoryAgentRegion("memmy_account", {
+    expect(resolveMemoryAgentRegion("account", {
       manifestPath: writeManifest(manifest),
       env: {
         MEMMY_ACCOUNT_CHANNEL: expected === "intl" ? "phone" : "email",
@@ -49,30 +48,30 @@ describe("memory account model agent region", () => {
   it("falls back to app edition and then accountChannel when the manifest is unavailable", () => {
     const manifestPath = missingManifestPath();
 
-    expect(resolveMemoryAgentRegion("memmy_account", {
+    expect(resolveMemoryAgentRegion("account", {
       manifestPath,
       env: { MEMMY_ACCOUNT_CHANNEL: "email", MEMMY_APP_EDITION: "cn" }
     })).toBe("cn");
-    expect(resolveMemoryAgentRegion("memmy_account", {
+    expect(resolveMemoryAgentRegion("account", {
       manifestPath,
       env: { MEMMY_ACCOUNT_CHANNEL: "phone", MEMMY_APP_EDITION: "intl" }
     })).toBe("intl");
-    expect(resolveMemoryAgentRegion("memmy_account", {
+    expect(resolveMemoryAgentRegion("account", {
       manifestPath,
       env: { MEMMY_ACCOUNT_CHANNEL: "email" }
     })).toBe("intl");
-    expect(resolveMemoryAgentRegion("memmy_account", {
+    expect(resolveMemoryAgentRegion("account", {
       manifestPath,
       env: { MEMMY_ACCOUNT_CHANNEL: "phone" }
     })).toBe("cn");
-    expect(resolveMemoryAgentRegion("memmy_account", {
+    expect(resolveMemoryAgentRegion("account", {
       manifestPath,
       env: {}
     })).toBe("cn");
   });
 
   it("does not resolve an agent region outside account mode", () => {
-    expect(resolveMemoryAgentRegion("openai", {
+    expect(resolveMemoryAgentRegion("byok", {
       manifestPath: writeManifest({ edition: "intl", accountChannel: "email" }),
       env: { MEMMY_ACCOUNT_CHANNEL: "email" }
     })).toBeUndefined();
@@ -91,9 +90,8 @@ describe("memory account model agent region", () => {
       headers: { "content-type": "application/json" }
     }));
     vi.stubGlobal("fetch", fetchMock);
-    vi.stubEnv("MEMMY_APP_EDITION", agentRegion);
 
-    const client = createLlmClient(llmConfig(modelRole), { modelRole });
+    const client = createLlmClient(llmConfig(modelRole), { modelRole, agentRegion });
     await expect(client.complete(
       [{ role: "user", content: "run" }],
       { operation: modelRole === "memory_summary" ? "capture.summarize" : "skill.crystallize" }
@@ -114,10 +112,13 @@ describe("memory account model agent region", () => {
     }));
     vi.stubGlobal("fetch", fetchMock);
 
-    const client = createLlmClient({
-      ...llmConfig("memory_summary"),
-      sourceProvider: "openai"
-    }, { modelRole: "memory_summary" });
+    const client = createLlmClient(llmConfig("memory_summary"), {
+      modelRole: "memory_summary",
+      agentRegion: resolveMemoryAgentRegion("byok", {
+        manifestPath: writeManifest({ edition: "intl", accountChannel: "email" }),
+        env: { MEMMY_ACCOUNT_CHANNEL: "email" }
+      })
+    });
     await client.complete(
       [{ role: "user", content: "run" }],
       { operation: "capture.summarize" }
@@ -130,7 +131,6 @@ describe("memory account model agent region", () => {
 function llmConfig(modelRole: MemoryLlmModelRole): LlmConfig {
   return {
     provider: "openai_compatible",
-    sourceProvider: "memmy_account",
     endpoint: "https://api.example.test/v1",
     model: modelRole,
     apiKey: "account-token",

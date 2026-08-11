@@ -13,17 +13,14 @@ import { buildAgentDisplayUnits } from "../agent-thread-messages.js";
 import {
   AGENT_RESTART_STATE_STORAGE_KEY,
   AGENT_MEDIA_ACCEPT,
-  ComposerCommandChip,
   ComposerMediaPreviewStrip,
   ComposerSubmitButton,
   HomePage,
   AgentOperationErrorSlot,
-  agentComposerPrimaryAction,
   agentErrorText,
   agentStatusText,
   agentChatScopeKey,
   attachmentFilesFromDataTransfer,
-  buildComposerCommandDraft,
   clipboardImageFilesFromDataTransfer,
   dataTransferHasAttachmentFiles,
   hasActiveAgentConversation,
@@ -32,14 +29,12 @@ import {
   isComposingKeyboardEvent,
   isSingleLineComposerInput,
   parseStoredAgentRestartState,
-  parseComposerCommandDraft,
   readFocusedAgentChatId,
   requestNewSessionReset,
   requestAgentRestart,
   requestAgentStop,
   shouldAcceptAgentStatusResult,
   submitAgentComposerMessage,
-  updateAgentComposerOverlayHeight,
   updateComposerDraftForScope,
   fileToPendingAttachment,
   filterProjectTargetPickerProjects,
@@ -50,7 +45,6 @@ import {
 
 const homePageSourcePath = fileURLToPath(new URL("../home-page.tsx", import.meta.url));
 const agentRuntimeBridgeSourcePath = fileURLToPath(new URL("../../app/agent-runtime-bridge.tsx", import.meta.url));
-const agentModelSelectorSourcePath = fileURLToPath(new URL("../../components/agent-model-selector.tsx", import.meta.url));
 const stylesSourcePath = fileURLToPath(new URL("../../styles.css", import.meta.url));
 
 function readAgentRuntimeBridgeSource(): string {
@@ -96,62 +90,6 @@ describe("HomePage", () => {
     expect(html).toContain("内容由 AI 生成，请仔细甄别");
     expect(html).toContain("text-center text-[11px] text-text-ink/40 mt-4");
     expect(html).not.toContain("未选择任何文件");
-  });
-
-  it("renders Goal as a removable composer token without changing its wire-format command", () => {
-    const html = renderToString(
-      <ComposerCommandChip command="/goal" removeLabel="移除" onRemove={() => undefined} />
-    );
-    const source = readFileSync(homePageSourcePath, "utf8");
-    const styles = readFileSync(stylesSourcePath, "utf8");
-    const chipStyles = styles.slice(
-      styles.indexOf(".composer-command-chip-slot {"),
-      styles.indexOf(".home-project-picker {")
-    );
-
-    expect(parseComposerCommandDraft("/goal ")).toEqual({ command: "/goal", text: "" });
-    expect(parseComposerCommandDraft("/goal 完成目标")).toEqual({ command: "/goal", text: "完成目标" });
-    expect(parseComposerCommandDraft("/goalkeeper")).toEqual({ command: null, text: "/goalkeeper" });
-    expect(buildComposerCommandDraft("/goal", "完成目标")).toBe("/goal 完成目标");
-    expect(buildComposerCommandDraft(null, "普通消息")).toBe("普通消息");
-    expect(html).toContain('class="composer-command-chip"');
-    expect(html).toContain(">goal</span>");
-    expect(html).toContain('aria-label="移除 goal"');
-    expect(html).toContain("lucide-circle-x");
-    expect(chipStyles).toContain("height: 30px;");
-    expect(chipStyles).toContain("border-radius: 10px;");
-    expect(chipStyles).toContain(".composer-command-chip:hover");
-    expect(chipStyles).toContain("opacity: 0;");
-    expect(chipStyles).toContain("opacity: 1;");
-    expect(source.match(/<ComposerCommandChip/g)).toHaveLength(2);
-    expect(source.match(/value=\{composerInput\}/g)).toHaveLength(2);
-    expect(source).toContain("setCurrentComposerDraft(buildComposerCommandDraft(selectedComposerCommand, value));");
-    expect(styles).toContain(".agent-composer-shell textarea.agent-composer-input--command-selected");
-  });
-
-  it("在空白和已有会话 composer 都展示按 chatScopeKey 隔离的模型选择器", () => {
-    const source = readFileSync(homePageSourcePath, "utf8");
-    const selectorSource = readFileSync(agentModelSelectorSourcePath, "utf8");
-    const styles = readFileSync(stylesSourcePath, "utf8");
-
-    expect(source.match(/<AgentModelSelector/g)).toHaveLength(2);
-    expect(source).toContain("scopeKey={modelSelectionScopeKey}");
-    expect(source).toContain("const modelWorkspaceMode = state.bootstrap?.app.userMode");
-    expect(source).toContain("disabled={isCurrentAgentRunning || isCreatingChat || messageSendInFlight}");
-    expect(source).toContain("copyScopedModelSelection(modelWorkspace, modelSelectionScopeKey, chatId)");
-    expect(source).not.toContain('sendMessage({ chatId: state.agent.currentChatId, content: "/model');
-    expect(styles).toContain(".agent-model-selector .agent-model-selector__menu");
-    expect(styles).toContain("top: calc(100% + 6px)");
-    expect(styles).toContain(".agent-model-selector__configure");
-    expect(source).not.toContain("modelSwitchNotice");
-    expect(selectorSource).not.toContain("onModelSwitch");
-    expect(selectorSource).not.toContain("hasConversationContent");
-    expect(selectorSource).not.toContain("SETTINGS_ADD_MODEL_RETURN_STORAGE_KEY");
-    expect(selectorSource).toContain('settingsTabHash("model")');
-    expect(styles).not.toContain(".agent-model-switch-event");
-    expect(source).toContain("if (resolvedConversationModel.unavailable)");
-    expect(source).toContain('message: "home.modelSelector.unavailable"');
-    expect(source).not.toContain("agent-conversation-model-error");
   });
 
   it("hides the agent status line after the websocket is connected", () => {
@@ -215,12 +153,9 @@ describe("HomePage", () => {
 
     expect(source).toContain('className="agent-conversation-panel flex flex-col h-full"');
     expect(source).toContain("const activeConversationTitle = state.agent.currentSessionKey");
-    expect(source).toContain("const activeImTitleDisplay = imChannelTitleDisplay(activeConversationTitle);");
-    expect(source).toContain("formatConversationTitleForDisplay(activeImTitleDisplay?.title ?? activeConversationTitle)");
+    expect(source).toContain("const activeConversationTitleDisplay = formatConversationTitleForDisplay(activeConversationTitle);");
     expect(source).toContain("topBar={hasActiveConversation ? (");
     expect(source).toContain('<h1 className="agent-conversation-title" title={activeConversationTitle}>');
-    expect(source).toContain('<span className="agent-conversation-title__text">{activeConversationTitleDisplay}</span>');
-    expect(source).toContain('<ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} />');
     expect(source).toContain("{activeConversationTitleDisplay}");
     expect(source).toContain("topBarBorder={hasActiveConversation}");
     expect(source).not.toContain("agent-conversation-titlebar");
@@ -233,7 +168,7 @@ describe("HomePage", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
 
     expect(source).toContain("{historyDagPanel.open && !statusPanel.open && !lastCompactionPanel.open && !slashMenuOpen && (");
-    expect(source).toContain('className="agent-composer-popover absolute left-0 right-0 bottom-full mb-3 z-30 w-full"');
+    expect(source).toContain('className="absolute left-0 right-0 bottom-full mb-3 z-30 w-full"');
     expect(source).not.toContain('className="absolute left-1/2 bottom-full mb-3 z-30 -translate-x-1/2"');
   });
 
@@ -478,8 +413,7 @@ describe("HomePage", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
     const keyDownHandler = source.slice(source.indexOf("function handleComposerKeyDown"), source.indexOf("  /**\n   * 校验并暂存用户选择"));
 
-    expect(keyDownHandler).toContain("!composerSendDisabled");
-    expect(keyDownHandler).toContain('composerPrimaryAction === "send"');
+    expect(keyDownHandler).toContain("!composerSubmitDisabled");
     expect(keyDownHandler).not.toContain("!state.agent.isSending && !isCreatingChat");
   });
 
@@ -515,7 +449,7 @@ describe("HomePage", () => {
   it("centers the composer controls only while the session composer is one line", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
 
-    expect(source).toContain('${isComposerSingleLine ? "agent-composer-input--single " : ""}${selectedComposerCommand ? "agent-composer-input--command-selected " : ""}block w-full pl-4 pr-36 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40');
+    expect(source).toContain('${isComposerSingleLine ? "agent-composer-input--single " : ""}block w-full pl-4 pr-20 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40');
     expect(source).toContain('centerComposerControls ? "top-1/2 -translate-y-1/2" : "bottom-2"');
     expect(source).toContain("COMPOSER_SINGLE_LINE_HEIGHT_PX = 52");
   });
@@ -623,7 +557,7 @@ describe("HomePage", () => {
     expect(subscriptionBlock).toContain("if (chatId === subscribedChatRef.current)");
     expect(subscriptionBlock).toContain("dispatch(agentActions.wsEventReceived(event));");
     expect(subscriptionBlock).not.toContain("nextConnection.onRunStatus");
-    expect(subscriptionBlock).not.toContain('event: "run_status"');
+    expect(subscriptionBlock).not.toContain('event: "goal_status"');
   });
 
   it("consumes the shared AgentRuntimeBridge connection instead of owning websocket lifecycle", () => {
@@ -648,48 +582,7 @@ describe("HomePage", () => {
     expect(source).toContain("const stopInFlight = state.agent.currentChatId ? Boolean(state.agent.stopInFlightByChatId[state.agent.currentChatId]) : false;");
     expect(source).toContain("const stopRequestLocksRef = useRef<Set<string>>(new Set());");
     expect(source).toContain("input.stopRequestLocks.has(chatId)");
-    expect(source).toContain("const composerStopDisabled = stopInFlight");
-    expect(submitDisabledBlock).toContain('composerPrimaryAction === "stop"');
-  });
-
-  it("switches the single Goal composer button between Stop and Send from user intent", () => {
-    const source = readFileSync(homePageSourcePath, "utf8").replace(/\r\n/g, "\n");
-    const stopBlock = source.slice(
-      source.indexOf("function stopCurrentTurn()"),
-      source.indexOf("async function controlGoal")
-    );
-    const conversationComposer = source.slice(
-      source.indexOf("{state.agent.currentChatId && currentGoal ? ("),
-      source.indexOf('<p className="text-center text-[11px] text-text-ink/40 mt-2">')
-    );
-    expect(agentComposerPrimaryAction({ isRunning: true, isGoalActive: true, hasIntent: false })).toBe("stop");
-    expect(agentComposerPrimaryAction({ isRunning: true, isGoalActive: true, hasIntent: true })).toBe("send");
-    expect(agentComposerPrimaryAction({ isRunning: true, isGoalActive: false, hasIntent: true })).toBe("send");
-    expect(agentComposerPrimaryAction({ isRunning: false, isGoalActive: false, hasIntent: false })).toBe("send");
-    expect(source).toContain("const hasComposerIntent = Boolean(input.trim() || pendingAttachments.length > 0);");
-    expect(conversationComposer.match(/<ComposerSubmitButton/g)).toHaveLength(1);
-    expect(source).toContain('isSending={composerPrimaryAction === "stop"}');
-    expect(source).toContain('onClick={composerPrimaryAction === "stop" ? stopCurrentTurn : () => void sendMessage()}');
-    expect(stopBlock).toContain('controlGoal({ chatId, goalId: goal.goal_id, action: "pause" })');
-    expect(stopBlock.indexOf("return;")).toBeLessThan(stopBlock.indexOf("requestAgentStop({"));
-  });
-
-  it("holds one synchronous Goal control lock per chat through async calibration", () => {
-    const source = readFileSync(homePageSourcePath, "utf8").replace(/\r\n/g, "\n");
-    const controlBlock = source.slice(
-      source.indexOf("async function controlGoal"),
-      source.indexOf("/**\n   * Updates the input draft")
-    );
-    const sendBlock = source.slice(
-      source.indexOf("async function sendMessage()"),
-      source.indexOf("/**\n   * Stops the current Agent turn.")
-    );
-
-    expect(controlBlock).toContain("goalMutationLocksRef.current.has(request.chatId)");
-    expect(controlBlock).toContain("goalMutationLocksRef.current.add(request.chatId)");
-    expect(controlBlock.indexOf("await connection.controlGoal({"))
-      .toBeLessThan(controlBlock.indexOf("goalMutationLocksRef.current.delete(request.chatId)"));
-    expect(sendBlock).not.toContain("goalMutationLocksRef");
+    expect(submitDisabledBlock).toContain("isCurrentAgentRunning\n    ? stopInFlight");
   });
 
   it("locks duplicate stop clicks before React state re-renders", () => {
@@ -868,7 +761,7 @@ describe("HomePage", () => {
   });
 
   it("validates and sends slash new before clearing the composer", () => {
-    const sendMessage = vi.fn(async () => ({ status: "accepted" as const }));
+    const sendMessage = vi.fn();
     const ensureChatSubscription = vi.fn();
     const clearInput = vi.fn();
     const clearPendingMedia = vi.fn();
@@ -992,7 +885,7 @@ describe("HomePage", () => {
 
     expect(sendHtml).toContain("发送");
     expect(sendHtml).toContain('data-icon="send"');
-    expect(sendHtml).toContain("composer-action-submit");
+    expect(sendHtml).toContain("rounded-full w-7 h-7");
     expect(sendHtml).toContain("bg-action-sky");
     expect(sendHtml).toContain("translate-y-[1px]");
     expect(sendHtml).not.toContain("停止");
@@ -1000,7 +893,7 @@ describe("HomePage", () => {
     expect(sendHtml).not.toContain('data-icon="stop-square"');
 
     expect(stopHtml).toContain("停止");
-    expect(stopHtml).toContain("composer-action-submit");
+    expect(stopHtml).toContain("rounded-full w-7 h-7");
     expect(stopHtml).toContain("bg-action-sky");
     expect(stopHtml).toContain("block shrink-0 bg-white");
     expect(stopHtml).toContain('width:11px');
@@ -1023,16 +916,8 @@ describe("HomePage", () => {
   });
 
   it("blank composer first send creates chat then sends message", async () => {
-    const newChat = vi.fn(async (
-      _expectedGeneration: number,
-      _timeoutMs?: number,
-      _modelPreset?: string | null,
-      _clientRequestId?: string
-    ) => ({
-      chatId: "chat-new",
-      modelPreset: "desktop-openai-gpt-5-confirmed"
-    }));
-    const sendMessage = vi.fn(async () => ({ status: "accepted" as const }));
+    const newChat = vi.fn(async () => "chat-new");
+    const sendMessage = vi.fn();
     const getReadyGeneration = vi.fn(() => 1);
     const ensureChatSubscription = vi.fn();
     const dispatch = vi.fn();
@@ -1048,7 +933,7 @@ describe("HomePage", () => {
 
     await expect(submitAgentComposerMessage({
       chatId: null,
-      connection: { getReadyGeneration, newChat, submitMessage: sendMessage },
+      connection: { getReadyGeneration, newChat, sendMessage },
       ensureChatSubscription,
       content: " 帮我整理计划 ",
       language: "zh-CN",
@@ -1064,7 +949,7 @@ describe("HomePage", () => {
       onNewChatMessageSent
     })).resolves.toBe(true);
 
-    expect(newChat).toHaveBeenCalledWith(1, 5000, undefined, expect.any(String));
+    expect(newChat).toHaveBeenCalledWith(1);
     expect(dispatch).toHaveBeenNthCalledWith(1, { type: "agent/newChatCreated", chatId: "chat-new" });
     expect(dispatch).toHaveBeenNthCalledWith(2, {
       type: "agent/userMessageQueued",
@@ -1075,7 +960,6 @@ describe("HomePage", () => {
         { url: "http://agent.local/api/media/sig/report", name: "小短文.pdf", kind: "file", path: "/media/websocket/webui/小短文.pdf" }
       ],
       focus: true,
-      clientRequestId: expect.any(String),
       target: { kind: "standalone" }
     });
     expect(uploadAgentMedia).toHaveBeenCalledWith([
@@ -1088,13 +972,11 @@ describe("HomePage", () => {
       clientRequestId: expect.any(String),
       target: { kind: "standalone" },
       language: "zh-CN",
-      modelPreset: "desktop-openai-gpt-5-confirmed",
       media: [
         { path: "/media/websocket/webui/shot.png", url: "http://agent.local/api/media/sig/shot", name: "shot.png", kind: "image", mime: "image/png", bytes: 3 },
         { path: "/media/websocket/webui/小短文.pdf", url: "http://agent.local/api/media/sig/report", name: "小短文.pdf", kind: "file", mime: "application/pdf", bytes: 12 }
       ]
     }, 1);
-    expect(newChat.mock.calls[0]?.[3]).toBe(sendMessage.mock.calls[0]?.[0].clientRequestId);
     expect(ensureChatSubscription).toHaveBeenCalledWith("chat-new");
     expect(mockCallOrder(ensureChatSubscription)).toBeLessThan(mockCallOrder(sendMessage));
     expect(mockCallOrder(sendMessage)).toBeLessThan(mockCallOrder(dispatch, 1));
@@ -1107,7 +989,7 @@ describe("HomePage", () => {
 
   it("keeps a new project target on the optimistic task action", async () => {
     const dispatch = vi.fn();
-    const sendMessage = vi.fn(async () => ({ status: "accepted" as const }));
+    const sendMessage = vi.fn();
     const projectTarget = { kind: "project" as const, projectId: "project-a" };
 
     await expect(submitAgentComposerMessage({
@@ -1115,8 +997,8 @@ describe("HomePage", () => {
       target: projectTarget,
       connection: {
         getReadyGeneration: () => 1,
-        newChat: vi.fn(async () => ({ chatId: "chat-project", modelPreset: "desktop-openai-gpt-5" })),
-        submitMessage: sendMessage
+        newChat: vi.fn(async () => "chat-project"),
+        sendMessage
       },
       content: "检查项目",
       pendingAttachments: [],
@@ -1136,14 +1018,13 @@ describe("HomePage", () => {
       content: "检查项目",
       media: [],
       focus: true,
-      clientRequestId: expect.any(String),
       target: projectTarget
     });
   });
 
   it("existing chat send does not create a new chat", async () => {
-    const newChat = vi.fn(async () => ({ chatId: "unused-chat", modelPreset: "desktop-openai-gpt-5" }));
-    const sendMessage = vi.fn(async () => ({ status: "accepted" as const }));
+    const newChat = vi.fn(async () => "unused-chat");
+    const sendMessage = vi.fn();
     const getReadyGeneration = vi.fn(() => 1);
     const ensureChatSubscription = vi.fn();
     const dispatch = vi.fn();
@@ -1151,7 +1032,7 @@ describe("HomePage", () => {
 
     await expect(submitAgentComposerMessage({
       chatId: "chat-1",
-      connection: { getReadyGeneration, newChat, submitMessage: sendMessage },
+      connection: { getReadyGeneration, newChat, sendMessage },
       ensureChatSubscription,
       content: "继续",
       pendingAttachments: [],
@@ -1163,14 +1044,7 @@ describe("HomePage", () => {
     })).resolves.toBe(true);
 
     expect(newChat).not.toHaveBeenCalled();
-    expect(dispatch).toHaveBeenCalledWith({
-      type: "agent/userMessageQueued",
-      chatId: "chat-1",
-      content: "继续",
-      media: [],
-      focus: true,
-      clientRequestId: expect.any(String)
-    });
+    expect(dispatch).toHaveBeenCalledWith({ type: "agent/userMessageQueued", chatId: "chat-1", content: "继续", media: [], focus: true });
     expect(ensureChatSubscription).toHaveBeenCalledWith("chat-1");
     expect(sendMessage).toHaveBeenCalledWith({
       chatId: "chat-1",
@@ -1183,146 +1057,6 @@ describe("HomePage", () => {
     expect(onNewChatMessageSent).not.toHaveBeenCalled();
   });
 
-  it("does not clear the composer or add an optimistic user before send confirmation", async () => {
-    let confirmSend!: () => void;
-    const sendMessage = vi.fn(() => new Promise<{ status: "accepted" }>((resolve) => {
-      confirmSend = () => resolve({ status: "accepted" });
-    }));
-    const dispatch = vi.fn();
-    const clearComposer = vi.fn();
-    const submission = submitAgentComposerMessage({
-      chatId: "chat-1",
-      connection: {
-        getReadyGeneration: () => 1,
-        newChat: vi.fn(async () => ({ chatId: "unused-chat", modelPreset: "desktop-openai-gpt-5" })),
-        submitMessage: sendMessage
-      },
-      content: "等待正式接受",
-      pendingAttachments: [],
-      uploadAgentMedia: vi.fn(async () => []),
-      dispatch,
-      track: vi.fn(),
-      clearComposer
-    });
-
-    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledOnce());
-    expect(dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: "agent/userMessageQueued" }));
-    expect(clearComposer).not.toHaveBeenCalled();
-
-    confirmSend();
-    await expect(submission).resolves.toBe(true);
-    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({
-      type: "agent/userMessageQueued",
-      chatId: "chat-1",
-      content: "等待正式接受"
-    }));
-    expect(clearComposer).toHaveBeenCalledOnce();
-  });
-
-  it("clears a composer after queued confirmation without inserting a premature user message", async () => {
-    const submitMessage = vi.fn(async () => ({ status: "queued" as const }));
-    const dispatch = vi.fn();
-    const clearComposer = vi.fn();
-
-    await expect(submitAgentComposerMessage({
-      chatId: "chat-running",
-      clientRequestId: "66666666-6666-4666-8666-666666666666",
-      connection: {
-        getReadyGeneration: () => 1,
-        newChat: vi.fn(async () => ({ chatId: "unused-chat", modelPreset: "desktop-openai-gpt-5" })),
-        submitMessage
-      },
-      content: "排到下一条",
-      pendingAttachments: [],
-      uploadAgentMedia: vi.fn(async () => []),
-      dispatch,
-      track: vi.fn(),
-      clearComposer
-    })).resolves.toBe(true);
-
-    expect(submitMessage).toHaveBeenCalledWith(expect.objectContaining({
-      chatId: "chat-running",
-      clientRequestId: "66666666-6666-4666-8666-666666666666"
-    }), 1);
-    expect(dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: "agent/userMessageQueued" }));
-    expect(clearComposer).toHaveBeenCalledOnce();
-  });
-
-  it("anchors composer popovers above the queue and measures the complete overlay", () => {
-    const source = readFileSync(homePageSourcePath, "utf8").replace(/\r\n/g, "\n");
-    const flowStart = source.indexOf('<div className="agent-composer-flow">');
-    const slashStart = source.indexOf("{slashMenuOpen && (", flowStart);
-    const stackStart = source.indexOf('<div className="agent-composer-stack">', slashStart);
-    const queueStart = source.indexOf("<AgentQueuedMessageList", stackStart);
-    const shellStart = source.indexOf('className="relative agent-composer-shell rounded-card-lg"', stackStart);
-
-    expect(flowStart).toBeGreaterThan(0);
-    expect(slashStart).toBeGreaterThan(flowStart);
-    expect(stackStart).toBeGreaterThan(slashStart);
-    expect(queueStart).toBeGreaterThan(stackStart);
-    expect(shellStart).toBeGreaterThan(queueStart);
-    expect(source).toContain('ref={conversationPanelRef} className="agent-conversation-panel flex flex-col h-full"');
-    expect(source).toContain('ref={composerOverlayRef} className="agent-conversation-composer"');
-    expect(source).toContain("updateAgentComposerOverlayHeight(panel, composer, measuredHeight)");
-    expect(source).toContain('if (typeof ResizeObserver !== "undefined") return;');
-    expect(source).toContain("currentQueuedMessages.length");
-  });
-
-  it("writes the measured composer height and ignores sub-pixel-equivalent changes", () => {
-    const testWindow = new Window();
-    const panel = testWindow.document.createElement("section") as unknown as HTMLElement;
-    const composer = testWindow.document.createElement("div") as unknown as HTMLElement;
-    vi.spyOn(composer, "getBoundingClientRect")
-      .mockReturnValueOnce({ height: 180.2 } as DOMRect)
-      .mockReturnValueOnce({ height: 180.8 } as DOMRect)
-      .mockReturnValueOnce({ height: 222.1 } as DOMRect);
-
-    const initial = updateAgentComposerOverlayHeight(panel, composer);
-    const unchanged = updateAgentComposerOverlayHeight(panel, composer, initial);
-    const grown = updateAgentComposerOverlayHeight(panel, composer, unchanged);
-
-    expect(initial).toBe(181);
-    expect(unchanged).toBe(181);
-    expect(grown).toBe(223);
-    expect(panel.style.getPropertyValue("--agent-composer-overlay-height")).toBe("223px");
-  });
-
-  it("keeps the Goal command on the wire but shows only its objective", async () => {
-    const sendMessage = vi.fn(async () => ({ status: "accepted" as const }));
-    const dispatch = vi.fn();
-
-    await expect(submitAgentComposerMessage({
-      chatId: "chat-goal",
-      connection: {
-        getReadyGeneration: () => 1,
-        newChat: vi.fn(async () => ({ chatId: "unused-chat", modelPreset: "desktop-openai-gpt-5" })),
-        submitMessage: sendMessage
-      },
-      content: "/goal 编写亚洲流行文化网页",
-      displayContent: "编写亚洲流行文化网页",
-      pendingAttachments: [],
-      uploadAgentMedia: vi.fn(async () => []),
-      dispatch,
-      track: vi.fn(),
-      clearComposer: vi.fn()
-    })).resolves.toBe(true);
-
-    expect(sendMessage).toHaveBeenCalledWith({
-      chatId: "chat-goal",
-      content: "/goal 编写亚洲流行文化网页",
-      clientRequestId: expect.any(String),
-      media: []
-    }, 1);
-    expect(dispatch).toHaveBeenCalledWith({
-      type: "agent/userMessageQueued",
-      chatId: "chat-goal",
-      content: "编写亚洲流行文化网页",
-      media: [],
-      focus: true,
-      clientRequestId: expect.any(String)
-    });
-  });
-
   it("newChat failure keeps composer input for retry", async () => {
     const sendMessage = vi.fn();
     const dispatch = vi.fn();
@@ -1330,7 +1064,7 @@ describe("HomePage", () => {
 
     await expect(submitAgentComposerMessage({
       chatId: null,
-      connection: { getReadyGeneration: () => 1, newChat: vi.fn(async () => { throw new Error("new chat failed"); }), submitMessage: sendMessage },
+      connection: { getReadyGeneration: () => 1, newChat: vi.fn(async () => { throw new Error("new chat failed"); }), sendMessage },
       content: "不要丢",
       pendingAttachments: [],
       uploadAgentMedia: vi.fn(async () => []),
@@ -1357,11 +1091,7 @@ describe("HomePage", () => {
 
     await expect(submitAgentComposerMessage({
       chatId: "chat-1",
-      connection: {
-        getReadyGeneration: () => 1,
-        newChat: vi.fn(async () => ({ chatId: "unused-chat", modelPreset: "desktop-openai-gpt-5" })),
-        submitMessage: sendMessage
-      },
+      connection: { getReadyGeneration: () => 1, newChat: vi.fn(async () => "unused-chat"), sendMessage },
       content: "不要静默丢失",
       pendingAttachments: [],
       uploadAgentMedia: vi.fn(async () => []),
@@ -1383,18 +1113,13 @@ describe("HomePage", () => {
   it("does not restore the old delivery-uncertain flag after an acknowledged send", async () => {
     const dispatch = vi.fn();
     let generation: number | null = 1;
-    const sendMessage = vi.fn(async () => {
+    const sendMessage = vi.fn(() => {
       generation = null;
-      return { status: "accepted" as const };
     });
 
     await expect(submitAgentComposerMessage({
       chatId: "chat-1",
-      connection: {
-        getReadyGeneration: () => generation,
-        newChat: vi.fn(async () => ({ chatId: "unused-chat", modelPreset: "desktop-openai-gpt-5" })),
-        submitMessage: sendMessage
-      },
+      connection: { getReadyGeneration: () => generation, newChat: vi.fn(async () => "unused-chat"), sendMessage },
       content: "发送后立刻断线",
       pendingAttachments: [],
       uploadAgentMedia: vi.fn(async () => []),
@@ -1408,8 +1133,7 @@ describe("HomePage", () => {
       chatId: "chat-1",
       content: "发送后立刻断线",
       media: [],
-      focus: true,
-      clientRequestId: expect.any(String)
+      focus: true
     });
   });
 
@@ -1426,8 +1150,8 @@ describe("HomePage", () => {
       chatId: null,
       connection: {
         getReadyGeneration: () => 1,
-        newChat: vi.fn(async () => ({ chatId: "background-chat", modelPreset: "desktop-openai-gpt-5" })),
-        submitMessage: vi.fn(async () => ({ status: "accepted" as const }))
+        newChat: vi.fn(async () => "background-chat"),
+        sendMessage: vi.fn()
       },
       ensureChatSubscription,
       content: "后台完成",
@@ -1458,11 +1182,7 @@ describe("HomePage", () => {
 
     await expect(submitAgentComposerMessage({
       chatId: "chat-1",
-      connection: {
-        getReadyGeneration: () => 1,
-        newChat: vi.fn(async () => ({ chatId: "unused-chat", modelPreset: "desktop-openai-gpt-5" })),
-        submitMessage: sendMessage
-      },
+      connection: { getReadyGeneration: () => 1, newChat: vi.fn(async () => "unused-chat"), sendMessage },
       content: "看这个文件",
       pendingAttachments: [readyFile({ fileName: "large.pdf", originalBytes: 10 * 1024 * 1024 + 1 })],
       uploadAgentMedia: vi.fn(async () => { throw new MemmyAgentRequestError("file too large", 413); }),

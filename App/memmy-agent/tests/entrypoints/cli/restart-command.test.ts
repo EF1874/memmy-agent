@@ -260,7 +260,7 @@ describe("/restart command", () => {
     session.messages = [{ role: "user", content: "a" }, { role: "user", content: "b" }, { role: "user", content: "c" }];
     loop.sessions.getOrCreate = vi.fn(() => session) as any;
     loop.startTime = Date.now() / 1000 - 125;
-    loop.lastUsageBySession.set("telegram:c1", { prompt_tokens: 0, completion_tokens: 0 });
+    loop.lastUsage = { prompt_tokens: 0, completion_tokens: 0 };
     loop.consolidator.estimateSessionPromptTokens = vi.fn(() => [20_500, "tiktoken"]) as any;
     loop.subagents.getRunningCountBySession = vi.fn(() => 0) as any;
 
@@ -310,11 +310,11 @@ describe("/restart command", () => {
       .mockResolvedValueOnce({ finalContent: "first", messages: [], usage: { prompt_tokens: 9, completion_tokens: 4 } })
       .mockResolvedValueOnce({ finalContent: "second", messages: [], usage: {} }) as any;
 
-    await loop.runAgentLoop([], { sessionKey: "telegram:c1" });
-    expect(loop.lastUsageBySession.get("telegram:c1")).toMatchObject({ prompt_tokens: 9, completion_tokens: 4 });
+    await loop.runAgentLoop([]);
+    expect(loop.lastUsage).toMatchObject({ prompt_tokens: 9, completion_tokens: 4 });
 
-    await loop.runAgentLoop([], { sessionKey: "telegram:c1" });
-    expect(loop.lastUsageBySession.get("telegram:c1")).toMatchObject({ prompt_tokens: 0, completion_tokens: 0 });
+    await loop.runAgentLoop([]);
+    expect(loop.lastUsage).toMatchObject({ prompt_tokens: 0, completion_tokens: 0 });
   });
 
   it("status falls back to last usage when context estimate is missing", async () => {
@@ -322,15 +322,13 @@ describe("/restart command", () => {
     const session = new Session({ key: "telegram:c1" });
     session.getHistory = vi.fn(() => [{ role: "user" }]) as any;
     loop.sessions.getOrCreate = vi.fn(() => session) as any;
-    loop.lastUsageBySession.set("telegram:c1", { prompt_tokens: 1200, completion_tokens: 34 });
-    loop.lastUsageBySession.set("telegram:other", { prompt_tokens: 9999, completion_tokens: 888 });
+    loop.lastUsage = { prompt_tokens: 1200, completion_tokens: 34 };
     loop.consolidator.estimateSessionPromptTokens = vi.fn(() => [0, "none"]) as any;
     loop.subagents.getRunningCountBySession = vi.fn(() => 0) as any;
 
     const response = await loop.processMessage(new InboundMessage({ channel: "telegram", senderId: "u1", chatId: "c1", content: "/status" }));
 
     expect(response?.content).toContain("Tokens: 1200 in / 34 out");
-    expect(response?.content).not.toContain("9999 in / 888 out");
     expect(response?.content).toContain("Context: 1k/200k (0% of input budget)");
     expect(response?.content).toContain("Tasks: 0 active");
   });

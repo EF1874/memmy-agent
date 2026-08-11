@@ -7,73 +7,6 @@
  */
 import { z } from "zod";
 
-export type AgentGoalStatus =
-  | "active"
-  | "paused"
-  | "blocked"
-  | "usage_limited"
-  | "budget_limited"
-  | "completed";
-
-export type AgentGoalState = {
-  goal_id: string | null;
-  status: AgentGoalStatus | null;
-  objective: string;
-  token_budget: number | null;
-  tokens_used: number;
-  time_used_seconds: number;
-  created_at: string | null;
-  updated_at: string | null;
-};
-
-export type AgentGoalControlAction = "pause" | "resume" | "edit" | "set_budget" | "clear";
-
-export type AgentGoalControlInput = {
-  chatId: string;
-  goalId: string;
-  action: AgentGoalControlAction;
-  requestId?: string;
-  objective?: string;
-  tokenBudget?: number | null;
-};
-
-export type AgentGoalControlResult = {
-  ok: true;
-  requestId: string;
-  warning?: "turn_cancel_failed";
-};
-
-const AgentGoalStateSchema = z.object({
-  goal_id: z.string().nullable(),
-  status: z.union([
-    z.literal("active"),
-    z.literal("paused"),
-    z.literal("blocked"),
-    z.literal("usage_limited"),
-    z.literal("budget_limited"),
-    z.literal("completed")
-  ]).nullable(),
-  objective: z.string(),
-  token_budget: z.number().int().positive().nullable(),
-  tokens_used: z.number().int().nonnegative(),
-  time_used_seconds: z.number().int().nonnegative(),
-  created_at: z.string().nullable(),
-  updated_at: z.string().nullable()
-}).strict();
-
-export function isAgentGoalStatus(value: unknown): value is AgentGoalStatus {
-  return value === "active"
-    || value === "paused"
-    || value === "blocked"
-    || value === "usage_limited"
-    || value === "budget_limited"
-    || value === "completed";
-}
-
-export function isAgentGoalState(value: unknown): value is AgentGoalState {
-  return AgentGoalStateSchema.safeParse(value).success;
-}
-
 export const DEFAULT_MEMMY_AGENT_WEBUI_BASE_URL = "http://127.0.0.1:18980";
 const WEBUI_TOKEN_REFRESH_SKEW_MS = 30_000;
 
@@ -84,21 +17,6 @@ const BootstrapSchema = z.object({
   model_name: z.string().nullable()
 });
 
-const ChatModelPresetSchema = z.object({
-  name: z.string(),
-  provider: z.string(),
-  model: z.string(),
-  is_default: z.boolean(),
-  available: z.boolean()
-});
-
-const AgentSettingsSchema = z.object({
-  agent: z.object({
-    model_preset: z.string().nullable()
-  }).passthrough(),
-  model_presets: z.array(ChatModelPresetSchema)
-}).passthrough();
-
 const SessionSummarySchema = z.object({
   key: z.string(),
   title: z.string().optional(),
@@ -106,8 +24,7 @@ const SessionSummarySchema = z.object({
   updatedAt: z.string().optional(),
   run_started_at: z.number().optional(),
   projectId: z.string().nullable(),
-  cwd: z.string(),
-  model_preset: z.string().nullable().optional()
+  cwd: z.string()
 }).passthrough();
 
 const ProjectSchema = z.object({
@@ -158,6 +75,7 @@ const WEBUI_HIDDEN_SLASH_COMMANDS = new Set([
   "/dream-log",
   "/dream-restore",
   "/history",
+  "/goal",
   "/pairing",
   "/help",
   "/model"
@@ -184,25 +102,8 @@ const SidebarStateSchema = z.object({
 const WebuiThreadSchema = z.object({
   schemaVersion: z.number(),
   sessionKey: z.string(),
-  last_turn_id: z.string().min(1).optional(),
   last_turn_closed: z.boolean().optional(),
-  last_turn_goal_id: z.string().uuid().optional(),
-  last_turn_goal_outcome: z.union([
-    z.literal("active"),
-    z.literal("paused"),
-    z.literal("blocked"),
-    z.literal("usage_limited"),
-    z.literal("budget_limited"),
-    z.literal("completed")
-  ]).optional(),
   messages: z.array(z.record(z.string(), z.unknown()))
-}).superRefine((value, context) => {
-  if ((value.last_turn_goal_id === undefined) !== (value.last_turn_goal_outcome === undefined)) {
-    context.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: "last Turn Goal identity and outcome must be paired"
-    });
-  }
 });
 
 const SeedWebuiChatResponseSchema = z.object({
@@ -293,8 +194,6 @@ const UploadedAgentMediaResponseSchema = z.object({
 });
 
 export type MemmyAgentBootstrap = z.infer<typeof BootstrapSchema>;
-export type ChatModelPreset = z.infer<typeof ChatModelPresetSchema>;
-export type MemmyAgentSettings = z.infer<typeof AgentSettingsSchema>;
 export type MemmyAgentSessionSummary = z.infer<typeof SessionSummarySchema>;
 export type MemmyAgentProject = z.infer<typeof ProjectSchema>;
 export type MemmyAgentSessionSnapshot = z.infer<typeof SessionSnapshotSchema>;
@@ -378,28 +277,6 @@ export type MemmyAgentMediaAttachment = {
   path?: string;
 };
 
-export type AgentTurnSource = {
-  kind: "gui" | "tui" | "im";
-  channel: string;
-};
-
-export type WebuiQueuedMessage = {
-  client_request_id: string;
-  text: string;
-  media_urls: MemmyAgentMediaAttachment[];
-  queued_at: string;
-  source?: AgentTurnSource;
-};
-
-export type MemmyAgentMessageSubmissionResult = {
-  status: "accepted" | "queued";
-};
-
-export type MemmyAgentQueueRemovalResult = {
-  outcome: "removed" | "already_dequeued";
-  revision: number;
-};
-
 export type WebuiSessionTarget =
   | { kind: "standalone" }
   | { kind: "project"; projectId: string };
@@ -411,13 +288,7 @@ export type MemmyAgentSendMessageInput = {
   target?: WebuiSessionTarget;
   language?: MemmyAgentUiLanguage;
   media?: MemmyAgentMediaInput[];
-  modelPreset?: string | null;
 };
-
-export interface MemmyAgentNewChatResult {
-  chatId: string;
-  modelPreset: string;
-}
 
 export type MemmyAgentModelError = {
   category: "quota_exhausted" | "model_failed";
@@ -446,9 +317,7 @@ export type MemmyAgentWsEvent = {
   tool_events?: unknown;
   agent_ui?: unknown;
   edits?: unknown;
-  goal_state?: AgentGoalState;
-  goal_id?: string;
-  goal_outcome?: AgentGoalStatus;
+  goal_state?: unknown;
   compaction_id?: string;
   status?: string;
   started_at?: number;
@@ -456,24 +325,16 @@ export type MemmyAgentWsEvent = {
   scope?: string;
   model_name?: string;
   model_preset?: string;
-  request_id?: string;
-  ok?: boolean;
-  outcome?: string;
-  item?: WebuiQueuedMessage;
-  items?: WebuiQueuedMessage[];
-  started_items?: WebuiQueuedMessage[];
-  revision?: number;
   [key: string]: unknown;
 };
 
 export type MemmyAgentRunLifecycleEvent = MemmyAgentWsEvent & {
-  event: "run_status" | "turn_end" | "stop_result" | "run_status_snapshot";
+  event: "goal_status" | "turn_end" | "stop_result" | "run_status_snapshot";
   chat_id: string;
 };
 
 export interface MemmyAgentClient {
   bootstrap(options?: { force?: boolean }): Promise<MemmyAgentBootstrap>;
-  getSettings(): Promise<MemmyAgentSettings>;
   getSessionSnapshot(options?: MemmyAgentRequestOptions): Promise<MemmyAgentSessionSnapshot>;
   listSessions(): Promise<MemmyAgentSessionSummary[]>;
   listSlashCommands(): Promise<MemmyAgentSlashCommand[]>;
@@ -520,30 +381,9 @@ export type MemmyAgentUnsubscribe = () => void;
 
 export interface MemmyAgentWebSocketConnection {
   getReadyGeneration(): number | null;
-  newChat(
-    expectedGeneration: number,
-    timeoutMs?: number,
-    modelPreset?: string | null,
-    clientRequestId?: string
-  ): Promise<MemmyAgentNewChatResult>;
+  newChat(expectedGeneration: number, timeoutMs?: number): Promise<string>;
   attach(chatId: string): void;
   sendMessage(input: MemmyAgentSendMessageInput, expectedGeneration: number): Promise<void>;
-  submitMessage(
-    input: MemmyAgentSendMessageInput,
-    expectedGeneration: number
-  ): Promise<MemmyAgentMessageSubmissionResult>;
-  removeQueuedMessage(
-    chatId: string,
-    clientRequestId: string,
-    expectedGeneration: number,
-    timeoutMs?: number
-  ): Promise<MemmyAgentQueueRemovalResult>;
-  requestQueueSnapshot(chatId: string, expectedGeneration: number): void;
-  controlGoal(
-    input: AgentGoalControlInput,
-    expectedGeneration: number,
-    timeoutMs?: number
-  ): Promise<AgentGoalControlResult>;
   stop(chatId: string): void;
   restart(chatId: string): void;
   status(chatId: string): void;
@@ -557,7 +397,7 @@ export interface MemmyAgentWebSocketConnection {
   onRunLifecycle(handler: (chatId: string, event: MemmyAgentRunLifecycleEvent) => void): MemmyAgentUnsubscribe;
   requestRunStatusSnapshot(chatId: string, expectedGeneration: number, timeoutMs?: number): Promise<MemmyAgentRunStatusSnapshot>;
   getRunStartedAt(chatId: string): number | null;
-  getGoalState(chatId: string): AgentGoalState | undefined;
+  getGoalState(chatId: string): unknown;
   close(): void;
 }
 
@@ -640,18 +480,6 @@ export class MemmyAgentMessageRejectedError extends Error {
   }
 }
 
-export class MemmyAgentGoalControlError extends Error {
-  readonly code: string;
-  readonly unknownResult: boolean;
-
-  constructor(code: string, { unknownResult = false }: { unknownResult?: boolean } = {}) {
-    super(unknownResult ? "Goal control result is unknown" : `Goal control failed: ${code}`);
-    this.name = "MemmyAgentGoalControlError";
-    this.code = code;
-    this.unknownResult = unknownResult;
-  }
-}
-
 export function createMemmyAgentClient(input: CreateMemmyAgentClientInput = {}): MemmyAgentClient {
   return new HttpMemmyAgentClient(input);
 }
@@ -687,7 +515,6 @@ function toWebSocketUrl(baseUrl: string, wsPath: string, token: string, clientId
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   url.searchParams.set("token", token);
   url.searchParams.set("client_id", clientId);
-  url.searchParams.set("client_surface", "gui");
   return url.toString();
 }
 
@@ -787,10 +614,6 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
 
   async getSessionSnapshot(options: MemmyAgentRequestOptions = {}): Promise<MemmyAgentSessionSnapshot> {
     return this.request("/api/sessions", SessionSnapshotSchema, options);
-  }
-
-  async getSettings(): Promise<MemmyAgentSettings> {
-    return this.request("/api/settings", AgentSettingsSchema);
   }
 
   async listSessions(): Promise<MemmyAgentSessionSummary[]> {
@@ -1053,9 +876,6 @@ const READY_HANDSHAKE_TIMEOUT_MS = 5_000;
 const MESSAGE_ACK_TIMEOUT_MS = 10_000;
 const MESSAGE_RESULT_TIMEOUT_MS = 30_000;
 const MAX_AUTOMATIC_MESSAGE_CONFIRMATIONS = 3;
-const GOAL_CONTROL_TIMEOUT_MS = 15_000;
-const GOAL_CONTROL_HYDRATE_TIMEOUT_MS = 5_000;
-const QUEUE_REMOVE_TIMEOUT_MS = 15_000;
 
 interface MemmyAgentWebSocketSessionInput {
   bootstrap(options?: { force?: boolean }): Promise<MemmyAgentBootstrap>;
@@ -1067,8 +887,7 @@ interface MemmyAgentWebSocketSessionInput {
 
 interface PendingNewChat {
   generation: number;
-  clientRequestId: string;
-  resolve: (result: MemmyAgentNewChatResult) => void;
+  resolve: (chatId: string) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
 }
@@ -1080,38 +899,15 @@ interface PendingRunStatusSnapshot {
   timer: ReturnType<typeof setTimeout>;
 }
 
-interface PendingGoalControl {
-  input: AgentGoalControlInput & { requestId: string };
-  promise: Promise<AgentGoalControlResult>;
-  resolve: (result: AgentGoalControlResult) => void;
-  reject: (error: Error) => void;
-  timer: ReturnType<typeof setTimeout> | null;
-  calibrating: boolean;
-}
-
 interface PendingMessageAttempt {
   input: MemmyAgentSendMessageInput & { clientRequestId: string };
-  queueSurface: "chat_composer" | null;
-  finalPromise: Promise<void>;
-  resolveFinal: () => void;
-  rejectFinal: (error: Error) => void;
-  firstPromise: Promise<MemmyAgentMessageSubmissionResult>;
-  resolveFirst: (result: MemmyAgentMessageSubmissionResult) => void;
-  rejectFirst: (error: Error) => void;
-  firstSettled: boolean;
+  promise: Promise<void>;
+  resolve: () => void;
+  reject: (error: Error) => void;
   acknowledgementTimer: ReturnType<typeof setTimeout> | null;
   resultTimer: ReturnType<typeof setTimeout> | null;
   reconnectConfirmations: number;
   lastSentGeneration: number | null;
-  queued: boolean;
-}
-
-interface PendingQueueRemoval {
-  chatId: string;
-  clientRequestId: string;
-  resolve: (result: MemmyAgentQueueRemovalResult) => void;
-  reject: (error: Error) => void;
-  timer: ReturnType<typeof setTimeout>;
 }
 
 interface PendingInitialReady {
@@ -1128,8 +924,6 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
   private pendingInitialReady: PendingInitialReady | null = null;
   private readonly pendingRunStatusSnapshots = new Map<string, PendingRunStatusSnapshot>();
   private readonly pendingMessageAttempts = new Map<string, PendingMessageAttempt>();
-  private readonly pendingQueueRemovals = new Map<string, PendingQueueRemoval>();
-  private readonly pendingGoalControls = new Map<string, PendingGoalControl>();
   private connectionGeneration = 0;
   private transportOpenGeneration: number | null = null;
   private readyGeneration: number | null = null;
@@ -1147,7 +941,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
   private readonly runStatusHandlers = new Set<(chatId: string, startedAt: number | null) => void>();
   private readonly runLifecycleHandlers = new Set<(chatId: string, event: MemmyAgentRunLifecycleEvent) => void>();
   private readonly runStartedAtByChatId = new Map<string, number>();
-  private readonly goalStateByChatId = new Map<string, AgentGoalState>();
+  private readonly goalStateByChatId = new Map<string, unknown>();
 
   constructor(private readonly input: MemmyAgentWebSocketSessionInput) {}
 
@@ -1170,12 +964,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     return this.readyGeneration;
   }
 
-  newChat(
-    expectedGeneration: number,
-    timeoutMs = 5000,
-    modelPreset?: string | null,
-    suppliedClientRequestId?: string
-  ): Promise<MemmyAgentNewChatResult> {
+  newChat(expectedGeneration: number, timeoutMs = 5000): Promise<string> {
     if (this.pendingNewChat) {
       return Promise.reject(new Error("newChat already in flight"));
     }
@@ -1186,11 +975,9 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
       return Promise.reject(error);
     }
 
-    return new Promise<MemmyAgentNewChatResult>((resolve, reject) => {
-      const clientRequestId = suppliedClientRequestId ?? crypto.randomUUID();
+    return new Promise<string>((resolve, reject) => {
       const pending: PendingNewChat = {
         generation: expectedGeneration,
-        clientRequestId,
         resolve,
         reject,
         timer: setTimeout(() => {
@@ -1202,11 +989,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
       };
       this.pendingNewChat = pending;
       try {
-        this.sendOrdinaryFrame({
-          type: "new_chat",
-          client_request_id: clientRequestId,
-          ...(modelPreset !== undefined ? { model_preset: modelPreset } : {})
-        }, expectedGeneration);
+        this.sendOrdinaryFrame({ type: "new_chat" }, expectedGeneration);
       } catch (error) {
         this.pendingNewChat = null;
         clearTimeout(pending.timer);
@@ -1226,123 +1009,38 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     }
   }
 
-  requestQueueSnapshot(chatId: string, expectedGeneration: number): void {
-    this.assertReadyGeneration(expectedGeneration);
-    this.knownChats.add(chatId);
-    this.sendOrdinaryFrame({
-      type: "queue_snapshot_request",
-      chat_id: chatId
-    }, expectedGeneration);
-  }
-
   sendMessage(input: MemmyAgentSendMessageInput, expectedGeneration: number): Promise<void> {
     if (!input.clientRequestId) {
-      this.sendMessageFrame(input, expectedGeneration, null);
+      this.sendMessageFrame(input, expectedGeneration);
       return Promise.resolve();
     }
-    return this.getOrCreatePendingMessageAttempt(
-      { ...input, clientRequestId: input.clientRequestId },
-      expectedGeneration,
-      null
-    ).finalPromise;
-  }
 
-  submitMessage(
-    input: MemmyAgentSendMessageInput,
-    expectedGeneration: number
-  ): Promise<MemmyAgentMessageSubmissionResult> {
-    if (!input.clientRequestId) {
-      return Promise.reject(new Error("clientRequestId is required for queued submission"));
-    }
-    return this.getOrCreatePendingMessageAttempt(
-      { ...input, clientRequestId: input.clientRequestId },
-      expectedGeneration,
-      "chat_composer"
-    ).firstPromise;
-  }
-
-  removeQueuedMessage(
-    chatId: string,
-    clientRequestId: string,
-    expectedGeneration: number,
-    timeoutMs = QUEUE_REMOVE_TIMEOUT_MS
-  ): Promise<MemmyAgentQueueRemovalResult> {
-    this.assertReadyGeneration(expectedGeneration);
-    const requestId = crypto.randomUUID();
-    return new Promise<MemmyAgentQueueRemovalResult>((resolve, reject) => {
-      const pending: PendingQueueRemoval = {
-        chatId,
-        clientRequestId,
-        resolve,
-        reject,
-        timer: setTimeout(() => {
-          if (this.pendingQueueRemovals.get(requestId) === pending) {
-            this.pendingQueueRemovals.delete(requestId);
-          }
-          reject(new Error("Queue removal timed out"));
-        }, timeoutMs)
-      };
-      this.pendingQueueRemovals.set(requestId, pending);
-      try {
-        this.sendOrdinaryFrame({
-          type: "queue_remove",
-          chat_id: chatId,
-          request_id: requestId,
-          client_request_id: clientRequestId
-        }, expectedGeneration);
-      } catch (error) {
-        this.pendingQueueRemovals.delete(requestId);
-        clearTimeout(pending.timer);
-        reject(asError(error, "Unable to remove queued message"));
-      }
-    });
-  }
-
-  private getOrCreatePendingMessageAttempt(
-    input: MemmyAgentSendMessageInput & { clientRequestId: string },
-    expectedGeneration: number,
-    queueSurface: "chat_composer" | null
-  ): PendingMessageAttempt {
     const key = messageAttemptKey(input.chatId, input.clientRequestId);
     const current = this.pendingMessageAttempts.get(key);
     if (current) {
-      if (!sameMessageAttempt(current.input, input) || current.queueSurface !== queueSurface) {
-        throw new Error("clientRequestId already belongs to another message");
+      if (!sameMessageAttempt(current.input, input)) {
+        return Promise.reject(new Error("clientRequestId already belongs to another message"));
       }
       current.reconnectConfirmations = 0;
       this.sendPendingMessageAttempt(current, expectedGeneration);
-      return current;
+      return current.promise;
     }
 
-    let resolveFinal!: () => void;
-    let rejectFinal!: (error: Error) => void;
-    const finalPromise = new Promise<void>((resolve, reject) => {
-      resolveFinal = resolve;
-      rejectFinal = reject;
+    let resolveAttempt!: () => void;
+    let rejectAttempt!: (error: Error) => void;
+    const promise = new Promise<void>((resolve, reject) => {
+      resolveAttempt = resolve;
+      rejectAttempt = reject;
     });
-    void finalPromise.catch(() => undefined);
-    let resolveFirst!: (result: MemmyAgentMessageSubmissionResult) => void;
-    let rejectFirst!: (error: Error) => void;
-    const firstPromise = new Promise<MemmyAgentMessageSubmissionResult>((resolve, reject) => {
-      resolveFirst = resolve;
-      rejectFirst = reject;
-    });
-    void firstPromise.catch(() => undefined);
     const attempt: PendingMessageAttempt = {
       input: { ...input, clientRequestId: input.clientRequestId },
-      queueSurface,
-      finalPromise,
-      resolveFinal,
-      rejectFinal,
-      firstPromise,
-      resolveFirst,
-      rejectFirst,
-      firstSettled: false,
+      promise,
+      resolve: resolveAttempt,
+      reject: rejectAttempt,
       acknowledgementTimer: null,
       resultTimer: null,
       reconnectConfirmations: 0,
-      lastSentGeneration: null,
-      queued: false
+      lastSentGeneration: null
     };
     this.pendingMessageAttempts.set(key, attempt);
     attempt.resultTimer = setTimeout(() => {
@@ -1354,15 +1052,10 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
         chat_id: attempt.input.chatId,
         client_request_id: attempt.input.clientRequestId
       });
-      const error = new MemmyAgentMessageRejectedError(
+      attempt.reject(new MemmyAgentMessageRejectedError(
         "message_result_unknown",
         "result_unknown"
-      );
-      if (!attempt.firstSettled) {
-        attempt.firstSettled = true;
-        attempt.rejectFirst(error);
-      }
-      attempt.rejectFinal(error);
+      ));
     }, MESSAGE_RESULT_TIMEOUT_MS);
     try {
       this.sendPendingMessageAttempt(attempt, expectedGeneration);
@@ -1370,61 +1063,6 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
       this.pendingMessageAttempts.delete(key);
       if (attempt.resultTimer) clearTimeout(attempt.resultTimer);
       throw error;
-    }
-    return attempt;
-  }
-
-  controlGoal(
-    input: AgentGoalControlInput,
-    expectedGeneration: number,
-    timeoutMs = GOAL_CONTROL_TIMEOUT_MS
-  ): Promise<AgentGoalControlResult> {
-    this.assertReadyGeneration(expectedGeneration);
-    const requestId = input.requestId ?? crypto.randomUUID();
-    const normalizedInput = { ...input, requestId };
-    const key = messageAttemptKey(input.chatId, requestId);
-    const current = this.pendingGoalControls.get(key);
-    if (current) {
-      if (!sameGoalControl(current.input, normalizedInput)) {
-        return Promise.reject(new MemmyAgentGoalControlError("request_id_conflict"));
-      }
-      return current.promise;
-    }
-
-    let resolveControl!: (result: AgentGoalControlResult) => void;
-    let rejectControl!: (error: Error) => void;
-    const promise = new Promise<AgentGoalControlResult>((resolve, reject) => {
-      resolveControl = resolve;
-      rejectControl = reject;
-    });
-    const pending: PendingGoalControl = {
-      input: normalizedInput,
-      promise,
-      resolve: resolveControl,
-      reject: rejectControl,
-      calibrating: false,
-      timer: null
-    };
-    pending.timer = setTimeout(() => {
-      if (this.pendingGoalControls.get(key) !== pending) return;
-      this.beginGoalControlCalibration(key, pending);
-    }, timeoutMs);
-    this.pendingGoalControls.set(key, pending);
-    try {
-      this.sendOrdinaryFrame({
-        type: "goal_control",
-        chat_id: input.chatId,
-        request_id: requestId,
-        goal_id: input.goalId,
-        action: input.action,
-        ...(input.action === "edit" ? { objective: input.objective } : {}),
-        ...(input.action === "set_budget" ? { token_budget: input.tokenBudget } : {})
-      }, expectedGeneration);
-      this.knownChats.add(input.chatId);
-    } catch (error) {
-      if (pending.timer) clearTimeout(pending.timer);
-      this.pendingGoalControls.delete(key);
-      pending.reject(asError(error, "Unable to control Goal"));
     }
     return promise;
   }
@@ -1531,7 +1169,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     this.runLifecycleHandlers.add(handler);
     for (const [chatId, startedAt] of this.runStartedAtByChatId) {
       handler(chatId, {
-        event: "run_status",
+        event: "goal_status",
         chat_id: chatId,
         status: "running",
         started_at: startedAt,
@@ -1545,7 +1183,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     return this.runStartedAtByChatId.get(chatId) ?? null;
   }
 
-  getGoalState(chatId: string): AgentGoalState | undefined {
+  getGoalState(chatId: string): unknown {
     return this.goalStateByChatId.get(chatId);
   }
 
@@ -1592,8 +1230,6 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     this.rejectPendingNewChat(new Error("newChat cancelled"));
     this.rejectPendingRunStatusSnapshots(new Error("run status snapshot cancelled"));
     this.rejectPendingMessageAttempts(new Error("message confirmation cancelled"));
-    this.rejectPendingQueueRemovals(new Error("queue removal cancelled"));
-    this.rejectPendingGoalControls(new Error("Goal control cancelled"));
     this.rejectInitialReady(new Error("Agent gateway connection cancelled"));
     this.clearReadyHandshakeTimer();
     if (this.reconnectTimer) {
@@ -1675,24 +1311,16 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
 
     this.emitEvent(normalized);
 
-    if (normalized.event === "message_queued") {
-      this.markPendingMessageQueued(normalized);
-    } else if (normalized.event === "message_accepted") {
+    if (normalized.event === "message_accepted") {
       this.resolvePendingMessageAttempt(normalized);
-    } else if (normalized.event === "message_queue_removed") {
-      this.resolveRemovedMessageAttempt(normalized);
     } else if (normalized.event === "error") {
       this.rejectPendingMessageAttempt(normalized);
-    } else if (normalized.event === "goal_control_result") {
-      this.resolvePendingGoalControl(normalized);
-    } else if (normalized.event === "queue_remove_result") {
-      this.resolvePendingQueueRemoval(normalized);
     }
 
     if (normalized.event === "attached") {
       if (normalized.chat_id) {
         this.knownChats.add(normalized.chat_id);
-        this.resolvePendingNewChat(normalized, generation);
+        this.resolvePendingNewChat(normalized.chat_id, generation);
         this.dispatchChat(normalized.chat_id, normalized);
       }
       return;
@@ -1771,12 +1399,8 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     this.readyGeneration = null;
     this.clearReadyHandshakeTimer();
     this.suspendPendingMessageAttemptsForReconnect();
-    for (const [key, pending] of this.pendingGoalControls) {
-      this.beginGoalControlCalibration(key, pending);
-    }
     this.rejectPendingNewChat(new Error("newChat failed because websocket closed"));
     this.rejectPendingRunStatusSnapshots(new Error("run status snapshot failed because websocket closed"), generation);
-    this.rejectPendingQueueRemovals(new Error("queue removal failed because websocket closed"));
     if (this.intentionallyClosed) {
       return;
     }
@@ -1862,21 +1486,15 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     this.rawSend(this.socket!, expectedGeneration, frame);
   }
 
-  private sendMessageFrame(
-    input: MemmyAgentSendMessageInput,
-    expectedGeneration: number,
-    queueSurface: "chat_composer" | null
-  ): void {
+  private sendMessageFrame(input: MemmyAgentSendMessageInput, expectedGeneration: number): void {
     this.sendOrdinaryFrame({
       type: "message",
       chat_id: input.chatId,
       content: input.content,
       webui: true,
-      ...(queueSurface ? { queue_surface: queueSurface } : {}),
       ...(input.clientRequestId ? { client_request_id: input.clientRequestId } : {}),
       ...(input.target ? { target: input.target } : {}),
       ...(input.language ? { language: input.language } : {}),
-      ...(input.modelPreset !== undefined ? { model_preset: input.modelPreset } : {}),
       ...(input.media?.length ? { media_paths: input.media.map((item) => item.path) } : {})
     }, expectedGeneration);
     this.knownChats.add(input.chatId);
@@ -1884,13 +1502,9 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
   }
 
   private sendPendingMessageAttempt(attempt: PendingMessageAttempt, generation: number): void {
-    this.sendMessageFrame(attempt.input, generation, attempt.queueSurface);
+    this.sendMessageFrame(attempt.input, generation);
     attempt.lastSentGeneration = generation;
     if (attempt.acknowledgementTimer) clearTimeout(attempt.acknowledgementTimer);
-    if (attempt.queued) {
-      attempt.acknowledgementTimer = null;
-      return;
-    }
     attempt.acknowledgementTimer = setTimeout(() => {
       attempt.acknowledgementTimer = null;
       this.emitEvent({
@@ -1905,7 +1519,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
   private confirmPendingMessagesAfterReconnect(generation: number): void {
     for (const attempt of this.pendingMessageAttempts.values()) {
       if (attempt.lastSentGeneration === generation) continue;
-      if (!attempt.queued && attempt.reconnectConfirmations >= MAX_AUTOMATIC_MESSAGE_CONFIRMATIONS) {
+      if (attempt.reconnectConfirmations >= MAX_AUTOMATIC_MESSAGE_CONFIRMATIONS) {
         this.emitEvent({
           event: "message_confirmation_exhausted",
           chat_id: attempt.input.chatId,
@@ -1917,19 +1531,14 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
           this.pendingMessageAttempts.delete(key);
           if (attempt.acknowledgementTimer) clearTimeout(attempt.acknowledgementTimer);
           if (attempt.resultTimer) clearTimeout(attempt.resultTimer);
-          const error = new MemmyAgentMessageRejectedError(
+          attempt.reject(new MemmyAgentMessageRejectedError(
             "message_result_unknown",
             "result_unknown"
-          );
-          if (!attempt.firstSettled) {
-            attempt.firstSettled = true;
-            attempt.rejectFirst(error);
-          }
-          attempt.rejectFinal(error);
+          ));
         }
         continue;
       }
-      if (!attempt.queued) attempt.reconnectConfirmations += 1;
+      attempt.reconnectConfirmations += 1;
       try {
         this.sendPendingMessageAttempt(attempt, generation);
       } catch {
@@ -1951,39 +1560,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     this.pendingMessageAttempts.delete(key);
     if (attempt.acknowledgementTimer) clearTimeout(attempt.acknowledgementTimer);
     if (attempt.resultTimer) clearTimeout(attempt.resultTimer);
-    if (!attempt.firstSettled) {
-      attempt.firstSettled = true;
-      attempt.resolveFirst({ status: "accepted" });
-    }
-    attempt.resolveFinal();
-  }
-
-  private markPendingMessageQueued(event: MemmyAgentWsEvent): void {
-    if (!event.chat_id || !event.client_request_id) return;
-    const key = messageAttemptKey(event.chat_id, event.client_request_id);
-    const attempt = this.pendingMessageAttempts.get(key);
-    if (!attempt) return;
-    attempt.queued = true;
-    attempt.reconnectConfirmations = 0;
-    if (attempt.acknowledgementTimer) clearTimeout(attempt.acknowledgementTimer);
-    if (attempt.resultTimer) clearTimeout(attempt.resultTimer);
-    attempt.acknowledgementTimer = null;
-    attempt.resultTimer = null;
-    if (event.item && attempt.queueSurface === "chat_composer" && !attempt.firstSettled) {
-      attempt.firstSettled = true;
-      attempt.resolveFirst({ status: "queued" });
-    }
-  }
-
-  private resolveRemovedMessageAttempt(event: MemmyAgentWsEvent): void {
-    if (!event.chat_id || !event.client_request_id) return;
-    const key = messageAttemptKey(event.chat_id, event.client_request_id);
-    const attempt = this.pendingMessageAttempts.get(key);
-    if (!attempt) return;
-    this.pendingMessageAttempts.delete(key);
-    if (attempt.acknowledgementTimer) clearTimeout(attempt.acknowledgementTimer);
-    if (attempt.resultTimer) clearTimeout(attempt.resultTimer);
-    attempt.resolveFinal();
+    attempt.resolve();
   }
 
   private rejectPendingMessageAttempt(event: MemmyAgentWsEvent): void {
@@ -1994,15 +1571,10 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     this.pendingMessageAttempts.delete(key);
     if (attempt.acknowledgementTimer) clearTimeout(attempt.acknowledgementTimer);
     if (attempt.resultTimer) clearTimeout(attempt.resultTimer);
-    const error = new MemmyAgentMessageRejectedError(
+    attempt.reject(new MemmyAgentMessageRejectedError(
       typeof event.detail === "string" ? event.detail : "message_request_rejected",
       typeof event.reason === "string" ? event.reason : "message_rejected"
-    );
-    if (!attempt.firstSettled) {
-      attempt.firstSettled = true;
-      attempt.rejectFirst(error);
-    }
-    attempt.rejectFinal(error);
+    ));
   }
 
   private rejectPendingMessageAttempts(error: Error): void {
@@ -2010,11 +1582,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
       this.pendingMessageAttempts.delete(key);
       if (attempt.acknowledgementTimer) clearTimeout(attempt.acknowledgementTimer);
       if (attempt.resultTimer) clearTimeout(attempt.resultTimer);
-      if (!attempt.firstSettled) {
-        attempt.firstSettled = true;
-        attempt.rejectFirst(error);
-      }
-      attempt.rejectFinal(error);
+      attempt.reject(error);
     }
   }
 
@@ -2071,24 +1639,14 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     this.pendingInboundByChat.set(chatId, queue);
   }
 
-  private resolvePendingNewChat(event: MemmyAgentWsEvent, generation: number): void {
+  private resolvePendingNewChat(chatId: string, generation: number): void {
     const pending = this.pendingNewChat;
-    if (
-      !pending
-      || pending.generation !== generation
-      || event.client_request_id !== pending.clientRequestId
-      || !event.chat_id
-      || typeof event.model_preset !== "string"
-      || !event.model_preset
-    ) {
+    if (!pending || pending.generation !== generation) {
       return;
     }
     this.pendingNewChat = null;
     clearTimeout(pending.timer);
-    pending.resolve({
-      chatId: event.chat_id,
-      modelPreset: event.model_preset
-    });
+    pending.resolve(chatId);
   }
 
   private rejectPendingNewChat(error: Error): void {
@@ -2152,7 +1710,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
   }
 
   private recordRunStatus(chatId: string, event: MemmyAgentWsEvent): void {
-    if (event.event !== "run_status" && event.event !== "turn_end" && event.event !== "stop_result" && event.event !== "run_status_snapshot") {
+    if (event.event !== "goal_status" && event.event !== "turn_end" && event.event !== "stop_result" && event.event !== "run_status_snapshot") {
       return;
     }
     if (event.event === "run_status_snapshot") {
@@ -2184,96 +1742,10 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
   }
 
   private recordGoalState(chatId: string, event: MemmyAgentWsEvent): void {
-    if (event.event !== "goal_state") return;
-    const parsed = AgentGoalStateSchema.safeParse(event.goal_state);
-    if (!parsed.success) return;
-    this.goalStateByChatId.set(chatId, parsed.data);
-    for (const [key, pending] of this.pendingGoalControls) {
-      if (pending.input.chatId !== chatId || !pending.calibrating) continue;
-      this.pendingGoalControls.delete(key);
-      if (pending.timer) clearTimeout(pending.timer);
-      if (goalControlPostcondition(pending.input, parsed.data)) {
-        pending.resolve({ ok: true, requestId: pending.input.requestId });
-      } else {
-        pending.reject(new MemmyAgentGoalControlError("result_unknown", { unknownResult: true }));
-      }
-    }
-  }
-
-  private resolvePendingGoalControl(event: MemmyAgentWsEvent): void {
-    const chatId = event.chat_id;
-    const requestId = typeof event.request_id === "string" ? event.request_id : null;
-    if (!chatId || !requestId) return;
-    const key = messageAttemptKey(chatId, requestId);
-    const pending = this.pendingGoalControls.get(key);
-    if (!pending) return;
-    this.pendingGoalControls.delete(key);
-    if (pending.timer) clearTimeout(pending.timer);
-    if (event.ok === true) {
-      pending.resolve({
-        ok: true,
-        requestId,
-        ...(event.warning === "turn_cancel_failed" ? { warning: event.warning } : {})
-      });
-      return;
-    }
-    pending.reject(new MemmyAgentGoalControlError(
-      typeof event.error === "string" ? event.error : "invalid_transition"
-    ));
-  }
-
-  private beginGoalControlCalibration(key: string, pending: PendingGoalControl): void {
-    if (this.pendingGoalControls.get(key) !== pending) return;
-    if (pending.timer) clearTimeout(pending.timer);
-    pending.calibrating = true;
-    const generation = this.readyGeneration;
-    if (generation !== null) this.sendAttach(pending.input.chatId, generation);
-    pending.timer = setTimeout(() => {
-      if (this.pendingGoalControls.get(key) !== pending) return;
-      this.pendingGoalControls.delete(key);
-      pending.reject(new MemmyAgentGoalControlError("result_unknown", { unknownResult: true }));
-    }, GOAL_CONTROL_HYDRATE_TIMEOUT_MS);
-  }
-
-  private rejectPendingGoalControls(error: Error): void {
-    for (const [key, pending] of this.pendingGoalControls) {
-      this.pendingGoalControls.delete(key);
-      if (pending.timer) clearTimeout(pending.timer);
-      pending.reject(error);
-    }
-  }
-
-  private resolvePendingQueueRemoval(event: MemmyAgentWsEvent): void {
-    const requestId = typeof event.request_id === "string" ? event.request_id : null;
-    if (!requestId) return;
-    const pending = this.pendingQueueRemovals.get(requestId);
-    if (!pending) return;
-    if (
-      event.chat_id !== pending.chatId
-      || event.client_request_id !== pending.clientRequestId
-    ) return;
-    this.pendingQueueRemovals.delete(requestId);
-    clearTimeout(pending.timer);
-    if (
-      event.ok === true
-      && (event.outcome === "removed" || event.outcome === "already_dequeued")
-      && typeof event.revision === "number"
-      && Number.isSafeInteger(event.revision)
-      && event.revision >= 0
-    ) {
-      pending.resolve({ outcome: event.outcome, revision: event.revision });
-      return;
-    }
-    pending.reject(new Error(
-      typeof event.error === "string" ? event.error : "Unable to remove queued message"
-    ));
-  }
-
-  private rejectPendingQueueRemovals(error: Error): void {
-    for (const [requestId, pending] of this.pendingQueueRemovals) {
-      this.pendingQueueRemovals.delete(requestId);
-      clearTimeout(pending.timer);
-      pending.reject(error);
+    if (event.event === "goal_state") {
+      this.goalStateByChatId.set(chatId, event.goal_state);
+    } else if (event.event === "turn_end" && event.goal_state != null) {
+      this.goalStateByChatId.set(chatId, event.goal_state);
     }
   }
 
@@ -2300,7 +1772,6 @@ function sameMessageAttempt(
     clientRequestId: left.clientRequestId,
     target: left.target ?? null,
     language: left.language ?? null,
-    modelPreset: left.modelPreset ?? null,
     mediaPaths: left.media?.map((item) => item.path) ?? []
   }) === JSON.stringify({
     chatId: right.chatId,
@@ -2308,42 +1779,8 @@ function sameMessageAttempt(
     clientRequestId: right.clientRequestId,
     target: right.target ?? null,
     language: right.language ?? null,
-    modelPreset: right.modelPreset ?? null,
     mediaPaths: right.media?.map((item) => item.path) ?? []
   });
-}
-
-function sameGoalControl(
-  left: AgentGoalControlInput & { requestId: string },
-  right: AgentGoalControlInput & { requestId: string }
-): boolean {
-  return JSON.stringify({
-    chatId: left.chatId,
-    requestId: left.requestId,
-    goalId: left.goalId,
-    action: left.action,
-    objective: left.action === "edit" ? left.objective?.trim() ?? "" : null,
-    tokenBudget: left.action === "set_budget" ? left.tokenBudget ?? null : null
-  }) === JSON.stringify({
-    chatId: right.chatId,
-    requestId: right.requestId,
-    goalId: right.goalId,
-    action: right.action,
-    objective: right.action === "edit" ? right.objective?.trim() ?? "" : null,
-    tokenBudget: right.action === "set_budget" ? right.tokenBudget ?? null : null
-  });
-}
-
-function goalControlPostcondition(
-  input: AgentGoalControlInput,
-  state: AgentGoalState
-): boolean {
-  if (input.action === "clear") return state.goal_id === null && state.status === null;
-  if (state.goal_id !== input.goalId) return false;
-  if (input.action === "pause") return state.status === "paused";
-  if (input.action === "resume") return state.status === "active";
-  if (input.action === "edit") return state.objective === input.objective?.trim();
-  return state.token_budget === (input.tokenBudget ?? null);
 }
 
 function combineAbortSignals(

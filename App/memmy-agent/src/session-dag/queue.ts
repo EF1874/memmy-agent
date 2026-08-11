@@ -13,11 +13,6 @@ export type SessionDagQueueManagerOptions = {
   usageReporter?: SessionDagUsageReporter | null;
 };
 
-export type SessionDagRuntime = {
-  provider: any;
-  model: string;
-};
-
 export class SessionDagQueueManager {
   private readonly config: SessionDagConfig;
   private readonly sessions: SessionManager;
@@ -36,8 +31,8 @@ export class SessionDagQueueManager {
     this.usageReporter = options.usageReporter ?? null;
   }
 
-  enqueueSavedTurn(sessionKey: string, turn: DagTurnInput, runtime?: SessionDagRuntime): void {
-    this.queueFor(sessionKey).enqueue(turn, runtime);
+  enqueueSavedTurn(sessionKey: string, turn: DagTurnInput): void {
+    this.queueFor(sessionKey).enqueue(turn);
   }
 
   wakeSession(sessionKey: string): void {
@@ -81,17 +76,13 @@ export class SessionDagQueueManager {
     }
   }
 
-  createBuilder(
-    sessionKey: string,
-    store: SessionDagStore,
-    runtime?: SessionDagRuntime,
-  ): SessionDagBuilder {
+  createBuilder(sessionKey: string, store: SessionDagStore): SessionDagBuilder {
     return new SessionDagBuilder({
       sessionKey,
       sessions: this.sessions,
       store,
-      provider: runtime?.provider ?? this.provider(),
-      model: runtime?.model ?? this.model(),
+      provider: this.provider(),
+      model: this.model(),
       maxBuilderContextNodes: this.config.maxBuilderContextNodes,
       usageReporter: this.usageReporter,
       debugLog: this.config.debugLog,
@@ -123,7 +114,6 @@ class SessionDagQueue {
   private closed = false;
   private storeClosed = false;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
-  private readonly runtimeByTurnId = new Map<string, SessionDagRuntime>();
   private readonly closedPromise: Promise<void>;
   private resolveClosed!: () => void;
 
@@ -137,10 +127,9 @@ class SessionDagQueue {
     });
   }
 
-  enqueue(turn: DagTurnInput, runtime?: SessionDagRuntime): void {
+  enqueue(turn: DagTurnInput): void {
     if (this.closed) return;
     this.store.upsertTurn(turn);
-    if (runtime) this.runtimeByTurnId.set(turn.turn_id, runtime);
     this.wake();
   }
 
@@ -185,14 +174,9 @@ class SessionDagQueue {
     while (!this.closed) {
       const turn = this.store.claimNextTurn();
       if (!turn) return;
-      const builder = this.manager.createBuilder(
-        this.sessionKey,
-        this.store,
-        this.runtimeByTurnId.get(turn.turn_id),
-      );
+      const builder = this.manager.createBuilder(this.sessionKey, this.store);
       try {
         await builder.buildAndApply(turn);
-        this.runtimeByTurnId.delete(turn.turn_id);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (turn.attempt_count + 1 < this.maxUpdateAttempts()) {
@@ -203,7 +187,6 @@ class SessionDagQueue {
         }
         try {
           builder.applyDeterministicFallback(turn);
-          this.runtimeByTurnId.delete(turn.turn_id);
         } catch (fallbackError) {
           const fallbackMessage = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
           this.store.markTurnBlocked(turn.turn_id, fallbackMessage, new Date(Date.now() + this.manager.retryDelayMs(0)).toISOString());
@@ -231,7 +214,6 @@ class SessionDagQueue {
   private closeStore(): void {
     if (this.storeClosed) return;
     this.storeClosed = true;
-    this.runtimeByTurnId.clear();
     this.store.close();
     this.resolveClosed();
   }

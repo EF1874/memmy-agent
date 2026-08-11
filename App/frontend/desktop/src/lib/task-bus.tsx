@@ -18,7 +18,6 @@ export interface Task {
   lastAgentMessage?: string;
   streamingChunks?: string[];
   source: TaskSource;
-  goalId?: string;
   dismissed?: boolean;
   readAt?: number;
 }
@@ -73,7 +72,6 @@ export interface TaskBusValue {
   completeTask: (taskId: string, finalText: string) => void;
   errorTask: (taskId: string, message: string) => void;
   cancelTask: (taskId: string) => void;
-  bindTaskGoal: (taskId: string, goalId: string) => void;
   focusTask: (taskId: string | null) => void;
   startNewSession: () => void;
   dismissTask: (taskId: string) => void;
@@ -177,18 +175,6 @@ export function cancelTaskInSnapshot(snapshot: TaskBusSnapshot, taskId: string, 
         : task
     )
   };
-}
-
-export function bindTaskGoalInSnapshot(snapshot: TaskBusSnapshot, taskId: string, goalId: string): TaskBusSnapshot {
-  const normalizedGoalId = goalId.trim();
-  if (!normalizedGoalId) return snapshot;
-  let changed = false;
-  const tasks = snapshot.tasks.map((task) => {
-    if (task.id !== taskId || !isTaskInFlightStatus(task.status) || task.goalId) return task;
-    changed = true;
-    return { ...task, goalId: normalizedGoalId };
-  });
-  return changed ? { ...snapshot, tasks } : snapshot;
 }
 
 export function focusTaskInSnapshot(snapshot: TaskBusSnapshot, taskId: string | null): TaskBusSnapshot {
@@ -431,10 +417,6 @@ export function TaskBusProvider({ children }: PropsWithChildren) {
     setSnapshot((current) => cancelTaskInSnapshot(current, taskId));
   }, []);
 
-  const bindTaskGoal = useCallback<TaskBusValue["bindTaskGoal"]>((taskId, goalId) => {
-    setSnapshot((current) => bindTaskGoalInSnapshot(current, taskId, goalId));
-  }, []);
-
   const focusTask = useCallback<TaskBusValue["focusTask"]>((taskId) => {
     setSnapshot((current) => focusTaskInSnapshot(current, taskId));
   }, []);
@@ -502,7 +484,6 @@ export function TaskBusProvider({ children }: PropsWithChildren) {
       completeTask,
       errorTask,
       cancelTask,
-      bindTaskGoal,
       focusTask,
       startNewSession,
       dismissTask,
@@ -513,7 +494,6 @@ export function TaskBusProvider({ children }: PropsWithChildren) {
     }),
     [
       appendChunk,
-      bindTaskGoal,
       cancelTask,
       completeTask,
       createTask,
@@ -998,7 +978,6 @@ function isTaskLike(value: unknown): value is Task {
     typeof task.startedAt === "number" &&
     typeof task.updatedAt === "number" &&
     typeof task.lastUserMessage === "string" &&
-    (task.goalId === undefined || (typeof task.goalId === "string" && Boolean(task.goalId.trim()))) &&
     isTaskSource(task.source)
   );
 }

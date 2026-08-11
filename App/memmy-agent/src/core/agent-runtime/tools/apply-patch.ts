@@ -14,8 +14,7 @@ type PatchEdit = {
 
 type PendingChange =
   | { kind: "write"; rel: string; target: string; content: string; existed: boolean; previous: string | null }
-  | { kind: "delete"; rel: string; target: string; previous: string }
-  | { kind: "unchanged"; rel: string; target: string; previous: string | null };
+  | { kind: "delete"; rel: string; target: string; previous: string };
 
 type PatchPlan = {
   changes: PendingChange[];
@@ -197,6 +196,7 @@ export class ApplyPatchTool extends Tool {
       string,
       { rel: string; existed: boolean; content: string | null; previous: string | null }
     >();
+    const summaries: PatchSummary[] = [];
     const getState = async (rel: string, target: string) => {
       let state = contents.get(target);
       if (!state) {
@@ -223,9 +223,16 @@ export class ApplyPatchTool extends Tool {
 
       if (edit.action === "add") {
         if (newText == null) return `newText required for add: ${rel}`;
+        const before = state.content ?? "";
         const addition = normalizeNewText(newText);
         state.content =
           state.content == null ? addition : normalizeNewText(`${state.content}${newText}`);
+        if (state.existed) {
+          const [added, deleted] = lineDiffStats(before, state.content);
+          summaries.push(new PatchSummary("update", rel, added, deleted));
+        } else {
+          summaries.push(new PatchSummary("add", rel, textLineCount(state.content), 0));
+        }
         continue;
       }
 
@@ -235,59 +242,43 @@ export class ApplyPatchTool extends Tool {
 
       if (edit.action === "replace") {
         if (newText == null) return `newText required for replace: ${rel}`;
+        const before = state.content;
         state.content = normalizeNewText(state.content.replace(oldText, newText));
+        const [added, deleted] = lineDiffStats(before, state.content);
+        summaries.push(new PatchSummary("update", rel, added, deleted));
       } else if (edit.action === "delete") {
+        const before = state.content;
         if (state.content === oldText) {
           state.content = null;
+          summaries.push(new PatchSummary("delete", rel, 0, textLineCount(before)));
         } else {
           state.content = normalizeNewText(state.content.replace(oldText, ""));
+          const [added, deleted] = lineDiffStats(before, state.content);
+          summaries.push(new PatchSummary("update", rel, added, deleted));
         }
       } else {
         return `unknown action: ${edit.action}`;
       }
     }
 
-    const changes: PendingChange[] = [];
-    const summaries: PatchSummary[] = [];
-    for (const [target, state] of contents) {
-      if (state.previous === state.content) {
-        changes.push({ kind: "unchanged", rel: state.rel, target, previous: state.previous });
-        summaries.push(new PatchSummary("unchanged", state.rel));
-      } else if (state.content == null) {
-        changes.push({ kind: "delete", rel: state.rel, target, previous: state.previous ?? "" });
-        summaries.push(new PatchSummary("delete", state.rel, 0, textLineCount(state.previous ?? "")));
-      } else {
-        changes.push({
-          kind: "write",
-          rel: state.rel,
-          target,
-          content: state.content,
-          existed: state.existed,
-          previous: state.previous,
-        });
-        if (state.previous == null) {
-          summaries.push(new PatchSummary("add", state.rel, textLineCount(state.content), 0));
-        } else {
-          const [added, deleted] = lineDiffStats(state.previous, state.content);
-          summaries.push(new PatchSummary("update", state.rel, added, deleted));
-        }
-      }
-    }
+    const changes = [...contents.entries()].map(([target, state]) =>
+      state.content == null
+        ? { kind: "delete" as const, rel: state.rel, target, previous: state.previous ?? "" }
+        : {
+            kind: "write" as const,
+            rel: state.rel,
+            target,
+            content: state.content,
+            existed: state.existed,
+            previous: state.previous,
+          },
+    );
     return { changes, summaries };
   }
 
-  private async applyChanges(plan: PatchPlan, context?: ToolExecutionContext): Promise<string> {
-    const signal = context?.abortSignal ?? null;
-    const actionableChanges = plan.changes.filter((change) => change.kind !== "unchanged");
-    const unchangedChanges = plan.changes.filter((change) => change.kind === "unchanged");
-    if (!actionableChanges.length) {
-      for (const change of unchangedChanges) {
-        context?.reportFileMutation?.({ path: change.target, changed: false });
-      }
-      return `No changes made by patch:\n${plan.summaries.map(formatSummary).join("\n")}`;
-    }
+  private async applyChanges(plan: PatchPlan, signal?: AbortSignal | null): Promise<string> {
     const backups = new Map<string, Buffer | null>();
-    for (const change of actionableChanges) {
+    for (const change of plan.changes) {
       throwIfAborted(signal);
       backups.set(
         change.target,
@@ -296,7 +287,7 @@ export class ApplyPatchTool extends Tool {
     }
     let applied = false;
     try {
-      for (const change of actionableChanges) {
+      for (const change of plan.changes) {
         throwIfAborted(signal);
         if (change.kind === "delete") {
           applied = true;
@@ -308,7 +299,7 @@ export class ApplyPatchTool extends Tool {
         }
       }
       const lintRequests: FileLintRequest[] = [];
-      for (const change of actionableChanges) {
+      for (const change of plan.changes) {
         throwIfAborted(signal);
         if (change.kind === "delete") {
           if (fsSync.existsSync(change.target)) {
@@ -332,11 +323,7 @@ export class ApplyPatchTool extends Tool {
       }
       const lintResults = await lintFiles(lintRequests, { abortSignal: signal });
       const success = `Patch applied:\n${plan.summaries.map(formatSummary).join("\n")}`;
-      const result = appendFileLintResults(success, lintResults);
-      for (const change of unchangedChanges) {
-        context?.reportFileMutation?.({ path: change.target, changed: false });
-      }
-      return result;
+      return appendFileLintResults(success, lintResults);
     } catch (err) {
       if (applied) {
         for (const [target, data] of backups) {
@@ -360,10 +347,8 @@ export class ApplyPatchTool extends Tool {
     if (typeof planned === "string") return `Error: ${planned}`;
     throwIfAborted(signal);
     if (params.dryRun) {
-      const allUnchanged = planned.changes.every((change) => change.kind === "unchanged");
-      const prefix = allUnchanged ? "Patch dry-run found no changes" : "Patch dry-run succeeded";
-      return `${prefix}:\n${planned.summaries.map(formatSummary).join("\n")}`;
+      return `Patch dry-run succeeded:\n${planned.summaries.map(formatSummary).join("\n")}`;
     }
-    return this.applyChanges(planned, context);
+    return this.applyChanges(planned, signal);
   }
 }

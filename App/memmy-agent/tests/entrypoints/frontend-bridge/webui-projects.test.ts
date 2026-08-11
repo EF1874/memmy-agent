@@ -67,33 +67,6 @@ describe("ProjectStore", () => {
     expect(store.snapshot().projects).toHaveLength(2);
   });
 
-  it("reuses a project registered through another store instance", () => {
-    const root = tempRoot();
-    const projectRoot = path.join(root, "project");
-    fs.mkdirSync(projectRoot);
-    const filePath = path.join(root, "projects.json");
-    const firstStore = new ProjectStore({ filePath });
-    const secondStore = new ProjectStore({ filePath });
-
-    const first = firstStore.resolveOrRegisterExisting(projectRoot, (project) => project);
-    const second = secondStore.resolveOrRegisterExisting(projectRoot, (project) => project);
-
-    expect(second.id).toBe(first.id);
-    expect(secondStore.snapshot().projects).toHaveLength(1);
-  });
-
-  it("rolls back a new project when terminal Session creation fails", () => {
-    const root = tempRoot();
-    const projectRoot = path.join(root, "project");
-    fs.mkdirSync(projectRoot);
-    const store = storeAt(root);
-
-    expect(() => store.resolveOrRegisterExisting(projectRoot, () => {
-      throw new Error("session save failed");
-    })).toThrow("session save failed");
-    expect(store.snapshot()).toEqual({ state: "ready", projects: [] });
-  });
-
   it("renames and pins without changing identity, root, or creation time", () => {
     const root = tempRoot();
     const projectRoot = path.join(root, "project");

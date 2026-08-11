@@ -111,13 +111,11 @@ function inlineFallbackPreset(primary: ModelPresetConfig, fallback: InlineFallba
 }
 
 function resolveFallbackPresets(config: Config, primary: ModelPresetConfig): ModelPresetConfig[] {
-  return config.agents.defaults.fallbackModels
-    .map((fallback) =>
-      typeof fallback === "string"
-        ? config.modelPresets[fallback]
-        : inlineFallbackPreset(primary, fallback),
-    )
-    .filter((fallback): fallback is ModelPresetConfig => fallback instanceof ModelPresetConfig);
+  return config.agents.defaults.fallbackModels.map((fallback) =>
+    typeof fallback === "string"
+      ? config.modelPresets[fallback]
+      : inlineFallbackPreset(primary, fallback),
+  );
 }
 
 export function makeProvider(

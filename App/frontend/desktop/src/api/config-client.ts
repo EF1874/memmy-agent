@@ -7,7 +7,6 @@ import type {
   ModelConfigTestSecretTarget,
   ModelConfigView,
   ModelProvider,
-  AgentApiType,
   OnboardingStateDto,
   PrivacySettingsDto,
   RuntimeConfig,
@@ -37,9 +36,6 @@ import type { PreferredMode } from "../app/routes.js";
 import { requestJson } from "./http.js";
 
 export interface ModelProviderConfig {
-  configRevision?: string;
-  providers?: TextModelProviderConfig[];
-  defaultModelPreset?: string | null;
   provider: string;
   endpoint: string;
   model: string;
@@ -52,28 +48,7 @@ export interface ModelProviderConfig {
   imageGen?: ImageGenProviderConfig | null;
 }
 
-export interface TextModelConfig {
-  presetName?: string;
-  draftId?: string;
-  model: string;
-  isDefault: boolean;
-  available: boolean;
-}
-
-export interface TextModelProviderConfig {
-  provider: string;
-  endpoint: string;
-  apiType: AgentApiType;
-  apiKey: string;
-  apiKeyMasked: string;
-  configured: boolean;
-  accountManaged: boolean;
-  editable: boolean;
-  models: TextModelConfig[];
-}
-
 export interface RoleModelProviderConfig {
-  mode?: "follow" | "fixed";
   provider: string;
   endpoint: string;
   model: string;
@@ -212,7 +187,7 @@ export function createHttpConfigClient(config: RuntimeConfig): ConfigClient {
         path: "/api/app/model-config",
         schema: ModelConfigViewSchema,
         init: { method: "PUT" },
-        body: await toModelConfigInput(modelConfig)
+        body: toModelConfigInput(modelConfig)
       });
 
       return fromModelConfigView(response);
@@ -224,10 +199,7 @@ export function createHttpConfigClient(config: RuntimeConfig): ConfigClient {
         path: "/api/app/model-config/test",
         schema: ModelConfigTestResultSchema,
         body: ModelConfigTestInputSchema.parse({
-          provider: toModelProvider(modelConfig.provider),
-          baseUrl: modelConfig.endpoint,
-          modelId: modelConfig.model,
-          apiKey: modelConfig.apiKey || undefined,
+          ...toModelConfigInput(modelConfig),
           capability,
           secretTarget
         })
@@ -241,78 +213,17 @@ export function createHttpConfigClient(config: RuntimeConfig): ConfigClient {
   };
 }
 
-async function toModelConfigInput(config: ModelProviderConfig): Promise<ModelConfigInput> {
-  const providers = config.providers?.length
-    ? config.providers
-    : [{
-        provider: config.provider,
-        endpoint: config.endpoint,
-        apiType: "auto" as const,
-        apiKey: config.apiKey,
-        apiKeyMasked: config.apiKeyMasked,
-        configured: config.configured,
-        accountManaged: false,
-        editable: true,
-        models: [{
-          model: config.model,
-          isDefault: true,
-          available: config.configured
-        }]
-      }];
-  const preparedProviders = await Promise.all(providers.map(async (provider) => ({
-    provider,
-    models: await Promise.all(provider.models.map(async (model) => ({
-      ...model,
-      resolvedPresetName: model.presetName
-        ?? await desktopPresetName(provider.provider, model.model)
-    })))
-  })));
-  const selectedPreset = preparedProviders
-    .flatMap(({ models }) => models)
-    .find((model) => (
-      model.presetName === config.defaultModelPreset
-      || model.draftId === config.defaultModelPreset
-    ))?.resolvedPresetName
-    ?? config.defaultModelPreset
-    ?? null;
+function toModelConfigInput(config: ModelProviderConfig): ModelConfigInput {
   return ModelConfigInputSchema.parse({
-    configRevision: config.configRevision ?? "unknown",
-    providers: preparedProviders.map(({ provider, models }) => ({
-      provider: provider.provider,
-      apiBase: provider.endpoint || undefined,
-      apiType: provider.apiType,
-      apiKey: provider.apiKey || undefined,
-      models: models.map((model) => ({
-        presetName: model.resolvedPresetName,
-        model: model.model
-      }))
-    })),
-    defaultModelPreset: selectedPreset,
+    provider: toModelProvider(config.provider),
+    baseUrl: config.endpoint,
+    modelId: config.model,
+    apiKey: config.apiKey || undefined,
     embedding: toEmbeddingConfigInput(config.embedding),
     memmyMemory: toMemmyMemoryConfigInput(config),
     asr: toAsrConfigInput(config.asr),
     imageGen: toImageGenConfigInput(config.imageGen)
   });
-}
-
-async function desktopPresetName(provider: string, model: string): Promise<string> {
-  const normalizedProvider = readablePresetPart(provider, "provider");
-  const normalizedModel = readablePresetPart(model, "model").slice(0, 48).replace(/-+$/g, "");
-  const bytes = new TextEncoder().encode(`${provider.trim()}\0${model.trim()}`);
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
-  const shortHash = [...digest.slice(0, 4)]
-    .map((value) => value.toString(16).padStart(2, "0"))
-    .join("");
-  return `desktop-${normalizedProvider}-${normalizedModel || "model"}-${shortHash}`;
-}
-
-function readablePresetPart(value: string, fallback: string): string {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    || fallback;
 }
 
 function toImageGenConfigInput(config: ModelProviderConfig["imageGen"]): ModelConfigInput["imageGen"] {
@@ -332,20 +243,15 @@ function toEmbeddingConfigInput(config: ModelProviderConfig["embedding"]): Model
   if (config.mode === "local") {
     return { mode: "local" };
   }
-  if (config.mode === "cloud") {
-    return { mode: "cloud" };
-  }
   // Exclude incomplete custom embedding placeholders before validating the write schema.
   if (!config.endpoint.trim() || !config.model.trim()) {
     return undefined;
   }
   return {
     mode: "custom",
-    custom: {
-      baseUrl: config.endpoint,
-      modelId: config.model,
-      apiKey: config.apiKey || undefined
-    }
+    baseUrl: config.endpoint,
+    modelId: config.model,
+    apiKey: config.apiKey || undefined
   };
 }
 
@@ -362,8 +268,8 @@ function toMemmyMemoryConfigInput(config: ModelProviderConfig): ModelConfigInput
   }
 
   return {
-    summary: toMemoryRoleInput(memmyMemory.summary, summaryConfigured),
-    evolution: toMemoryRoleInput(memmyMemory.evolution, evolutionConfigured)
+    summary: toRoleModelConfigInput(summaryConfigured ? memmyMemory.summary : config),
+    evolution: toRoleModelConfigInput(evolutionConfigured ? memmyMemory.evolution : config)
   };
 }
 
@@ -380,19 +286,6 @@ function toRoleModelConfigInput(config: Pick<ModelProviderConfig, "provider" | "
   };
 }
 
-function toMemoryRoleInput(
-  config: RoleModelProviderConfig,
-  configured: boolean
-): NonNullable<ModelConfigInput["memmyMemory"]>["summary"] {
-  if (config.mode === "follow" || !configured) {
-    return { mode: "follow" };
-  }
-  return {
-    mode: "fixed",
-    fixed: toRoleModelConfigInput(config)
-  };
-}
-
 function toAsrConfigInput(config: ModelProviderConfig["asr"]): ModelConfigInput["asr"] {
   if (!config || !config.endpoint.trim()) return undefined;
   return {
@@ -404,40 +297,20 @@ function toAsrConfigInput(config: ModelProviderConfig["asr"]): ModelConfigInput[
 }
 
 function fromModelConfigView(view: ModelConfigView): ModelProviderConfig {
-  const selected = findSelectedTextModel(view);
-  const embeddingCustom = view.embedding?.custom ?? null;
   return {
-    configRevision: view.configRevision,
-    providers: view.providers.map((provider) => ({
-      provider: provider.provider,
-      endpoint: provider.apiBase,
-      apiType: provider.apiType,
-      apiKey: provider.apiKey,
-      apiKeyMasked: provider.apiKeyMasked,
-      configured: provider.configured,
-      accountManaged: provider.accountManaged,
-      editable: provider.editable,
-      models: provider.models.map((model) => ({
-        presetName: model.presetName,
-        model: model.model,
-        isDefault: model.isDefault,
-        available: model.available
-      }))
-    })),
-    defaultModelPreset: view.defaultModelPreset,
-    provider: selected?.provider.provider ?? "openai",
-    endpoint: selected?.provider.apiBase ?? "",
-    model: selected?.model.model ?? "",
-    apiKey: selected?.provider.apiKey ?? "",
-    apiKeyMasked: selected?.provider.apiKeyMasked ?? "",
-    configured: view.configured,
+    provider: fromModelProvider(view.provider),
+    endpoint: view.baseUrl,
+    model: view.modelId,
+    apiKey: view.apiKey,
+    apiKeyMasked: view.apiKeyMasked,
+    configured: view.hasApiKey,
     embedding: view.embedding ? {
       mode: view.embedding.mode,
-      endpoint: embeddingCustom?.baseUrl ?? "",
-      model: embeddingCustom?.modelId ?? "",
-      apiKey: embeddingCustom?.apiKey ?? "",
-      apiKeyMasked: embeddingCustom?.apiKeyMasked ?? "",
-      configured: embeddingCustom?.hasApiKey ?? view.embedding.mode !== "custom"
+      endpoint: view.embedding.baseUrl ?? "",
+      model: view.embedding.modelId ?? "",
+      apiKey: view.embedding.apiKey,
+      apiKeyMasked: view.embedding.apiKeyMasked,
+      configured: view.embedding.hasApiKey
     } : null,
     memmyMemory: {
       summary: fromRoleModelConfigView(view.memmyMemory.summary),
@@ -463,31 +336,14 @@ function fromModelConfigView(view: ModelConfigView): ModelProviderConfig {
 }
 
 function fromRoleModelConfigView(view: ModelConfigView["memmyMemory"]["summary"]): RoleModelProviderConfig {
-  const fixed = view.fixed;
   return {
-    mode: view.mode,
-    provider: fixed ? fromModelProvider(fixed.provider) : "openai",
-    endpoint: fixed?.baseUrl ?? "",
-    model: fixed?.modelId ?? "",
-    apiKey: fixed?.apiKey ?? "",
-    apiKeyMasked: fixed?.apiKeyMasked ?? "",
-    configured: fixed?.hasApiKey ?? false
+    provider: fromModelProvider(view.provider),
+    endpoint: view.baseUrl,
+    model: view.modelId,
+    apiKey: view.apiKey,
+    apiKeyMasked: view.apiKeyMasked,
+    configured: view.hasApiKey
   };
-}
-
-function findSelectedTextModel(view: ModelConfigView): {
-  provider: ModelConfigView["providers"][number];
-  model: ModelConfigView["providers"][number]["models"][number];
-} | null {
-  for (const provider of view.providers) {
-    const model = provider.models.find(
-      (candidate) => candidate.presetName === view.defaultModelPreset
-    );
-    if (model) return { provider, model };
-  }
-  const provider = view.providers[0];
-  const model = provider?.models[0];
-  return provider && model ? { provider, model } : null;
 }
 
 function toModelProvider(provider: string): ModelProvider {

@@ -4,6 +4,7 @@ import { evaluateResponse } from "../../../src/utils/evaluator.js";
 import { redirectLibLogging, redirectedLoggers } from "../../../src/utils/logging-bridge.js";
 import { renderTemplate } from "../../../src/utils/prompt-templates.js";
 import {
+  buildGoalContinueMessage,
   ensureNonemptyToolResult,
   externalLookupSignature,
   repeatedExternalLookupError,
@@ -59,6 +60,7 @@ describe("runtime helpers", () => {
     expect(ensureNonemptyToolResult("shell", "")).toBe("(shell completed with no output)");
     expect(ensureNonemptyToolResult("read", [{ type: "text", text: "   " }])).toBe("(read completed with no output)");
     expect(ensureNonemptyToolResult("read", "ok")).toBe("ok");
+    expect(buildGoalContinueMessage("keep going")).toEqual({ role: "user", content: "keep going" });
   });
 
   it("throttles repeated external lookups and workspace violations by signature", () => {

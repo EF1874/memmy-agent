@@ -481,108 +481,6 @@ describe("DAG patch schema", () => {
     expect(normalizeDagTaskTransition(parsed, context)).toBe(parsed);
   });
 
-  it("accepts side_branch only from a task to a subtask or decision", () => {
-    const valid = validateDagPatch(
-      {
-        ops: [
-          {
-            op: "add_node",
-            temp_id: "n0",
-            kind: "decision",
-            status: "done",
-            title: "旁支结论",
-            summary: "回答 Goal 外的持久问题",
-            importance: 60,
-          },
-          { op: "add_edge", source_id: "root-task", target_id: "n0", type: "side_branch" },
-        ],
-      },
-      { contextNodeKinds: { "root-task": "task" } },
-    );
-    expect(valid.ops.at(-1)).toEqual({
-      op: "add_edge",
-      source_id: "root-task",
-      target_id: "n0",
-      type: "side_branch",
-    });
-
-    expect(() => validateDagPatch(
-      {
-        ops: [{ op: "add_edge", source_id: "child", target_id: "decision", type: "side_branch" }],
-      },
-      { contextNodeKinds: { child: "subtask", decision: "decision" } },
-    )).toThrow(/side_branch source must be a task/);
-
-    expect(() => validateDagPatch(
-      {
-        ops: [{ op: "add_edge", source_id: "root-task", target_id: "other-task", type: "side_branch" }],
-      },
-      { contextNodeKinds: { "root-task": "task", "other-task": "task" } },
-    )).toThrow(/side_branch target must be a subtask or decision/);
-  });
-
-  it("enforces the locked Goal task for side_branch and terminal updates", () => {
-    const context = taskContext("active", [contextChild("existing-child", "active")], "goal-1");
-    const goal = { goalId: "goal-1", objective: "完成目标", status: "active" as const };
-    const sideBranch = validateDagPatch(
-      {
-        ops: [
-          {
-            op: "add_node",
-            temp_id: "n0",
-            kind: "subtask",
-            status: "done",
-            title: "旁支",
-            summary: "无关问题",
-            importance: 40,
-          },
-          { op: "add_edge", source_id: "root-task", target_id: "n0", type: "side_branch" },
-        ],
-      },
-      { contextNodeKinds: contextKinds(context) },
-    );
-    expect(normalizeDagTaskTransition(sideBranch, context, goal)).toBe(sideBranch);
-
-    const contextWithHistoricalTask: DagBuilderContext = {
-      ...context,
-      nodes: [
-        ...context.nodes,
-        { ...context.nodes[0]!, id: "historical-goal-task", status: "done", goal_id: "goal-old" },
-      ],
-    };
-    const wrongSource = validateDagPatch(
-      {
-        ops: [
-          {
-            op: "add_node",
-            temp_id: "n0",
-            kind: "decision",
-            status: "done",
-            title: "错误旁支",
-            summary: "从子节点发出",
-            importance: 40,
-          },
-          { op: "add_edge", source_id: "historical-goal-task", target_id: "n0", type: "side_branch" },
-        ],
-      },
-      { contextNodeKinds: contextKinds(contextWithHistoricalTask) },
-    );
-    expect(() => normalizeDagTaskTransition(wrongSource, contextWithHistoricalTask, goal)).toThrow(/current Goal task/);
-    expect(() => normalizeDagTaskTransition(sideBranch, context, null)).toThrow(/current Goal task/);
-
-    const closeEarly = validateDagPatch(
-      { ops: [{ op: "update_node", node_id: "root-task", status: "done" }] },
-      { contextNodeKinds: contextKinds(context) },
-    );
-    expect(() => normalizeDagTaskTransition(closeEarly, context, goal)).toThrow(/Unfinished Goal turn/);
-
-    const completeAsFailed = validateDagPatch(
-      { ops: [{ op: "update_node", node_id: "root-task", status: "failed" }] },
-      { contextNodeKinds: contextKinds(context) },
-    );
-    expect(() => normalizeDagTaskTransition(completeAsFailed, context, { ...goal, status: "completed" })).toThrow(/only close its task as done/);
-  });
-
   it("rejects chained new subtasks when chain root is isolated", () => {
     expect(() =>
       validateDagPatch({
@@ -757,14 +655,12 @@ function contextChild(id: string, status: "active" | "done" | "failed" | "blocke
     updated_turn_id: "turn-1",
     first_message_index: 0,
     last_message_index: 2,
-    goal_id: null,
   };
 }
 
 function taskContext(
   status: "active" | "done" | "failed" | "blocked" | "frozen",
   children: DagBuilderContext["nodes"] = [],
-  goalId: string | null = null,
 ): DagBuilderContext {
   return {
     root_task_id: "root-task",
@@ -782,7 +678,6 @@ function taskContext(
         updated_turn_id: "turn-1",
         first_message_index: 0,
         last_message_index: 2,
-        goal_id: goalId,
       },
       ...children,
     ],

@@ -194,6 +194,9 @@ const RuntimeRequestFieldsSchema = z.object({
   source: NonEmptyStringSchema.optional()
 });
 
+export const MemoryActiveProfileSchema = z.enum(["account", "byok"]);
+export type MemoryActiveProfile = z.infer<typeof MemoryActiveProfileSchema>;
+
 export const MemoryModelStatusSchema = z.object({
   provider: z.string(),
   model: z.string().optional(),
@@ -205,15 +208,9 @@ export const MemoryModelStatusSchema = z.object({
 export type MemoryModelStatus = z.infer<typeof MemoryModelStatusSchema>;
 
 export const MemoryModelsStatusSchema = z.object({
-  summary: MemoryModelStatusSchema.extend({
-    routing: z.enum(["follow", "fixed"]).nullable()
-  }),
-  evolution: MemoryModelStatusSchema.extend({
-    routing: z.enum(["follow", "fixed"]).nullable()
-  }),
-  embedding: MemoryModelStatusSchema.extend({
-    mode: z.enum(["cloud", "local", "custom"]).nullable()
-  })
+  summary: MemoryModelStatusSchema,
+  evolution: MemoryModelStatusSchema,
+  embedding: MemoryModelStatusSchema
 });
 export type MemoryModelsStatus = z.infer<typeof MemoryModelsStatusSchema>;
 
@@ -235,6 +232,7 @@ export const MemoryHealthSnapshotSchema = z.object({
     memoryLayers: z.array(MemoryLayerSchema),
     supportsCli: z.boolean()
   }),
+  activeProfile: MemoryActiveProfileSchema,
   models: MemoryModelsStatusSchema,
   serverTime: IsoTimeSchema
 });
@@ -247,6 +245,7 @@ export const MemoryReloadConfigInputSchema = RuntimeRequestFieldsSchema.extend({
 export type MemoryReloadConfigInput = z.infer<typeof MemoryReloadConfigInputSchema>;
 
 export const MemoryReloadConfigOutputSchema = z.object({
+  activeProfile: MemoryActiveProfileSchema,
   changed: z.boolean(),
   requiresRestart: z.boolean(),
   models: MemoryModelsStatusSchema,
@@ -793,10 +792,7 @@ export const ApiErrorCodeSchema = z.enum([
   "skill_write_not_permitted",
   "agent_source_unavailable",
   "composio_not_configured",
-  "toolkit_unsupported",
-  "model_config_changed",
-  "config_write_busy",
-  "account_model_preset_conflict"
+  "toolkit_unsupported"
 ]);
 export type ApiErrorCode = z.infer<typeof ApiErrorCodeSchema>;
 

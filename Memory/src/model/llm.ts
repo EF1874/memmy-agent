@@ -1,6 +1,6 @@
 import type { LlmConfig } from "../config/index.js";
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
-import { resolveMemoryAgentRegion } from "./agent-region.js";
+import type { MemoryAgentRegion } from "./agent-region.js";
 import { bearer, postJsonWithRetry, trimTrailingSlash } from "./http.js";
 import {
   HttpByokTokenUsageRecorder,
@@ -70,6 +70,7 @@ interface ThinkingControl {
 
 export interface CreateLlmClientOptions {
   modelRole?: MemoryLlmModelRole;
+  agentRegion?: MemoryAgentRegion;
 }
 
 export function createLlmClient(config: LlmConfig, options: CreateLlmClientOptions = {}): LlmClient {
@@ -297,7 +298,6 @@ class HttpLlmClient implements LlmClient {
     const thinkingBudget = thinking.enabled && thinkingUsesEnableThinking(this.config.vendor ?? "", base, model)
       ? this.config.thinkingBudget
       : undefined;
-    const agentRegion = resolveMemoryAgentRegion(this.config.sourceProvider);
     const response = await postJsonWithRetry<OpenAiChatResponse>({
       provider: "openai_compatible",
       operation: options.operation,
@@ -305,7 +305,7 @@ class HttpLlmClient implements LlmClient {
       url,
       headers: {
         ...bearer(this.config.apiKey),
-        ...(agentRegion ? { "X-Agent-Region": agentRegion } : {})
+        ...(this.options.agentRegion ? { "X-Agent-Region": this.options.agentRegion } : {})
       },
       timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
       maxRetries: options.maxRetries ?? this.config.maxRetries,
@@ -527,7 +527,7 @@ class HttpLlmClient implements LlmClient {
     this.usageRecorder.record({
       kind: this.options.modelRole,
       operation: options.operation,
-      provider: this.config.sourceProvider ?? this.config.provider,
+      provider: this.config.provider,
       model: this.config.model,
       endpoint: this.config.endpoint,
       usage: extractModelTokenUsage(response)

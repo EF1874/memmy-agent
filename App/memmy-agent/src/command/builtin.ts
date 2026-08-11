@@ -7,15 +7,11 @@ import {
   setRestartNoticeToEnv,
   type ManagedRestartNotice
 } from "../utils/restart.js";
-import { readModelCatalog, resolveModelSelection } from "../providers/model-catalog.js";
 import { handlePairingCommand } from "../integrations/channel-auth/store.js";
 import { DEFAULT_MAX_TOKENS } from "../token-budget.js";
 import { buildStatusContent } from "../utils/helpers.js";
 import { fetchSearchUsage } from "../utils/searchusage.js";
 import { buildHistoryDagPayload, renderHistoryDagSummary, SessionDagStore } from "../session-dag/index.js";
-import { GoalRuntimeError } from "../core/agent-runtime/goal-runtime.js";
-import { publicGoalState, type GoalState } from "../core/session/goal-state.js";
-import { GOAL_COMMAND_SUBCOMMANDS } from "../core/session/webui-user-content.js";
 import { VERSION } from "../version.js";
 import { CommandContext, CommandRouter } from "./router.js";
 
@@ -38,16 +34,10 @@ export const BUILTIN_COMMAND_SPECS = [
   new BuiltinCommandSpec("/stop", "Stop current task", "Cancel the active agent turn for this chat.", "square"),
   new BuiltinCommandSpec("/restart", "Restart memmy", "Restart the bot process in place.", "rotate-cw"),
   new BuiltinCommandSpec("/status", "Show status", "Display runtime, provider, and channel status.", "activity"),
-  new BuiltinCommandSpec("/model", "Switch model preset", "Show, list, or switch the active model preset.", "brain", "[list|preset]"),
+  new BuiltinCommandSpec("/model", "Switch model preset", "Show or switch the active model preset.", "brain", "[preset]"),
   new BuiltinCommandSpec("/history", "Show conversation history", "Print the last N persisted conversation messages.", "history", "[n]"),
   new BuiltinCommandSpec("/history-dag", "Show history DAG", "Show the task-state DAG for this chat.", "git-branch"),
-  new BuiltinCommandSpec(
-    "/goal",
-    "Manage persistent goal",
-    "Create, inspect, pause, resume, edit, budget, or clear a persistent Goal.",
-    "activity",
-    "[status|help|create <objective>|pause|resume|edit <objective>|budget <n|none>|clear]",
-  ),
+  new BuiltinCommandSpec("/goal", "Start long-running goal", "Tell the agent to treat the request as a long-running goal.", "activity", "<goal>"),
   new BuiltinCommandSpec("/dream", "Run Dream", "Manually trigger memory consolidation.", "sparkles"),
   new BuiltinCommandSpec("/dream-log", "Show Dream log", "Show what the last Dream consolidation changed.", "book-open"),
   new BuiltinCommandSpec("/dream-restore", "Restore memory", "Revert memory to a previous Dream snapshot.", "undo-2"),
@@ -160,19 +150,6 @@ export function scheduleRestartForCommand(delayMs = 1000): void {
 }
 
 export async function cmdStop(ctx: CommandContext): Promise<OutboundMessage> {
-  const activeGoal = ctx.loop?.goalRuntime?.get?.(ctx.key);
-  if (activeGoal?.status === "active") {
-    try {
-      const result = await ctx.loop.goalRuntime.pauseAndCancel(ctx.key, activeGoal.goalId);
-      return reply(
-        ctx,
-        result.warning ? "Goal paused. Warning: turn_cancel_failed" : "Goal paused.",
-      );
-    } catch (error) {
-      const code = error instanceof GoalRuntimeError ? error.code : String(error);
-      return reply(ctx, `Could not pause Goal: ${code}`);
-    }
-  }
   const total = ctx.loop?.cancelActiveTasks ? await ctx.loop.cancelActiveTasks(ctx.key) : 0;
   return reply(ctx, total ? `Stopped ${total} task(s).` : "No active task to stop.");
 }
@@ -259,38 +236,22 @@ function formatPresetNames(names: string[]): string {
   return names.length ? names.map((name) => `\`${name}\``).join(", ") : "(none configured)";
 }
 
-function modelPresetNames(): string[] {
-  return readModelCatalog().items
-    .filter((item) => item.available)
-    .map((item) => item.preset);
+function modelPresetNames(loop: any): string[] {
+  const names = new Set(Object.keys(loop.modelPresets ?? {}));
+  names.add("default");
+  return ["default", ...[...names].filter((name) => name !== "default").sort()];
 }
 
-function modelCommandList(): string {
-  const items = readModelCatalog().items.filter((item) => item.available);
-  return [
-    "## Model presets",
-    ...(items.length
-      ? items.map((item) => `- \`${item.preset}\` -> \`${item.provider} / ${item.model}\``)
-      : ["- (none configured)"]),
-  ].join("\n");
+function activeModelPresetName(loop: any): string {
+  return loop.modelPreset ?? "default";
 }
 
-function sessionModelPreset(ctx: CommandContext): string | null {
-  const session = ctx.session ?? ctx.loop?.sessions?.get?.(ctx.key);
-  return typeof session?.metadata?.modelPreset === "string"
-    ? session.metadata.modelPreset
-    : null;
-}
-
-function modelCommandStatus(ctx: CommandContext): string {
-  const selection = resolveModelSelection({
-    sessionPreset: sessionModelPreset(ctx),
-  });
+function modelCommandStatus(loop: any): string {
   return [
     "## Model",
-    `- Current model: \`${selection ? `${selection.provider} / ${selection.model}` : "(none configured)"}\``,
-    `- Current preset: \`${selection?.preset ?? "(none configured)"}\``,
-    `- Available presets: ${formatPresetNames(modelPresetNames())}`,
+    `- Current model: \`${loop.model}\``,
+    `- Current preset: \`${activeModelPresetName(loop)}\``,
+    `- Available presets: ${formatPresetNames(modelPresetNames(loop))}`,
   ].join("\n");
 }
 
@@ -298,145 +259,49 @@ export async function cmdModel(ctx: CommandContext): Promise<OutboundMessage> {
   const loop = ctx.loop;
   const args = ctx.args.trim();
   const metadata = { renderAs: "text" };
-  if (!args) return reply(ctx, modelCommandStatus(ctx), metadata);
+  if (!args) return reply(ctx, modelCommandStatus(loop), metadata);
   const parts = args.split(/\s+/);
-  if (parts.length !== 1) return reply(ctx, "Usage: `/model [list|preset]`", metadata);
-  if (parts[0]?.toLowerCase() === "list") {
-    return reply(ctx, modelCommandList(), metadata);
-  }
+  if (parts.length !== 1) return reply(ctx, "Usage: `/model [preset]`", metadata);
 
   try {
-    const session = ctx.session ?? loop?.sessions?.get?.(ctx.key);
-    if (!session) throw new Error("No active Session is available");
-    const selection = typeof loop?.applySessionModelPresetLocked === "function"
-      ? loop.applySessionModelPresetLocked(session, parts[0])
-      : resolveAndPersistSessionModel(loop, session, parts[0]);
-    const lines = [
-      `Switched this Session to \`${selection.preset}\`.`,
-      `- Model: \`${selection.provider} / ${selection.model}\``,
-      `- Context window: ${selection.snapshot.contextWindowTokens}`,
-    ];
-    const maxTokens = selection.snapshot.provider?.generation?.maxTokens;
-    if (maxTokens != null) lines.push(`- Max output tokens: ${maxTokens}`);
-    return reply(ctx, lines.join("\n"), metadata);
+    loop.setModelPreset(parts[0]);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return reply(ctx, `Could not switch model preset: ${message}\n\nAvailable presets: ${formatPresetNames(modelPresetNames())}`, metadata);
+    return reply(ctx, `Could not switch model preset: ${message}\n\nAvailable presets: ${formatPresetNames(modelPresetNames(loop))}`, metadata);
   }
+
+  const maxTokens = loop.provider?.generation?.max_tokens ?? loop.provider?.generation?.maxTokens;
+  const lines = [
+    `Switched model preset to \`${activeModelPresetName(loop)}\`.`,
+    `- Model: \`${loop.model}\``,
+    `- Context window: ${loop.contextWindowTokens}`,
+  ];
+  if (maxTokens != null) lines.push(`- Max output tokens: ${maxTokens}`);
+  return reply(ctx, lines.join("\n"), metadata);
 }
 
-function resolveAndPersistSessionModel(loop: any, session: any, preset: string) {
-  const selection = resolveModelSelection({ requestedPreset: preset });
-  const requested = readModelCatalog().items.find((item) => item.preset === preset && item.available);
-  if (!selection || !requested || selection.preset !== preset) {
-    throw new Error(`Unknown or unavailable model preset '${preset}'`);
+const GOAL_PROMPT_TEMPLATE = `The user declared a sustained objective for this thread.
+
+Inspect or clarify if needed, then call \`long_task\` with the refined objective (and optional short uiSummary). Work proceeds as normal assistant turns using your usual tools. When the objective is fully done and verified, call \`complete_goal\` with a brief recap. If the user later cancels or changes direction, still call \`complete_goal\` with an honest recap (then \`long_task\` again only after there is no active goal). Do not use \`long_task\` / \`complete_goal\` for trivial one-shot answers.
+
+Goal:
+{goal}
+`;
+
+export async function cmdGoal(ctx: CommandContext): Promise<OutboundMessage | null> {
+  const goal = ctx.args.trim();
+  if (!goal) return reply(ctx, "Usage: /goal <long-running task description>", { renderAs: "text" });
+  if (ctx.session == null) {
+    return reply(ctx, "A task is already running for this chat. Use `/stop` first, then send `/goal <long-running task description>` again.", { renderAs: "text" });
   }
-  session.metadata.modelPreset = selection.preset;
-  loop.sessions.save(session, { fsync: true });
-  loop.guiTranscriptMirror?.sessionUpdated?.(session.key);
-  return selection;
-}
-
-function goalActions(goal: GoalState | null): string {
-  if (!goal) return "create <objective>";
-  if (goal.status === "active") return "pause, clear";
-  if (goal.status === "budget_limited") return "edit, budget <n|none>, clear";
-  if (goal.status === "completed") return "clear, create <objective>";
-  return "resume, edit, budget <n|none>, clear";
-}
-
-function goalStatusText(goal: GoalState | null): string {
-  return [
-    "## Goal",
-    JSON.stringify(publicGoalState(goal), null, 2),
-    `Available: ${goalActions(goal)}`,
-  ].join("\n");
-}
-
-function goalHelpText(): string {
-  return [
-    "/goal — show status",
-    "/goal status — show status",
-    "/goal <objective> — create a Goal",
-    "/goal create <objective> — create a Goal",
-    "/goal pause — pause and stop the current Goal turn",
-    "/goal resume — resume a paused, blocked, or usage-limited Goal",
-    "/goal edit <objective> — edit a non-active Goal",
-    "/goal budget <positive-int|none> — set or remove the cumulative token budget",
-    "/goal clear — cancel and remove the Goal",
-    "usage_limited requires provider capacity before resume; budget_limited requires a larger or removed budget, then resume.",
-  ].join("\n");
-}
-
-export async function cmdGoal(ctx: CommandContext): Promise<OutboundMessage> {
-  const runtime = ctx.loop?.goalRuntime;
-  if (!runtime) return reply(ctx, "Goal runtime is unavailable.", { renderAs: "text" });
-  const rawArgs = ctx.args.trim();
-  const [first = "", ...remaining] = rawArgs.split(/\s+/);
-  const command = first.toLowerCase();
-  const explicitSubcommand = GOAL_COMMAND_SUBCOMMANDS.has(command);
-  const argument = explicitSubcommand ? remaining.join(" ").trim() : rawArgs;
-  const current = runtime.get(ctx.key);
-  try {
-    if (!rawArgs || command === "status") {
-      return reply(ctx, goalStatusText(current), { renderAs: "text" });
-    }
-    if (command === "help") return reply(ctx, goalHelpText(), { renderAs: "text" });
-    if (command === "pause") {
-      if (argument) throw new GoalRuntimeError("invalid_transition");
-      if (!current) throw new GoalRuntimeError("goal_not_found");
-      const result = await runtime.pauseAndCancel(ctx.key, current.goalId);
-      const warning = result.warning ? "\nWarning: turn_cancel_failed" : "";
-      return reply(ctx, `Goal paused.${warning}\n${goalStatusText(result.goal)}`, { renderAs: "text" });
-    }
-    if (command === "resume") {
-      if (argument) throw new GoalRuntimeError("invalid_transition");
-      if (!current) throw new GoalRuntimeError("goal_not_found");
-      const goal = await runtime.resume(ctx.key, current.goalId);
-      return reply(ctx, `Goal resumed.\n${goalStatusText(goal)}`, { renderAs: "text" });
-    }
-    if (command === "edit") {
-      if (!current) throw new GoalRuntimeError("goal_not_found");
-      const goal = await runtime.edit(ctx.key, current.goalId, argument);
-      return reply(ctx, `Goal updated.\n${goalStatusText(goal)}`, { renderAs: "text" });
-    }
-    if (command === "budget") {
-      if (!current) throw new GoalRuntimeError("goal_not_found");
-      const budget = argument.toLowerCase() === "none"
-        ? null
-        : /^\d+$/.test(argument)
-          ? Number(argument)
-          : Number.NaN;
-      const goal = await runtime.setBudget(ctx.key, current.goalId, budget);
-      return reply(ctx, `Goal budget updated.\n${goalStatusText(goal)}`, { renderAs: "text" });
-    }
-    if (command === "clear") {
-      if (argument) throw new GoalRuntimeError("invalid_transition");
-      if (!current) throw new GoalRuntimeError("goal_not_found");
-      await runtime.clear(ctx.key, current.goalId);
-      return reply(ctx, `Goal cleared.\n${goalStatusText(null)}`, { renderAs: "text" });
-    }
-
-    const objective = command === "create" ? argument : rawArgs;
-    const turnId = String(ctx.turnId ?? ctx.msg.metadata?.turn_id ?? "").trim();
-    if (!turnId) throw new GoalRuntimeError("goal_route_unavailable");
-    const goal = await runtime.create({
-      sessionKey: ctx.key,
-      objective,
-      route: { channel: ctx.msg.channel, chatId: ctx.msg.chatId },
-      turnId,
-    });
-    ctx.loop.scheduleGoalWork?.(ctx.key, goal);
-    return reply(ctx, `Goal created.\n${goalStatusText(goal)}`, {
-      renderAs: "text",
-      ...(ctx.msg.channel === "websocket" && ctx.msg.metadata?.webui === true
-        ? { webuiGoalCreateAck: true }
-        : {}),
-    });
-  } catch (error) {
-    const code = error instanceof GoalRuntimeError ? error.code : String(error);
-    return reply(ctx, `Goal command failed: ${code}`, { renderAs: "text" });
-  }
+  ctx.msg.metadata = {
+    ...(ctx.msg.metadata ?? {}),
+    originalCommand: "/goal",
+    originalContent: ctx.raw,
+    goalStartedAt: Date.now() / 1000,
+  };
+  ctx.msg.content = ctx.msg.text = GOAL_PROMPT_TEMPLATE.replace("{goal}", goal);
+  return null;
 }
 
 function extractChangedFiles(diff: string): string[] {
@@ -553,7 +418,7 @@ export async function cmdStatus(ctx: CommandContext): Promise<OutboundMessage> {
   } catch {
     contextEstimate = 0;
   }
-  const lastUsage = loop?.lastUsageBySession?.get?.(ctx.key) ?? {};
+  const lastUsage = loop?.lastUsage ?? {};
   if (contextEstimate <= 0) contextEstimate = Number(lastUsage.prompt_tokens ?? 0);
 
   let searchUsageText: string | null = null;
@@ -666,9 +531,7 @@ export async function cmdHistory(ctx: CommandContext): Promise<OutboundMessage> 
     typeof session?.getHistory === "function"
       ? session.getHistory({ maxMessages: 0 })
       : (session?.messages ?? []);
-  const filtered = history.filter(
-    (message: any) => !message.commandMessage && message.internal_context !== "goal_continuation",
-  );
+  const filtered = history.filter((message: any) => !message.commandMessage);
   const visible = filtered.map(formatHistoryMessage).filter((message: string | null): message is string => Boolean(message));
   const recent = visible.slice(-count);
   if (!recent.length) return reply(ctx, "No conversation history yet.");

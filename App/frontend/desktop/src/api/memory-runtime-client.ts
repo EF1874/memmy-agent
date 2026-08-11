@@ -243,10 +243,11 @@ export function createUnavailableMemoryRuntimeClient(): MemoryRuntimeClient {
           memoryLayers: ["L1", "L2", "L3", "Skill"],
           supportsCli: false
         },
+        activeProfile: "byok",
         models: {
-          summary: { provider: "", configured: false, remote: false, routing: null },
-          evolution: { provider: "", configured: false, remote: false, routing: null },
-          embedding: { provider: "local", configured: true, remote: false, mode: null }
+          summary: { provider: "", configured: false, remote: false },
+          evolution: { provider: "", configured: false, remote: false },
+          embedding: { provider: "local", configured: true, remote: false }
         },
         serverTime: new Date().toISOString()
       };

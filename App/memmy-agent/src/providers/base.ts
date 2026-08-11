@@ -57,8 +57,6 @@ export class LLMResponse {
   errorCode?: string | null;
   errorRetryAfterS?: number | null;
   errorShouldRetry?: boolean | null;
-  actualProvider?: string | null;
-  actualModel?: string | null;
   errorCategory?: ProviderErrorCategory | null;
 
   constructor(init: {
@@ -75,8 +73,6 @@ export class LLMResponse {
     errorCode?: string | null;
     errorRetryAfterS?: number | null;
     errorShouldRetry?: boolean | null;
-    actualProvider?: string | null;
-    actualModel?: string | null;
     errorCategory?: ProviderErrorCategory | null;
   }) {
     this.content = init.content;
@@ -92,8 +88,6 @@ export class LLMResponse {
     this.errorCode = init.errorCode ?? null;
     this.errorRetryAfterS = init.errorRetryAfterS ?? null;
     this.errorShouldRetry = init.errorShouldRetry ?? null;
-    this.actualProvider = init.actualProvider ?? null;
-    this.actualModel = init.actualModel ?? null;
     this.errorCategory = init.errorCategory ?? null;
   }
 

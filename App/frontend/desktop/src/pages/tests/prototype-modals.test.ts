@@ -47,9 +47,9 @@ describe("2026-06-04 prototype modals", () => {
     const applyMoreSource = readSource(resolve(appDir, "app/token-exhausted-apply-more.ts"));
 
     expect(messagesSource).toContain('"tokenExhausted.title": "体验额度已用完"');
-    expect(messagesSource).toContain('"tokenExhausted.body": "赠送 Token 已耗尽，可以申请更多赠送，也可切换为自定义 API Key 继续使用。"');
+    expect(messagesSource).toContain('"tokenExhausted.body": "赠送 Token 已耗尽，可以申请更多赠送，也可切换为自己的 API Key 继续使用。"');
     expect(messagesSource).toContain('"tokenExhausted.applyMore": "获取更多赠送 Token"');
-    expect(messagesSource).toContain('"tokenExhausted.switchApiKey": "使用自定义 API Key"');
+    expect(messagesSource).toContain('"tokenExhausted.switchApiKey": "更换自己的 API Key"');
     expect(messagesSource).toContain('"tokenExhausted.later": "稍后再说"');
     expect(modalSource).toContain('import { Gift } from "lucide-react"');
     expect(modalSource).toContain('pose="sad"');
@@ -69,7 +69,7 @@ describe("2026-06-04 prototype modals", () => {
     expect(settingsSource).toContain("consumeTokenExhaustedApplyMoreRequest");
     expect(settingsSource).toContain("TOKEN_EXHAUSTED_APPLY_MORE_EVENT");
     expect(settingsSource).toContain("canApplyMoreByPromotion");
-    expect(settingsSource).toContain('id="model-config"');
+    expect(settingsSource).toContain('sectionId="model-config"');
     expect(settingsSource).toContain('sectionId="token-usage"');
   });
 

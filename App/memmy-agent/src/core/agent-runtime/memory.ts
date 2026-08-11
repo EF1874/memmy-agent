@@ -671,32 +671,6 @@ export class Consolidator {
     this.maxCompletionTokens = provider?.generation?.maxTokens ?? this.maxCompletionTokens;
   }
 
-  withProviderSnapshot(
-    provider: any,
-    model: string,
-    contextWindowTokens: number,
-  ): Consolidator {
-    const scoped = new Consolidator({
-      store: this.store,
-      provider,
-      model,
-      sessions: this.sessions,
-      contextWindowTokens,
-      buildMessages: this.buildMessages,
-      getToolDefinitions: this.getToolDefinitions,
-      maxCompletionTokens: provider?.generation?.maxTokens ?? this.maxCompletionTokens,
-      consolidationRatio: this.consolidationRatio,
-      unifiedSession: this.unifiedSession,
-      lifecycleHook: this.lifecycleHook,
-      summaryMode: this.summaryMode,
-      dagQueue: this.dagQueue,
-      dagCatchupTimeoutMs: this.dagCatchupTimeoutMs,
-      createDagStore: this.createDagStore,
-    });
-    scoped.locks = this.locks;
-    return scoped;
-  }
-
   getLock(sessionKey: string): AsyncLock {
     let lock = this.locks.get(sessionKey);
     if (!lock) {

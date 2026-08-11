@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  buildToolEventStartPayload,
   buildToolEventFinishPayloads,
   onProgressAcceptsFileEditEvents,
   onProgressAcceptsReasoning,
@@ -33,22 +32,6 @@ describe("progress event capabilities", () => {
 });
 
 describe("tool progress result sanitization", () => {
-  it("uses one UI identity without changing the protocol call id", () => {
-    const call = { id: "provider-call-1", name: "write_file", arguments: { path: "a.ts" } };
-    const start = buildToolEventStartPayload(call);
-    const [finish] = buildToolEventFinishPayloads({
-      toolCalls: [call],
-      toolResults: ["ok"],
-      toolEvents: [{ status: "ok" }],
-    });
-
-    expect(start.call_id).toBe("provider-call-1");
-    expect(finish.call_id).toBe("provider-call-1");
-    expect(start.ui_tool_call_id).toEqual(expect.any(String));
-    expect(finish.ui_tool_call_id).toBe(start.ui_tool_call_id);
-    expect(call).toEqual({ id: "provider-call-1", name: "write_file", arguments: { path: "a.ts" } });
-  });
-
   it("replaces inline images with saved artifact references", () => {
     const sanitized = sanitizeToolEventResult([
       { type: "text", text: "page screenshot" },

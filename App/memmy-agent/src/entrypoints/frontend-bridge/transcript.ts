@@ -3,7 +3,6 @@ import fs from "node:fs";
 import path from "node:path";
 import { lookup as lookupMime } from "mime-types";
 import { getWebuiDir } from "../../config/paths.js";
-import { parseTurnSource } from "../../core/runtime-messages/events.js";
 
 export const WEBUI_TRANSCRIPT_SCHEMA_VERSION = 3;
 
@@ -24,28 +23,9 @@ export interface ReplayTranscriptOptions {
   augmentAssistantMedia?: AugmentAssistantMedia | null;
   augmentAssistantText?: AugmentAssistantText | null;
   sessionMessages?: Dict[] | null;
-  surface?: "gui" | "tui";
 }
 
 export interface BuildWebuiThreadResponseOptions extends ReplayTranscriptOptions {}
-
-function surfaceAwareTranscriptLines(
-  lines: Dict[],
-  surface: "gui" | "tui",
-): Dict[] {
-  if (surface === "gui") return lines;
-  const visibleTurnIds = new Set<string>();
-  for (const line of lines) {
-    if (line.event !== "user") continue;
-    const turnId = stringValue(line.turn_id) ?? stringValue(line.turnId);
-    if (!turnId || parseTurnSource(line.source)?.kind !== "tui") continue;
-    visibleTurnIds.add(turnId);
-  }
-  return lines.filter((line) => {
-    const turnId = stringValue(line.turn_id) ?? stringValue(line.turnId);
-    return turnId !== null && visibleTurnIds.has(turnId);
-  });
-}
 
 export interface RewriteLocalMarkdownImagesOptions {
   workspacePath?: string;
@@ -208,9 +188,9 @@ export function readTranscriptLines(sessionKey: string): Dict[] {
   return out;
 }
 
-export function appendTranscriptObject(sessionKey: string, obj: Dict): number;
-export function appendTranscriptObject(root: string, id: string, obj: Dict): number;
-export function appendTranscriptObject(sessionKeyOrRoot: string, objOrId: Dict | string, maybeObj?: Dict): number {
+export function appendTranscriptObject(sessionKey: string, obj: Dict): void;
+export function appendTranscriptObject(root: string, id: string, obj: Dict): void;
+export function appendTranscriptObject(sessionKeyOrRoot: string, objOrId: Dict | string, maybeObj?: Dict): void {
   const file = typeof objOrId === "string"
     ? webuiTranscriptPath(sessionKeyOrRoot, objOrId)
     : webuiTranscriptPath(sessionKeyOrRoot);
@@ -226,49 +206,9 @@ export function appendTranscriptObject(sessionKeyOrRoot: string, objOrId: Dict |
   try {
     fs.writeSync(fd, `${raw}\n`, undefined, "utf8");
     fs.fsyncSync(fd);
-    return fs.fstatSync(fd).size;
   } finally {
     fs.closeSync(fd);
   }
-}
-
-export function readTranscriptChunk(
-  sessionKey: string,
-  offset: number,
-): {
-  inode: number;
-  nextOffset: number;
-  completeLines: string[];
-  remainder: string;
-  size: number;
-} | null {
-  const file = webuiTranscriptPath(sessionKey);
-  let stat: fs.Stats;
-  try {
-    stat = fs.statSync(file);
-  } catch {
-    return null;
-  }
-  if (!stat.isFile() || stat.size > MAX_TRANSCRIPT_FILE_BYTES) return null;
-  const start = Math.max(0, Math.min(Math.trunc(offset), stat.size));
-  const length = stat.size - start;
-  const buffer = Buffer.alloc(length);
-  const fd = fs.openSync(file, "r");
-  try {
-    if (length) fs.readSync(fd, buffer, 0, length, start);
-  } finally {
-    fs.closeSync(fd);
-  }
-  const text = buffer.toString("utf8");
-  const parts = text.split("\n");
-  const remainder = parts.pop() ?? "";
-  return {
-    inode: Number(stat.ino),
-    nextOffset: stat.size - Buffer.byteLength(remainder, "utf8"),
-    completeLines: parts.map((line) => line.replace(/\r$/, "")),
-    remainder,
-    size: stat.size,
-  };
 }
 
 export function deleteWebuiTranscript(sessionKey: string): boolean;
@@ -344,10 +284,10 @@ export function toolTraceLinesFromEvents(events: any): string[] {
   for (const event of events) {
     if (!isDict(event)) continue;
     if (!["start", "end", "error"].includes(String(event.phase))) continue;
-    const identity = toolEventKey(event);
-    if (identity) {
-      if (seen.has(identity)) continue;
-      seen.add(identity);
+    const callId = typeof event.call_id === "string" ? event.call_id : "";
+    if (callId) {
+      if (seen.has(callId)) continue;
+      seen.add(callId);
     }
     const trace = formatToolCallTrace(event);
     if (trace) lines.push(trace);
@@ -371,28 +311,8 @@ function normalizeToolEvents(events: any): Dict[] {
 }
 
 function toolEventKey(event: Dict): string {
-  const uiToolCallId = typeof event.ui_tool_call_id === "string" ? event.ui_tool_call_id : "";
   const callId = typeof event.call_id === "string" ? event.call_id : "";
-  const name = toolEventNameValue(event);
-  if (uiToolCallId) return `ui:${uiToolCallId}:${name}`;
-  return callId ? `call:${callId}:${name}` : formatToolCallTrace(event) ?? jsonWithCompactSpacing(event);
-}
-
-function toolEventNameValue(event: Dict): string {
-  if (typeof event.name === "string" && event.name) return event.name;
-  const fn = isDict(event.function) ? event.function : null;
-  return typeof fn?.name === "string" ? fn.name : "";
-}
-
-function toolEventsShareActivity(left: Dict, right: Dict): boolean {
-  const leftUi = stringValue(left.ui_tool_call_id);
-  const rightUi = stringValue(right.ui_tool_call_id);
-  if (leftUi && rightUi) {
-    return leftUi === rightUi && toolEventNameValue(left) === toolEventNameValue(right);
-  }
-  const leftCall = stringValue(left.call_id);
-  const rightCall = stringValue(right.call_id);
-  return Boolean(leftCall && rightCall && leftCall === rightCall && toolEventNameValue(left) === toolEventNameValue(right));
+  return callId ? `call:${callId}` : formatToolCallTrace(event) ?? jsonWithCompactSpacing(event);
 }
 
 function mergeToolEvents(previous: any, incoming: Dict[]): Dict[] {
@@ -403,8 +323,7 @@ function mergeToolEvents(previous: any, incoming: Dict[]): Dict[] {
   merged.forEach((event, idx) => indexByKey.set(toolEventKey(event), idx));
   for (const event of incoming) {
     const key = toolEventKey(event);
-    const fallbackIndex = merged.findIndex((existing) => toolEventsShareActivity(existing, event));
-    const existingIndex = indexByKey.get(key) ?? (fallbackIndex >= 0 ? fallbackIndex : undefined);
+    const existingIndex = indexByKey.get(key);
     if (existingIndex === undefined) {
       indexByKey.set(key, merged.length);
       merged.push(event);
@@ -433,9 +352,7 @@ function mergeUniqueToolTraceLines(previousTraces: string[], lines: string[]): [
 
 function sessionCreatedAts(messages: Dict[] | null, role: "user" | "assistant"): number[] {
   return (messages ?? [])
-    .filter(
-      (message) => message.role === role && message.internal_context !== "goal_continuation",
-    )
+    .filter((message) => message.role === role)
     .map(transcriptCreatedAt)
     .filter((createdAt): createdAt is number => createdAt != null);
 }
@@ -456,71 +373,8 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
   let suppressUntilTurnEnd = false;
   let activeActivitySegmentId: string | null = null;
   let activeFileEditSegmentId: string | null = null;
-  let activeReplayTurnId: string | null = null;
-  let activeReplayKey = "legacy";
-  type ReplayState = {
-    bufferMessageId: string | null;
-    closedAnswerMessageId: string | null;
-    bufferParts: string[];
-    suppressUntilTurnEnd: boolean;
-    activeActivitySegmentId: string | null;
-    activeFileEditSegmentId: string | null;
-  };
-  const replayStates = new Map<string, ReplayState>();
-  const closedReplayTurnIds = new Set<string>();
   let activitySegmentCounter = 0;
   const newId = (prefix: string, idx: number): string => `${prefix}-${idx}-${randomUUID().slice(0, 8)}`;
-
-  function recordTurnId(rec: Dict): string | null {
-    const value = stringValue(rec.turn_id) ?? stringValue(rec.turnId);
-    return value?.trim() || null;
-  }
-
-  function currentReplayState(): ReplayState {
-    return {
-      bufferMessageId,
-      closedAnswerMessageId,
-      bufferParts,
-      suppressUntilTurnEnd,
-      activeActivitySegmentId,
-      activeFileEditSegmentId,
-    };
-  }
-
-  function activateReplayState(rec: Dict): void {
-    replayStates.set(activeReplayKey, currentReplayState());
-    activeReplayTurnId = recordTurnId(rec);
-    activeReplayKey = activeReplayTurnId ? `turn:${activeReplayTurnId}` : "legacy";
-    const state = replayStates.get(activeReplayKey) ?? {
-      bufferMessageId: null,
-      closedAnswerMessageId: null,
-      bufferParts: [],
-      suppressUntilTurnEnd: false,
-      activeActivitySegmentId: null,
-      activeFileEditSegmentId: null,
-    };
-    bufferMessageId = state.bufferMessageId;
-    closedAnswerMessageId = state.closedAnswerMessageId;
-    bufferParts = [...state.bufferParts];
-    suppressUntilTurnEnd = state.suppressUntilTurnEnd;
-    activeActivitySegmentId = state.activeActivitySegmentId;
-    activeFileEditSegmentId = state.activeFileEditSegmentId;
-  }
-
-  function activeTurnPatch(): Dict {
-    return activeReplayTurnId ? { turnId: activeReplayTurnId } : {};
-  }
-
-  function messageBelongsToActiveTurn(message: Dict): boolean {
-    return activeReplayTurnId == null || message.turnId === activeReplayTurnId;
-  }
-
-  function latestActiveMessageIndex(): number {
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      if (messageBelongsToActiveTurn(messages[index])) return index;
-    }
-    return -1;
-  }
 
   function modelError(value: any): { category: "quota_exhausted" | "model_failed"; detail?: string } | null {
     if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -565,8 +419,7 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
     const status = normalizeContextCompactionStatus(rec.status);
     const content = stringValue(rec.text) ?? stringValue(rec.content) ?? contextCompactionFallbackText(status);
     const existingIndex = messages.findIndex((message) => (
-      messageBelongsToActiveTurn(message)
-      && message.kind === "context_compaction"
+      message.kind === "context_compaction"
       && message.compactionId === compactionId
     ));
     const next = {
@@ -576,7 +429,6 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
       compactionId,
       compactionStatus: status,
       isStreaming: status === "running",
-      ...activeTurnPatch(),
     };
     if (existingIndex >= 0) {
       const { traces, toolEvents, fileEdits, activitySegmentId, ...previous } = messages[existingIndex];
@@ -591,19 +443,13 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
       return;
     }
     messages.push({
-      id: activeReplayTurnId
-        ? `context-compaction:${activeReplayTurnId}:${compactionId}`
-        : `context-compaction:${compactionId}`,
+      id: `context-compaction:${compactionId}`,
       ...next,
       ...createdAtPatch(rec),
     });
   }
 
   function currentTurnStartIndex(): number {
-    if (activeReplayTurnId) {
-      const index = messages.findIndex((message) => message.turnId === activeReplayTurnId);
-      return index >= 0 ? index : messages.length;
-    }
     for (let i = messages.length - 1; i >= 0; i -= 1) {
       if (messages[i].role === "user") return i + 1;
     }
@@ -612,7 +458,6 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
 
   function firstActivitySegmentIdInCurrentTurn(): string | null {
     for (let i = currentTurnStartIndex(); i < messages.length; i += 1) {
-      if (!messageBelongsToActiveTurn(messages[i])) continue;
       const segment = messages[i].activitySegmentId;
       if (typeof segment === "string" && segment) return segment;
     }
@@ -638,8 +483,7 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
     detachOpenAnswerBeforeActivity();
     for (let i = prev.length - 1; i >= 0; i -= 1) {
       const candidate = prev[i];
-      if (!messageBelongsToActiveTurn(candidate)) continue;
-      if (!activeReplayTurnId && candidate.role === "user") break;
+      if (candidate.role === "user") break;
       if (candidate.kind === "trace") break;
       if (candidate.role !== "assistant") continue;
       const content = String(candidate.content ?? "");
@@ -673,26 +517,22 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
       reasoning: chunk,
       reasoningStreaming: true,
       activitySegmentId: segment,
-      ...activeTurnPatch(),
       ...createdAtPatch(rec),
     });
   }
 
   function findActivePlaceholder(prev: Dict[]): string | null {
-    for (let index = prev.length - 1; index >= 0; index -= 1) {
-      const candidate = prev[index];
-      if (!messageBelongsToActiveTurn(candidate)) continue;
-      if (!activeReplayTurnId && candidate.role === "user") return null;
-      if (candidate.role !== "assistant" || candidate.kind === "trace") return null;
-      if (candidate.reasoning || String(candidate.content ?? "") || !candidate.isStreaming) return null;
-      return String(candidate.id);
-    }
-    return null;
+    const last = prev.at(-1);
+    if (!last) return null;
+    if (last.role !== "assistant" || last.kind === "trace") return null;
+    if (last.reasoning) return null;
+    if (String(last.content ?? "")) return null;
+    if (!last.isStreaming) return null;
+    return String(last.id);
   }
 
   function closeReasoning(prev: Dict[]): void {
     for (let i = prev.length - 1; i >= 0; i -= 1) {
-      if (!messageBelongsToActiveTurn(prev[i])) continue;
       if (prev[i].reasoningStreaming) {
         prev[i] = { ...prev[i], reasoningStreaming: false };
         return;
@@ -721,7 +561,7 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
 
   function pruneReasoningOnly(): void {
     messages = messages.map((message) => (
-      messageBelongsToActiveTurn(message) && isReasoningOnlyPlaceholder(message)
+      isReasoningOnlyPlaceholder(message)
         ? { ...message, reasoningStreaming: false, isStreaming: false }
         : message
     ));
@@ -771,7 +611,6 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
 
   function stampLatency(latencyMs: number): void {
     for (let i = messages.length - 1; i >= 0; i -= 1) {
-      if (!messageBelongsToActiveTurn(messages[i])) continue;
       if (messages[i].role === "assistant" && messages[i].kind !== "trace" && messages[i].kind !== "narration") {
         messages[i] = { ...messages[i], latencyMs, isStreaming: false };
         return;
@@ -781,7 +620,7 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
 
   function absorbComplete(extra: Dict, rec: Dict, idx: number): void {
     const last = messages.at(-1);
-    if (last && messageBelongsToActiveTurn(last) && isReasoningOnlyPlaceholder(last)) {
+    if (last && isReasoningOnlyPlaceholder(last)) {
       messages[messages.length - 1] = {
         ...last,
         reasoningStreaming: false,
@@ -793,7 +632,6 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
         role: "assistant",
         ...roleCreatedAtPatch("assistant"),
         ...extra,
-        ...activeTurnPatch(),
       });
     } else {
       messages.push({
@@ -801,7 +639,6 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
         role: "assistant",
         ...roleCreatedAtPatch("assistant"),
         ...extra,
-        ...activeTurnPatch(),
       });
     }
     activeFileEditSegmentId = null;
@@ -832,7 +669,6 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
   function findLatestFoldableAssistantAnswerIndex(): number | null {
     for (let i = messages.length - 1; i >= currentTurnStartIndex(); i -= 1) {
       const candidate = messages[i];
-      if (!messageBelongsToActiveTurn(candidate)) continue;
       if (
         candidate.role === "assistant"
         && candidate.kind !== "trace"
@@ -891,58 +727,21 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
   }
 
   function fileEditKey(edit: Dict): string {
-    const uiToolCallId = String(edit.ui_tool_call_id ?? "");
     const callId = String(edit.call_id ?? "");
     const tool = String(edit.tool ?? "");
-    const identity = uiToolCallId ? `ui:${uiToolCallId}` : callId ? `call:${callId}` : `legacy:${tool}`;
-    const editPath = String(edit.absolute_path ?? edit.path ?? "pending").replace(/\\/gu, "/");
-    return `${identity}|${tool}|${editPath}`;
-  }
-
-  function fileEditsShareActivity(left: Dict, right: Dict): boolean {
-    const leftUi = stringValue(left.ui_tool_call_id);
-    const rightUi = stringValue(right.ui_tool_call_id);
-    if (leftUi && rightUi) {
-      return leftUi === rightUi && String(left.tool ?? "") === String(right.tool ?? "");
-    }
-    const leftCall = stringValue(left.call_id);
-    const rightCall = stringValue(right.call_id);
-    if (leftCall && rightCall) {
-      return leftCall === rightCall && String(left.tool ?? "") === String(right.tool ?? "");
-    }
-    return !leftUi
-      && !rightUi
-      && !leftCall
-      && !rightCall
-      && String(left.tool ?? "") === String(right.tool ?? "");
-  }
-
-  function mergeFileEdit(existing: Dict, incoming: Dict): Dict {
-    const incomingRank = PHASE_RANK[String(incoming.phase)] ?? 0;
-    const existingRank = PHASE_RANK[String(existing.phase)] ?? 0;
-    const merged: Dict = incomingRank >= existingRank
-      ? { ...existing, ...incoming }
-      : {
-          ...existing,
-          ...(!existing.ui_tool_call_id && incoming.ui_tool_call_id ? { ui_tool_call_id: incoming.ui_tool_call_id } : {}),
-          ...(!existing.call_id && incoming.call_id ? { call_id: incoming.call_id } : {}),
-          ...(!existing.path && incoming.path ? { path: incoming.path } : {}),
-          ...(!existing.absolute_path && incoming.absolute_path ? { absolute_path: incoming.absolute_path } : {}),
-        };
-    if (incoming.path && !incoming.pending) delete merged.pending;
-    return merged;
+    return callId ? `${callId}|${tool}` : `${tool}|${edit.path ?? ""}`;
   }
 
   function findFileEditTraceIndex(segment: string | null, edits: Dict[]): number | null {
+    const incomingKeys = new Set(edits.filter(isDict).map(fileEditKey));
     for (let i = messages.length - 1; i >= 0; i -= 1) {
       const candidate = messages[i];
-      if (!messageBelongsToActiveTurn(candidate)) continue;
-      if (!activeReplayTurnId && candidate.role === "user") break;
+      if (candidate.role === "user") break;
       if (candidate.kind !== "trace" || !candidate.fileEdits) continue;
       const existingEdits = candidate.fileEdits;
       if (!Array.isArray(existingEdits)) continue;
       for (const existing of existingEdits) {
-        if (isDict(existing) && edits.some((incoming) => fileEditsShareActivity(existing, incoming))) return i;
+        if (isDict(existing) && incomingKeys.has(fileEditKey(existing))) return i;
       }
     }
     return null;
@@ -960,26 +759,15 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
     return typeof event.call_id === "string" && event.call_id ? event.call_id : "";
   }
 
-  function toolEventUiCallId(event: Dict): string {
-    return typeof event.ui_tool_call_id === "string" && event.ui_tool_call_id ? event.ui_tool_call_id : "";
-  }
-
   function fileEditCallId(edit: Dict): string {
-    return typeof edit.call_id === "string" && edit.call_id ? edit.call_id : "";
-  }
-
-  function fileEditUiCallId(edit: Dict): string {
-    return typeof edit.ui_tool_call_id === "string" && edit.ui_tool_call_id ? edit.ui_tool_call_id : "";
+    const callId = typeof edit.call_id === "string" && edit.call_id ? edit.call_id : "";
+    const tool = String(edit.tool ?? "");
+    const editPath = String(edit.path ?? "");
+    const fallbackCallId = `${tool}:${editPath || "pending"}`;
+    return callId && callId !== fallbackCallId ? callId : "";
   }
 
   function fileEditMatchesToolEvent(edit: Dict, event: Dict): boolean {
-    const editUiCallId = fileEditUiCallId(edit);
-    const eventUiCallId = toolEventUiCallId(event);
-    if (editUiCallId && eventUiCallId) {
-      if (editUiCallId !== eventUiCallId) return false;
-      const name = toolEventName(event);
-      return !name || String(edit.tool ?? "") === name;
-    }
     const editCallId = fileEditCallId(edit);
     const eventCallId = toolEventCallId(event);
     if (!editCallId || !eventCallId || editCallId !== eventCallId) {
@@ -990,14 +778,6 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
   }
 
   function toolEventsMatch(left: Dict, right: Dict): boolean {
-    const leftUiCallId = toolEventUiCallId(left);
-    const rightUiCallId = toolEventUiCallId(right);
-    if (leftUiCallId && rightUiCallId) {
-      if (leftUiCallId !== rightUiCallId) return false;
-      const leftName = toolEventName(left);
-      const rightName = toolEventName(right);
-      return !leftName || !rightName || leftName === rightName;
-    }
     const leftCallId = toolEventCallId(left);
     const rightCallId = toolEventCallId(right);
     if (!leftCallId || !rightCallId || leftCallId !== rightCallId) {
@@ -1015,8 +795,7 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
   function findFileEditTraceIndexForToolEvents(events: Dict[]): number | null {
     for (let i = messages.length - 1; i >= 0; i -= 1) {
       const candidate = messages[i];
-      if (!messageBelongsToActiveTurn(candidate)) continue;
-      if (!activeReplayTurnId && candidate.role === "user") break;
+      if (candidate.role === "user") break;
       if (candidate.kind !== "trace" || !Array.isArray(candidate.fileEdits)) continue;
       if (candidate.fileEdits.some((edit: unknown) => isDict(edit) && events.some((event) => fileEditMatchesToolEvent(edit, event)))) {
         return i;
@@ -1028,8 +807,7 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
   function findToolTraceIndexForToolEvents(events: Dict[], segment: string): number | null {
     for (let i = messages.length - 1; i >= 0; i -= 1) {
       const candidate = messages[i];
-      if (!messageBelongsToActiveTurn(candidate)) continue;
-      if (!activeReplayTurnId && candidate.role === "user") break;
+      if (candidate.role === "user") break;
       if (candidate.kind !== "trace" || candidate.activitySegmentId !== segment || !Array.isArray(candidate.toolEvents)) continue;
       if (candidate.toolEvents.some((event: unknown) => isDict(event) && events.some((incoming) => toolEventsMatch(event, incoming)))) {
         return i;
@@ -1041,8 +819,7 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
   function findToolTraceSegmentIdForFileEdits(edits: Dict[]): string | null {
     for (let i = messages.length - 1; i >= 0; i -= 1) {
       const candidate = messages[i];
-      if (!messageBelongsToActiveTurn(candidate)) continue;
-      if (!activeReplayTurnId && candidate.role === "user") break;
+      if (candidate.role === "user") break;
       if (candidate.kind !== "trace" || !Array.isArray(candidate.toolEvents)) continue;
       if (candidate.toolEvents.some((event: unknown) => isDict(event) && edits.some((edit) => fileEditMatchesToolEvent(edit, event)))) {
         return typeof candidate.activitySegmentId === "string" ? candidate.activitySegmentId : null;
@@ -1072,7 +849,6 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
         traces: [],
         fileEdits: [],
         activitySegmentId: segment,
-        ...activeTurnPatch(),
         ...createdAtPatch(rec),
       });
       targetIndex = messages.length - 1;
@@ -1083,28 +859,18 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
       activeFileEditSegmentId = segment;
     }
     const existing = Array.isArray(last.fileEdits) ? [...last.fileEdits] : [];
+    const indexByKey = new Map<string, number>();
+    existing.forEach((edit, pos) => {
+      if (isDict(edit)) indexByKey.set(fileEditKey(edit), pos);
+    });
     for (const edit of edits) {
       if (!isDict(edit)) continue;
-      if (edit.path && !edit.pending) {
-        for (let pos = existing.length - 1; pos >= 0; pos -= 1) {
-          const candidate = existing[pos];
-          if (isDict(candidate) && candidate.pending && fileEditsShareActivity(candidate, edit)) existing.splice(pos, 1);
-        }
-      }
-      const indexByKey = new Map<string, number>();
-      existing.forEach((candidate, pos) => {
-        if (isDict(candidate)) indexByKey.set(fileEditKey(candidate), pos);
-      });
       const key = fileEditKey(edit);
-      const fallbackPos = existing.findIndex((candidate) => (
-        isDict(candidate)
-        && fileEditsShareActivity(candidate, edit)
-        && String(candidate.absolute_path ?? candidate.path ?? "pending").replace(/\\/gu, "/")
-          === String(edit.absolute_path ?? edit.path ?? "pending").replace(/\\/gu, "/")
-      ));
-      const pos = indexByKey.get(key) ?? (fallbackPos >= 0 ? fallbackPos : undefined);
+      const pos = indexByKey.get(key);
       if (pos !== undefined) {
-        existing[pos] = mergeFileEdit(existing[pos], edit);
+        const merged = { ...existing[pos], ...edit };
+        if (edit.path && !edit.pending) delete merged.pending;
+        existing[pos] = merged;
       } else {
         indexByKey.set(key, existing.length);
         existing.push({ ...edit });
@@ -1120,15 +886,12 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
   }
 
   for (const [idx, rec] of lines.entries()) {
-    activateReplayState(rec);
     const ev = rec.event;
     if (ev === "user") {
       suppressUntilTurnEnd = false;
       activeActivitySegmentId = null;
       activeFileEditSegmentId = null;
       closedAnswerMessageId = null;
-      bufferMessageId = null;
-      bufferParts = [];
       const text = typeof rec.text === "string" ? rec.text : "";
       const rawMediaPaths = Array.isArray(rec.media_paths) ? rec.media_paths : [];
       const mediaPaths = rawMediaPaths.filter(Boolean).map((item) => String(item));
@@ -1137,12 +900,8 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
         id: newId("u", idx),
         role: "user",
         content: text,
-        ...activeTurnPatch(),
         ...roleCreatedAtPatch("user"),
       };
-      const clientRequestId = stringValue(rec.client_request_id)
-        ?? stringValue(rec.clientRequestId);
-      if (clientRequestId) row.client_request_id = clientRequestId;
       if (mediaAttachments?.length) {
         row.media = mediaAttachments;
         if (mediaAttachments.every((item) => item.kind === "image")) {
@@ -1186,7 +945,6 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
             role: "assistant",
             content: "",
             isStreaming: true,
-            ...activeTurnPatch(),
             ...roleCreatedAtPatch("assistant"),
           });
         }
@@ -1216,7 +974,6 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
             role: "assistant",
             content: finalText,
             isStreaming: true,
-            ...activeTurnPatch(),
             ...roleCreatedAtPatch("assistant"),
           });
         } else {
@@ -1299,8 +1056,7 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
             continue;
           }
         }
-        const lastIndex = latestActiveMessageIndex();
-        const last = lastIndex >= 0 ? messages[lastIndex] : undefined;
+        const last = messages.at(-1);
         if (
           last
           && last.kind === "trace"
@@ -1317,7 +1073,7 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
           } else {
             mergedTraces = [...prevTraces, ...traceLines];
           }
-          messages[lastIndex] = {
+          messages[messages.length - 1] = {
             ...last,
             traces: mergedTraces,
             content: mergedTraces.at(-1) ?? "",
@@ -1334,7 +1090,6 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
             traces: traceLines,
             ...(structuredEvents.length ? { toolEvents: structuredEvents } : {}),
             activitySegmentId: segment,
-            ...activeTurnPatch(),
             ...createdAtPatch(rec),
           });
           activeActivitySegmentId = segment;
@@ -1376,13 +1131,10 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
     }
 
     if (ev === "turn_end") {
-      if (activeReplayTurnId) closedReplayTurnIds.add(activeReplayTurnId);
       suppressUntilTurnEnd = false;
       activeActivitySegmentId = null;
       activeFileEditSegmentId = null;
-      messages = messages.map((message) => (
-        messageBelongsToActiveTurn(message) ? finishActivityProgressForTurnEnd(message) : message
-      ));
+      messages = messages.map(finishActivityProgressForTurnEnd);
       pruneReasoningOnly();
       if (typeof rec.latency_ms === "number" && rec.latency_ms >= 0) stampLatency(Math.trunc(rec.latency_ms));
       closedAnswerMessageId = null;
@@ -1396,10 +1148,8 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
     if (augmentAssistantText && out.role === "assistant" && out.kind !== "trace" && typeof out.content === "string") {
       out = { ...out, content: augmentAssistantText(out.content) };
     }
-    const belongsToOpenIdentifiedTurn = typeof out.turnId === "string"
-      && !closedReplayTurnIds.has(out.turnId);
-    if (out.kind !== "context_compaction" && !belongsToOpenIdentifiedTurn) delete out.isStreaming;
-    if (!belongsToOpenIdentifiedTurn) delete out.reasoningStreaming;
+    if (out.kind !== "context_compaction") delete out.isStreaming;
+    delete out.reasoningStreaming;
     return out;
   });
 }
@@ -1420,82 +1170,16 @@ export function lastTranscriptUserTurnClosed(lines: Dict[]): boolean {
   return sawUser && closed;
 }
 
-export function lastTranscriptTurnState(lines: Dict[]): Dict {
-  const turnOrder: string[] = [];
-  const seenTurnIds = new Set<string>();
-  const closedTurnIds = new Set<string>();
-
-  for (const rec of lines) {
-    const turnId = stringValue(rec.turn_id) ?? stringValue(rec.turnId);
-    if (!turnId) continue;
-    const edits = Array.isArray(rec.edits) ? rec.edits : [];
-    const cancellationTerminal = rec.cancellation_terminal === true
-      || (rec.event === "file_edit" && edits.length > 0 && edits.every((edit) => isDict(edit) && edit.cancellation_terminal === true));
-    if (cancellationTerminal && !seenTurnIds.has(turnId)) continue;
-    if (!seenTurnIds.has(turnId)) {
-      seenTurnIds.add(turnId);
-      turnOrder.push(turnId);
-    }
-    if (rec.event === "turn_end") closedTurnIds.add(turnId);
-  }
-
-  const lastTurnId = turnOrder.at(-1);
-  if (!lastTurnId) return { last_turn_closed: lastTranscriptUserTurnClosed(lines) };
-  return {
-    last_turn_id: lastTurnId,
-    last_turn_closed: closedTurnIds.has(lastTurnId),
-  };
-}
-
-function lastTranscriptGoalOutcome(lines: Dict[], lastTurnId: string | null): Dict {
-  let lastTurnEnd: Dict | null = null;
-  for (const rec of lines) {
-    if (rec.event !== "turn_end") continue;
-    const turnId = stringValue(rec.turn_id) ?? stringValue(rec.turnId);
-    if (!lastTurnId || turnId === lastTurnId) lastTurnEnd = rec;
-  }
-  if (!lastTurnEnd) return {};
-  const goalId = stringValue(lastTurnEnd.goal_id);
-  const goalOutcome = lastTurnEnd.goal_outcome;
-  if (!goalId || !isGoalStatus(goalOutcome)) return {};
-  return {
-    last_turn_goal_id: goalId,
-    last_turn_goal_outcome: goalOutcome,
-  };
-}
-
-function isGoalStatus(value: unknown): boolean {
-  return value === "active"
-    || value === "paused"
-    || value === "blocked"
-    || value === "usage_limited"
-    || value === "budget_limited"
-    || value === "completed";
-}
-
 export function buildWebuiThreadResponse(sessionKey: string, messages: any[]): Dict;
 export function buildWebuiThreadResponse(sessionKey: string, options?: BuildWebuiThreadResponseOptions | null): Dict | null;
 export function buildWebuiThreadResponse(sessionKey: string, messagesOrOptions: any[] | BuildWebuiThreadResponseOptions | null = null): Dict | null {
   if (Array.isArray(messagesOrOptions)) return { id: sessionKey, messages: messagesOrOptions };
-  const options = messagesOrOptions ?? {};
-  const surface = options.surface ?? "gui";
-  const allLines = readTranscriptLines(sessionKey);
-  if (!allLines.length) return null;
-  const lines = surfaceAwareTranscriptLines(allLines, surface);
-  const turnState = lastTranscriptTurnState(lines);
-  const lastTurnId = stringValue(turnState.last_turn_id);
+  const lines = readTranscriptLines(sessionKey);
+  if (!lines.length) return null;
   return {
     schemaVersion: WEBUI_TRANSCRIPT_SCHEMA_VERSION,
     sessionKey,
-    ...turnState,
-    ...lastTranscriptGoalOutcome(lines, lastTurnId),
-    messages: replayTranscriptToUiMessages(lines, {
-      ...options,
-      sessionMessages: surface === "tui"
-        ? (options.sessionMessages ?? []).filter(
-            (message) => parseTurnSource(message.turn_source)?.kind === "tui",
-          )
-        : options.sessionMessages,
-    }),
+    last_turn_closed: lastTranscriptUserTurnClosed(lines),
+    messages: replayTranscriptToUiMessages(lines, messagesOrOptions ?? {}),
   };
 }

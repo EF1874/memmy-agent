@@ -49,20 +49,6 @@ describe("bus event models", () => {
     expect(generated.timestamp.getTime()).toBeLessThanOrEqual(after);
     expect(explicit.timestamp.toISOString()).toBe("2026-06-04T01:02:03.000Z");
   });
-
-  it("defaults inbound turn admission to queue and preserves explicit steer", () => {
-    const queued = new InboundMessage({ channel: "cli", chatId: "c1", content: "next" });
-    const steered = new InboundMessage({
-      channel: "cli",
-      chatId: "c1",
-      content: "correction",
-      turnAdmission: "steer",
-    });
-
-    expect(queued.turnAdmission).toBe("queue");
-    expect(steered.turnAdmission).toBe("steer");
-    expect(JSON.parse(JSON.stringify(steered))).toMatchObject({ turnAdmission: "steer" });
-  });
 });
 
 describe("AsyncQueue", () => {

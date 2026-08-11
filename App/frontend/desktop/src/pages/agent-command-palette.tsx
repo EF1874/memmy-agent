@@ -54,7 +54,7 @@ const iconByName: Record<string, LucideIcon> = {
   "undo-2": Undo2
 };
 
-const localizedBuiltinCommandKeys: Record<string, { title: MessageKey; description: MessageKey; hideArgHint?: boolean }> = {
+const localizedBuiltinCommandKeys: Record<string, { title: MessageKey; description: MessageKey }> = {
   "/new": {
     title: "home.command.newTitle",
     description: "home.command.newDescription"
@@ -85,8 +85,7 @@ const localizedBuiltinCommandKeys: Record<string, { title: MessageKey; descripti
   },
   "/goal": {
     title: "home.command.goalTitle",
-    description: "home.command.goalDescription",
-    hideArgHint: true
+    description: "home.command.goalDescription"
   },
   "/dream": {
     title: "home.command.dreamTitle",
@@ -115,19 +114,15 @@ export function localizeSlashCommands(
   language: ResolvedLanguage,
   t: SlashCommandTranslator
 ): MemmyAgentSlashCommand[] {
+  if (language !== "zh-CN") {
+    return commands;
+  }
+
   return commands.map((command) => {
     const keys = localizedBuiltinCommandKeys[command.command];
-    if (!keys) {
-      return command;
-    }
-    if (language !== "zh-CN" && !keys.hideArgHint) {
-      return command;
-    }
-    return {
-      ...command,
-      ...(language === "zh-CN" ? { title: t(keys.title), description: t(keys.description) } : {}),
-      ...(keys.hideArgHint ? { argHint: "" } : {})
-    };
+    return keys
+      ? { ...command, title: t(keys.title), description: t(keys.description) }
+      : command;
   });
 }
 
@@ -164,8 +159,8 @@ export function AgentCommandPalette(props: AgentCommandPaletteProps) {
               </span>
               <span className="min-w-0 flex-1">
                 <span className="flex min-w-0 items-baseline gap-1.5">
-                  <span className="shrink-0 whitespace-nowrap font-mono text-xs font-semibold text-action-sky">{command.command}</span>
-                  {command.argHint ? <span className="min-w-0 flex-1 truncate text-xs text-text-ink/45">{command.argHint}</span> : null}
+                  <span className="min-w-0 font-mono text-xs font-semibold text-action-sky truncate">{command.command}</span>
+                  {command.argHint ? <span className="min-w-0 text-xs text-text-ink/45 truncate">{command.argHint}</span> : null}
                 </span>
                 <span className="mt-0.5 block truncate text-[11px] text-text-ink/50">{command.description || command.title}</span>
               </span>

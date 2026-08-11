@@ -104,33 +104,22 @@ describe("config-client", () => {
       if (url.endsWith("/api/app/model-config") && init?.method === "PUT") {
         expect(init?.method).toBe("PUT");
         expect(JSON.parse(String(init?.body))).toMatchObject({
-          configRevision: "unknown",
-          providers: [{
-            provider: "openai",
-            apiBase: "https://api.openai.com/v1",
-            apiKey: "sk-test",
-            models: [{
-              model: "gpt-4.1-mini"
-            }]
-          }],
+          provider: "openai_compatible",
+          baseUrl: "https://api.openai.com/v1",
+          modelId: "gpt-4.1-mini",
+          apiKey: "sk-test",
           memmyMemory: {
-            summary: {
-              mode: "fixed",
-              fixed: {
-                provider: "anthropic",
-                baseUrl: "https://memory.example.com/v1",
-                modelId: "claude-3-5-haiku",
-                apiKey: "sk-memory"
-              }
+        summary: {
+              provider: "anthropic",
+              baseUrl: "https://memory.example.com/v1",
+              modelId: "claude-3-5-haiku",
+              apiKey: "sk-memory"
             },
             evolution: {
-              mode: "fixed",
-              fixed: {
-                provider: "qwen",
-                baseUrl: "https://skill.example.com/v1",
-                modelId: "qwen-plus",
-                apiKey: "sk-skill"
-              }
+              provider: "qwen",
+              baseUrl: "https://skill.example.com/v1",
+              modelId: "qwen-plus",
+              apiKey: "sk-skill"
             }
           },
           asr: {
@@ -140,19 +129,27 @@ describe("config-client", () => {
             apiKey: "sk-asr"
           }
         });
-        return jsonResponse(modelConfigView({
-          revision: "revision-2",
-          apiBase: "https://api.openai.com/v1",
-          model: "gpt-4.1-mini",
+        return jsonResponse({
+          provider: "openai_compatible",
+          baseUrl: "https://api.openai.com/v1",
+          modelId: "gpt-4.1-mini",
+          hasApiKey: true,
           apiKeyMasked: "sk••••test",
+          embedding: localEmbeddingView(),
           memmyMemory: {
-            summary: {
-              mode: "fixed",
-              fixed: roleView("anthropic", "https://memory.example.com/v1", "claude-3-5-haiku", "sk••••mory")
+        summary: {
+              provider: "anthropic",
+              baseUrl: "https://memory.example.com/v1",
+              modelId: "claude-3-5-haiku",
+              hasApiKey: true,
+              apiKeyMasked: "sk••••mory"
             },
             evolution: {
-              mode: "fixed",
-              fixed: roleView("qwen", "https://skill.example.com/v1", "qwen-plus", "sk••••kill")
+              provider: "qwen",
+              baseUrl: "https://skill.example.com/v1",
+              modelId: "qwen-plus",
+              hasApiKey: true,
+              apiKeyMasked: "sk••••kill"
             }
           },
           asr: {
@@ -160,26 +157,35 @@ describe("config-client", () => {
             baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
             modelId: "qwen3-asr-flash",
             hasApiKey: true,
-            apiKeyMasked: "sk••••asr",
-            apiKey: ""
-          }
-        }));
+            apiKeyMasked: "sk••••asr"
+          },
+          imageGen: null,
+          updatedAt: "2026-06-04T00:00:00.000Z"
+        });
       }
 
       if (url.endsWith("/api/app/model-config") && init?.method === "GET") {
-        return jsonResponse(modelConfigView({
-          revision: "revision-1",
-          apiBase: "https://api.openai.com/v1",
-          model: "gpt-4.1-mini",
+        return jsonResponse({
+          provider: "openai_compatible",
+          baseUrl: "https://api.openai.com/v1",
+          modelId: "gpt-4.1-mini",
+          hasApiKey: true,
           apiKeyMasked: "sk••••test",
+          embedding: localEmbeddingView(),
           memmyMemory: {
-            summary: {
-              mode: "fixed",
-              fixed: roleView("openai_compatible", "https://api.openai.com/v1", "gpt-4.1-mini", "sk••••test")
+        summary: {
+              provider: "openai_compatible",
+              baseUrl: "https://api.openai.com/v1",
+              modelId: "gpt-4.1-mini",
+              hasApiKey: true,
+              apiKeyMasked: "sk••••test"
             },
             evolution: {
-              mode: "fixed",
-              fixed: roleView("openai_compatible", "https://api.openai.com/v1", "gpt-4.1-mini", "sk••••test")
+              provider: "openai_compatible",
+              baseUrl: "https://api.openai.com/v1",
+              modelId: "gpt-4.1-mini",
+              hasApiKey: true,
+              apiKeyMasked: "sk••••test"
             }
           },
           asr: {
@@ -187,10 +193,11 @@ describe("config-client", () => {
             baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
             modelId: "qwen3-asr-flash",
             hasApiKey: true,
-            apiKeyMasked: "sk••••asr",
-            apiKey: ""
-          }
-        }));
+            apiKeyMasked: "sk••••asr"
+          },
+          imageGen: null,
+          updatedAt: "2026-06-04T00:00:00.000Z"
+        });
       }
 
       if (url.endsWith("/api/app/model-config/test") && init?.method === "POST") {
@@ -409,27 +416,20 @@ describe("config-client", () => {
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body));
       expect(body).toMatchObject({
-        providers: [{
-          provider: "openai",
-          apiBase: "https://api.openai.com/v1",
-          models: [{ model: "gpt-4.1-mini" }]
-        }],
+        provider: "openai_compatible",
+        baseUrl: "https://api.openai.com/v1",
+        modelId: "gpt-4.1-mini",
         memmyMemory: {
-          summary: {
-            mode: "fixed",
-            fixed: {
-              provider: "openai_compatible",
-              baseUrl: "https://api.openai.com/v1",
-              modelId: "gpt-4.1-mini"
-            }
+        summary: {
+            provider: "openai_compatible",
+            baseUrl: "https://api.openai.com/v1",
+            modelId: "gpt-4.1-mini"
           }
         },
         embedding: {
           mode: "custom",
-          custom: {
-            baseUrl: "https://embedding.example.com/v1",
-            modelId: "text-embedding-3-small"
-          }
+          baseUrl: "https://embedding.example.com/v1",
+          modelId: "text-embedding-3-small"
         },
         asr: {
           provider: "aliyun",
@@ -437,34 +437,38 @@ describe("config-client", () => {
           modelId: "qwen3-asr-flash"
         }
       });
-      expect(body.providers[0]).not.toHaveProperty("apiKey");
-      expect(body.embedding.custom).not.toHaveProperty("apiKey");
-      expect(body.memmyMemory.summary.fixed).not.toHaveProperty("apiKey");
-      expect(body.memmyMemory.evolution.fixed).not.toHaveProperty("apiKey");
+      expect(body).not.toHaveProperty("apiKey");
+      expect(body.embedding).not.toHaveProperty("apiKey");
+      expect(body.memmyMemory.summary).not.toHaveProperty("apiKey");
+      expect(body.memmyMemory.evolution).not.toHaveProperty("apiKey");
       expect(body.asr).not.toHaveProperty("apiKey");
-      return jsonResponse(modelConfigView({
-        revision: "revision-masked",
-        apiBase: "https://api.openai.com/v1",
-        model: "gpt-4.1-mini",
+      return jsonResponse({
+        provider: "openai_compatible",
+        baseUrl: "https://api.openai.com/v1",
+        modelId: "gpt-4.1-mini",
+        hasApiKey: true,
         apiKeyMasked: "sk-t••••cret",
         embedding: {
           mode: "custom",
-          custom: {
-            baseUrl: "https://embedding.example.com/v1",
-            modelId: "text-embedding-3-small",
-            hasApiKey: true,
-            apiKeyMasked: "sk-e••••cret",
-            apiKey: ""
-          }
+          baseUrl: "https://embedding.example.com/v1",
+          modelId: "text-embedding-3-small",
+          hasApiKey: true,
+          apiKeyMasked: "sk-e••••cret"
         },
         memmyMemory: {
-          summary: {
-            mode: "fixed",
-            fixed: roleView("openai_compatible", "https://api.openai.com/v1", "gpt-4.1-mini", "sk-t••••cret")
+        summary: {
+            provider: "openai_compatible",
+            baseUrl: "https://api.openai.com/v1",
+            modelId: "gpt-4.1-mini",
+            hasApiKey: true,
+            apiKeyMasked: "sk-t••••cret"
           },
           evolution: {
-            mode: "fixed",
-            fixed: roleView("openai_compatible", "https://api.openai.com/v1", "gpt-4.1-mini", "sk-t••••cret")
+            provider: "openai_compatible",
+            baseUrl: "https://api.openai.com/v1",
+            modelId: "gpt-4.1-mini",
+            hasApiKey: true,
+            apiKeyMasked: "sk-t••••cret"
           }
         },
         asr: {
@@ -472,10 +476,11 @@ describe("config-client", () => {
           baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
           modelId: "qwen3-asr-flash",
           hasApiKey: true,
-          apiKeyMasked: "sk-a••••cret",
-          apiKey: ""
-        }
-      }));
+          apiKeyMasked: "sk-a••••cret"
+        },
+        imageGen: null,
+        updatedAt: "2026-06-04T00:00:00.000Z"
+      });
     });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -573,11 +578,9 @@ describe("config-client", () => {
 
     expect(requestBodies).toHaveLength(1);
     expect(requestBodies[0]).toMatchObject({
-      providers: [{
-        provider: "openai",
-        apiBase: "https://gateway.example.com/v1",
-        models: [{ model: "gpt-4.1-mini" }]
-      }]
+      provider: "openai_compatible",
+      baseUrl: "https://gateway.example.com/v1",
+      modelId: "gpt-4.1-mini"
     });
     expect(requestBodies[0]).not.toHaveProperty("memmyMemory");
   });
@@ -622,15 +625,14 @@ describe("config-client", () => {
     expect(requestBodies[0]).toMatchObject({
       memmyMemory: {
         summary: {
-          mode: "fixed",
-          fixed: {
-            provider: "anthropic",
-            baseUrl: "https://memory.example.com/v1",
-            modelId: "claude-3-5-haiku"
-          }
+          provider: "anthropic",
+          baseUrl: "https://memory.example.com/v1",
+          modelId: "claude-3-5-haiku"
         },
         evolution: {
-          mode: "follow"
+          provider: "openai_compatible",
+          baseUrl: "https://gateway.example.com/v1",
+          modelId: "gpt-4.1-mini"
         }
       }
     });
@@ -677,22 +679,33 @@ describe("config-client", () => {
 });
 
 function savedModelConfigView() {
-  return modelConfigView({
-    revision: "saved-revision",
-    apiBase: "https://gateway.example.com/v1",
-    model: "gpt-4.1-mini",
+  return {
+    provider: "openai_compatible",
+    baseUrl: "https://gateway.example.com/v1",
+    modelId: "gpt-4.1-mini",
+    hasApiKey: true,
     apiKeyMasked: "sk••••test",
+    embedding: localEmbeddingView(),
     memmyMemory: {
       summary: {
-        mode: "fixed",
-        fixed: roleView("openai_compatible", "https://gateway.example.com/v1", "gpt-4.1-mini", "sk••••test")
+        provider: "openai_compatible",
+        baseUrl: "https://gateway.example.com/v1",
+        modelId: "gpt-4.1-mini",
+        hasApiKey: true,
+        apiKeyMasked: "sk••••test"
       },
       evolution: {
-        mode: "fixed",
-        fixed: roleView("openai_compatible", "https://gateway.example.com/v1", "gpt-4.1-mini", "sk••••test")
+        provider: "openai_compatible",
+        baseUrl: "https://gateway.example.com/v1",
+        modelId: "gpt-4.1-mini",
+        hasApiKey: true,
+        apiKeyMasked: "sk••••test"
       }
-    }
-  });
+    },
+    asr: null,
+    imageGen: null,
+    updatedAt: "2026-07-13T00:00:00.000Z"
+  };
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -707,61 +720,9 @@ function jsonResponse(body: unknown, status = 200): Response {
 function localEmbeddingView() {
   return {
     mode: "local",
-    custom: null
-  };
-}
-
-function roleView(
-  provider: string,
-  baseUrl: string,
-  modelId: string,
-  apiKeyMasked: string
-) {
-  return {
-    provider,
-    baseUrl,
-    modelId,
-    hasApiKey: true,
-    apiKeyMasked,
-    apiKey: ""
-  };
-}
-
-function modelConfigView(input: {
-  revision: string;
-  apiBase: string;
-  model: string;
-  apiKeyMasked: string;
-  embedding?: unknown;
-  memmyMemory: unknown;
-  asr?: unknown;
-}) {
-  const presetName = "desktop-openai-gpt-4-1-mini-abcd1234";
-  return {
-    configRevision: input.revision,
-    providers: [{
-      provider: "openai",
-      apiBase: input.apiBase,
-      apiType: "auto",
-      configured: true,
-      hasApiKey: true,
-      apiKeyMasked: input.apiKeyMasked,
-      apiKey: "",
-      accountManaged: false,
-      editable: true,
-      models: [{
-        presetName,
-        model: input.model,
-        isDefault: true,
-        available: true
-      }]
-    }],
-    defaultModelPreset: presetName,
-    configured: true,
-    embedding: input.embedding ?? localEmbeddingView(),
-    memmyMemory: input.memmyMemory,
-    asr: input.asr ?? null,
-    imageGen: null,
-    updatedAt: "2026-07-13T00:00:00.000Z"
+    baseUrl: null,
+    modelId: null,
+    hasApiKey: false,
+    apiKeyMasked: ""
   };
 }

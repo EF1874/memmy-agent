@@ -6,6 +6,7 @@ import { MemoryStore } from "./memory.js";
 import { SkillsLoader } from "./skills.js";
 import { SystemPromptBuildContext, type AgentHook, type SystemPromptSection } from "./hook.js";
 import { Session } from "../session/manager.js";
+import { goalStateRuntimeLines } from "../session/goal-state.js";
 import { detectImageMime, truncateText } from "../../utils/helpers.js";
 import { renderTemplate } from "../../utils/prompt-templates.js";
 
@@ -359,7 +360,10 @@ export class ContextBuilder {
       sessionWorkspace = this.workspace,
     } = args;
     const role = currentRole ?? "user";
-    const runtimeLines = (currentRuntimeLines ?? []).filter(Boolean);
+    const runtimeLines = [
+      ...goalStateRuntimeLines(sessionMetadata),
+      ...((currentRuntimeLines ?? []).filter(Boolean)),
+    ];
     const sessionResponseLanguage = sessionMetadata && typeof sessionMetadata === "object"
       ? sessionMetadata.webui_language ?? sessionMetadata.webuiLanguage ?? null
       : null;

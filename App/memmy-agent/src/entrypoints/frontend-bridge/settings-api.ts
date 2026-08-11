@@ -14,7 +14,6 @@ import {
   imageGenProviderNames,
 } from "../../providers/image-generation.js";
 import { findByName, PROVIDERS } from "../../providers/registry.js";
-import { readModelCatalog } from "../../providers/model-catalog.js";
 import { normalizeTimeZoneOffset } from "../../utils/time-zone.js";
 
 type QueryParams = Record<string, string[]>;
@@ -187,37 +186,44 @@ function parseStringRecord(value: string, field: string): Record<string, string>
 export function settingsPayload({ requiresRestart = false }: { requiresRestart?: boolean } = {}): Record<string, any> {
   const config = loadConfig();
   const defaults = config.agents.defaults;
-  const catalog = readModelCatalog();
-  const configuredActivePreset = defaults.modelPreset ?? "default";
-  const activeItem = catalog.items.find((item) => item.preset === configuredActivePreset) ?? null;
-  const activePresetName = activeItem ? configuredActivePreset : null;
-  const effectivePreset = activePresetName
-    ? activePresetName === "default"
-      ? config.resolvePreset("default")
-      : config.modelPresets[activePresetName] ?? null
-    : null;
-  const provider = effectivePreset
-    ? config.getProvider(effectivePreset.model, { preset: effectivePreset })
-    : null;
+  let activePresetName = defaults.modelPreset ?? "default";
+  let effectivePreset: ModelPresetConfig;
+  try {
+    effectivePreset = config.resolvePreset();
+  } catch {
+    effectivePreset = config.resolvePreset("default");
+    activePresetName = "default";
+  }
+  const providerName = config.getProviderName(effectivePreset.model, { preset: effectivePreset }) ?? effectivePreset.provider;
+  const provider = config.getProvider(effectivePreset.model, { preset: effectivePreset });
+  const selectedProvider = effectivePreset.provider === "auto" ? providerName : findByName(effectivePreset.provider)?.name ?? providerName;
 
-  const modelPresets = catalog.items.map((item) => {
-    const preset = item.preset === "default"
-      ? config.resolvePreset("default")
-      : config.modelPresets[item.preset];
-    return {
-      name: item.preset,
-      label: item.preset === "default" ? "Default" : preset?.label ?? item.preset,
-      active: item.preset === activePresetName,
-      is_default: item.isDefault,
-      available: item.available,
-      model: item.model,
-      provider: item.provider,
-      max_tokens: preset?.maxTokens ?? null,
-      context_window_tokens: preset?.contextWindowTokens ?? null,
-      temperature: preset?.temperature ?? null,
-      reasoning_effort: preset?.reasoningEffort ?? null,
-    };
-  });
+  const modelPresets = [
+    {
+      name: "default",
+      label: "Default",
+      active: activePresetName === "default",
+      is_default: true,
+      model: defaults.model,
+      provider: defaults.provider,
+      max_tokens: defaults.maxTokens,
+      context_window_tokens: defaults.contextWindowTokens,
+      temperature: defaults.temperature,
+      reasoning_effort: defaults.reasoningEffort,
+    },
+    ...Object.entries(config.modelPresets).map(([name, preset]) => ({
+      name,
+      label: preset.label ?? name,
+      active: activePresetName === name,
+      is_default: false,
+      model: preset.model,
+      provider: preset.provider,
+      max_tokens: preset.maxTokens,
+      context_window_tokens: preset.contextWindowTokens,
+      temperature: preset.temperature,
+      reasoning_effort: preset.reasoningEffort,
+    })),
+  ];
 
   const providers = PROVIDERS
     .map((spec) => {
@@ -245,15 +251,15 @@ export function settingsPayload({ requiresRestart = false }: { requiresRestart?:
 
   return {
     agent: {
-      model: activeItem?.model ?? "",
-      provider: activeItem?.provider ?? "",
-      resolved_provider: activeItem?.provider ?? "",
+      model: effectivePreset.model,
+      provider: selectedProvider,
+      resolved_provider: providerName,
       has_api_key: Boolean(provider?.apiKey),
       model_preset: activePresetName,
-      max_tokens: effectivePreset?.maxTokens ?? null,
-      context_window_tokens: effectivePreset?.contextWindowTokens ?? null,
-      temperature: effectivePreset?.temperature ?? null,
-      reasoning_effort: effectivePreset?.reasoningEffort ?? null,
+      max_tokens: effectivePreset.maxTokens,
+      context_window_tokens: effectivePreset.contextWindowTokens,
+      temperature: effectivePreset.temperature,
+      reasoning_effort: effectivePreset.reasoningEffort,
       timezone: defaults.timezone,
       bot_name: defaults.botName,
       bot_icon: defaults.botIcon,

@@ -33,7 +33,7 @@ export interface CreatePetAgentBridgeOptions {
   /** Client. */
   client: Pick<MemmyAgentClient, "connectWebSocket" | "readWebuiThread" | "chatIdToSessionKey">;
   /** Bus. */
-  bus: Pick<TaskBusValue, "appendChunk" | "completeTask" | "errorTask" | "cancelTask" | "bindTaskGoal">;
+  bus: Pick<TaskBusValue, "appendChunk" | "completeTask" | "errorTask" | "cancelTask">;
   /** Unavailable message. */
   unavailableMessage?: string;
   /** Empty response message. */
@@ -46,8 +46,6 @@ export interface CreatePetAgentBridgeOptions {
 interface ActiveTaskRun {
   taskId: string;
   accumulatedText: string;
-  goalId: string | null;
-  turnRunning: boolean;
   unsubscribe: MemmyAgentUnsubscribe;
 }
 
@@ -60,7 +58,6 @@ interface PetRecoveryEntry {
   taskId: string;
   chatId: string;
   submittedContent: string;
-  goalId: string | null;
   deadline: number;
   disconnectedGeneration: number;
   retryAttempt: number;
@@ -74,8 +71,6 @@ export interface PetReconnectRecoveryTrackerOptions {
   getConnection: () => MemmyAgentWebSocketConnection | null;
   completeTask: (taskId: string, text: string) => void;
   errorTask: (taskId: string, message: string) => void;
-  cancelTask?: (taskId: string) => void;
-  bindTaskGoal?: (taskId: string, goalId: string) => void;
   emptyResponseMessage: string;
   recoveryTimeoutMessage: string;
   interruptedMessage: string;
@@ -99,11 +94,10 @@ export class PetReconnectRecoveryTracker {
     this.clearTimer = options.clearTimer ?? clearTimeout;
   }
 
-  register(input: { taskId: string; chatId: string; submittedContent: string; goalId?: string | null }): void {
+  register(input: { taskId: string; chatId: string; submittedContent: string }): void {
     this.remove(input.taskId);
     this.entries.set(input.taskId, {
       ...input,
-      goalId: input.goalId ?? null,
       deadline: 0,
       disconnectedGeneration: 0,
       retryAttempt: 0,
@@ -191,42 +185,6 @@ export class PetReconnectRecoveryTracker {
         this.clearEntryTimers(current);
         return;
       }
-      const lastGoalId = thread.last_turn_goal_id ?? null;
-      const lastGoalOutcome = thread.last_turn_goal_outcome ?? null;
-      if (lastGoalId && lastGoalOutcome) {
-        if (current.goalId && current.goalId !== lastGoalId) {
-          this.scheduleRetry(current, generation);
-          return;
-        }
-        if (!current.goalId) {
-          current.goalId = lastGoalId;
-          this.options.bindTaskGoal?.(taskId, lastGoalId);
-        }
-        const answer = findLastAssistantText(thread.messages, userIndex) || this.options.emptyResponseMessage;
-        if (lastGoalOutcome === "active") {
-          const currentGoal = connection.getGoalState(current.chatId);
-          if (currentGoal?.goal_id !== lastGoalId || currentGoal.status !== "active") {
-            this.scheduleRetry(current, generation);
-            return;
-          }
-          current.deadline = 0;
-          this.clearEntryTimers(current);
-          return;
-        }
-        if (lastGoalOutcome === "completed") {
-          this.options.completeTask(taskId, answer);
-        } else if (lastGoalOutcome === "paused") {
-          this.options.cancelTask?.(taskId);
-        } else {
-          this.options.errorTask(taskId, answer || this.options.interruptedMessage);
-        }
-        this.remove(taskId);
-        return;
-      }
-      if (current.goalId) {
-        this.scheduleRetry(current, generation);
-        return;
-      }
       if (thread.last_turn_closed === true) {
         const answer = findLastAssistantText(thread.messages, userIndex) || this.options.emptyResponseMessage;
         this.options.completeTask(taskId, answer);
@@ -309,13 +267,6 @@ export function createPetAgentBridge(options: CreatePetAgentBridgeOptions): PetA
         failTaskRun(entry.chatId, message);
       }
     },
-    cancelTask: (taskId) => {
-      const entry = findActiveTaskRunByTaskId(taskId);
-      if (!entry) return;
-      options.bus.cancelTask(taskId);
-      cleanupRun(entry.chatId, entry.run);
-    },
-    bindTaskGoal: (taskId, goalId) => options.bus.bindTaskGoal(taskId, goalId),
     emptyResponseMessage,
     recoveryTimeoutMessage: formatMessage(zhCNMessages["home.agent.recoveryTimeout"]),
     interruptedMessage: formatMessage(zhCNMessages["home.agent.executionInterrupted"]),
@@ -339,13 +290,8 @@ export function createPetAgentBridge(options: CreatePetAgentBridgeOptions): PetA
       }
       const resolvedChat = await resolveChatId(nextConnection, input.task.sessionId, expectedGeneration);
       const { chatId } = resolvedChat;
-      subscribeTaskRun(nextConnection, chatId, input.task.id, input.task.goalId ?? null);
-      recoveryTracker.register({
-        taskId: input.task.id,
-        chatId,
-        submittedContent: content,
-        goalId: input.task.goalId ?? null
-      });
+      subscribeTaskRun(nextConnection, chatId, input.task.id);
+      recoveryTracker.register({ taskId: input.task.id, chatId, submittedContent: content });
       try {
         await nextConnection.sendMessage({
           chatId,
@@ -437,9 +383,7 @@ export function createPetAgentBridge(options: CreatePetAgentBridgeOptions): PetA
       if (closed) {
         throw new Error(unavailableMessage);
       }
-      return nextConnection
-        .newChat(expectedGeneration, newChatTimeoutMs)
-        .then((result) => result.chatId);
+      return nextConnection.newChat(expectedGeneration, newChatTimeoutMs);
     });
     newChatQueue = pending.catch(() => undefined);
     return pending.catch((error: unknown) => {
@@ -463,15 +407,12 @@ export function createPetAgentBridge(options: CreatePetAgentBridgeOptions): PetA
   function subscribeTaskRun(
     nextConnection: MemmyAgentWebSocketConnection,
     chatId: string,
-    taskId: string,
-    goalId: string | null,
+    taskId: string
   ): void {
     activeRuns.get(chatId)?.unsubscribe();
     const run: ActiveTaskRun = {
       taskId,
       accumulatedText: "",
-      goalId,
-      turnRunning: false,
       unsubscribe: nextConnection.onChat(chatId, (event) => handleTaskEvent(chatId, event))
     };
     activeRuns.set(chatId, run);
@@ -490,7 +431,7 @@ export function createPetAgentBridge(options: CreatePetAgentBridgeOptions): PetA
     }
 
     if (event.event === "stream_end") {
-      appendMissingTaskText(run, readEventText(event));
+      completeTaskRun(chatId, readEventText(event) || run.accumulatedText || emptyResponseMessage);
       return;
     }
 
@@ -498,82 +439,23 @@ export function createPetAgentBridge(options: CreatePetAgentBridgeOptions): PetA
       if (event.kind === "progress" || event.kind === "tool_hint" || event.kind === "reasoning") {
         return;
       }
-      appendMissingTaskText(run, readEventText(event));
+      completeTaskRun(chatId, readEventText(event) || run.accumulatedText || emptyResponseMessage);
       return;
     }
 
     if (event.event === "turn_end") {
-      const goalId = typeof event.goal_id === "string" ? event.goal_id : null;
-      if (!goalId && event.goal_outcome === undefined) {
-        completeTaskRun(chatId, run.accumulatedText || emptyResponseMessage);
-        return;
-      }
-      if (!goalId || (run.goalId && run.goalId !== goalId)) return;
-      bindRunGoal(run, goalId);
-      run.turnRunning = false;
-      if (event.goal_outcome === "active") return;
-      if (event.goal_outcome === "completed") {
-        completeTaskRun(chatId, run.accumulatedText || emptyResponseMessage);
-      } else if (event.goal_outcome === "paused") {
-        options.bus.cancelTask(run.taskId);
-        cleanupRun(chatId, run);
-      } else if (
-        event.goal_outcome === "blocked"
-        || event.goal_outcome === "usage_limited"
-        || event.goal_outcome === "budget_limited"
-      ) {
-        failTaskRun(chatId, run.accumulatedText || unavailableMessage);
-      }
+      completeTaskRun(chatId, run.accumulatedText || emptyResponseMessage);
       return;
     }
 
-    if (event.event === "run_status") {
-      run.turnRunning = event.status === "running";
-      return;
-    }
-
-    if (event.event === "goal_state") {
-      const goal = event.goal_state;
-      const goalId = goal?.goal_id ?? null;
-      if (!goal || !goalId) {
-        if (run.goalId && !run.turnRunning) {
-          options.bus.cancelTask(run.taskId);
-          cleanupRun(chatId, run);
-        }
-        return;
-      }
-      if (run.goalId && run.goalId !== goalId) return;
-      bindRunGoal(run, goalId);
-      if (run.turnRunning) return;
-      if (goal.status === "paused") {
-        options.bus.cancelTask(run.taskId);
-        cleanupRun(chatId, run);
-      } else if (goal.status === "completed") {
-        completeTaskRun(chatId, run.accumulatedText || emptyResponseMessage);
-      } else if (
-        goal.status === "blocked"
-        || goal.status === "usage_limited"
-        || goal.status === "budget_limited"
-      ) {
-        failTaskRun(chatId, run.accumulatedText || unavailableMessage);
-      }
+    if (event.event === "goal_status" && event.status !== "running") {
+      completeTaskRun(chatId, run.accumulatedText || emptyResponseMessage);
       return;
     }
 
     if (event.event === "error") {
       failTaskRun(chatId, event.detail ?? event.reason ?? unavailableMessage);
     }
-  }
-
-  function appendMissingTaskText(run: ActiveTaskRun, text: string): void {
-    if (!text || run.accumulatedText) return;
-    appendTaskText(run, text);
-  }
-
-  function bindRunGoal(run: ActiveTaskRun, goalId: string): void {
-    if (run.goalId) return;
-    run.goalId = goalId;
-    options.bus.bindTaskGoal(run.taskId, goalId);
   }
 
   /** Appends append task text. */
@@ -640,10 +522,7 @@ function toError(error: unknown, fallbackMessage: string): Error {
 
 function findLastUserMessageIndex(messages: Record<string, unknown>[]): number {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (
-      messages[index]?.role === "user"
-      && messages[index]?.internal_context !== "goal_continuation"
-    ) {
+    if (messages[index]?.role === "user") {
       return index;
     }
   }

@@ -7,8 +7,7 @@ import type {
   ImageGenProviderConfig,
   MemmyMemoryProviderConfig,
   ModelProviderConfig,
-  RoleModelProviderConfig,
-  TextModelProviderConfig
+  RoleModelProviderConfig
 } from "../api/config-client.js";
 import type { MessageKey } from "../i18n/messages.js";
 import {
@@ -38,11 +37,6 @@ export interface ModelConfig {
 /** Contract for protocol option. */
 export interface ProtocolOption {
   value: Protocol;
-  labelKey: MessageKey;
-}
-
-export interface TextProviderOption {
-  protocol: Protocol | null;
   labelKey: MessageKey;
 }
 
@@ -119,8 +113,6 @@ export const PROTOCOL_OPTIONS: ProtocolOption[] = [
   { value: "baidu", labelKey: "apiKey.provider.baidu" },
   { value: "doubao", labelKey: "apiKey.provider.doubao" }
 ];
-
-const MEMMY_ACCOUNT_PROVIDER = "memmy_account";
 
 export const DEFAULT_ENDPOINTS: Record<Protocol, string> = {
   openai: "https://api.openai.com/v1",
@@ -353,14 +345,8 @@ export function createMemmyMemoryProviderConfig(
   primary: PrimaryModelValues
 ): MemmyMemoryProviderConfig {
   return {
-    summary: {
-      ...toRoleModelProviderConfig(createModelFormValues(memoryModel, primary)),
-      mode: memoryModel.reuse ? "follow" : "fixed"
-    },
-    evolution: {
-      ...toRoleModelProviderConfig(createModelFormValues(skillModel, primary)),
-      mode: skillModel.reuse ? "follow" : "fixed"
-    }
+    summary: toRoleModelProviderConfig(createModelFormValues(memoryModel, primary)),
+    evolution: toRoleModelProviderConfig(createModelFormValues(skillModel, primary))
   };
 }
 
@@ -463,7 +449,7 @@ function toRoleModelProviderConfig(values: ModelConfigFormValues): RoleModelProv
 }
 
 function hydrateRoleModelConfig(role: RoleModelProviderConfig | undefined, primary: PrimaryModelValues): ModelConfig {
-  if (!role || role.mode === "follow" || (!role.configured && !role.apiKeyMasked)) {
+  if (!role?.configured && !role?.apiKeyMasked) {
     return createModelConfig(primary.protocol);
   }
 
@@ -604,60 +590,6 @@ export function toProtocol(provider: string): Protocol {
   }
 
   return PROTOCOL_OPTIONS.some((option) => option.value === provider) ? (provider as Protocol) : "openai";
-}
-
-export function resolveTextProviderOption(provider: string): TextProviderOption | null {
-  if (provider === MEMMY_ACCOUNT_PROVIDER) {
-    return {
-      protocol: null,
-      labelKey: "apiKey.provider.memmy"
-    };
-  }
-  const protocol = provider === "google"
-    ? "gemini"
-    : provider === "kimi"
-      ? "moonshot"
-      : provider;
-  const option = PROTOCOL_OPTIONS.find((candidate) => candidate.value === protocol);
-  return option
-    ? {
-      protocol: option.value,
-      labelKey: option.labelKey
-    }
-    : null;
-}
-
-export function filterDesktopTextModelProviders(
-  providers: readonly TextModelProviderConfig[]
-): TextModelProviderConfig[] {
-  return providers
-    .filter((provider) => (
-      provider.models.length > 0 && resolveTextProviderOption(provider.provider) !== null
-    ))
-    .map((provider) => ({
-      ...provider,
-      apiType: desktopTextProviderApiType(provider.provider)
-    }));
-}
-
-/**
- * Resolves the fixed API type used by the desktop text-model form.
- *
- * OpenAI-compatible endpoints use Chat Completions. Every other provider keeps
- * its provider-specific runtime behavior through the automatic API type.
- */
-export function desktopTextProviderApiType(
-  provider: string
-): TextModelProviderConfig["apiType"] {
-  return provider === "openai" ? "chatCompletions" : "auto";
-}
-
-export function textProviderDisplayName(
-  provider: string,
-  translate: (key: MessageKey) => string
-): string {
-  const option = resolveTextProviderOption(provider);
-  return option ? translate(option.labelKey) : provider;
 }
 
 /** Handles from protocol. */

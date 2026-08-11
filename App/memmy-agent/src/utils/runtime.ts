@@ -5,6 +5,8 @@ export const EMPTY_FINAL_RESPONSE_MESSAGE =
 export const FINALIZATION_RETRY_PROMPT = "Please provide your response to the user based on the conversation above.";
 export const LENGTH_RECOVERY_PROMPT =
   "Output limit reached. Continue exactly where you left off - no recap, no apology. Break remaining work into smaller steps if needed.";
+export const SUSTAINED_GOAL_CONTINUE_PROMPT =
+  "You have an active sustained goal. Please continue working toward the objective using your tools, or call complete_goal if the work is truly finished.";
 
 const MAX_REPEAT_EXTERNAL_LOOKUPS = 2;
 const MAX_REPEAT_WORKSPACE_VIOLATIONS = 2;
@@ -41,6 +43,9 @@ export function buildLengthRecoveryMessage(): Record<string, string> {
   return { role: "user", content: LENGTH_RECOVERY_PROMPT };
 }
 
+export function buildGoalContinueMessage(custom: string | null = null): Record<string, string> {
+  return { role: "user", content: custom || SUSTAINED_GOAL_CONTINUE_PROMPT };
+}
 
 export function externalLookupSignature(toolName: string, args: Record<string, any>): string | null {
   if (toolName === "web_fetch") {

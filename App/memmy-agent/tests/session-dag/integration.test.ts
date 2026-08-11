@@ -67,85 +67,6 @@ function seedGraph(store: SessionDagStore, messageEnd = 4): void {
   });
 }
 
-function seedCompactionGraph(store: SessionDagStore, messageEnd: number): void {
-  const first = store.applyPatch({
-    turn: {
-      turn_id: "turn-1",
-      message_start: 0,
-      message_end: 2,
-      user_text: "完成旧任务",
-      assistant_text: "旧任务已完成",
-    },
-    buildMode: "llm_patch",
-    patch: {
-      ops: [
-        {
-          op: "add_node",
-          temp_id: "old-task",
-          kind: "task",
-          status: "active",
-          title: "实现旧版 DAG",
-          summary: "实现旧版 DAG 流程",
-          importance: 90,
-        },
-        {
-          op: "add_node",
-          temp_id: "old-child",
-          kind: "subtask",
-          status: "done",
-          title: "旧任务终态子节点",
-          summary: "该子节点只保留在完整 DAG 中",
-          importance: 88,
-        },
-        { op: "add_edge", source_id: "old-task", target_id: "old-child", type: "decomposes" },
-      ],
-    },
-  });
-  store.applyPatch({
-    turn: {
-      turn_id: "turn-2",
-      message_start: 2,
-      message_end: messageEnd,
-      user_text: "切换到 snapshot 优化",
-      assistant_text: "开始优化 snapshot",
-    },
-    buildMode: "llm_patch",
-    patch: {
-      ops: [
-        {
-          op: "update_node",
-          node_id: first.nodeIds["old-task"],
-          status: "done",
-          title: "完成旧版 DAG",
-          summary: "旧版 DAG 已完成并通过验证",
-          importance: 92,
-          detail_json: { commands: ["npm test"] },
-        },
-        {
-          op: "add_node",
-          temp_id: "current-task",
-          kind: "task",
-          status: "active",
-          title: "优化 DAG snapshot",
-          summary: "只投影当前路径和终态任务",
-          importance: 95,
-        },
-        {
-          op: "add_node",
-          temp_id: "current-decision",
-          kind: "decision",
-          status: "done",
-          title: "确定三分区输出",
-          summary: "保留当前路径、完成任务和冻结或失败任务",
-          importance: 86,
-        },
-        { op: "add_edge", source_id: first.nodeIds["old-task"], target_id: "current-task", type: "continues" },
-        { op: "add_edge", source_id: "current-task", target_id: "current-decision", type: "decomposes" },
-      ],
-    },
-  });
-}
-
 afterEach(() => {
   vi.restoreAllMocks();
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
@@ -178,10 +99,6 @@ describe("Session DAG integration", () => {
         message_end: 2,
         user_text: "hello",
         assistant_text: "summary",
-      }),
-      expect.objectContaining({
-        provider: expect.any(Object),
-        model: "test-model",
       }),
     );
   });
@@ -323,8 +240,7 @@ describe("Session DAG integration", () => {
     sessions.save(session);
     const storePath = sessionDagDbPath(sessionKey, { MEMMY_AGENT_SESSION_DAG_DIR: path.join(root, "dag") });
     const seedStore = new SessionDagStore({ sessionKey, dbPath: storePath });
-    seedCompactionGraph(seedStore, session.messages.length);
-    const graphBeforeCompaction = seedStore.readGraphForHistoryDag();
+    seedGraph(seedStore, session.messages.length);
     seedStore.close();
     const queue = { waitUntilProcessed: vi.fn(async () => true) };
     const p = provider();
@@ -333,7 +249,7 @@ describe("Session DAG integration", () => {
       provider: p,
       model: "test-model",
       sessions,
-      contextWindowTokens: 10_000,
+      contextWindowTokens: 1000,
       maxCompletionTokens: 100,
       consolidationRatio: 0.5,
       buildMessages: ({ history }: any) => history,
@@ -349,7 +265,7 @@ describe("Session DAG integration", () => {
     const result = await consolidator.maybeConsolidateByTokens(session, { replayMaxMessages: 2 });
 
     expect(result).toMatchObject({ started: true, changed: true, error: null });
-    expect(queue.waitUntilProcessed).toHaveBeenCalledWith(sessionKey, "turn-2", 10);
+    expect(queue.waitUntilProcessed).toHaveBeenCalledWith(sessionKey, "turn-1", 10);
     expect(archive).not.toHaveBeenCalled();
     expect(session.lastConsolidated).toBe(4);
     expect(session.metadata.lastSummary).toMatchObject({
@@ -357,27 +273,6 @@ describe("Session DAG integration", () => {
       text: expect.stringContaining("[Working Memory DAG Snapshot]"),
       dagSnapshotId: expect.stringMatching(/^s_/),
     });
-    const snapshotText = session.metadata.lastSummary.text;
-    expect(snapshotText.match(/^[a-z_]+:$/gm)).toEqual([
-      "current_active_path:",
-      "completed_tasks:",
-      "frozen_or_failed_tasks:",
-    ]);
-    expect(snapshotText).toContain("[task done importance=92] 完成旧版 DAG");
-    expect(snapshotText).toContain("[decision done importance=86] 确定三分区输出");
-    expect(snapshotText).not.toContain("旧任务终态子节点");
-
-    const reopenedStore = new SessionDagStore({ sessionKey, dbPath: storePath });
-    try {
-      const graphAfterCompaction = reopenedStore.readGraphForHistoryDag();
-      expect(graphAfterCompaction.nodes).toEqual(graphBeforeCompaction.nodes);
-      expect(graphAfterCompaction.edges).toEqual(graphBeforeCompaction.edges);
-      expect(graphAfterCompaction.activePathNodeIds).toEqual(graphBeforeCompaction.activePathNodeIds);
-      expect(graphAfterCompaction.activePathEdgeIds).toEqual(graphBeforeCompaction.activePathEdgeIds);
-      expect(graphAfterCompaction.snapshotText).toBe(snapshotText);
-    } finally {
-      reopenedStore.close();
-    }
   });
 
   it("DAG mode does not run idle text compaction", async () => {

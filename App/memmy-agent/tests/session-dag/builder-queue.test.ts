@@ -196,15 +196,13 @@ describe("Session DAG builder and queue", () => {
       expect(systemPrompt).toContain('Use exactly "n0", "n1", "n2"');
       expect(systemPrompt).toContain("n0/n1/n2 are invalid here");
       expect(systemPrompt).toContain("Temporary ids are patch-local");
+      expect(systemPrompt).toContain("Do not create orphan subtask or decision nodes.");
       expect(systemPrompt).toContain("Every new subtask or decision must be connected by add_edge so it is reachable from a task root.");
       expect(systemPrompt).toContain('For add_node with kind="task", status must be "active" or "blocked"');
       expect(systemPrompt).toContain("Node kind meanings");
       expect(systemPrompt).toContain("Edge type meanings");
       expect(systemPrompt).toContain("done/failed task -> next task");
       expect(systemPrompt).toContain("frozen task -> replacement task");
-      expect(systemPrompt).toContain("side_branch: current Goal task -> subtask/decision");
-      expect(systemPrompt).toContain("If goal_context exists and the root task has the same goal_id, never add a task");
-      expect(systemPrompt).toContain("An unrelated durable question must use a side_branch edge from the Goal task");
       expect(systemPrompt).toContain("Adding a task while dag_context.root_task_id exists is a task switch");
       expect(systemPrompt).toContain("dag_context.active_path and dag_context.active_path_edges");
       expect(systemPrompt).toContain("latest completed subtask/decision");
@@ -233,7 +231,6 @@ describe("Session DAG builder and queue", () => {
         tool_name: "apply_patch",
       });
       expect(payload.dag_context).toMatchObject({ root_task_id: null, nodes: [], edges: [], active_path: [], active_path_edges: [] });
-      expect(payload.goal_context).toBeNull();
       expect(store.readGraphForHistoryDag().nodes.map((node) => node.title).sort()).toEqual(["完成 store 事务", "实现 DAG store"]);
       const debugRecords = readDebugRecords(sessionKey);
       expect(debugRecords).toHaveLength(1);
@@ -270,193 +267,6 @@ describe("Session DAG builder and queue", () => {
           turnId: "turn-1",
           contextNodeCount: 0,
         }),
-      }));
-    } finally {
-      store.close();
-    }
-  });
-
-  it("passes the persisted Goal snapshot to the Builder and assigns goal_id only in the Store", async () => {
-    const root = tmpRoot();
-    oldDagDir = process.env.MEMMY_AGENT_SESSION_DAG_DIR;
-    process.env.MEMMY_AGENT_SESSION_DAG_DIR = path.join(root, "dag");
-    const sessionKey = "websocket:goal-builder-context";
-    const { sessions, session } = makeSession(root, sessionKey);
-    const store = new SessionDagStore({ sessionKey });
-    const provider: any = {
-      chatWithRetry: vi.fn(async () => ({
-        content: JSON.stringify({
-          ops: [{
-            op: "add_node",
-            temp_id: "n0",
-            kind: "task",
-            status: "active",
-            title: "实现 Goal mode",
-            summary: "按目标持续执行",
-            importance: 95,
-          }],
-        }),
-        usage: { prompt_tokens: 2, completion_tokens: 1 },
-      })),
-    };
-    const builder = new SessionDagBuilder({
-      sessionKey,
-      sessions,
-      store,
-      provider,
-      model: "test-model",
-      maxBuilderContextNodes: 40,
-    });
-    store.upsertTurn({
-      turn_id: "turn-goal",
-      message_start: 0,
-      message_end: session.messages.length,
-      user_text: "开始 Goal",
-      assistant_text: "正在实现",
-      goal_context: { goalId: "goal-1", objective: "实现并验证 Goal mode", status: "active" },
-    });
-
-    try {
-      await builder.buildAndApply(store.getTurn("turn-goal")!);
-
-      const payload = JSON.parse(provider.chatWithRetry.mock.calls[0][0].messages[1].content);
-      expect(payload.goal_context).toEqual({
-        goal_id: "goal-1",
-        objective: "实现并验证 Goal mode",
-        status: "active",
-      });
-      expect(payload.dag_context.root_task_id).toBeNull();
-      expect(store.readGraphForHistoryDag().nodes).toContainEqual(expect.objectContaining({
-        kind: "task",
-        goal_id: "goal-1",
-      }));
-    } finally {
-      store.close();
-    }
-  });
-
-  it("replaces the internal continuation contract with the persisted objective summary for the Builder", async () => {
-    const root = tmpRoot();
-    oldDagDir = process.env.MEMMY_AGENT_SESSION_DAG_DIR;
-    process.env.MEMMY_AGENT_SESSION_DAG_DIR = path.join(root, "dag");
-    const sessionKey = "websocket:goal-builder-internal";
-    const sessions = new SessionManager(path.join(root, "sessions"));
-    const session = new Session({ key: sessionKey });
-    session.addMessage("user", "PRIVATE GOAL CONTRACT WITH BUDGET AND AUDIT", {
-      internal_context: "goal_continuation",
-    });
-    session.addMessage("assistant", "继续处理中");
-    sessions.save(session);
-    const store = new SessionDagStore({ sessionKey });
-    store.applyPatch({
-      turn: {
-        turn_id: "turn-bootstrap",
-        message_start: 0,
-        message_end: 1,
-        goal_context: { goalId: "goal-1", objective: "完成 Goal", status: "active" },
-      },
-      buildMode: "llm_patch",
-      patch: { ops: [{ op: "add_node", temp_id: "task", kind: "task", status: "active", title: "Goal", summary: "持续目标", importance: 95 }] },
-    });
-    store.upsertTurn({
-      turn_id: "turn-continuation",
-      message_start: 0,
-      message_end: session.messages.length,
-      user_text: "Goal continuation: 完成 Goal",
-      assistant_text: "继续处理中",
-      goal_context: { goalId: "goal-1", objective: "完成 Goal", status: "active" },
-    });
-    const provider: any = {
-      chatWithRetry: vi.fn(async () => ({
-        content: JSON.stringify({ ops: [] }),
-        usage: { prompt_tokens: 1, completion_tokens: 1 },
-      })),
-    };
-    const builder = new SessionDagBuilder({
-      sessionKey,
-      sessions,
-      store,
-      provider,
-      model: "test-model",
-      maxBuilderContextNodes: 40,
-    });
-
-    try {
-      await builder.buildAndApply(store.getTurn("turn-continuation")!);
-
-      const payload = JSON.parse(provider.chatWithRetry.mock.calls[0][0].messages[1].content);
-      expect(payload.turn_messages.messages[0].content).toBe("Goal continuation: 完成 Goal");
-      expect(JSON.stringify(payload.turn_messages)).not.toContain("PRIVATE GOAL CONTRACT");
-      expect(payload.goal_context).toEqual({ goal_id: "goal-1", objective: "完成 Goal", status: "active" });
-      expect(payload.dag_context.nodes.find((node: any) => node.id === payload.dag_context.root_task_id)?.goal_id).toBe("goal-1");
-    } finally {
-      store.close();
-    }
-  });
-
-  it("deterministic fallback keeps the locked Goal task and uses ordinary transition semantics after completion", () => {
-    const root = tmpRoot();
-    oldDagDir = process.env.MEMMY_AGENT_SESSION_DAG_DIR;
-    process.env.MEMMY_AGENT_SESSION_DAG_DIR = path.join(root, "dag");
-    const sessionKey = "websocket:goal-builder-fallback";
-    const sessions = new SessionManager(path.join(root, "sessions"));
-    const store = new SessionDagStore({ sessionKey });
-    const builder = new SessionDagBuilder({
-      sessionKey,
-      sessions,
-      store,
-      provider: {},
-      model: "test-model",
-      maxBuilderContextNodes: 40,
-    });
-    store.upsertTurn({
-      turn_id: "turn-goal-start",
-      message_start: 0,
-      message_end: 1,
-      user_text: "开始 Goal",
-      assistant_text: "处理中",
-      goal_context: { goalId: "goal-1", objective: "完成 Goal", status: "active" },
-    });
-
-    try {
-      builder.applyDeterministicFallback(store.getTurn("turn-goal-start")!);
-      const goalTask = store.readGraphForHistoryDag().nodes.find((node) => node.kind === "task")!;
-
-      store.upsertTurn({
-        turn_id: "turn-goal-next",
-        message_start: 1,
-        message_end: 2,
-        user_text: "继续 Goal",
-        assistant_text: "仍在处理",
-        goal_context: { goalId: "goal-1", objective: "完成 Goal", status: "active" },
-      });
-      builder.applyDeterministicFallback(store.getTurn("turn-goal-next")!);
-      expect(store.readGraphForHistoryDag().nodes.filter((node) => node.kind === "task")).toHaveLength(1);
-
-      store.upsertTurn({
-        turn_id: "turn-goal-complete",
-        message_start: 2,
-        message_end: 3,
-        user_text: "完成 Goal",
-        assistant_text: "已完成",
-        goal_context: { goalId: "goal-1", objective: "完成 Goal", status: "completed" },
-      });
-      builder.applyDeterministicFallback(store.getTurn("turn-goal-complete")!);
-      expect(store.readGraphForHistoryDag().nodes.find((node) => node.id === goalTask.id)?.status).toBe("done");
-
-      store.upsertTurn({
-        turn_id: "turn-ordinary",
-        message_start: 3,
-        message_end: 4,
-        user_text: "新的普通问题",
-        assistant_text: "处理中",
-      });
-      builder.applyDeterministicFallback(store.getTurn("turn-ordinary")!);
-      const graph = store.readGraphForHistoryDag();
-      expect(graph.nodes.filter((node) => node.kind === "task")).toHaveLength(2);
-      expect(graph.edges).toContainEqual(expect.objectContaining({
-        source_id: goalTask.id,
-        type: "continues",
       }));
     } finally {
       store.close();

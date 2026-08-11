@@ -9,7 +9,6 @@ import {
   type DagDetailJson,
   type DagBuilderContext,
   type DagEdgeType,
-  type DagGoalContext,
   type DagNodeKind,
   type DagNodeStatus,
   type DagPatch,
@@ -75,7 +74,7 @@ export function validateDagPatch(input: unknown, options: DagPatchValidationOpti
       }
       ops.push(update);
     } else if (op === "add_edge") {
-      const edge = validateAddEdge(rawOp, index, knownExistingIds, tempKinds, contextNodeKinds);
+      const edge = validateAddEdge(rawOp, index, knownExistingIds, tempKinds);
       ops.push(edge);
     } else {
       throw new DagPatchValidationError(`DAG patch op ${index} has unsupported op`);
@@ -86,58 +85,17 @@ export function validateDagPatch(input: unknown, options: DagPatchValidationOpti
   return { ops };
 }
 
-export function normalizeDagTaskTransition(
-  patch: DagPatch,
-  dagContext: DagBuilderContext,
-  goalContext: DagGoalContext | null = null,
-): DagPatch {
+export function normalizeDagTaskTransition(patch: DagPatch, dagContext: DagBuilderContext): DagPatch {
   const addedTasks = patch.ops.filter((op): op is AddNodePatchOp => op.op === "add_node" && op.kind === "task");
   if (addedTasks.length > 1) {
     throw new DagPatchValidationError("DAG patch may add at most one task");
   }
   const addedTask = addedTasks[0];
-  const rootTask = dagContext.root_task_id
-    ? dagContext.nodes.find((node) => node.id === dagContext.root_task_id && node.kind === "task") ?? null
-    : null;
-  const sideBranches = patch.ops.filter(
-    (op): op is AddEdgePatchOp => op.op === "add_edge" && op.type === "side_branch",
-  );
-  if (sideBranches.length) {
-    const expectedSource = goalContext
-      ? rootTask?.goal_id === goalContext.goalId
-        ? rootTask.id
-        : addedTask?.temp_id ?? null
-      : null;
-    if (!expectedSource || sideBranches.some((edge) => edge.source_id !== expectedSource)) {
-      throw new DagPatchValidationError("side_branch must start at the current Goal task");
-    }
-  }
-  if (goalContext && rootTask?.goal_id === goalContext.goalId) {
-    if (addedTask) throw new DagPatchValidationError("Goal turn cannot create a second task");
-    const rootStatusUpdates = patch.ops.filter(
-      (op): op is UpdateNodePatchOp => op.op === "update_node" && op.node_id === rootTask.id && op.status !== undefined,
-    );
-    if (goalContext.status !== "completed") {
-      if (rootStatusUpdates.some((op) => isTerminalTaskStatus(op.status!))) {
-        throw new DagPatchValidationError("Unfinished Goal turn cannot close its task");
-      }
-      return patch;
-    }
-    if (rootStatusUpdates.some((op) => op.status !== "done")) {
-      throw new DagPatchValidationError("Completed Goal turn can only close its task as done");
-    }
-    const hasDoneUpdate = patch.ops.some((op) => (
-      op.op === "update_node" && op.node_id === rootTask.id && op.status === "done"
-    ));
-    return hasDoneUpdate
-      ? patch
-      : { ops: [{ op: "update_node", node_id: rootTask.id, status: "done" }, ...patch.ops] };
-  }
   if (!addedTask || !dagContext.root_task_id) return patch;
 
   const rootTaskId = dagContext.root_task_id;
-  const currentRootTask = dagContext.nodes.find((node) => node.id === rootTaskId);
-  if (!currentRootTask || currentRootTask.kind !== "task") {
+  const rootTask = dagContext.nodes.find((node) => node.id === rootTaskId);
+  if (!rootTask || rootTask.kind !== "task") {
     throw new DagPatchValidationError("DAG task transition root_task_id must reference a task in dag_context.nodes");
   }
 
@@ -183,20 +141,18 @@ export function normalizeDagTaskTransition(
   if (explicitStatus) {
     resolvedStatus = explicitStatus;
   } else if (explicitEdgeType) {
-    if (isTerminalTaskStatus(currentRootTask.status)) {
-      resolvedStatus = currentRootTask.status;
+    if (isTerminalTaskStatus(rootTask.status)) {
+      resolvedStatus = rootTask.status;
     } else {
       resolvedStatus = explicitEdgeType === "continues" ? "done" : "frozen";
     }
-  } else if (isTerminalTaskStatus(currentRootTask.status)) {
-    resolvedStatus = currentRootTask.status;
-  } else if (!goalContext && currentRootTask.goal_id) {
-    resolvedStatus = "frozen";
+  } else if (isTerminalTaskStatus(rootTask.status)) {
+    resolvedStatus = rootTask.status;
   } else {
     const descendants = dagContext.nodes.filter((node) => node.kind !== "task");
     const hasDoneDescendant = descendants.some((node) => node.status === "done");
     const hasOpenDescendant = descendants.some((node) => node.status === "active" || node.status === "blocked");
-    resolvedStatus = currentRootTask.status === "active" && hasDoneDescendant && !hasOpenDescendant ? "done" : "frozen";
+    resolvedStatus = rootTask.status === "active" && hasDoneDescendant && !hasOpenDescendant ? "done" : "frozen";
   }
 
   const resolvedEdgeType = taskTransitionEdgeType(resolvedStatus);
@@ -206,7 +162,7 @@ export function normalizeDagTaskTransition(
     );
   }
 
-  const shouldWriteStatus = Boolean(explicitStatus) || !isTerminalTaskStatus(currentRootTask.status);
+  const shouldWriteStatus = Boolean(explicitStatus) || !isTerminalTaskStatus(rootTask.status);
   const rootUpdate = mergeRootUpdates(rootTaskId, rootUpdates);
   if (shouldWriteStatus) {
     rootUpdate.status = resolvedStatus;
@@ -350,7 +306,6 @@ function validateAddEdge(
   index: number,
   knownExistingIds: Set<string>,
   tempKinds: Map<string, DagNodeKind>,
-  contextNodeKinds: Record<string, DagNodeKind>,
 ): AddEdgePatchOp {
   rejectUnknownKeys(raw, ADD_EDGE_KEYS, index);
   const sourceId = requiredBoundedString(raw.source_id, "source_id", index, 120);
@@ -362,22 +317,11 @@ function validateAddEdge(
   if (!knownExistingIds.has(targetId) && !tempKinds.has(targetId)) {
     throw new DagPatchValidationError(`DAG patch op ${index} target_id is unknown`);
   }
-  const type = enumField(raw, "type", EDGE_TYPES, index);
-  if (type === "side_branch") {
-    const sourceKind = tempKinds.get(sourceId) ?? contextNodeKinds[sourceId];
-    const targetKind = tempKinds.get(targetId) ?? contextNodeKinds[targetId];
-    if (sourceKind !== "task") {
-      throw new DagPatchValidationError(`DAG patch op ${index} side_branch source must be a task`);
-    }
-    if (targetKind === "task") {
-      throw new DagPatchValidationError(`DAG patch op ${index} side_branch target must be a subtask or decision`);
-    }
-  }
   return {
     op: "add_edge",
     source_id: sourceId,
     target_id: targetId,
-    type,
+    type: enumField(raw, "type", EDGE_TYPES, index),
   };
 }
 

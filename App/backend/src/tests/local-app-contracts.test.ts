@@ -151,40 +151,28 @@ describe("local app contracts", () => {
 
   it("parses model config input and exposes saved keys in model config view", () => {
     const input = ModelConfigInputSchema.parse({
-      configRevision: "revision-1",
-      providers: [{
-        provider: "openai",
-        apiBase: "https://api.example.com/v1",
-        apiKey: "sk-test-secret",
-        models: [{ presetName: "work-gpt", model: "gpt-4.1-mini" }]
-      }],
-      defaultModelPreset: "work-gpt",
+      provider: "openai_compatible",
+      baseUrl: "https://api.example.com/v1",
+      modelId: "gpt-4.1-mini",
+      apiKey: "sk-test-secret",
       embedding: {
         mode: "custom",
-        custom: {
-          baseUrl: "https://embedding.example.com/v1",
-          modelId: "text-embedding-3-large",
-          apiKey: "emb-test-secret"
-        }
+        baseUrl: "https://embedding.example.com/v1",
+        modelId: "text-embedding-3-large",
+        apiKey: "emb-test-secret"
       },
       memmyMemory: {
         summary: {
-          mode: "fixed",
-          fixed: {
-            provider: "anthropic",
-            baseUrl: "https://memory.example.com/v1",
-            modelId: "claude-3-5-haiku",
-            apiKey: "sk-memory-secret"
-          }
+          provider: "anthropic",
+          baseUrl: "https://memory.example.com/v1",
+          modelId: "claude-3-5-haiku",
+          apiKey: "sk-memory-secret"
         },
         evolution: {
-          mode: "fixed",
-          fixed: {
-            provider: "qwen",
-            baseUrl: "https://skill.example.com/v1",
-            modelId: "qwen-plus",
-            apiKey: "sk-skill-secret"
-          }
+          provider: "qwen",
+          baseUrl: "https://skill.example.com/v1",
+          modelId: "qwen-plus",
+          apiKey: "sk-skill-secret"
         }
       },
       asr: {
@@ -196,62 +184,40 @@ describe("local app contracts", () => {
     });
 
     expect(input.embedding?.mode).toBe("custom");
-    expect(input.memmyMemory?.evolution.fixed?.provider).toBe("qwen");
+    expect(input.memmyMemory?.evolution.provider).toBe("qwen");
     expect(input.asr?.modelId).toBe("qwen3-asr-flash");
 
     const view = ModelConfigViewSchema.parse({
-      configRevision: "revision-2",
-      providers: [{
-        provider: "openai",
-        apiBase: "https://api.example.com/v1",
-        apiType: "auto",
-        configured: true,
-        hasApiKey: true,
-        apiKeyMasked: "sk-t••••cret",
-        apiKey: "sk-test-secret",
-        accountManaged: false,
-        editable: true,
-        models: [{
-          presetName: "work-gpt",
-          model: "gpt-4.1-mini",
-          isDefault: true,
-          available: true
-        }]
-      }],
-      defaultModelPreset: "work-gpt",
-      configured: true,
+      provider: "openai_compatible",
+      baseUrl: "https://api.example.com/v1",
+      modelId: "gpt-4.1-mini",
+      hasApiKey: true,
+      apiKeyMasked: "sk-t••••cret",
+      apiKey: "sk-test-secret",
       embedding: {
         mode: "custom",
-        custom: {
-          baseUrl: "https://embedding.example.com/v1",
-          modelId: "text-embedding-3-large",
-          hasApiKey: true,
-          apiKeyMasked: "emb-••••cret",
-          apiKey: "emb-test-secret"
-        }
+        baseUrl: "https://embedding.example.com/v1",
+        modelId: "text-embedding-3-large",
+        hasApiKey: true,
+        apiKeyMasked: "emb-••••cret",
+        apiKey: "emb-test-secret"
       },
       memmyMemory: {
         summary: {
-          mode: "fixed",
-          fixed: {
-            provider: "anthropic",
-            baseUrl: "https://memory.example.com/v1",
-            modelId: "claude-3-5-haiku",
-            hasApiKey: true,
-            apiKeyMasked: "sk-m••••cret",
-            apiKey: "sk-memory-secret"
-          }
+          provider: "anthropic",
+          baseUrl: "https://memory.example.com/v1",
+          modelId: "claude-3-5-haiku",
+          hasApiKey: true,
+          apiKeyMasked: "sk-m••••cret",
+          apiKey: "sk-memory-secret"
         },
         evolution: {
-          mode: "fixed",
-          fixed: {
-            provider: "qwen",
-            baseUrl: "https://skill.example.com/v1",
-            modelId: "qwen-plus",
-            hasApiKey: true,
-            apiKeyMasked: "sk-s••••cret",
-            apiKey: "sk-skill-secret"
-          }
+          provider: "qwen",
+          baseUrl: "https://skill.example.com/v1",
+          modelId: "qwen-plus",
+          hasApiKey: true,
+          apiKeyMasked: "sk-s••••cret",
+          apiKey: "sk-skill-secret"
         }
       },
       asr: {
@@ -273,10 +239,10 @@ describe("local app contracts", () => {
       updatedAt: "2026-06-02T10:00:00.000Z"
     });
 
-    expect(view.providers[0]?.apiKey).toBe("sk-test-secret");
-    expect(view.embedding?.custom?.apiKey).toBe("emb-test-secret");
-    expect(view.memmyMemory.summary.fixed?.apiKey).toBe("sk-memory-secret");
-    expect(view.memmyMemory.evolution.fixed?.apiKey).toBe("sk-skill-secret");
+    expect(view.apiKey).toBe("sk-test-secret");
+    expect(view.embedding?.apiKey).toBe("emb-test-secret");
+    expect(view.memmyMemory.summary.apiKey).toBe("sk-memory-secret");
+    expect(view.memmyMemory.evolution.apiKey).toBe("sk-skill-secret");
     expect(view.asr?.apiKey).toBe("sk-asr-secret");
     expect(view.imageGen?.apiKey).toBe("sk-image-secret");
   });

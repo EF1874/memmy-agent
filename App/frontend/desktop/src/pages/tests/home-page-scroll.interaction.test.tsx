@@ -28,8 +28,6 @@ describe("HomePage conversation scrolling", () => {
     act(() => root.unmount());
     vi.clearAllTimers();
     vi.useRealTimers();
-    vi.restoreAllMocks();
-    vi.unstubAllGlobals();
     document.body.replaceChildren();
   });
 
@@ -85,71 +83,6 @@ describe("HomePage conversation scrolling", () => {
     });
     expect(findScrollToLatestButton()).toBeNull();
   });
-
-  it("tracks the real composer overlay height without pulling an actively reading user down", () => {
-    let overlayHeight = 180;
-    let resizeCallback: ResizeObserverCallback | null = null;
-    class TestResizeObserver {
-      constructor(private readonly callback: ResizeObserverCallback) {
-      }
-      observe(target: Element) {
-        if (target.classList.contains("agent-conversation-composer")) {
-          resizeCallback = this.callback;
-        }
-      }
-      disconnect() {}
-      unobserve() {}
-    }
-    vi.stubGlobal("ResizeObserver", TestResizeObserver);
-    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
-      if (this.classList.contains("agent-conversation-composer")) {
-        return { x: 0, y: 0, top: 0, right: 0, bottom: overlayHeight, left: 0, width: 0, height: overlayHeight, toJSON: () => ({}) };
-      }
-      return { x: 0, y: 0, top: 0, right: 0, bottom: 0, left: 0, width: 0, height: 0, toJSON: () => ({}) };
-    });
-
-    act(() => {
-      root.render(
-        <AppProviders>
-          <AgentRuntimeBridge>
-            <CompletedConversationSeeder />
-            <HomePage />
-          </AgentRuntimeBridge>
-        </AppProviders>
-      );
-    });
-
-    const panel = document.querySelector<HTMLElement>(".agent-conversation-panel")!;
-    const scrollContainer = document.querySelector<HTMLDivElement>(".agent-conversation-scroll")!;
-    Object.defineProperties(scrollContainer, {
-      clientHeight: { configurable: true, value: 400 },
-      scrollHeight: { configurable: true, value: 1200 },
-      scrollTop: { configurable: true, value: 200, writable: true }
-    });
-    expect(panel.style.getPropertyValue("--agent-composer-overlay-height")).toBe("180px");
-    expect(resizeCallback).not.toBeNull();
-
-    overlayHeight = 260;
-    act(() => (resizeCallback as ResizeObserverCallback)([], {} as ResizeObserver));
-    act(() => vi.advanceTimersByTime(20));
-    expect(panel.style.getPropertyValue("--agent-composer-overlay-height")).toBe("260px");
-    expect(scrollContainer.scrollTop).toBe(1200);
-
-    act(() => {
-      vi.advanceTimersByTime(121);
-      scrollContainer.dispatchEvent(new Event("wheel", { bubbles: true }));
-      scrollContainer.scrollTop = 200;
-      scrollContainer.dispatchEvent(new Event("scroll", { bubbles: true }));
-    });
-    overlayHeight = 320;
-    act(() => (resizeCallback as ResizeObserverCallback)([], {} as ResizeObserver));
-    act(() => vi.advanceTimersByTime(20));
-
-    expect(panel.style.getPropertyValue("--agent-composer-overlay-height")).toBe("320px");
-    expect(scrollContainer.scrollTop).toBe(200);
-    expect(findScrollToLatestButton()).not.toBeNull();
-  });
-
 });
 
 function CompletedConversationSeeder() {

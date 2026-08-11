@@ -37,9 +37,6 @@ describe("installByokTokenUsage", () => {
       spec: {
         sessionKey: "cli:direct",
         model: "gpt-4.1-mini",
-        provider: {
-          spec: { name: "openai" }
-        }
       },
     });
     await hooks[0]?.beforeRun(ctx);

@@ -6,16 +6,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { migrations } from "../src/registry.js";
 import { runMigrations, runMigrationsForTest } from "../src/runner.js";
 import {
+  emptyMigrationState,
   getMigrationStatePaths,
   readMigrationState,
-  runtimeConfigTargetKey,
+  writeMigrationState,
+  type MigrationState,
 } from "../src/state-store.js";
-import type {
-  AgentWorkspaceMigrationContext,
-  MigrationDefinition,
-  MigrationLogger,
-  RunMigrationsOptions,
-} from "../src/types.js";
+import type { MigrationDefinition, MigrationLogger } from "../src/types.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -30,17 +27,14 @@ function logger(): MigrationLogger {
 function definition(
   id: string,
   introducedIn: string,
-  options: {
-    scope?: MigrationDefinition["scope"];
-    up?: MigrationDefinition["up"];
-  } = {},
+  up: MigrationDefinition["up"] = async () => ({ scanned: 0, changed: 0, ignored: 0 }),
 ): MigrationDefinition {
   return {
     id,
     introducedIn,
-    scope: options.scope ?? "agent-workspace",
+    scope: "agent-workspace",
     description: `Test migration ${id}`,
-    up: options.up ?? (async () => ({ scanned: 0, changed: 0, ignored: 0 })),
+    up,
   };
 }
 
@@ -50,21 +44,10 @@ async function workspace(): Promise<string> {
   return fs.realpath(directory);
 }
 
-function options(
-  agentWorkspace: string,
-  runtimeConfigFile = path.join(agentWorkspace, "config.yaml"),
-): RunMigrationsOptions {
-  return {
-    targets: {
-      agentWorkspace,
-      runtimeConfigFile,
-      sessionDagDir: path.join(agentWorkspace, "session-dag"),
-    },
-    logger: logger(),
-  };
-}
-
-async function writeState(profileWorkspace: string, state: unknown): Promise<void> {
+async function writeState(
+  profileWorkspace: string,
+  state: unknown,
+): Promise<void> {
   const paths = getMigrationStatePaths(profileWorkspace);
   await fs.mkdir(paths.directory, { recursive: true });
   await fs.writeFile(paths.file, JSON.stringify(state));
@@ -79,13 +62,13 @@ afterEach(async () => {
 });
 
 describe("migration runner", () => {
-  it("applies the registry in order and skips both target types on the second run", async () => {
+  it("applies the default migration once and then skips it", async () => {
     const profileWorkspace = await workspace();
     const sessionsDir = path.join(profileWorkspace, "sessions");
-    const configPath = path.join(profileWorkspace, "config.yaml");
     await fs.mkdir(sessionsDir);
+    const sessionPath = path.join(sessionsDir, "legacy.jsonl");
     await fs.writeFile(
-      path.join(sessionsDir, "legacy.jsonl"),
+      sessionPath,
       `${JSON.stringify({
         recordType: "metadata",
         key: "websocket:legacy",
@@ -95,95 +78,62 @@ describe("migration runner", () => {
         lastConsolidated: 0,
       })}\n`,
     );
-    await fs.writeFile(
-      configPath,
-      "memmyMemory:\n  activeProfile: byok\n  profiles:\n    byok:\n      embedding:\n        provider: local\n",
-    );
 
-    const first = await runMigrations(options(profileWorkspace, configPath));
-    const second = await runMigrations(options(profileWorkspace, configPath));
-
-    expect(first.applied.map((item) => item.id)).toEqual([
-      "v1.0.4/0001-add-webui-session-binding",
-      "v1.0.5/0001-flatten-memory-model-config",
-      "v1.0.5/0002-normalize-goal-state",
-      "v1.0.5/0003-add-goal-dag-boundary",
-    ]);
-    expect(first.results).toEqual({ scanned: 3, changed: 2, ignored: 1 });
-    expect(second).toEqual({
-      applied: [],
-      skipped: [
-        "v1.0.4/0001-add-webui-session-binding",
-        "v1.0.5/0001-flatten-memory-model-config",
-        "v1.0.5/0002-normalize-goal-state",
-        "v1.0.5/0003-add-goal-dag-boundary",
-      ],
-      results: { scanned: 0, changed: 0, ignored: 0 },
+    const first = await runMigrations({
+      targets: { agentWorkspace: profileWorkspace },
+      logger: logger(),
+    });
+    const fileAfterFirstRun = await fs.readFile(sessionPath);
+    const second = await runMigrations({
+      targets: { agentWorkspace: profileWorkspace },
+      logger: logger(),
     });
 
+    expect(first.applied).toHaveLength(1);
+    expect(first.results).toEqual({ scanned: 1, changed: 1, ignored: 0 });
+    expect(second).toEqual({
+      applied: [],
+      skipped: ["v1.0.4/0001-add-webui-session-binding"],
+      results: { scanned: 0, changed: 0, ignored: 0 },
+    });
+    expect(await fs.readFile(sessionPath)).toEqual(fileAfterFirstRun);
     const state = await readMigrationState(
       getMigrationStatePaths(profileWorkspace).file,
       migrations,
     );
-    expect(state.formatVersion).toBe(2);
     expect(state.applied).toEqual([
       {
         id: "v1.0.4/0001-add-webui-session-binding",
         introducedIn: "1.0.4",
         appliedAt: expect.stringMatching(/Z$/),
-        target: { type: "agent-workspace" },
-      },
-      {
-        id: "v1.0.5/0001-flatten-memory-model-config",
-        introducedIn: "1.0.5",
-        appliedAt: expect.stringMatching(/Z$/),
-        target: {
-          type: "runtime-config",
-          key: runtimeConfigTargetKey(configPath),
-        },
-      },
-      {
-        id: "v1.0.5/0002-normalize-goal-state",
-        introducedIn: "1.0.5",
-        appliedAt: expect.stringMatching(/Z$/),
-        target: { type: "agent-workspace" },
-      },
-      {
-        id: "v1.0.5/0003-add-goal-dag-boundary",
-        introducedIn: "1.0.5",
-        appliedAt: expect.stringMatching(/Z$/),
-        target: {
-          type: "session-dag",
-          key: expect.stringMatching(/^[a-f0-9]{64}$/),
-        },
       },
     ]);
   });
 
-  it("runs pending definitions in registry order without filtering by app version", async () => {
+  it("runs every pending migration in registry order without filtering by app version", async () => {
     const profileWorkspace = await workspace();
     const calls: string[] = [];
     const definitions = [
-      definition("v1.0.1/0001-first", "1.0.1", {
-        up: async () => {
-          calls.push("first");
-          return { scanned: 1, changed: 1, ignored: 0 };
-        },
+      definition("v1.0.1/0001-first", "1.0.1", async () => {
+        calls.push("first");
+        return { scanned: 1, changed: 1, ignored: 0 };
       }),
-      definition("v3.0.0/0001-future", "3.0.0", {
-        up: async () => {
-          calls.push("future");
-          return { scanned: 2, changed: 0, ignored: 2 };
-        },
+      definition("v3.0.0/0001-future", "3.0.0", async () => {
+        calls.push("future");
+        return { scanned: 2, changed: 0, ignored: 2 };
       }),
     ];
 
-    const result = await runMigrationsForTest(options(profileWorkspace), {
-      definitions,
-      now: () => new Date("2026-07-27T08:00:00.000Z"),
-    });
+    const result = await runMigrationsForTest(
+      { targets: { agentWorkspace: profileWorkspace }, logger: logger() },
+      { definitions, now: () => new Date("2026-07-27T08:00:00.000Z") },
+    );
 
     expect(calls).toEqual(["first", "future"]);
+    expect(result.applied.map((item) => item.id)).toEqual([
+      "v1.0.1/0001-first",
+      "v3.0.0/0001-future",
+    ]);
     expect(result.results).toEqual({ scanned: 3, changed: 1, ignored: 2 });
   });
 
@@ -198,129 +148,88 @@ describe("migration runner", () => {
     });
     const third = vi.fn(async () => ({ scanned: 0, changed: 0, ignored: 0 }));
     const definitions = [
-      definition("v1.0.1/0001-first", "1.0.1", { up: first }),
-      definition("v1.0.1/0002-second", "1.0.1", { up: second }),
-      definition("v1.0.1/0003-third", "1.0.1", { up: third }),
+      definition("v1.0.1/0001-first", "1.0.1", first),
+      definition("v1.0.1/0002-second", "1.0.1", second),
+      definition("v1.0.1/0003-third", "1.0.1", third),
     ];
 
     await expect(
-      runMigrationsForTest(options(profileWorkspace), { definitions }),
+      runMigrationsForTest(
+        { targets: { agentWorkspace: profileWorkspace }, logger: logger() },
+        { definitions },
+      ),
     ).rejects.toMatchObject({
       code: "migration_io_failed",
       migrationId: "v1.0.1/0002-second",
     });
     expect(third).not.toHaveBeenCalled();
 
-    await runMigrationsForTest(options(profileWorkspace), { definitions });
+    const afterFailure = await readMigrationState(
+      getMigrationStatePaths(profileWorkspace).file,
+      definitions,
+    );
+    expect(afterFailure.applied.map((item) => item.id)).toEqual(["v1.0.1/0001-first"]);
+
+    await runMigrationsForTest(
+      { targets: { agentWorkspace: profileWorkspace }, logger: logger() },
+      { definitions },
+    );
     expect(first).toHaveBeenCalledTimes(1);
     expect(second).toHaveBeenCalledTimes(2);
     expect(third).toHaveBeenCalledTimes(1);
   });
 
-  it("runs a runtime-config migration once per normalized config path", async () => {
-    const profileWorkspace = await workspace();
-    const firstConfig = path.join(profileWorkspace, "first.yaml");
-    const secondConfig = path.join(profileWorkspace, "nested", "..", "second.yaml");
-    const workspaceUp = vi.fn(async () => ({ scanned: 0, changed: 1, ignored: 0 }));
-    const configUp = vi.fn(async (_context: AgentWorkspaceMigrationContext) => ({
-      scanned: 0,
-      changed: 1,
-      ignored: 0,
-    }));
-    const definitions = [
-      definition("v1.0.1/0001-workspace", "1.0.1", { up: workspaceUp }),
-      definition("v1.0.2/0001-config", "1.0.2", {
-        scope: "runtime-config",
-        up: configUp,
-      }),
-    ];
-
-    await runMigrationsForTest(options(profileWorkspace, firstConfig), { definitions });
-    await runMigrationsForTest(options(profileWorkspace, firstConfig), { definitions });
-    await runMigrationsForTest(options(profileWorkspace, secondConfig), { definitions });
-
-    expect(workspaceUp).toHaveBeenCalledTimes(1);
-    expect(configUp).toHaveBeenCalledTimes(2);
-    expect(configUp.mock.calls.map(([context]) => context.runtimeConfigFile)).toEqual([
-      path.normalize(path.resolve(firstConfig)),
-      path.normalize(path.resolve(secondConfig)),
-    ]);
-  });
-
-  it("upgrades a valid v1 state without rerunning workspace migrations", async () => {
-    const profileWorkspace = await workspace();
-    await writeState(profileWorkspace, {
-      formatVersion: 1,
-      scope: "agent-workspace",
-      applied: [
-        {
-          id: "v1.0.1/0001-workspace",
-          introducedIn: "1.0.1",
-          appliedAt: "2026-07-27T08:00:00.000Z",
-        },
-      ],
-    });
-    const workspaceUp = vi.fn(async () => ({ scanned: 0, changed: 1, ignored: 0 }));
-    const configUp = vi.fn(async () => ({ scanned: 0, changed: 1, ignored: 0 }));
-    const definitions = [
-      definition("v1.0.1/0001-workspace", "1.0.1", { up: workspaceUp }),
-      definition("v1.0.2/0001-config", "1.0.2", {
-        scope: "runtime-config",
-        up: configUp,
-      }),
-    ];
-
-    await runMigrationsForTest(options(profileWorkspace), { definitions });
-
-    expect(workspaceUp).not.toHaveBeenCalled();
-    expect(configUp).toHaveBeenCalledOnce();
-    const source = await fs.readFile(
-      getMigrationStatePaths(profileWorkspace).file,
-      "utf8",
-    );
-    expect(JSON.parse(source).formatVersion).toBe(2);
-  });
-
   it.each([
     ["invalid JSON", "not-json"],
-    ["unsupported format", { formatVersion: 3, scope: "agent-workspace", applied: [] }],
-    ["wrong scope", { formatVersion: 2, scope: "other", applied: [] }],
     [
-      "unsupported fields",
-      { formatVersion: 2, scope: "agent-workspace", applied: [], extra: true },
+      "unsupported format",
+      { formatVersion: 2, scope: "agent-workspace", applied: [] },
     ],
     [
-      "duplicate targets",
+      "wrong scope",
+      { formatVersion: 1, scope: "other", applied: [] },
+    ],
+    [
+      "unsupported fields",
+      { formatVersion: 1, scope: "agent-workspace", applied: [], extra: true },
+    ],
+    [
+      "duplicate IDs",
       {
-        formatVersion: 2,
+        formatVersion: 1,
         scope: "agent-workspace",
         applied: [
           {
             id: "unknown",
             introducedIn: "9.0.0",
             appliedAt: "2026-07-27T08:00:00.000Z",
-            target: { type: "agent-workspace" },
           },
           {
             id: "unknown",
             introducedIn: "9.0.0",
             appliedAt: "2026-07-27T08:00:00.000Z",
-            target: { type: "agent-workspace" },
           },
         ],
       },
     ],
     [
-      "an exposed runtime config path",
+      "invalid timestamp",
       {
-        formatVersion: 2,
+        formatVersion: 1,
+        scope: "agent-workspace",
+        applied: [{ id: "unknown", introducedIn: "9.0.0", appliedAt: "yesterday" }],
+      },
+    ],
+    [
+      "known ID version mismatch",
+      {
+        formatVersion: 1,
         scope: "agent-workspace",
         applied: [
           {
-            id: "unknown",
-            introducedIn: "9.0.0",
+            id: "v1.0.4/0001-add-webui-session-binding",
+            introducedIn: "1.0.3",
             appliedAt: "2026-07-27T08:00:00.000Z",
-            target: { type: "runtime-config", key: "/Users/example/config.yaml" },
           },
         ],
       },
@@ -332,29 +241,35 @@ describe("migration runner", () => {
     const source = typeof state === "string" ? state : JSON.stringify(state);
     await fs.writeFile(paths.file, source);
 
-    await expect(runMigrations(options(profileWorkspace))).rejects.toMatchObject({
-      code: "migration_state_invalid",
-    });
+    await expect(
+      runMigrations({
+        targets: { agentWorkspace: profileWorkspace },
+        logger: logger(),
+      }),
+    ).rejects.toMatchObject({ code: "migration_state_invalid" });
     await expect(fs.readFile(paths.file, "utf8")).resolves.toBe(source);
   });
 
-  it("preserves records unknown to the current registry", async () => {
+  it("preserves applied IDs unknown to the current registry", async () => {
     const profileWorkspace = await workspace();
     await writeState(profileWorkspace, {
-      formatVersion: 2,
+      formatVersion: 1,
       scope: "agent-workspace",
       applied: [
         {
           id: "v9.9.9/0001-from-newer-app",
           introducedIn: "9.9.9",
           appliedAt: "2026-07-27T08:00:00.000Z",
-          target: { type: "agent-workspace" },
         },
       ],
     });
     const definitions = [definition("v1.0.1/0001-known", "1.0.1")];
 
-    await runMigrationsForTest(options(profileWorkspace), { definitions });
+    await runMigrationsForTest(
+      { targets: { agentWorkspace: profileWorkspace }, logger: logger() },
+      { definitions },
+    );
+
     const state = await readMigrationState(
       getMigrationStatePaths(profileWorkspace).file,
       definitions,
@@ -365,17 +280,36 @@ describe("migration runner", () => {
     ]);
   });
 
+  it("validates the complete registry before touching the target", async () => {
+    const profileWorkspace = await workspace();
+    const duplicate = definition("v1.0.1/0001-duplicate", "1.0.1");
+
+    await expect(
+      runMigrationsForTest(
+        { targets: { agentWorkspace: profileWorkspace }, logger: logger() },
+        { definitions: [duplicate, duplicate] },
+      ),
+    ).rejects.toMatchObject({
+      code: "migration_definition_invalid",
+    });
+    await expect(
+      fs.access(getMigrationStatePaths(profileWorkspace).directory),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it.each([
     [
-      "duplicate IDs",
-      [
-        definition("v1.0.1/0001-duplicate", "1.0.1"),
-        definition("v1.0.1/0001-duplicate", "1.0.1"),
-      ],
+      "a leading-zero version",
+      [definition("v01.0.1/0001-invalid", "01.0.1")],
     ],
-    ["a leading-zero version", [definition("v01.0.1/0001-invalid", "01.0.1")]],
-    ["a version mismatch", [definition("v1.0.1/0001-invalid", "1.0.2")]],
-    ["sequence zero", [definition("v1.0.1/0000-invalid", "1.0.1")]],
+    [
+      "a version mismatch",
+      [definition("v1.0.1/0001-invalid", "1.0.2")],
+    ],
+    [
+      "sequence zero",
+      [definition("v1.0.1/0000-invalid", "1.0.1")],
+    ],
     [
       "out-of-order definitions",
       [
@@ -392,125 +326,139 @@ describe("migration runner", () => {
         } as unknown as MigrationDefinition,
       ],
     ],
-  ])("rejects registry definitions with %s before touching state", async (_label, definitions) => {
+  ])("rejects registry definitions with %s", async (_label, definitions) => {
     const profileWorkspace = await workspace();
     await expect(
-      runMigrationsForTest(options(profileWorkspace), { definitions }),
+      runMigrationsForTest(
+        { targets: { agentWorkspace: profileWorkspace }, logger: logger() },
+        { definitions },
+      ),
     ).rejects.toMatchObject({ code: "migration_definition_invalid" });
     await expect(
       fs.access(getMigrationStatePaths(profileWorkspace).directory),
     ).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("serializes concurrent runners so each target migration executes once", async () => {
+  it("serializes concurrent runners so a migration executes once", async () => {
     const profileWorkspace = await workspace();
     const up = vi.fn(async () => {
       await new Promise((resolve) => setTimeout(resolve, 50));
       return { scanned: 1, changed: 1, ignored: 0 };
     });
-    const definitions = [
-      definition("v1.0.1/0001-once", "1.0.1", { up }),
-    ];
-    const migrationOptions = options(profileWorkspace);
+    const definitions = [definition("v1.0.1/0001-once", "1.0.1", up)];
+    const options = {
+      targets: { agentWorkspace: profileWorkspace },
+      logger: logger(),
+    };
 
     const [left, right] = await Promise.all([
-      runMigrationsForTest(migrationOptions, { definitions }),
-      runMigrationsForTest(migrationOptions, { definitions }),
+      runMigrationsForTest(options, { definitions }),
+      runMigrationsForTest(options, { definitions }),
     ]);
 
     expect(up).toHaveBeenCalledTimes(1);
     expect([left.applied.length, right.applied.length].sort()).toEqual([0, 1]);
+    expect([left.skipped.length, right.skipped.length].sort()).toEqual([0, 1]);
   });
 
-  it("tracks a session-dag migration independently for each normalized directory", async () => {
-    const profileWorkspace = await workspace();
-    const seenTargets: string[] = [];
-    const definitions = [definition("v1.0.1/0001-session-dag", "1.0.1", {
-      scope: "session-dag",
-      up: async (context) => {
-        seenTargets.push(context.sessionDagDir);
-        return { scanned: 1, changed: 1, ignored: 0 };
-      },
-    })];
-    const firstOptions = options(profileWorkspace);
-    firstOptions.targets.sessionDagDir = path.join(profileWorkspace, "nested", "..", "dag-a");
-    const secondOptions = options(profileWorkspace);
-    secondOptions.targets.sessionDagDir = path.join(profileWorkspace, "dag-b");
-
-    const first = await runMigrationsForTest(firstOptions, { definitions });
-    const second = await runMigrationsForTest(secondOptions, { definitions });
-    const repeated = await runMigrationsForTest(firstOptions, { definitions });
-
-    expect(first.applied).toHaveLength(1);
-    expect(second.applied).toHaveLength(1);
-    expect(repeated.applied).toHaveLength(0);
-    expect(repeated.skipped).toEqual(["v1.0.1/0001-session-dag"]);
-    expect(seenTargets).toEqual([
-      path.join(profileWorkspace, "dag-a"),
-      path.join(profileWorkspace, "dag-b"),
-    ]);
-  });
-
-  it("returns a stable timeout when another process holds the workspace state lock", async () => {
+  it("returns a stable timeout when another process holds the scope lock", async () => {
     const profileWorkspace = await workspace();
     const paths = getMigrationStatePaths(profileWorkspace);
     await fs.mkdir(paths.directory, { recursive: true });
     const release = await lockfile.lock(paths.directory, { realpath: false });
     try {
       await expect(
-        runMigrationsForTest(options(profileWorkspace), {
-          definitions: [definition("v1.0.1/0001-lock", "1.0.1")],
-          lock: { stale: 120_000, update: 10_000, retries: 1, retryDelay: 5 },
-        }),
-      ).rejects.toMatchObject({ code: "migration_lock_timeout" });
+        runMigrationsForTest(
+          { targets: { agentWorkspace: profileWorkspace }, logger: logger() },
+          {
+            definitions: [definition("v1.0.1/0001-lock", "1.0.1")],
+            lock: { stale: 120_000, update: 10_000, retries: 1, retryDelay: 5 },
+          },
+        ),
+      ).rejects.toMatchObject({
+        code: "migration_lock_timeout",
+      });
     } finally {
       await release();
     }
   });
 
-  it("reports unavailable targets before creating state", async () => {
-    const root = await workspace();
-    const missingWorkspace = path.join(root, "missing");
-    await expect(runMigrations(options(missingWorkspace))).rejects.toMatchObject({
-      code: "migration_target_unavailable",
-    });
+  it("keeps migration state independent for each profile workspace", async () => {
+    const firstWorkspace = await workspace();
+    const secondWorkspace = await workspace();
+    const up = vi.fn(async () => ({ scanned: 0, changed: 1, ignored: 0 }));
+    const definitions = [definition("v1.0.1/0001-per-workspace", "1.0.1", up)];
+
+    for (const profileWorkspace of [firstWorkspace, secondWorkspace]) {
+      await runMigrationsForTest(
+        { targets: { agentWorkspace: profileWorkspace }, logger: logger() },
+        { definitions },
+      );
+    }
+
+    expect(up).toHaveBeenCalledTimes(2);
   });
 
-  it("rejects an empty runtime config target before creating state", async () => {
+  it("leaves the previous state intact when an atomic state replacement fails", async () => {
     const profileWorkspace = await workspace();
-    await expect(
-      runMigrations({
-        targets: {
-          agentWorkspace: profileWorkspace,
-          runtimeConfigFile: " ",
-          sessionDagDir: path.join(profileWorkspace, "session-dag"),
+    const paths = getMigrationStatePaths(profileWorkspace);
+    await fs.mkdir(paths.directory, { recursive: true });
+    const initial: MigrationState = {
+      ...emptyMigrationState(),
+      applied: [
+        {
+          id: "v1.0.1/0001-old",
+          introducedIn: "1.0.1",
+          appliedAt: "2026-07-27T08:00:00.000Z",
         },
-        logger: logger(),
+      ],
+    };
+    await writeMigrationState(paths, initial, "v1.0.1/0001-old");
+    const before = await fs.readFile(paths.file);
+    const replacement: MigrationState = {
+      ...initial,
+      applied: [
+        ...initial.applied,
+        {
+          id: "v1.0.1/0002-new",
+          introducedIn: "1.0.1",
+          appliedAt: "2026-07-27T08:01:00.000Z",
+        },
+      ],
+    };
+
+    await expect(
+      writeMigrationState(paths, replacement, "v1.0.1/0002-new", {
+        beforeRename: async () => {
+          throw new Error("injected rename failure");
+        },
       }),
+    ).rejects.toMatchObject({ code: "migration_io_failed" });
+    await expect(fs.readFile(paths.file)).resolves.toEqual(before);
+    expect((await fs.readdir(paths.directory)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("reports unavailable targets before creating state", async () => {
+    const missing = path.join(await workspace(), "missing");
+    await expect(
+      runMigrations({ targets: { agentWorkspace: missing }, logger: logger() }),
     ).rejects.toMatchObject({
       code: "migration_target_unavailable",
-      scope: "runtime-config",
     });
-    await expect(
-      fs.access(getMigrationStatePaths(profileWorkspace).directory),
-    ).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("does not expose a migration cause or config content in structured logs", async () => {
+  it("does not expose a migration cause or Session content in structured logs", async () => {
     const profileWorkspace = await workspace();
     const migrationLogger = logger();
     const definitions = [
-      definition("v1.0.1/0001-secret", "1.0.1", {
-        scope: "runtime-config",
-        up: async () => {
-          throw new Error("private API key");
-        },
+      definition("v1.0.1/0001-secret", "1.0.1", async () => {
+        throw new Error("private chat content");
       }),
     ];
 
     await expect(
       runMigrationsForTest(
-        { ...options(profileWorkspace), logger: migrationLogger },
+        { targets: { agentWorkspace: profileWorkspace }, logger: migrationLogger },
         { definitions },
       ),
     ).rejects.toMatchObject({ code: "migration_io_failed" });
@@ -520,10 +468,10 @@ describe("migration runner", () => {
       ...vi.mocked(migrationLogger.warn).mock.calls,
       ...vi.mocked(migrationLogger.error).mock.calls,
     ]);
-    expect(serializedCalls).not.toContain("private API key");
+    expect(serializedCalls).not.toContain("private chat content");
     expect(migrationLogger.error).toHaveBeenCalledWith("migration_failed", {
       migrationId: "v1.0.1/0001-secret",
-      scope: "runtime-config",
+      scope: "agent-workspace",
       errorCode: "migration_io_failed",
     });
   });

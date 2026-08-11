@@ -1,9 +1,8 @@
 import { Command } from "commander";
-import { withRuntimeConfigWriteLock } from "@memmy/migrations";
+import { runMigrations } from "@memmy/migrations";
 import fs from "node:fs";
 import http from "node:http";
 import { AsyncLocalStorage } from "node:async_hooks";
-import crypto from "node:crypto";
 import { Readable } from "node:stream";
 import path from "node:path";
 import YAML from "yaml";
@@ -14,12 +13,7 @@ import { CronTool } from "../../core/agent-runtime/tools/cron.js";
 import { MessageTool } from "../../core/agent-runtime/tools/message.js";
 import { prepareManagedChromium } from "../../core/agent-runtime/tools/browser-setup.js";
 import { WebuiTitleService } from "../../core/session/webui-title.js";
-import {
-  readWebuiSessionBinding,
-  Session,
-  SessionManager,
-  type WebuiSessionBinding,
-} from "../../core/session/manager.js";
+import { readWebuiSessionBinding } from "../../core/session/manager.js";
 import { WEBUI_LANGUAGE_METADATA_KEY } from "../../core/session/webui-turns.js";
 import {
   API_MAX_BODY_BYTES,
@@ -51,7 +45,6 @@ import {
   loginOpenAICodexInteractive,
 } from "../../providers/openai-codex-oauth.js";
 import { PROVIDERS } from "../../providers/registry.js";
-import { ModelCatalogWatcher } from "../../providers/model-catalog-watcher.js";
 import { evaluateResponse } from "../../utils/evaluator.js";
 import { installConsoleLevelGate } from "../../runtime-log-level.js";
 import { syncWorkspaceTemplates } from "../../utils/helpers.js";
@@ -64,22 +57,10 @@ import {
 } from "../../utils/restart.js";
 import { createChannelAdmin } from "../frontend-bridge/channels-api.js";
 import { ProjectStore } from "../frontend-bridge/projects.js";
-import {
-  GatewayTranscriptMonitor,
-  GuiTranscriptMirror,
-} from "../frontend-bridge/gui-transcript-sync.js";
-import {
-  getQuestionary,
-  runOnboard,
-  validateModelCatalogForSave,
-} from "./onboard.js";
+import { getQuestionary, runOnboard } from "./onboard.js";
 import { StreamRenderer, ThinkingSpinner } from "./stream.js";
-import { prepareStartupMigrations } from "./startup-migrations.js";
 
-export const app = new Command("memmy")
-  .option("-s, --session <sessionId>", "Resume an existing cli:* terminal session")
-  .option("--standalone", "Create a new standalone terminal session")
-  .option("--project <path>", "Create a terminal session bound to a project path");
+export const app = new Command("memmy");
 
 export type GatewayRuntime = {
   bus: MessageBus;
@@ -174,7 +155,6 @@ export function loadRuntimeConfig(config?: string | null, workspace?: string | n
   if (workspace) loaded.agents.defaults.workspace = workspace;
   return loaded;
 }
-
 export function mergeMissingDefaults(existing: any, defaults: any): any {
   if (!existing || typeof existing !== "object" || Array.isArray(existing)) return existing;
   if (!defaults || typeof defaults !== "object" || Array.isArray(defaults)) return existing;
@@ -185,24 +165,22 @@ export function mergeMissingDefaults(existing: any, defaults: any): any {
   return merged;
 }
 
-export async function onboardPlugins(configPath: string): Promise<void> {
+export function onboardPlugins(configPath: string): void {
   if (!fs.existsSync(configPath)) return;
-  await withRuntimeConfigWriteLock(configPath, async () => {
-    const raw = fs.readFileSync(configPath, "utf8");
-    let data: any = {};
-    try {
-      data = YAML.parse(raw || "{}");
-    } catch {
-      data = {};
-    }
-    const channels = (data.channels ??= {});
-    for (const [name, cls] of Object.entries(discoverAll())) {
-      const defaults = (cls as any).defaultConfig?.() ?? { enabled: false };
-      channels[name] = name in channels ? mergeMissingDefaults(channels[name], defaults) : defaults;
-    }
-    fs.mkdirSync(path.dirname(configPath), { recursive: true });
-    fs.writeFileSync(configPath, YAML.stringify(data), "utf8");
-  });
+  const raw = fs.readFileSync(configPath, "utf8");
+  let data: any = {};
+  try {
+    data = YAML.parse(raw || "{}");
+  } catch {
+    data = {};
+  }
+  const channels = (data.channels ??= {});
+  for (const [name, cls] of Object.entries(discoverAll())) {
+    const defaults = (cls as any).defaultConfig?.() ?? { enabled: false };
+    channels[name] = name in channels ? mergeMissingDefaults(channels[name], defaults) : defaults;
+  }
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  fs.writeFileSync(configPath, YAML.stringify(data), "utf8");
 }
 
 export function modelDisplay(config: Config): [string, string] {
@@ -231,250 +209,19 @@ export function isRootInteractiveRequest(argv: string[] = process.argv): boolean
 
 type RootInteractiveRunner = () => Promise<unknown>;
 
-export type TerminalTarget = {
-  sessionId: string;
-  target: "standalone" | "project";
-  projectId: string | null;
-  projectName: string | null;
-  cwd: string;
-};
-
-export type TerminalTargetDependencies = {
-  sessions: SessionManager;
-  projectStore: ProjectStore;
-  workspace: string;
-  hasUsableDefaultModel: () => boolean;
-};
-
 let rootInteractiveRunnerForTest: RootInteractiveRunner | null = null;
 
 export function setRootInteractiveRunnerForTest(runner: RootInteractiveRunner | null): void {
   rootInteractiveRunnerForTest = runner;
 }
 
-function terminalTargetDependenciesForLoop(loop: AgentLoop): TerminalTargetDependencies {
-  const projectStore = loop.projectStore ?? new ProjectStore();
-  loop.projectStore = projectStore;
-  return {
-    sessions: loop.sessions,
-    projectStore,
-    workspace: loop.workspace,
-    hasUsableDefaultModel: () => loop.resolveTurnModelSelection({}) !== null,
-  };
-}
-
-export function resolveTerminalTarget(
-  dependencies: TerminalTargetDependencies,
-  {
-    sessionId = null,
-    standalone = false,
-    project = null,
-    invocationCwd = process.cwd(),
-  }: {
-    sessionId?: string | null;
-    standalone?: boolean;
-    project?: string | null;
-    invocationCwd?: string;
-  } = {},
-): TerminalTarget {
-  const selected = Number(Boolean(sessionId)) + Number(standalone) + Number(Boolean(project));
-  if (selected > 1) throw new Error("--session, --standalone, and --project are mutually exclusive");
-  const { sessions, projectStore, workspace } = dependencies;
-  if (
-    typeof sessions?.get !== "function"
-    || typeof sessions?.save !== "function"
-  ) {
-    const fallbackId = sessionId
-      ?? (standalone || project ? `cli:${crypto.randomUUID()}` : "cli:direct");
-    return {
-      sessionId: fallbackId,
-      target: project ? "project" : "standalone",
-      projectId: null,
-      projectName: project ? path.basename(project) : null,
-      cwd: path.resolve(workspace || invocationCwd),
-    };
-  }
-  const reload = (key: string): Session | null => {
-    const runtimeSessions = sessions as SessionManager & {
-      invalidate?: (sessionKey: string) => void;
-      reload?: (sessionKey: string) => Session | null;
-    };
-    if (typeof runtimeSessions.reload === "function") {
-      return runtimeSessions.reload(key);
-    }
-    runtimeSessions.invalidate?.(key);
-    return sessions.get(key);
-  };
-
-  let key = sessionId;
-  let binding: WebuiSessionBinding;
-  let projectName: string | null = null;
-  let sessionSaved = false;
-  if (key) {
-    if (!key.startsWith("cli:")) throw new Error("--session only accepts an existing cli:* session");
-    const session = reload(key);
-    if (!session) throw new Error(`Session not found: ${key}`);
-    binding = readWebuiSessionBinding(session);
-    if (binding.projectId !== null) {
-      const registered = projectStore.getActive(binding.projectId);
-      if (!registered || registered.rootPath !== binding.cwd) {
-        throw new Error("Session project is no longer active");
-      }
-      projectName = registered.name;
-    }
-  } else {
-    key = standalone || project ? `cli:${crypto.randomUUID()}` : "cli:direct";
-    const existing = reload(key);
-    if (!existing && !dependencies.hasUsableDefaultModel()) {
-      throw new Error("No usable default model is configured. Run `memmy onboard` first.");
-    }
-    if (existing) {
-      binding = readWebuiSessionBinding(existing);
-    } else if (project) {
-      const rawPath = project === "~" || project.startsWith("~/")
-        ? path.join(process.env.HOME ?? "", project.slice(2))
-        : project;
-      const absolute = path.resolve(invocationCwd, rawPath);
-      const registered = projectStore.resolveOrRegisterExisting(absolute, (resolvedProject) => {
-        const resolvedBinding = {
-          projectId: resolvedProject.id,
-          cwd: resolvedProject.rootPath,
-        };
-        const session = new Session({ key: key! });
-        session.metadata.webui = true;
-        session.metadata.webuiProjectId = resolvedBinding.projectId;
-        session.metadata.webuiWorkspaceCwd = resolvedBinding.cwd;
-        sessions.save(session, { fsync: true });
-        sessionSaved = true;
-        return resolvedProject;
-      });
-      binding = { projectId: registered.id, cwd: registered.rootPath };
-      projectName = registered.name;
-    } else {
-      binding = { projectId: null, cwd: fs.realpathSync(workspace) };
-    }
-    if (!existing && !sessionSaved) {
-      const session = new Session({ key });
-      session.metadata.webui = true;
-      session.metadata.webuiProjectId = binding.projectId;
-      session.metadata.webuiWorkspaceCwd = binding.cwd;
-      sessions.save(session, { fsync: true });
-    }
-  }
-  if (binding.projectId !== null && !projectName) {
-    const registered = projectStore.getActive(binding.projectId);
-    if (!registered || registered.rootPath !== binding.cwd) {
-      throw new Error("Session project is no longer active");
-    }
-    projectName = registered.name;
-  }
-  return {
-    sessionId: key,
-    target: binding.projectId === null ? "standalone" : "project",
-    projectId: binding.projectId,
-    projectName,
-    cwd: binding.cwd,
-  };
-}
-
-export function listTerminalSessions(): Array<{
-  sessionId: string;
-  target: "standalone" | "project";
-  projectId: string | null;
-  projectName: string | null;
-  cwd: string;
-  updatedAt: string;
-}> {
-  const loaded = loadRuntimeConfig(null, null);
-  const loop = AgentLoop.fromConfig(loaded);
-  const projects = new ProjectStore();
-  return loop.sessions.listWebuiSessionRecords()
-    .flatMap((session) => {
-      if (!session.key.startsWith("cli:")) return [];
-      try {
-        const binding = readWebuiSessionBinding(session);
-        const project = binding.projectId === null
-          ? null
-          : projects.getActive(binding.projectId);
-        if (
-          binding.projectId !== null
-          && (!project || project.rootPath !== binding.cwd)
-        ) {
-          return [];
-        }
-        return [{
-          sessionId: session.key,
-          target: binding.projectId === null ? "standalone" as const : "project" as const,
-          projectId: binding.projectId,
-          projectName: project?.name ?? null,
-          cwd: binding.cwd,
-          updatedAt: session.updatedAt,
-        }];
-      } catch {
-        return [];
-      }
-    })
-    .sort((left, right) => (
-      right.updatedAt.localeCompare(left.updatedAt)
-      || left.sessionId.localeCompare(right.sessionId)
-    ));
-}
-
-export async function runRootInteractiveAgent({
-  sessionId = null,
-  standalone = false,
-  project = null,
-}: {
-  sessionId?: string | null;
-  standalone?: boolean;
-  project?: string | null;
-} = {}): Promise<unknown> {
+export async function runRootInteractiveAgent(): Promise<unknown> {
   if (rootInteractiveRunnerForTest) return rootInteractiveRunnerForTest();
   const loaded = loadRuntimeConfig(null, null);
-  const workspace = syncRuntimeWorkspaceTemplates(loaded);
-  const target = resolveTerminalTarget({
-    sessions: new SessionManager(path.join(workspace, "sessions"), {
-      legacyWebuiWorkspaceCwd: workspace,
-    }),
-    projectStore: new ProjectStore(),
-    workspace,
-    hasUsableDefaultModel: () => {
-      try {
-        const preset = loaded.resolvePreset();
-        return Boolean(preset.model.trim() && loaded.getProviderName(preset.model, { preset }));
-      } catch {
-        return false;
-      }
-    },
-  }, { sessionId, standalone, project });
-  printCliRestartNoticeIfNeeded(target.sessionId, true);
+  syncRuntimeWorkspaceTemplates(loaded);
+  printCliRestartNoticeIfNeeded("cli:direct", true);
   const { runInkInteractiveAgent } = await import("./tui.js");
-  return runInkInteractiveAgent(loaded, target.sessionId, target);
-}
-
-function rootTerminalOptions(argv: string[]): {
-  sessionId?: string;
-  standalone?: boolean;
-  project?: string;
-} | null {
-  if (argv.length <= 2) return {};
-  const args = argv.slice(2);
-  const options: { sessionId?: string; standalone?: boolean; project?: string } = {};
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === "--standalone") options.standalone = true;
-    else if (arg === "--session" || arg === "-s") {
-      const value = args[++index];
-      if (!value || value.startsWith("-")) throw new Error("--session requires a sessionId");
-      options.sessionId = value;
-    } else if (arg === "--project") {
-      const value = args[++index];
-      if (!value || value.startsWith("-")) throw new Error("--project requires a path");
-      options.project = value;
-    }
-    else return null;
-  }
-  return options;
+  return runInkInteractiveAgent(loaded, "cli:direct");
 }
 
 export async function runInternalCommand(argv: string[]): Promise<boolean> {
@@ -506,32 +253,10 @@ export async function main(argv: string[] = process.argv): Promise<void> {
     versionCallback(true);
     return;
   }
-  const rootTarget = rootTerminalOptions(argv);
-  if (rootTarget) {
-    await prepareStartupMigrations();
-    await runRootInteractiveAgent(rootTarget);
+  if (isRootInteractiveRequest(argv)) {
+    await runRootInteractiveAgent();
     return;
   }
-
-  app.hook("preAction", async (_command, actionCommand) => {
-    const opts = actionCommand.optsWithGlobals() as {
-      config?: string;
-      workspace?: string;
-    };
-    await prepareStartupMigrations(
-      { config: opts.config, workspace: opts.workspace },
-      process.env,
-      { force: actionCommand.name() === "migrate" },
-    );
-  });
-
-  app
-    .command("migrate", { hidden: true })
-    .option("-w, --workspace <dir>", "Workspace directory")
-    .option("-c, --config <path>", "Path to config file")
-    .action(() => {
-      console.log("Migrations ready.");
-    });
 
   app
     .command("onboard")
@@ -572,9 +297,7 @@ export async function main(argv: string[] = process.argv): Promise<void> {
     .command("agent")
     .description("Run a direct CLI chat turn.")
     .option("-m, --message <message>", "Message to send")
-    .option("-s, --session <sessionId>", "Existing cli:* session ID")
-    .option("--standalone", "Create a new standalone terminal session")
-    .option("--project <path>", "Create a terminal session bound to a project path")
+    .option("-s, --session <sessionId>", "Session ID", "cli:direct")
     .option("-w, --workspace <dir>", "Workspace directory")
     .option("-c, --config <path>", "Path to config file")
     .option("--markdown", "Render final responses as markdown", true)
@@ -583,27 +306,6 @@ export async function main(argv: string[] = process.argv): Promise<void> {
     .option("--no-logs", "Disable runtime logs")
     .action(async (opts) => {
       await agent({ ...opts, sessionId: opts.session });
-    });
-
-  const sessionsCommand = app.command("sessions").description("Manage terminal sessions.");
-  sessionsCommand
-    .command("list")
-    .option("--json", "Print JSON")
-    .action((opts) => {
-      const rows = listTerminalSessions();
-      if (opts.json) console.log(JSON.stringify(rows, null, 2));
-      else {
-        console.log("SESSION ID\tTARGET\tPROJECT\tCWD\tUPDATED");
-        for (const row of rows) {
-          console.log([
-            row.sessionId,
-            row.target,
-            row.projectName ?? "-",
-            row.cwd,
-            row.updatedAt,
-          ].join("\t"));
-        }
-      }
     });
 
   app
@@ -720,15 +422,12 @@ export async function onboard({
       console.log("Configuration discarded. No changes were saved.");
       return loaded;
     }
-    validateModelCatalogForSave(loaded);
-    await withRuntimeConfigWriteLock(configPath, async () => {
-      saveConfig(loaded, configPath);
-    });
+    saveConfig(loaded, configPath);
     console.log(`Config saved at ${configPath}`);
   } else if (!fs.existsSync(configPath)) {
     saveConfig(loaded, configPath);
   }
-  await onboardPlugins(configPath);
+  onboardPlugins(configPath);
   const workspacePath = getWorkspacePath(loaded.agents.defaults.workspace);
   fs.mkdirSync(workspacePath, { recursive: true });
   syncWorkspaceTemplates(workspacePath, undefined, {
@@ -954,8 +653,8 @@ const WEBUI_CRON_TRANSIENT_METADATA_KEYS = [
   "toolEvents",
   "fileEditEvents",
   "retryWait",
-  "runStatus",
-  "runStatusEvent",
+  "goalStatus",
+  "goalStatusEvent",
   "goalState",
   "goalStateSync",
 ] as const;
@@ -1038,6 +737,14 @@ export async function gateway({
   // Gateway daemon mode: filter console output by the MEMMY_LOG_LEVEL injected by the desktop app.
   installConsoleLevelGate();
   const canonicalWorkspace = fs.realpathSync(workspacePath);
+  await runMigrations({
+    targets: { agentWorkspace: canonicalWorkspace },
+    logger: {
+      info: (event, fields) => console.info(`[migration] ${event}`, fields ?? {}),
+      warn: (event, fields) => console.warn(`[migration] ${event}`, fields ?? {}),
+      error: (event, fields) => console.error(`[migration] ${event}`, fields ?? {}),
+    },
+  });
   const bus = new MessageBus();
   const cron = new CronService(path.join(workspacePath, "cron", "jobs.json"));
   const projectStore = new ProjectStore();
@@ -1048,69 +755,19 @@ export async function gateway({
       if (model) publishRuntimeModelUpdate(bus, model, preset);
     },
   });
-  if (loop.sessions instanceof SessionManager) {
-    loop.guiTranscriptMirror = new GuiTranscriptMirror(loop.sessions, canonicalWorkspace);
-  }
   await initializeLoopRuntimeTools(loop);
-  const cancelSessionTasks = async (sessionKey: string): Promise<number> => {
-    const stopped = await loop.cancelActiveTasks(sessionKey);
-    const terminalOwner = sessionKey.startsWith("cli:")
-      ? await loop.terminalRunControl.requestCancel(sessionKey)
-      : false;
-    if (terminalOwner) {
-      const deadline = Date.now() + 120_000;
-      while (loop.terminalRunControl.read(sessionKey) && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 250));
-      }
-    }
-    return stopped + Number(terminalOwner);
-  };
   const manager = new ChannelManager(loaded, bus, {
     sessionManager: loop.sessions,
     workspacePath,
     webuiRuntimeModelName: () => {
-      try {
-        return loop.llmRuntime().model;
-      } catch {
-        return null;
-      }
+      loop.refreshProviderSnapshot();
+      return loop.model ?? null;
     },
-    webuiRuntimeToolNames: () => loop.toolNames,
-    webuiModelSelectionResolver: (input) => loop.resolveTurnModelSelection(input),
-    cancelActiveTasks: cancelSessionTasks,
+    cancelActiveTasks: (sessionKey) => loop.cancelActiveTasks(sessionKey),
     closeBrowserChat: (channel, chatId) => loop.closeBrowserChat(channel, chatId),
-    goalControlHandler: (request) => loop.goalRuntime.control(request),
-    getWebuiQueueSnapshot: (sessionKey) => loop.getWebuiQueueSnapshot(sessionKey),
-    removeQueuedWebuiMessage: (sessionKey, clientRequestId) => (
-      loop.removeQueuedWebuiMessage(sessionKey, clientRequestId)
-    ),
-    stopExpectedTurn: (sessionKey, expectedTurnId) => (
-      loop.stopExpectedTurn(sessionKey, expectedTurnId, "tui")
-    ),
-    activeGoalStopHandler: async (sessionKey) => {
-      const goal = loop.goalRuntime.get(sessionKey);
-      if (goal?.status !== "active") return false;
-      await loop.goalRuntime.pauseAndCancel(sessionKey, goal.goalId);
-      await loop.goalRuntime.flushEffects(sessionKey);
-      return true;
-    },
   });
-  loop.setChannelCapabilitiesResolver?.((channel) => manager.channelCapabilities(channel));
   const webuiChannel = manager.getChannel("websocket");
-  let transcriptMonitor: GatewayTranscriptMonitor | null = null;
   if (webuiChannel instanceof WebSocketChannel) {
-    webuiChannel.setSessionTurnBarrier(
-      (sessionKey, operation) => loop.withSessionTurnBarrier(sessionKey, operation),
-    );
-    webuiChannel.setSessionDeletionBarrier(
-      (sessionKey, cancelRunning, operation) => loop.withSessionDeletionBarrier(
-        sessionKey,
-        async () => {
-          if (cancelRunning) await cancelSessionTasks(sessionKey);
-        },
-        operation,
-      ),
-    );
     webuiChannel.setProjectStore(projectStore);
     webuiChannel.setSessionDeletionServices({
       cronService: cron,
@@ -1121,25 +778,11 @@ export async function gateway({
       new WebuiTitleService({
         bus,
         sessions: loop.sessions,
-        llmRuntime: (preset) => loop.llmRuntime(preset),
+        llmRuntime: () => loop.llmRuntime(),
         scheduleBackground: (promise) => loop.scheduleBackground(promise),
         tokenUsageRecorder: createByokTokenUsageRecorder(loaded),
       }),
     );
-    if (webuiChannel.guiSessionProjection && loop.sessions instanceof SessionManager) {
-      transcriptMonitor = new GatewayTranscriptMonitor({
-        projection: webuiChannel.guiSessionProjection,
-        onRecord: (record, canonicalSessionKey) => (
-          webuiChannel.consumeTranscriptRecord(record, canonicalSessionKey)
-        ),
-        onRefresh: (chatId) => webuiChannel.consumeTranscriptRecord({
-          event: "session_updated",
-          chat_id: chatId,
-          scope: "thread",
-        }),
-      });
-      webuiChannel.setTranscriptMonitor(transcriptMonitor);
-    }
   }
   const bindHost = host ?? loaded.gateway.host;
   const bindPort = port == null ? loaded.gateway.port : Number(port);
@@ -1401,26 +1044,12 @@ export async function gateway({
 
   await cron.start();
   void manager.startAll();
-  transcriptMonitor?.start();
   await heartbeat.start();
   const inboundTask = loop.run();
   console.log(
     `memmy gateway started (${manager.enabledChannels.join(", ") || "no channels enabled"})`,
   );
   console.log(`Health endpoint: http://${bindHost}:${bindPort}/health`);
-  const modelCatalogWatcher = new ModelCatalogWatcher(getConfigPath(), (status, fingerprint) => {
-    bus.outbound.put(new OutboundMessage({
-      channel: "websocket",
-      chatId: "*",
-      content: "",
-      metadata: {
-        modelCatalogUpdated: true,
-        modelCatalogStatus: status,
-        fingerprint,
-      },
-    }));
-  });
-  modelCatalogWatcher.start();
   return {
     bus,
     loop,
@@ -1429,25 +1058,14 @@ export async function gateway({
     cron,
     healthServer,
     stop: async () => {
-      modelCatalogWatcher.close();
       heartbeat.stop();
       cron.stop();
       loop.stop();
-      transcriptMonitor?.stop();
-      const sessionStore = loop.sessions as SessionManager & {
-        flush?: () => unknown;
-      };
       await Promise.allSettled([
         inboundTask,
         manager.stopAll(),
         closeLoopRuntimeTools(loop),
-        Promise.resolve(
-          typeof sessionStore.flushAll === "function"
-            ? sessionStore.flushAll({
-                exclude: (session: Session) => session.key.startsWith("cli:"),
-              })
-            : sessionStore.flush?.(),
-        ),
+        (loop.sessions as any)?.flush?.(),
         closeServer(healthServer),
       ]);
     },
@@ -1456,41 +1074,26 @@ export async function gateway({
 
 export async function agent({
   message = null,
-  sessionId = null,
-  standalone = false,
-  project = null,
+  sessionId = "cli:direct",
   workspace = null,
   config = null,
   markdown = true,
   logs = false,
 }: {
   message?: string | null;
-  sessionId?: string | null;
-  standalone?: boolean;
-  project?: string | null;
+  sessionId?: string;
   workspace?: string | null;
   config?: string | null;
   markdown?: boolean;
   logs?: boolean;
 } = {}): Promise<string | null> {
-  const invocationCwd = process.cwd();
   const loaded = loadRuntimeConfig(config, workspace);
   syncRuntimeWorkspaceTemplates(loaded);
   setCliRuntimeLogs(Boolean(logs));
-  const loop = AgentLoop.fromConfig(loaded);
-  const target = resolveTerminalTarget(terminalTargetDependenciesForLoop(loop), {
-    sessionId,
-    standalone,
-    project,
-    invocationCwd,
-  });
-  if (loop.sessions instanceof SessionManager) {
-    loop.guiTranscriptMirror = new GuiTranscriptMirror(loop.sessions, target.cwd);
-    loop.guiTranscriptMirror.sessionUpdated(target.sessionId);
-  }
   const input = message ?? (process.stdin.isTTY ? "" : fs.readFileSync(0, "utf8").trim());
   if (input) {
-    printCliRestartNoticeIfNeeded(target.sessionId, markdown);
+    const loop = AgentLoop.fromConfig(loaded);
+    printCliRestartNoticeIfNeeded(sessionId, markdown);
     const renderer = new StreamRenderer({
       showSpinner: Boolean(process.stdout.isTTY),
       botName: loaded.agents.defaults.botName,
@@ -1501,7 +1104,7 @@ export async function agent({
     let rendererClosed = false;
     try {
       const response = await loop.processDirect(input, {
-        sessionKey: target.sessionId,
+        sessionKey: sessionId,
         onProgress: withProgressCapabilities(
           async (content: string, opts: Record<string, any> = {}) => {
             await maybePrintInteractiveProgress(
@@ -1536,19 +1139,14 @@ export async function agent({
         loop.stop();
         await Promise.allSettled([
           closeLoopRuntimeTools(loop),
-          Promise.resolve(loop.sessions.flushAll({
-            exclude: (session) => session.key.startsWith("cli:"),
-          })),
+          Promise.resolve(loop.sessions.flushAll()),
         ]);
       }
     }
   }
   if (!process.stdin.isTTY) return null;
-  printCliRestartNoticeIfNeeded(target.sessionId, markdown);
-  return runInteractiveAgent(loaded, target.sessionId, {
-    renderMarkdown: markdown,
-    target,
-  });
+  printCliRestartNoticeIfNeeded(sessionId, markdown);
+  return runInteractiveAgent(loaded, sessionId, { renderMarkdown: markdown });
 }
 
 export function printCliRestartNoticeIfNeeded(sessionId: string, renderMarkdown = true): boolean {
@@ -1576,34 +1174,12 @@ async function waitForOutbound(
 export async function runInteractiveAgent(
   config: Config,
   sessionId = "cli:direct",
-  {
-    renderMarkdown = true,
-    target = null,
-  }: {
-    renderMarkdown?: boolean;
-    target?: TerminalTarget | null;
-  } = {},
+  { renderMarkdown = true }: { renderMarkdown?: boolean } = {},
 ): Promise<null> {
   const bus = new MessageBus();
   const loop = AgentLoop.fromConfig(config, bus);
-  if (loop.sessions instanceof SessionManager) {
-    loop.guiTranscriptMirror = new GuiTranscriptMirror(
-      loop.sessions,
-      target?.cwd ?? loop.workspace,
-    );
-    if (target) loop.guiTranscriptMirror.sessionUpdated(target.sessionId);
-  }
   if (!promptSession) initPromptSession();
-  const existing = loop.sessions.get(sessionId);
-  const selection = loop.resolveTurnModelSelection({
-    sessionPreset: typeof existing?.metadata?.modelPreset === "string"
-      ? existing.metadata.modelPreset
-      : null,
-  });
-  const model = selection
-    ? `${selection.provider} / ${selection.model}`
-    : "(none configured)";
-  const presetTag = selection ? ` (preset: ${selection.preset})` : "";
+  const [model, presetTag] = modelDisplay(config);
   console.log(`memmy Interactive mode (${model})${presetTag} - type exit or Ctrl+C to quit\n`);
 
   const [cliChannel, cliChatId] = sessionId.includes(":")

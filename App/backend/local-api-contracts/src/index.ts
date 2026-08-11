@@ -140,10 +140,7 @@ export const ByokTokenUsageEventSchema = z.object({
     totalTokens: z.number().int().nonnegative(),
     cachedInputTokens: z.number().int().nonnegative(),
     cacheCreationInputTokens: z.number().int().nonnegative(),
-    metadata: z.record(z.string(), z.unknown()).refine(
-        (metadata) => typeof metadata.provider === "string" && metadata.provider.trim().length > 0,
-        "metadata.provider is required"
-    ),
+    metadata: z.record(z.string(), z.unknown()),
     rawUsage: z.record(z.string(), z.unknown()),
     createdAt: z.string().datetime()
 });
@@ -161,19 +158,6 @@ export const ByokTokenUsageByKindSchema = z.object({
 });
 export type ByokTokenUsageByKind = z.infer<typeof ByokTokenUsageByKindSchema>;
 
-export const ByokTokenUsageByProviderSchema = z.object({
-    provider: z.string().min(1),
-    inputTokens: z.number().int().nonnegative(),
-    outputTokens: z.number().int().nonnegative(),
-    totalTokens: z.number().int().nonnegative(),
-    cachedInputTokens: z.number().int().nonnegative(),
-    cacheCreationInputTokens: z.number().int().nonnegative(),
-    eventCount: z.number().int().nonnegative(),
-    updatedAt: z.string().datetime().nullable(),
-    byKind: z.array(ByokTokenUsageByKindSchema)
-});
-export type ByokTokenUsageByProvider = z.infer<typeof ByokTokenUsageByProviderSchema>;
-
 export const ByokTokenUsageSummarySchema = z.object({
     inputTokens: z.number().int().nonnegative(),
     outputTokens: z.number().int().nonnegative(),
@@ -181,8 +165,7 @@ export const ByokTokenUsageSummarySchema = z.object({
     cachedInputTokens: z.number().int().nonnegative(),
     cacheCreationInputTokens: z.number().int().nonnegative(),
     updatedAt: z.string().datetime().nullable(),
-    byKind: z.array(ByokTokenUsageByKindSchema),
-    byProvider: z.array(ByokTokenUsageByProviderSchema).default([])
+    byKind: z.array(ByokTokenUsageByKindSchema)
 });
 export type ByokTokenUsageSummary = z.infer<typeof ByokTokenUsageSummarySchema>;
 
@@ -601,11 +584,8 @@ export const ModelProviderSchema = z.enum([
 ]);
 export type ModelProvider = z.infer<typeof ModelProviderSchema>;
 
-export const EmbeddingModeSchema = z.enum(["cloud", "local", "custom"]);
+export const EmbeddingModeSchema = z.enum(["local", "custom"]);
 export type EmbeddingMode = z.infer<typeof EmbeddingModeSchema>;
-
-export const AgentApiTypeSchema = z.enum(["auto", "chatCompletions", "responses"]);
-export type AgentApiType = z.infer<typeof AgentApiTypeSchema>;
 
 export const ModelConfigTestCapabilitySchema = z.enum(["chat", "embedding", "asr", "image"]);
 export type ModelConfigTestCapability = z.infer<typeof ModelConfigTestCapabilitySchema>;
@@ -658,25 +638,18 @@ export type ImageGenModelConfigInput = z.infer<typeof ImageGenModelConfigInputSc
 
 
 /** Schema for local embedding config input. */
-export const CloudEmbeddingConfigInputSchema = z.object({
-    mode: z.literal("cloud")
-});
-
 export const LocalEmbeddingConfigInputSchema = z.object({
     mode: z.literal("local")
 });
 
 export const CustomEmbeddingConfigInputSchema = z.object({
     mode: z.literal("custom"),
-    custom: z.object({
-        baseUrl: z.string().url(),
-        modelId: z.string().min(1),
-        apiKey: z.string().min(1).optional()
-    })
+    baseUrl: z.string().url(),
+    modelId: z.string().min(1),
+    apiKey: z.string().min(1).optional()
 });
 
 export const EmbeddingConfigInputSchema = z.discriminatedUnion("mode", [
-    CloudEmbeddingConfigInputSchema,
     LocalEmbeddingConfigInputSchema,
     CustomEmbeddingConfigInputSchema
 ]);
@@ -691,47 +664,19 @@ export const RoleModelConfigInputSchema = z.object({
 });
 export type RoleModelConfigInput = z.infer<typeof RoleModelConfigInputSchema>;
 
-export const MemoryRoleInputSchema = z.object({
-    mode: z.enum(["follow", "fixed"]),
-    fixed: RoleModelConfigInputSchema.optional()
-}).superRefine((input, context) => {
-    if (input.mode === "fixed" && !input.fixed) {
-        context.addIssue({
-            code: "custom",
-            path: ["fixed"],
-            message: "fixed model configuration is required"
-        });
-    }
-});
-export type MemoryRoleInput = z.infer<typeof MemoryRoleInputSchema>;
-
 /** Schema for memmy memory model config input. */
 export const MemmyMemoryModelConfigInputSchema = z.object({
-    summary: MemoryRoleInputSchema,
-    evolution: MemoryRoleInputSchema
+    summary: RoleModelConfigInputSchema,
+    evolution: RoleModelConfigInputSchema
 });
 export type MemmyMemoryModelConfigInput = z.infer<typeof MemmyMemoryModelConfigInputSchema>;
 
-export const TextModelItemInputSchema = z.object({
-    presetName: z.string().trim().min(1).optional(),
-    model: z.string().trim().min(1)
-});
-export type TextModelItemInput = z.infer<typeof TextModelItemInputSchema>;
-
-export const TextModelProviderInputSchema = z.object({
-    provider: z.string().trim().min(1),
-    apiBase: z.string().url().optional(),
-    apiKey: z.string().min(1).optional(),
-    apiType: AgentApiTypeSchema.optional(),
-    models: z.array(TextModelItemInputSchema).min(1)
-});
-export type TextModelProviderInput = z.infer<typeof TextModelProviderInputSchema>;
-
 /** Schema for model config input. */
 export const ModelConfigInputSchema = z.object({
-    configRevision: z.string().min(1),
-    providers: z.array(TextModelProviderInputSchema),
-    defaultModelPreset: z.string().min(1).nullable(),
+    provider: ModelProviderSchema,
+    baseUrl: z.string().url(),
+    modelId: z.string().min(1),
+    apiKey: z.string().min(1).optional(),
     embedding: EmbeddingConfigInputSchema.optional(),
     memmyMemory: MemmyMemoryModelConfigInputSchema.optional(),
     asr: AsrModelConfigInputSchema.optional(),
@@ -740,11 +685,12 @@ export const ModelConfigInputSchema = z.object({
 export type ModelConfigInput = z.infer<typeof ModelConfigInputSchema>;
 
 /** Definition for model config test input. */
-export const ModelConfigTestInputSchema = z.object({
-    provider: ModelProviderSchema,
-    baseUrl: z.string().url(),
-    modelId: z.string().min(1),
-    apiKey: z.string().min(1).optional(),
+export const ModelConfigTestInputSchema = ModelConfigInputSchema.pick({
+    provider: true,
+    baseUrl: true,
+    modelId: true,
+    apiKey: true
+}).extend({
     capability: ModelConfigTestCapabilitySchema.optional(),
     secretTarget: ModelConfigTestSecretTargetSchema.optional()
 });
@@ -758,75 +704,26 @@ export const ModelConfigTestResultSchema = z.object({
 });
 export type ModelConfigTestResult = z.infer<typeof ModelConfigTestResultSchema>;
 
-/**
- * Legacy app-state projection retained for ASR/image compatibility and one-time startup hydration.
- * Desktop text-model settings no longer use this structure as their source of truth.
- */
-export const LegacyEmbeddingConfigInputSchema = z.discriminatedUnion("mode", [
-    z.object({ mode: z.literal("local") }),
-    z.object({
-        mode: z.literal("custom"),
-        baseUrl: z.string().url(),
-        modelId: z.string().min(1),
-        apiKey: z.string().min(1).optional()
-    })
-]);
-export type LegacyEmbeddingConfigInput = z.infer<typeof LegacyEmbeddingConfigInputSchema>;
-
-export const LegacyMemmyMemoryModelConfigInputSchema = z.object({
-    summary: RoleModelConfigInputSchema,
-    evolution: RoleModelConfigInputSchema
-});
-export type LegacyMemmyMemoryModelConfigInput = z.infer<typeof LegacyMemmyMemoryModelConfigInputSchema>;
-
-export const LegacyModelConfigInputSchema = z.object({
-    provider: ModelProviderSchema,
-    baseUrl: z.string().url(),
-    modelId: z.string().min(1),
-    apiKey: z.string().min(1).optional(),
-    embedding: LegacyEmbeddingConfigInputSchema.optional(),
-    memmyMemory: LegacyMemmyMemoryModelConfigInputSchema.optional(),
-    asr: AsrModelConfigInputSchema.optional(),
-    imageGen: ImageGenModelConfigInputSchema.optional()
-});
-export type LegacyModelConfigInput = z.infer<typeof LegacyModelConfigInputSchema>;
-
 /** Schema for local embedding config view. */
-export const CloudEmbeddingConfigViewSchema = z.object({
-    mode: z.literal("cloud"),
-    custom: z.object({
-        baseUrl: z.string().url(),
-        modelId: z.string().min(1),
-        hasApiKey: z.boolean(),
-        apiKeyMasked: z.string(),
-        apiKey: z.string().default("")
-    }).nullable()
-});
-
 export const LocalEmbeddingConfigViewSchema = z.object({
     mode: z.literal("local"),
-    custom: z.object({
-        baseUrl: z.string().url(),
-        modelId: z.string().min(1),
-        hasApiKey: z.boolean(),
-        apiKeyMasked: z.string(),
-        apiKey: z.string().default("")
-    }).nullable()
+    baseUrl: z.null(),
+    modelId: z.null(),
+    hasApiKey: z.literal(false),
+    apiKeyMasked: z.literal(""),
+    apiKey: z.string().default("")
 });
 
 export const CustomEmbeddingConfigViewSchema = z.object({
     mode: z.literal("custom"),
-    custom: z.object({
-        baseUrl: z.string().url(),
-        modelId: z.string().min(1),
-        hasApiKey: z.boolean(),
-        apiKeyMasked: z.string(),
-        apiKey: z.string().default("")
-    })
+    baseUrl: z.string().url(),
+    modelId: z.string().min(1),
+    hasApiKey: z.boolean(),
+    apiKeyMasked: z.string(),
+    apiKey: z.string().default("")
 });
 
 export const EmbeddingConfigViewSchema = z.discriminatedUnion("mode", [
-    CloudEmbeddingConfigViewSchema,
     LocalEmbeddingConfigViewSchema,
     CustomEmbeddingConfigViewSchema
 ]);
@@ -843,16 +740,10 @@ export const RoleModelConfigViewSchema = z.object({
 });
 export type RoleModelConfigView = z.infer<typeof RoleModelConfigViewSchema>;
 
-export const MemoryRoleViewSchema = z.object({
-    mode: z.enum(["follow", "fixed"]),
-    fixed: RoleModelConfigViewSchema.nullable()
-});
-export type MemoryRoleView = z.infer<typeof MemoryRoleViewSchema>;
-
 /** Schema for memmy memory model config view. */
 export const MemmyMemoryModelConfigViewSchema = z.object({
-    summary: MemoryRoleViewSchema,
-    evolution: MemoryRoleViewSchema
+    summary: RoleModelConfigViewSchema,
+    evolution: RoleModelConfigViewSchema
 });
 export type MemmyMemoryModelConfigView = z.infer<typeof MemmyMemoryModelConfigViewSchema>;
 
@@ -878,75 +769,14 @@ export const ImageGenModelConfigViewSchema = z.object({
 });
 export type ImageGenModelConfigView = z.infer<typeof ImageGenModelConfigViewSchema>;
 
-export const TextModelItemViewSchema = z.object({
-    presetName: z.string().min(1),
-    model: z.string().min(1),
-    isDefault: z.boolean(),
-    available: z.boolean()
-});
-export type TextModelItemView = z.infer<typeof TextModelItemViewSchema>;
-
-export const TextModelProviderViewSchema = z.object({
-    provider: z.string().min(1),
-    apiBase: z.string(),
-    apiType: AgentApiTypeSchema,
-    configured: z.boolean(),
-    hasApiKey: z.boolean(),
-    apiKeyMasked: z.string(),
-    apiKey: z.string().default(""),
-    accountManaged: z.boolean(),
-    editable: z.boolean(),
-    models: z.array(TextModelItemViewSchema)
-});
-export type TextModelProviderView = z.infer<typeof TextModelProviderViewSchema>;
-
-export const LegacyEmbeddingConfigViewSchema = z.discriminatedUnion("mode", [
-    z.object({
-        mode: z.literal("local"),
-        baseUrl: z.null(),
-        modelId: z.null(),
-        hasApiKey: z.literal(false),
-        apiKeyMasked: z.literal(""),
-        apiKey: z.string().default("")
-    }),
-    z.object({
-        mode: z.literal("custom"),
-        baseUrl: z.string().url(),
-        modelId: z.string().min(1),
-        hasApiKey: z.boolean(),
-        apiKeyMasked: z.string(),
-        apiKey: z.string().default("")
-    })
-]);
-export type LegacyEmbeddingConfigView = z.infer<typeof LegacyEmbeddingConfigViewSchema>;
-
-export const LegacyMemmyMemoryModelConfigViewSchema = z.object({
-    summary: RoleModelConfigViewSchema,
-    evolution: RoleModelConfigViewSchema
-});
-export type LegacyMemmyMemoryModelConfigView = z.infer<typeof LegacyMemmyMemoryModelConfigViewSchema>;
-
-export const LegacyModelConfigViewSchema = z.object({
+/** Schema for model config view. */
+export const ModelConfigViewSchema = z.object({
     provider: ModelProviderSchema,
     baseUrl: z.string().url(),
     modelId: z.string(),
     hasApiKey: z.boolean(),
     apiKeyMasked: z.string(),
     apiKey: z.string().default(""),
-    embedding: LegacyEmbeddingConfigViewSchema.nullable(),
-    memmyMemory: LegacyMemmyMemoryModelConfigViewSchema,
-    asr: AsrModelConfigViewSchema.nullable(),
-    imageGen: ImageGenModelConfigViewSchema.nullable(),
-    updatedAt: z.string().datetime()
-});
-export type LegacyModelConfigView = z.infer<typeof LegacyModelConfigViewSchema>;
-
-/** Schema for model config view. */
-export const ModelConfigViewSchema = z.object({
-    configRevision: z.string().min(1),
-    providers: z.array(TextModelProviderViewSchema),
-    defaultModelPreset: z.string().min(1).nullable(),
-    configured: z.boolean(),
     embedding: EmbeddingConfigViewSchema.nullable(),
     memmyMemory: MemmyMemoryModelConfigViewSchema,
     asr: AsrModelConfigViewSchema.nullable(),

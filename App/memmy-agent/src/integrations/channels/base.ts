@@ -1,10 +1,4 @@
-import {
-  InboundMessage,
-  MessageBus,
-  OutboundMessage,
-  type TurnAdmissionMode,
-  type TurnSource,
-} from "../../core/runtime-messages/index.js";
+import { InboundMessage, MessageBus, OutboundMessage } from "../../core/runtime-messages/index.js";
 import {
   formatPairingReply,
   generateCode,
@@ -26,9 +20,6 @@ export interface ChannelHandleMessageOptions {
   metadata?: Record<string, any>;
   sessionKey?: string | null;
   isDm?: boolean;
-  turnAdmission?: TurnAdmissionMode;
-  expectedTurnId?: string | null;
-  turnSource?: TurnSource | null;
 }
 
 export class BaseChannel {
@@ -166,9 +157,6 @@ export class BaseChannel {
       metadata: optionMetadata = {},
       sessionKey: optionSessionKey,
       isDm: optionIsDm,
-      turnAdmission,
-      expectedTurnId,
-      turnSource,
     } = options;
     const sender = String(senderId ?? "");
     const chat = String(optionChatId ?? "");
@@ -196,9 +184,6 @@ export class BaseChannel {
         media: optionMedia,
         metadata: meta,
         sessionKeyOverride: optionSessionKey ?? undefined,
-        turnAdmission,
-        expectedTurnId,
-        turnSource,
       }),
     );
   }

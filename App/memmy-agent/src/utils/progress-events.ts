@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-
 export type ProgressEvent = { type: string; [key: string]: any };
 export type ProgressOptions = {
   toolHint?: boolean;
@@ -17,28 +15,6 @@ export type ProgressCapabilities = {
 };
 
 const PROGRESS_CAPABILITIES = Symbol.for("memmy.progressCapabilities");
-const UI_TOOL_CALL_IDS = new WeakMap<object, string>();
-
-export function createUiToolCallId(): string {
-  return randomUUID();
-}
-
-export function bindUiToolCallId(toolCall: unknown, uiToolCallId: string): string {
-  if (!toolCall || typeof toolCall !== "object") return uiToolCallId;
-  const existing = UI_TOOL_CALL_IDS.get(toolCall);
-  if (existing) return existing;
-  UI_TOOL_CALL_IDS.set(toolCall, uiToolCallId);
-  return uiToolCallId;
-}
-
-export function getOrCreateUiToolCallId(toolCall: unknown): string {
-  if (!toolCall || typeof toolCall !== "object") return createUiToolCallId();
-  const existing = UI_TOOL_CALL_IDS.get(toolCall);
-  if (existing) return existing;
-  const created = createUiToolCallId();
-  UI_TOOL_CALL_IDS.set(toolCall, created);
-  return created;
-}
 
 export function progressEvent(type: string, data: Record<string, any> = {}): ProgressEvent {
   return { type, ...data };
@@ -134,7 +110,6 @@ export function buildToolEventStartPayload(toolCall: any): Record<string, any> {
     version: 1,
     phase: "start",
     call_id: String(toolCall?.id ?? ""),
-    ui_tool_call_id: getOrCreateUiToolCallId(toolCall),
     name: toolCall?.name ?? toolCall?.function?.name ?? "",
     arguments: toolCall?.arguments ?? {},
     result: null,
@@ -198,7 +173,6 @@ export function buildToolEventFinishPayloads(context: any): Array<Record<string,
       version: 1,
       phase,
       call_id: String(call?.id ?? ""),
-      ui_tool_call_id: getOrCreateUiToolCallId(call),
       name: call?.name ?? call?.function?.name ?? "",
       arguments: call?.arguments ?? {},
       result: phase === "end" ? sanitized.result : null,

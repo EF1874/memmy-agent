@@ -25,7 +25,7 @@ describe("createMockMemoryClient", () => {
     const client = createMockMemoryClient({ now: () => NOW });
 
     expect(MemoryHealthSnapshotSchema.parse(await client.health()).ok).toBe(true);
-    expect(MemoryReloadConfigOutputSchema.parse(await client.reloadConfig()).models.summary.routing).toBe("fixed");
+    expect(MemoryReloadConfigOutputSchema.parse(await client.reloadConfig()).activeProfile).toBe("byok");
     expect(OpenSessionOutputSchema.parse(await client.openSession(openSessionInput())).status).toBe("open");
     expect(CloseSessionOutputSchema.parse(await client.closeSession(closeSessionInput())).status).toBe("closed");
     expect(StartTurnOutputSchema.parse(await client.startTurn(startTurnInput())).status).toEqual([]);

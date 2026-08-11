@@ -4,29 +4,13 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import {
   resolveCloudServiceBaseUrl,
-  LegacyModelConfigInputSchema,
+  ModelConfigInputSchema,
   type ImageGenProvider,
-  type LegacyMemmyMemoryModelConfigInput,
-  type LegacyModelConfigInput,
+  type MemmyMemoryModelConfigInput,
   type ModelConfigInput,
-  type ModelConfigView,
   type ModelProvider
 } from "@memmy/local-api-contracts";
 import YAML from "yaml";
-import {
-  generateDesktopPresetName,
-  readModelConfigCatalog,
-  writeModelConfigCatalog
-} from "./model-config-catalog.js";
-import { withRuntimeConfigWriteLock } from "@memmy/migrations";
-
-export {
-  InvalidModelConfigError,
-  ModelConfigChangedError,
-  generateDesktopPresetName,
-  readModelConfigCatalog,
-  writeModelConfigCatalog
-} from "./model-config-catalog.js";
 import { normalizeTimeZoneOffset, systemUtcOffset } from "../../utils/time-zone.js";
 
 const MEMMY_ACCOUNT_PROVIDER = "memmy_account";
@@ -79,30 +63,28 @@ export type RuntimeMemmyConfigState =
   | {
       status: "valid_byok";
       configPath: string;
-      modelConfig: LegacyModelConfigInput & { memmyMemory: LegacyMemmyMemoryModelConfigInput };
+      modelConfig: ModelConfigInput & { memmyMemory: MemmyMemoryModelConfigInput };
     };
 
 export interface RuntimeProjectionResult {
   changed: boolean;
-  memoryConfigAffected: boolean;
+  activeProfile: MemoryProfileName;
+  activeProfileChanged: boolean;
+  activeProfileAffected: boolean;
 }
 
 export interface ByokModelProjectionOptions {
   /**
-   * Whether an imported legacy BYOK model becomes the runtime default.
+   * Whether to switch the runtime state over to BYOK.
    *
    * Field semantics:
-   * - true: set agents.defaults.modelPreset to the imported model.
-   * - false: add the provider and preset without changing the current default.
+   * - true: sync agents.defaults and set memmyMemory.activeProfile to byok.
+   * - false: only update the BYOK provider/profile, keeping the current runtime state.
    */
   activate?: boolean;
 }
 
 export interface MemmyConfigWriter {
-  readModelConfig?(): Promise<ModelConfigView>;
-
-  writeModelConfig?(input: ModelConfigInput): Promise<ModelConfigView>;
-
   /**
    * Write the account-mode Agent standard model config projection.
    *
@@ -114,6 +96,24 @@ export interface MemmyConfigWriter {
    * Clear the account-mode runtime login projection.
    */
   clearAccountModelProjection?(): Promise<RuntimeProjectionResult>;
+
+  /**
+   * Write the BYOK primary model and Memory role model projections.
+   *
+   * @param input the model config with memmyMemory role models already expanded.
+   * @param options whether to also activate the BYOK runtime state.
+   */
+  writeByokModelProjection(
+    input: ModelConfigInput & { memmyMemory: MemmyMemoryModelConfigInput },
+    options?: ByokModelProjectionOptions
+  ): Promise<RuntimeProjectionResult>;
+
+  /**
+   * Switch only the Memory active profile, without rewriting either profile's contents.
+   *
+   * @param profile the target Memory profile.
+   */
+  writeActiveMemoryProfile(profile: MemoryProfileName): Promise<RuntimeProjectionResult>;
 
   /**
    * Switch only the image generation active profile, without rewriting the account/byok profile contents.
@@ -159,20 +159,20 @@ export function createMemmyConfigWriter(options: CreateMemmyConfigWriterOptions 
   const configPath = options.configPath ?? resolveDefaultMemmyConfigPath();
 
   return {
-    async readModelConfig() {
-      return readModelConfigCatalog(configPath);
-    },
-
-    async writeModelConfig(input) {
-      return writeModelConfigCatalog(configPath, input);
-    },
-
     async writeAccountModelProjection(input) {
       return writeAccountModelProjectionToMemmyConfig(input, configPath);
     },
 
     async clearAccountModelProjection() {
       return clearAccountModelProjectionFromMemmyConfig(configPath);
+    },
+
+    async writeByokModelProjection(input, projectionOptions) {
+      return writeByokModelProjectionToMemmyConfig(input, configPath, projectionOptions);
+    },
+
+    async writeActiveMemoryProfile(profile) {
+      return writeActiveMemoryProfileToMemmyConfig(profile, configPath);
     },
 
     async writeActiveImageGenerationProfile(profile) {
@@ -323,53 +323,28 @@ export function mapModelProtocol(provider: ModelProvider): ModelProtocolProjecti
 }
 
 function deriveRuntimeMemmyConfigState(config: Record<string, unknown>, configPath: string): RuntimeMemmyConfigState {
-  if (hasAccountProjection(config)) {
+  const memmyMemory = asRecord(config.memmyMemory);
+  const activeProfile = memoryProfileName(memmyMemory?.activeProfile);
+  const agents = asRecord(config.agents);
+  const defaults = asRecord(agents?.defaults);
+  const providerName = existingString(defaults?.provider);
+  const modelName = existingString(defaults?.model);
+  const isAccountDefaults = providerName === MEMMY_ACCOUNT_PROVIDER && modelName === MEMMY_ACCOUNT_MODEL;
+  const isByokDefaults = Boolean(providerName && modelName && providerName !== MEMMY_ACCOUNT_PROVIDER);
+
+  if ((activeProfile === "account" && isByokDefaults) || (activeProfile === "byok" && isAccountDefaults)) {
+    return runtimeConfigProblem("conflict", configPath, "agents.defaults and memmyMemory.activeProfile point to different modes");
+  }
+
+  if (activeProfile === "account" || isAccountDefaults) {
     return deriveAccountRuntimeConfigState(config, configPath);
   }
 
-  const active = resolveRuntimeDefaultModel(config);
-  if (active && active.provider !== MEMMY_ACCOUNT_PROVIDER) {
-    return deriveByokRuntimeConfigState(config, configPath, active.provider, active.model);
+  if (activeProfile === "byok" || isByokDefaults) {
+    return deriveByokRuntimeConfigState(config, configPath, providerName, modelName);
   }
 
-  return runtimeConfigProblem("no_model_config", configPath, "Missing a locally usable default text model");
-}
-
-function hasAccountProjection(config: Record<string, unknown>): boolean {
-  const app = asRecord(config.app);
-  const provider = asRecord(asRecord(config.providers)?.[MEMMY_ACCOUNT_PROVIDER]);
-  const preset = asRecord(asRecord(config.modelPresets)?.["memmy-account"]);
-  const defaults = asRecord(asRecord(config.agents)?.defaults);
-  const credential = existingString(app?.cloudUuid) ?? existingString(provider?.apiKey);
-  const namedProjection = (
-    existingString(preset?.provider) === MEMMY_ACCOUNT_PROVIDER
-    && existingString(preset?.model) === MEMMY_ACCOUNT_MODEL
-  );
-  const legacyProjection = (
-    existingString(defaults?.provider) === MEMMY_ACCOUNT_PROVIDER
-    && existingString(defaults?.model) === MEMMY_ACCOUNT_MODEL
-  );
-  return Boolean(
-    credential
-    && existingString(provider?.apiBase)
-    && (namedProjection || legacyProjection)
-  );
-}
-
-function resolveRuntimeDefaultModel(
-  config: Record<string, unknown>
-): { provider: string; model: string } | null {
-  const defaults = asRecord(asRecord(config.agents)?.defaults);
-  const presetName = existingString(defaults?.modelPreset);
-  if (presetName && presetName !== "default") {
-    const preset = asRecord(asRecord(config.modelPresets)?.[presetName]);
-    const provider = existingString(preset?.provider);
-    const model = existingString(preset?.model);
-    return provider && model && providerConfigured(config, provider) ? { provider, model } : null;
-  }
-  const provider = existingString(defaults?.provider);
-  const model = existingString(defaults?.model);
-  return provider && model && providerConfigured(config, provider) ? { provider, model } : null;
+  return runtimeConfigProblem("no_model_config", configPath, "Missing agents.defaults provider/model and memory active profile");
 }
 
 function deriveAccountRuntimeConfigState(
@@ -378,13 +353,16 @@ function deriveAccountRuntimeConfigState(
 ): RuntimeMemmyConfigState {
   const cloudUuid =
     existingString(asRecord(config.app)?.cloudUuid) ??
-    existingString(asRecord(asRecord(config.providers)?.[MEMMY_ACCOUNT_PROVIDER])?.apiKey);
+    existingString(asRecord(asRecord(config.providers)?.[MEMMY_ACCOUNT_PROVIDER])?.apiKey) ??
+    existingString(asRecord(readMemoryProfile(config, "account"))?.apiKey) ??
+    existingString(asRecord(asRecord(readMemoryProfile(config, "account"))?.summary)?.apiKey);
   if (!cloudUuid) {
     return runtimeConfigProblem("no_model_config", configPath, "Account runtime config is missing cloud uuid");
   }
 
   const userId =
-    existingString(asRecord(config.app)?.userId);
+    existingString(asRecord(config.app)?.userId) ??
+    existingString(asRecord(readMemoryProfile(config, "account"))?.userId);
   return omitUndefined({
     status: "valid_account",
     configPath,
@@ -411,37 +389,30 @@ function deriveByokRuntimeConfigState(
     return runtimeConfigProblem("no_model_config", configPath, "BYOK runtime config is missing provider apiBase/apiKey");
   }
 
-  const memmyMemory = asRecord(config.memmyMemory);
-  const routing = asRecord(memmyMemory?.roleRouting);
+  const byokProfile = asRecord(readMemoryProfile(config, "byok"));
   const input = {
     provider,
     baseUrl,
     modelId: modelName,
     apiKey,
     imageGen: readRuntimeImageGenerationConfig(config),
-    embedding: readRuntimeRootEmbeddingConfig(memmyMemory),
+    embedding: readRuntimeEmbeddingConfig(byokProfile),
     memmyMemory: {
-      summary: readRuntimeRoleModelConfig(
-        routing?.summary === "fixed" ? asRecord(memmyMemory?.summary) : undefined,
-        {
+      summary: readRuntimeRoleModelConfig(asRecord(byokProfile?.summary), {
         provider,
         baseUrl,
         modelId: modelName,
         apiKey
-        }
-      ),
-      evolution: readRuntimeRoleModelConfig(
-        routing?.evolution === "fixed" ? asRecord(memmyMemory?.evolution) : undefined,
-        {
+      }),
+      evolution: readRuntimeRoleModelConfig(asRecord(byokProfile?.evolution), {
         provider,
         baseUrl,
         modelId: modelName,
         apiKey
-        }
-      )
+      })
     }
   };
-  const parsed = LegacyModelConfigInputSchema.safeParse(input);
+  const parsed = ModelConfigInputSchema.safeParse(input);
   if (!parsed.success || !parsed.data.memmyMemory) {
     return runtimeConfigProblem("no_model_config", configPath, "BYOK runtime config has invalid provider/model URLs");
   }
@@ -469,88 +440,62 @@ export async function writeAccountModelProjectionToMemmyConfig(
   const normalizedCloudUuid = input.cloudUuid?.trim();
   const normalizedUserId = input.userId?.trim();
   if (!normalizedCloudUuid && !normalizedUserId) {
-    return { changed: false, memoryConfigAffected: false };
+    return unchangedProjectionResult(await readMemmyConfig(configPath), "account");
   }
-  return withRuntimeConfigWriteLock(configPath, async () => {
-    const before = await readMemmyConfig(configPath);
-    const config = cloneConfig(before);
-    const appConfig = isRecord(config.app) ? { ...config.app } : {};
-    if (normalizedCloudUuid) appConfig.cloudUuid = normalizedCloudUuid;
-    if (normalizedUserId) appConfig.userId = normalizedUserId;
-    setAppConfig(config, appConfig);
-    delete config.uuid;
-    delete config.identity;
 
-    const effectiveCloudUuid = normalizedCloudUuid ?? existingString(appConfig.cloudUuid);
-    if (effectiveCloudUuid) {
-      const providers = isRecord(config.providers) ? { ...config.providers } : {};
-      providers[MEMMY_ACCOUNT_PROVIDER] = {
-        ...(isRecord(providers[MEMMY_ACCOUNT_PROVIDER]) ? providers[MEMMY_ACCOUNT_PROVIDER] : {}),
-        apiBase: resolveMemmyAccountApiBase(),
-        apiKey: effectiveCloudUuid
-      };
-      config.providers = providers;
+  const before = await readMemmyConfig(configPath);
+  const config = cloneConfig(before);
+  const beforeActiveProfile = memoryProfileName(asRecord(config.memmyMemory)?.activeProfile);
+  const appConfig = isRecord(config.app) ? { ...config.app } : {};
+  if (normalizedCloudUuid) {
+    appConfig.cloudUuid = normalizedCloudUuid;
+    patchAgentDefaults(config, {
+      provider: MEMMY_ACCOUNT_PROVIDER,
+      model: MEMMY_ACCOUNT_MODEL
+    });
+    patchProviderConfig(config, MEMMY_ACCOUNT_PROVIDER, {
+      apiBase: resolveMemmyAccountApiBase(),
+      apiKey: normalizedCloudUuid
+    });
+  }
+  if (normalizedUserId) {
+    appConfig.userId = normalizedUserId;
+  }
+  setAppConfig(config, appConfig);
+  delete config.uuid;
+  delete config.identity;
 
-      const presets = isRecord(config.modelPresets) ? { ...config.modelPresets } : {};
-      const occupied = asRecord(presets["memmy-account"]);
-      if (
-        occupied
-        && (
-          existingString(occupied.provider) !== MEMMY_ACCOUNT_PROVIDER
-          || existingString(occupied.model) !== MEMMY_ACCOUNT_MODEL
-        )
-      ) {
-        throw Object.assign(new Error("Preset memmy-account is already used by another model"), {
-          code: "account_model_preset_conflict" as const
-        });
-      }
-      presets["memmy-account"] = {
-        ...(occupied ?? {}),
-        provider: MEMMY_ACCOUNT_PROVIDER,
-        model: MEMMY_ACCOUNT_MODEL
-      };
-      config.modelPresets = presets;
-      ensureValidDefaultOrUse(config, "memmy-account");
-    }
+  const effectiveCloudUuid = normalizedCloudUuid ?? existingString(appConfig.cloudUuid);
+  const memmyMemory = prepareMemmyMemoryConfig(config, "account");
+  const profiles = getMemoryProfiles(memmyMemory);
+  profiles.account = buildAccountMemoryProfile({
+    existing: isRecord(profiles.account) ? profiles.account : null,
+    cloudUuid: effectiveCloudUuid,
+    userId: normalizedUserId
+  });
+  memmyMemory.profiles = profiles;
+  config.memmyMemory = memmyMemory;
 
-    const memmyMemory = isRecord(config.memmyMemory) ? { ...config.memmyMemory } : {};
-    const roleRouting = isRecord(memmyMemory.roleRouting) ? { ...memmyMemory.roleRouting } : {};
-    if (roleRouting.summary !== "follow" && roleRouting.summary !== "fixed") {
-      roleRouting.summary = "follow";
-    }
-    if (roleRouting.evolution !== "follow" && roleRouting.evolution !== "fixed") {
-      roleRouting.evolution = "follow";
-    }
-    memmyMemory.roleRouting = roleRouting;
-    const embedding = isRecord(memmyMemory.embedding) ? { ...memmyMemory.embedding } : {};
-    if (!["cloud", "local", "custom"].includes(String(embedding.mode ?? ""))) {
-      embedding.mode = "cloud";
-    }
-    memmyMemory.embedding = embedding;
-    delete memmyMemory.activeProfile;
-    delete memmyMemory.profiles;
-    config.memmyMemory = memmyMemory;
+  migrateLegacyImageGenerationToByokProfile(config);
+  const accountProvider = asRecord(asRecord(config.providers)?.[MEMMY_ACCOUNT_PROVIDER]);
+  const accountApiBase = existingString(accountProvider?.apiBase) ?? resolveMemmyAccountApiBase();
+  const accountApiKey = existingString(accountProvider?.apiKey) ?? effectiveCloudUuid;
+  if (accountApiKey) {
+    upsertImageGenerationProfile(config, "account", {
+      provider: MEMMY_ACCOUNT_PROVIDER,
+      model: MEMMY_ACCOUNT_IMAGE_MODEL,
+      apiBase: accountApiBase,
+      apiKey: accountApiKey
+    });
+  }
+  writeActiveImageGenerationProfile(config, "account");
 
-    migrateLegacyImageGenerationToByokProfile(config);
-    const accountProvider = asRecord(asRecord(config.providers)?.[MEMMY_ACCOUNT_PROVIDER]);
-    const accountApiBase = existingString(accountProvider?.apiBase) ?? resolveMemmyAccountApiBase();
-    const accountApiKey = existingString(accountProvider?.apiKey) ?? effectiveCloudUuid;
-    if (accountApiKey) {
-      upsertImageGenerationProfile(config, "account", {
-        provider: MEMMY_ACCOUNT_PROVIDER,
-        model: MEMMY_ACCOUNT_IMAGE_MODEL,
-        apiBase: accountApiBase,
-        apiKey: accountApiKey
-      });
-    }
-    writeActiveImageGenerationProfile(config, "account");
-
-    const changed = !sameConfig(before, config);
-    if (changed) await writeMemmyConfig(config, configPath);
-    return {
-      changed,
-      memoryConfigAffected: !sameConfig(before.memmyMemory, config.memmyMemory)
-    };
+  return writeProjectionResult({
+    before,
+    after: config,
+    configPath,
+    beforeActiveProfile,
+    targetProfile: "account"
   });
 }
 
@@ -562,44 +507,27 @@ export async function writeAccountModelProjectionToMemmyConfig(
 export async function clearAccountModelProjectionFromMemmyConfig(
   configPath = resolveDefaultMemmyConfigPath()
 ): Promise<RuntimeProjectionResult> {
-  return withRuntimeConfigWriteLock(configPath, async () => {
-    const before = await readMemmyConfig(configPath);
-    const config = cloneConfig(before);
-    const appConfig = isRecord(config.app) ? { ...config.app } : {};
-    delete appConfig.cloudUuid;
-    delete appConfig.userId;
-    setAppConfig(config, appConfig);
-    delete config.uuid;
-    delete config.identity;
+  const before = await readMemmyConfig(configPath);
+  const config = cloneConfig(before);
+  const beforeActiveProfile = memoryProfileName(asRecord(config.memmyMemory)?.activeProfile);
 
-    const providers = isRecord(config.providers) ? { ...config.providers } : {};
-    delete providers[MEMMY_ACCOUNT_PROVIDER];
-    config.providers = providers;
-    const presets = isRecord(config.modelPresets) ? { ...config.modelPresets } : {};
-    delete presets["memmy-account"];
-    config.modelPresets = presets;
-    replaceRemovedDefault(config, "memmy-account");
+  const appConfig = isRecord(config.app) ? { ...config.app } : {};
+  delete appConfig.cloudUuid;
+  delete appConfig.userId;
+  setAppConfig(config, appConfig);
+  delete config.uuid;
+  delete config.identity;
 
-    const memmyMemory = isRecord(config.memmyMemory) ? { ...config.memmyMemory } : {};
-    const embedding = isRecord(memmyMemory.embedding) ? { ...memmyMemory.embedding } : {};
-    if (embedding.mode === "cloud") {
-      const custom = asRecord(embedding.custom);
-      embedding.mode = (
-        existingString(custom?.endpoint)
-        && existingString(custom?.model)
-        && existingString(custom?.apiKey)
-      ) ? "custom" : "local";
-    }
-    memmyMemory.embedding = embedding;
-    config.memmyMemory = memmyMemory;
-    clearImageGenerationProfile(config, "account");
+  clearAccountAgentProjection(config);
+  clearAccountMemoryProjection(config);
+  clearImageGenerationProfile(config, "account");
 
-    const changed = !sameConfig(before, config);
-    if (changed) await writeMemmyConfig(config, configPath);
-    return {
-      changed,
-      memoryConfigAffected: !sameConfig(before.memmyMemory, config.memmyMemory)
-    };
+  return writeProjectionResult({
+    before,
+    after: config,
+    configPath,
+    beforeActiveProfile,
+    targetProfile: beforeActiveProfile ?? "account"
   });
 }
 
@@ -624,81 +552,66 @@ export async function writeAppLoginFieldsToMemmyConfig(
  * @param options whether to also activate the BYOK runtime state.
  */
 export async function writeByokModelProjectionToMemmyConfig(
-  input: LegacyModelConfigInput & { memmyMemory: LegacyMemmyMemoryModelConfigInput },
+  input: ModelConfigInput & { memmyMemory: MemmyMemoryModelConfigInput },
   configPath = resolveDefaultMemmyConfigPath(),
   options: ByokModelProjectionOptions = {}
 ): Promise<RuntimeProjectionResult> {
-  return withRuntimeConfigWriteLock(configPath, async () => {
-    const before = await readMemmyConfig(configPath);
-    const config = cloneConfig(before);
-    const activate = options.activate ?? true;
-    const agentProjection = mapModelProtocol(input.provider);
-    const providerName = agentProjection.agentProvider;
-    const presetName = findPresetName(config, providerName, input.modelId)
-      ?? generateDesktopPresetName(providerName, input.modelId);
+  const before = await readMemmyConfig(configPath);
+  const config = cloneConfig(before);
+  const beforeActiveProfile = memoryProfileName(asRecord(config.memmyMemory)?.activeProfile);
+  const activate = options.activate ?? true;
 
-    patchProviderConfig(config, providerName, {
-      apiBase: input.baseUrl,
-      apiKey: input.apiKey,
-      apiType: agentProjection.agentApiType
-    });
-    const presets = isRecord(config.modelPresets) ? { ...config.modelPresets } : {};
-    presets[presetName] = {
-      ...(isRecord(presets[presetName]) ? presets[presetName] : {}),
-      provider: providerName,
+  const agentProjection = mapModelProtocol(input.provider);
+  if (activate) {
+    patchAgentDefaults(config, {
+      provider: agentProjection.agentProvider,
       model: input.modelId
-    };
-    config.modelPresets = presets;
-    if (activate) {
-      const agents = isRecord(config.agents) ? { ...config.agents } : {};
-      const defaults = isRecord(agents.defaults) ? { ...agents.defaults } : {};
-      defaults.modelPreset = presetName;
-      defaults.timezone ??= systemUtcOffset();
-      delete defaults.provider;
-      delete defaults.model;
-      agents.defaults = defaults;
-      config.agents = agents;
-    }
+    });
+  }
+  patchProviderConfig(config, agentProjection.agentProvider, {
+    apiBase: input.baseUrl,
+    apiKey: input.apiKey,
+    apiType: agentProjection.agentApiType
+  });
 
-    const memmyMemory = isRecord(config.memmyMemory) ? { ...config.memmyMemory } : {};
-    const roleRouting = isRecord(memmyMemory.roleRouting) ? { ...memmyMemory.roleRouting } : {};
-    writeImportedMemoryRole(
-      memmyMemory,
-      roleRouting,
-      "summary",
+  migrateLegacyImageGenerationToByokProfile(config);
+  if (input.imageGen) {
+    upsertImageGenerationProfile(config, "byok", {
+      provider: mapImageGenProvider(input.imageGen.provider),
+      model: input.imageGen.modelId,
+      apiBase: input.imageGen.baseUrl,
+      apiKey: input.imageGen.apiKey
+    });
+  }
+  if (activate) {
+    writeActiveImageGenerationProfile(config, "byok");
+  }
+
+  const memmyMemory = prepareMemmyMemoryConfig(config, activate ? "byok" : undefined);
+  const profiles = getMemoryProfiles(memmyMemory);
+  const existingByok = isRecord(profiles.byok) ? profiles.byok : {};
+  profiles.byok = {
+    ...existingByok,
+    summary: buildMemoryModelProjection(
       input.memmyMemory.summary,
-      input
-    );
-    writeImportedMemoryRole(
-      memmyMemory,
-      roleRouting,
-      "evolution",
+      isRecord(existingByok.summary) ? existingByok.summary : null
+    ),
+    evolution: buildMemoryModelProjection(
       input.memmyMemory.evolution,
-      input
-    );
-    memmyMemory.roleRouting = roleRouting;
-    memmyMemory.embedding = importedEmbedding(input.embedding);
-    delete memmyMemory.activeProfile;
-    delete memmyMemory.profiles;
-    config.memmyMemory = memmyMemory;
+      isRecord(existingByok.evolution) ? existingByok.evolution : null,
+      { defaultEnableThinking: true }
+    ),
+    embedding: buildMemoryEmbeddingProjection(input.embedding, isRecord(existingByok.embedding) ? existingByok.embedding : null)
+  };
+  memmyMemory.profiles = profiles;
+  config.memmyMemory = memmyMemory;
 
-    migrateLegacyImageGenerationToByokProfile(config);
-    if (input.imageGen) {
-      upsertImageGenerationProfile(config, "byok", {
-        provider: mapImageGenProvider(input.imageGen.provider),
-        model: input.imageGen.modelId,
-        apiBase: input.imageGen.baseUrl,
-        apiKey: input.imageGen.apiKey
-      });
-    }
-    if (activate) writeActiveImageGenerationProfile(config, "byok");
-
-    const changed = !sameConfig(before, config);
-    if (changed) await writeMemmyConfig(config, configPath);
-    return {
-      changed,
-      memoryConfigAffected: !sameConfig(before.memmyMemory, config.memmyMemory)
-    };
+  return writeProjectionResult({
+    before,
+    after: config,
+    configPath,
+    beforeActiveProfile,
+    targetProfile: "byok"
   });
 }
 
@@ -735,11 +648,11 @@ export async function writeActiveImageGenerationProfileToMemmyConfig(
     await writeMemmyConfig(config, configPath);
   }
   const activeProfile = imageGenerationProfileName(asRecord(asRecord(config.tools)?.imageGeneration)?.activeProfile) ?? profile;
-  void beforeActiveProfile;
-  void activeProfile;
   return {
     changed,
-    memoryConfigAffected: false
+    activeProfile,
+    activeProfileChanged: beforeActiveProfile !== activeProfile,
+    activeProfileAffected: false
   };
 }
 
@@ -794,114 +707,20 @@ export async function patchMcpServerConfigInMemmyConfig(
   await writeMemmyConfig(config, configPath);
 }
 
-/** Ensure the active default preset and timezone are valid. */
-function ensureValidDefaultOrUse(config: Record<string, unknown>, fallbackPreset: string): void {
+/**
+ * Patch the agent default primary model config.
+ *
+ * @param config the Memmy main config object.
+ * @param input the agent default provider/model.
+ */
+function patchAgentDefaults(config: Record<string, unknown>, input: { provider: string; model: string }): void {
   const agents = isRecord(config.agents) ? { ...config.agents } : {};
   const defaults = isRecord(agents.defaults) ? { ...agents.defaults } : {};
-  if (!validDefaultPresetName(config, defaults)) {
-    defaults.modelPreset = fallbackPreset;
-  }
+  defaults.provider = input.provider;
+  defaults.model = input.model;
   defaults.timezone ??= systemUtcOffset();
   agents.defaults = defaults;
   config.agents = agents;
-}
-
-function replaceRemovedDefault(config: Record<string, unknown>, removedPreset: string): void {
-  const agents = isRecord(config.agents) ? { ...config.agents } : {};
-  const defaults = isRecord(agents.defaults) ? { ...agents.defaults } : {};
-  const removedLegacyAccountDefault = (
-    removedPreset === "memmy-account"
-    && defaults.provider === MEMMY_ACCOUNT_PROVIDER
-    && defaults.model === MEMMY_ACCOUNT_MODEL
-  );
-  if (existingString(defaults.modelPreset) !== removedPreset && !removedLegacyAccountDefault) return;
-  const presets = isRecord(config.modelPresets) ? config.modelPresets : {};
-  const replacement = Object.entries(presets).find(([, value]) => validNamedPreset(config, asRecord(value)));
-  defaults.modelPreset = replacement?.[0] ?? null;
-  delete defaults.provider;
-  delete defaults.model;
-  agents.defaults = defaults;
-  config.agents = agents;
-}
-
-function findPresetName(
-  config: Record<string, unknown>,
-  provider: string,
-  model: string
-): string | undefined {
-  return Object.entries(isRecord(config.modelPresets) ? config.modelPresets : {})
-    .find(([, value]) => (
-      existingString(asRecord(value)?.provider) === provider
-      && existingString(asRecord(value)?.model) === model
-    ))?.[0];
-}
-
-function writeImportedMemoryRole(
-  memory: Record<string, unknown>,
-  routing: Record<string, unknown>,
-  role: "summary" | "evolution",
-  input: LegacyMemmyMemoryModelConfigInput["summary"],
-  primary: Pick<LegacyModelConfigInput, "provider" | "baseUrl" | "modelId" | "apiKey">
-): void {
-  const followsPrimary = (
-    input.provider === primary.provider
-    && trimTrailingSlash(input.baseUrl) === trimTrailingSlash(primary.baseUrl)
-    && input.modelId === primary.modelId
-    && (!input.apiKey || !primary.apiKey || input.apiKey === primary.apiKey)
-  );
-  routing[role] = followsPrimary ? "follow" : "fixed";
-  if (followsPrimary) return;
-  memory[role] = buildMemoryModelProjection(
-    input,
-    isRecord(memory[role]) ? memory[role] : null,
-    role === "evolution" ? { defaultEnableThinking: true } : {}
-  );
-}
-
-function importedEmbedding(input: LegacyModelConfigInput["embedding"]): Record<string, unknown> {
-  if (!input || input.mode === "local") return { mode: "local" };
-  return {
-    mode: "custom",
-    custom: omitUndefined({
-      endpoint: input.baseUrl,
-      model: input.modelId,
-      apiKey: input.apiKey
-    })
-  };
-}
-
-function trimTrailingSlash(value: string): string {
-  return value.trim().replace(/\/+$/, "");
-}
-
-function validDefaultPresetName(
-  config: Record<string, unknown>,
-  defaults: Record<string, unknown>
-): boolean {
-  const name = existingString(defaults.modelPreset);
-  if (!name || name === "default") {
-    const provider = existingString(defaults.provider);
-    const model = existingString(defaults.model);
-    return Boolean(provider && model && providerConfigured(config, provider));
-  }
-  return validNamedPreset(config, asRecord(asRecord(config.modelPresets)?.[name]));
-}
-
-function validNamedPreset(
-  config: Record<string, unknown>,
-  preset: Record<string, unknown> | undefined
-): boolean {
-  const provider = existingString(preset?.provider);
-  const model = existingString(preset?.model);
-  return Boolean(provider && model && providerConfigured(config, provider));
-}
-
-function providerConfigured(config: Record<string, unknown>, providerName: string): boolean {
-  const provider = asRecord(asRecord(config.providers)?.[providerName]);
-  if (["ollama", "lmstudio", "openai_codex", "github_copilot"].includes(providerName)) {
-    return true;
-  }
-  return Boolean(existingString(provider?.apiKey));
 }
 
 /**
@@ -1116,7 +935,7 @@ function clearAccountMemoryProjection(config: Record<string, unknown>): void {
  * @returns the Memory service model config fragment.
  */
 function buildMemoryModelProjection(
-  input: LegacyMemmyMemoryModelConfigInput["summary"],
+  input: MemmyMemoryModelConfigInput["summary"],
   existing: Record<string, unknown> | null = null,
   options: { defaultEnableThinking?: boolean } = {}
 ): Record<string, unknown> {
@@ -1134,7 +953,7 @@ function buildMemoryModelProjection(
 }
 
 function buildMemoryEmbeddingProjection(
-  input: LegacyModelConfigInput["embedding"],
+  input: ModelConfigInput["embedding"],
   existing: Record<string, unknown> | null = null
 ): Record<string, unknown> {
   if (!input || input.mode === "local") {
@@ -1236,18 +1055,28 @@ async function writeProjectionResult(input: {
     await writeMemmyConfig(input.after, input.configPath);
   }
 
+  const activeProfile = memoryProfileName(asRecord(input.after.memmyMemory)?.activeProfile) ?? input.targetProfile;
+  const activeProfileChanged = input.beforeActiveProfile !== activeProfile;
+  const activeProfileAffected = activeProfileChanged || (
+    activeProfile === input.targetProfile &&
+    !sameConfig(readMemoryProfile(input.before, input.targetProfile), readMemoryProfile(input.after, input.targetProfile))
+  );
+
   return {
     changed,
-    memoryConfigAffected: !sameConfig(input.before.memmyMemory, input.after.memmyMemory)
+    activeProfile,
+    activeProfileChanged,
+    activeProfileAffected
   };
 }
 
 function unchangedProjectionResult(config: Record<string, unknown>, targetProfile: MemoryProfileName): RuntimeProjectionResult {
-  void config;
-  void targetProfile;
+  const activeProfile = memoryProfileName(asRecord(config.memmyMemory)?.activeProfile) ?? targetProfile;
   return {
     changed: false,
-    memoryConfigAffected: false
+    activeProfile,
+    activeProfileChanged: false,
+    activeProfileAffected: false
   };
 }
 
@@ -1265,7 +1094,7 @@ function readRuntimeRoleModelConfig(
     modelId: string;
     apiKey: string;
   }
-): LegacyMemmyMemoryModelConfigInput["summary"] {
+): MemmyMemoryModelConfigInput["summary"] {
   const provider =
     modelProviderFromMemoryProvider(existingString(role?.provider)) ??
     fallback.provider;
@@ -1274,10 +1103,10 @@ function readRuntimeRoleModelConfig(
     baseUrl: existingString(role?.endpoint) ?? fallback.baseUrl,
     modelId: existingString(role?.model) ?? fallback.modelId,
     apiKey: existingString(role?.apiKey) ?? fallback.apiKey
-  }) as LegacyMemmyMemoryModelConfigInput["summary"];
+  }) as MemmyMemoryModelConfigInput["summary"];
 }
 
-function readRuntimeEmbeddingConfig(profile: Record<string, unknown> | undefined): LegacyModelConfigInput["embedding"] {
+function readRuntimeEmbeddingConfig(profile: Record<string, unknown> | undefined): ModelConfigInput["embedding"] {
   const embedding = asRecord(profile?.embedding);
   const provider = existingString(embedding?.provider);
   if (!embedding || !provider || provider === "local") {
@@ -1289,24 +1118,10 @@ function readRuntimeEmbeddingConfig(profile: Record<string, unknown> | undefined
     baseUrl: existingString(embedding.endpoint) ?? "",
     modelId: existingString(embedding.model) ?? "",
     apiKey: existingString(embedding.apiKey)
-  }) as LegacyModelConfigInput["embedding"];
+  }) as ModelConfigInput["embedding"];
 }
 
-function readRuntimeRootEmbeddingConfig(
-  memmyMemory: Record<string, unknown> | undefined
-): LegacyModelConfigInput["embedding"] {
-  const embedding = asRecord(memmyMemory?.embedding);
-  if (embedding?.mode !== "custom") return { mode: "local" };
-  const custom = asRecord(embedding.custom);
-  return omitUndefined({
-    mode: "custom",
-    baseUrl: existingString(custom?.endpoint) ?? "",
-    modelId: existingString(custom?.model) ?? "",
-    apiKey: existingString(custom?.apiKey)
-  }) as LegacyModelConfigInput["embedding"];
-}
-
-function readRuntimeImageGenerationConfig(config: Record<string, unknown>): LegacyModelConfigInput["imageGen"] {
+function readRuntimeImageGenerationConfig(config: Record<string, unknown>): ModelConfigInput["imageGen"] {
   const imageGeneration = asRecord(asRecord(config.tools)?.imageGeneration);
   if (!imageGeneration) return undefined;
   const activeProfile = imageGenerationProfileName(imageGeneration.activeProfile);
@@ -1322,7 +1137,7 @@ function readRuntimeImageGenerationConfig(config: Record<string, unknown>): Lega
 
 function readRuntimeImageGenerationProfile(
   profile: Record<string, unknown> | undefined
-): LegacyModelConfigInput["imageGen"] {
+): ModelConfigInput["imageGen"] {
   if (!profile) return undefined;
   const provider = imageGenProviderFromRuntimeProvider(existingString(profile.provider));
   const baseUrl = existingString(profile.apiBase);
@@ -1333,7 +1148,7 @@ function readRuntimeImageGenerationProfile(
     baseUrl,
     modelId,
     apiKey: existingString(profile.apiKey)
-  }) as LegacyModelConfigInput["imageGen"];
+  }) as ModelConfigInput["imageGen"];
 }
 
 function modelProviderFromAgentProvider(value: string): ModelProvider | undefined {

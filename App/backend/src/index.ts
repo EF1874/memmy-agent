@@ -72,15 +72,15 @@ export interface LocalBackend {
 
 export async function createLocalBackend(options: CreateLocalBackendOptions): Promise<LocalBackend> {
   loadCloudServiceEnv();
-  const memmyConfigPath = options.memmyConfigPath ?? process.env.MEMMY_CONFIG;
-  if (!memmyConfigPath) {
-    throw new Error("memmyConfigPath or MEMMY_CONFIG is required");
-  }
   const appStateStore = createAppStateStore({ databasePath: options.databasePath });
   let server: Awaited<ReturnType<typeof createLocalApiServer>> | null = null;
   let autoScan: AgentSourceAutoScanService | null = null;
 
   try {
+    const memmyConfigPath = options.memmyConfigPath ?? process.env.MEMMY_CONFIG;
+    if (!memmyConfigPath) {
+      throw new Error("memmyConfigPath or MEMMY_CONFIG is required");
+    }
     if (options.desktopInstallFingerprint) {
       await resetAccountRuntimeForDesktopInstallChange({
         appStateStore,

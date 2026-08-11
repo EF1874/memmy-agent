@@ -95,95 +95,6 @@ const channelLogoBySlug: Record<string, string> = {
   wechat: wechatLogoUrl
 };
 
-export const AGENT_CHANNEL_DISPLAY_BY_SLUG = {
-  dingtalk: { name: "DingTalk", logoSlug: "dingtalk" },
-  discord: { name: "Discord", logoSlug: "discord" },
-  feishu: { name: "\u98de\u4e66", logoSlug: "feishu" },
-  imessage: { name: "iMessage", logoSlug: "imessage" },
-  matrix: { name: "Matrix", logoSlug: "matrix" },
-  mochat: { name: "Mochat", logoSlug: "mochat" },
-  msteams: { name: "Microsoft Teams", logoSlug: "microsoft_teams" },
-  qq: { name: "QQ", logoSlug: "qq" },
-  signal: { name: "Signal", logoSlug: "signal" },
-  slack: { name: "Slack", logoSlug: "slack" },
-  telegram: { name: "Telegram", logoSlug: "telegram" },
-  wecom: { name: "\u4f01\u4e1a\u5fae\u4fe1", logoSlug: "wecom" },
-  weixin: { name: "\u5fae\u4fe1", logoSlug: "wechat" },
-  whatsapp: { name: "WhatsApp", logoSlug: "whatsapp" }
-} as const;
-
-export function agentChannelDisplay(channel: string): {
-  name: string;
-  logoSlug: string;
-} | null {
-  return Object.prototype.hasOwnProperty.call(AGENT_CHANNEL_DISPLAY_BY_SLUG, channel)
-    ? AGENT_CHANNEL_DISPLAY_BY_SLUG[channel as keyof typeof AGENT_CHANNEL_DISPLAY_BY_SLUG]
-    : null;
-}
-
-/** Decorative compact channel icon used inside the Agent queue source slot. */
-export function AgentQueueChannelIcon(props: { channel: string; className?: string }) {
-  const [failed, setFailed] = useState(false);
-  const display = agentChannelDisplay(props.channel);
-  if (!display || failed) {
-    return <MessageCircle className={props.className} size={16} aria-hidden="true" />;
-  }
-  const iconDefinition = channelIconBySlug[display.logoSlug];
-  if (iconDefinition) {
-    const { Icon } = iconDefinition;
-    return (
-      <Icon
-        className={[props.className, iconDefinition.className].filter(Boolean).join(" ")}
-        size={16}
-        aria-hidden="true"
-      />
-    );
-  }
-  const logoUrl = channelLogoBySlug[display.logoSlug] ?? composioLogoUrl(display.logoSlug);
-  return (
-    <img
-      src={logoUrl}
-      alt=""
-      aria-hidden="true"
-      className={props.className}
-      loading="lazy"
-      onError={() => setFailed(true)}
-    />
-  );
-}
-
-const taskChannelByTitleSuffix = [
-  { slug: "telegram", name: "Telegram", suffixes: ["Telegram"] },
-  { slug: "wechat", name: "\u5fae\u4fe1", suffixes: ["\u5fae\u4fe1", "WeChat"] },
-  { slug: "discord", name: "Discord", suffixes: ["Discord"] },
-  { slug: "imessage", name: "iMessage", suffixes: ["iMessage"] },
-  { slug: "feishu", name: "\u98de\u4e66", suffixes: ["\u98de\u4e66", "Feishu"] },
-  { slug: "dingtalk", name: "\u9489\u9489", suffixes: ["\u9489\u9489", "DingTalk"] }
-] as const;
-
-export interface ImChannelTitleDisplay {
-  title: string;
-  slug: string;
-  channelName: string;
-}
-
-/** Split the six desktop-supported IM channel suffixes from projected task titles. */
-export function imChannelTitleDisplay(title: string): ImChannelTitleDisplay | null {
-  for (const channel of taskChannelByTitleSuffix) {
-    for (const suffixName of channel.suffixes) {
-      const suffix = ` · ${suffixName}`;
-      if (title.endsWith(suffix)) {
-        return {
-          title: title.slice(0, -suffix.length).trimEnd(),
-          slug: channel.slug,
-          channelName: channel.name
-        };
-      }
-    }
-  }
-  return null;
-}
-
 export function composioLogoUrl(slug: string): string {
   return `https://logos.composio.dev/api/${slug}`;
 }
@@ -280,15 +191,6 @@ export function IntegrationLogoBadge(props: { slug: string; name: string; surfac
           onError={() => setFailed(true)}
         />
       </span>
-    </span>
-  );
-}
-
-/** Compact channel mark used beside IM task titles. */
-export function ImChannelTitleIcon(props: { slug: string; name: string }) {
-  return (
-    <span className="im-channel-title-icon" aria-label={`${props.name} logo`}>
-      <IntegrationLogoBadge slug={props.slug} name={props.name} surface="channel" sizeClassName="h-4 w-4" />
     </span>
   );
 }

@@ -1,15 +1,9 @@
 export type JsonSchema = Record<string, any>;
 
-export type FileMutationOutcome = {
-  path: string;
-  changed: boolean;
-};
-
 export type ToolExecutionContext = {
   abortSignal?: AbortSignal | null;
   toolName?: string;
   callId?: string | null;
-  reportFileMutation?: (outcome: FileMutationOutcome) => void;
 };
 
 const JSON_TYPE_MAP: Record<string, (value: any) => boolean> = {

@@ -8,13 +8,10 @@ import { SESSION_TOOL_RESULT_MAX_CHARS_BY_NAME } from "../../../src/core/agent-r
 import { InboundMessage } from "../../../src/core/runtime-messages/events.js";
 import { Config } from "../../../src/config/schema.js";
 import { LLMResponse } from "../../../src/providers/base.js";
-import { GOAL_STATE_KEY, readGoalState } from "../../../src/core/session/goal-state.js";
-import { Session, SessionManager } from "../../../src/core/session/manager.js";
-import { GuiTranscriptMirror } from "../../../src/entrypoints/frontend-bridge/gui-transcript-sync.js";
+import { GOAL_STATE_KEY } from "../../../src/core/session/goal-state.js";
 
 const roots: string[] = [];
 const originalHome = process.env.HOME;
-const originalDataDir = process.env.MEMMY_AGENT_DATA_DIR;
 
 function workspace(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-loop-"));
@@ -66,8 +63,6 @@ afterEach(() => {
   vi.restoreAllMocks();
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
-  if (originalDataDir === undefined) delete process.env.MEMMY_AGENT_DATA_DIR;
-  else process.env.MEMMY_AGENT_DATA_DIR = originalDataDir;
   for (const dir of roots.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -112,73 +107,6 @@ describe("AgentLoop direct processing", () => {
     });
   });
 
-  it("keeps a projected CLI Session on its canonical workspace across the whole turn", async () => {
-    const root = workspace();
-    process.env.MEMMY_AGENT_DATA_DIR = path.join(root, "data");
-    const canonicalWorkspace = path.join(root, "canonical");
-    const workspaceAlias = path.join(root, "alias");
-    fs.mkdirSync(canonicalWorkspace, { recursive: true });
-    fs.symlinkSync(canonicalWorkspace, workspaceAlias, "dir");
-    const sessions = new SessionManager(path.join(canonicalWorkspace, "sessions"));
-    const session = new Session({
-      key: "cli:direct",
-      metadata: {
-        webui: true,
-        webuiProjectId: null,
-        webuiWorkspaceCwd: fs.realpathSync(canonicalWorkspace),
-      },
-    });
-    sessions.save(session, { fsync: true });
-    const p = provider(["projected answer"]);
-    const agent = new AgentLoop({
-      provider: p,
-      workspace: workspaceAlias,
-      model: "test-model",
-      contextWindowTokens: 4096,
-      sessionDir: sessions.root,
-      sessionManager: sessions,
-      config: new Config({ memmyMemory: { enabled: false } }),
-    });
-    agent.guiTranscriptMirror = new GuiTranscriptMirror(sessions, canonicalWorkspace);
-
-    const outbound = await agent.processDirect("hello", { sessionKey: "cli:direct" });
-
-    expect(outbound?.content).toBe("projected answer");
-    expect(p.chat).toHaveBeenCalledOnce();
-  });
-
-  it("treats a GUI cancellation of an independent cli turn as a normal stopped result", async () => {
-    const p = {
-      generation: { maxTokens: 100 },
-      getDefaultModel: () => "test-model",
-      chatWithRetry: vi.fn(async (args: Record<string, any>) => (
-        new Promise<never>((_resolve, reject) => {
-          const onAbort = () => {
-            const error = new Error("task cancelled");
-            error.name = "AbortError";
-            reject(error);
-          };
-          args.signal?.addEventListener("abort", onAbort, { once: true });
-        })
-      )),
-    };
-    const agent = loop(p);
-    const turn = agent.processDirect("keep working", { sessionKey: "cli:stoppable" });
-    while (!agent.terminalRunControl.read("cli:stoppable")) {
-      await new Promise((resolve) => setTimeout(resolve, 5));
-    }
-
-    await agent.terminalRunControl.requestCancel("cli:stoppable");
-
-    await expect(turn).resolves.toBeNull();
-    expect(agent.terminalRunControl.read("cli:stoppable")).toBeNull();
-    const session = agent.sessions.reload("cli:stoppable");
-    expect(session?.messages.map((message) => message.role)).toEqual(["user"]);
-    expect(session?.metadata).not.toHaveProperty(AgentLoop.PENDING_USER_TURN_KEY);
-    expect(session?.metadata).not.toHaveProperty(AgentLoop.RUNTIME_CHECKPOINT_KEY);
-    expect(agent.restorePendingUserTurn(session!)).toBe(false);
-  });
-
   it("attaches each turn's accumulated usage to its own outbound message", async () => {
     const agent = loop();
     const usages = [
@@ -199,8 +127,7 @@ describe("AgentLoop direct processing", () => {
 
     expect(first?.metadata.usage).toEqual(usages[0]);
     expect(second?.metadata.usage).toEqual(usages[1]);
-    expect(agent.lastUsageBySession.get("cli:usage-a")).toEqual(usages[0]);
-    expect(agent.lastUsageBySession.get("cli:usage-b")).toEqual(usages[1]);
+    expect(agent.lastUsage).toEqual(usages[1]);
   });
 
   it("publishes a thread session update after early-persisting WebUI user messages", async () => {
@@ -313,15 +240,14 @@ describe("AgentLoop direct processing", () => {
     expect(agent.sessions.getOrCreate("cli:test").messages.map((message) => message.content)).toEqual(["first", "one", "second", "two"]);
   });
 
-  it("keeps explicit cli sessions separate when unified sessions are enabled", async () => {
+  it("uses the unified session key when unified sessions are enabled", async () => {
     const p = provider(["ok"]);
     const agent = loop(p, { unifiedSession: true });
 
     await agent.processDirect("hello", { sessionKey: "cli:a", chatId: "a" });
 
     expect(agent.sessionKey({ sessionKey: "cli:a" } as any)).toBe(UNIFIED_SESSION_KEY);
-    expect(agent.sessions.getOrCreate("cli:a").messages[0].content).toBe("hello");
-    expect(agent.sessions.get(UNIFIED_SESSION_KEY)).toBeNull();
+    expect(agent.sessions.getOrCreate(UNIFIED_SESSION_KEY).messages[0].content).toBe("hello");
   });
 
   it("handles slash command shortcuts without calling the model and persists command turns outside LLM history", async () => {
@@ -338,25 +264,18 @@ describe("AgentLoop direct processing", () => {
     expect(session.getHistory({ maxMessages: 10 }).some((message) => String(message.content).includes("/help"))).toBe(false);
   });
 
-  it("creates /goal state directly and returns the control result before continuation output", async () => {
+  it("rewrites /goal into an agent prompt and continues through the model", async () => {
     const p = provider(["working on it"]);
     const agent = loop(p);
 
     const outbound = await agent.processDirect("/goal migrate the database", { sessionKey: "cli:test" });
 
-    expect(outbound?.content).toContain("Goal created.");
-    expect(outbound?.content).toContain("migrate the database");
-    const session = agent.sessions.getOrCreate("cli:test");
-    expect(readGoalState(session.metadata)).toMatchObject({
-      objective: "migrate the database",
-      status: "active",
-      tokensUsed: 0,
-    });
-    expect(session.messages[0]).toMatchObject({
-      role: "user",
-      content: "/goal migrate the database",
-      commandMessage: true,
-    });
+    expect(outbound?.content).toBe("working on it");
+    expect(p.chat).toHaveBeenCalledOnce();
+    const sent = JSON.stringify(p.calls[0].messages);
+    expect(sent).toContain("sustained objective");
+    expect(sent).toContain("migrate the database");
+    expect(agent.sessions.getOrCreate("cli:test").messages[0].content).toContain("sustained objective");
   });
 
   it("passes active goal state and runtime runner options through ordinary turns", async () => {
@@ -367,14 +286,9 @@ describe("AgentLoop direct processing", () => {
     agent.toolHintMaxLength = 12;
     const session = agent.sessions.getOrCreate("cli:goal");
     session.metadata[GOAL_STATE_KEY] = {
-      goalId: "8cd503f0-dc78-45c6-8978-983a09f694a0",
       status: "active",
       objective: "Finish the TypeScript parity fixes.",
-      tokenBudget: null,
-      tokensUsed: 0,
-      timeUsedSeconds: 0,
-      createdAt: "2026-08-01T00:00:00.000Z",
-      updatedAt: "2026-08-01T00:00:00.000Z",
+      uiSummary: "agent parity",
     };
     agent.sessions.save(session);
     let seenSpec: any = null;
@@ -390,7 +304,8 @@ describe("AgentLoop direct processing", () => {
     const outbound = await agent.processDirect("continue", { sessionKey: "cli:goal" });
 
     expect(outbound?.content).toBe("still working");
-    expect(JSON.stringify(seenSpec.messages)).not.toContain("Goal (active):");
+    expect(JSON.stringify(seenSpec.messages)).toContain("Goal (active):");
+    expect(JSON.stringify(seenSpec.messages)).toContain("Finish the TypeScript parity fixes.");
     expect(seenSpec.contextWindowTokens).toBe(4096);
     expect(seenSpec.contextBlockLimit).toBe(1234);
     expect(seenSpec.providerRetryMode).toBe("aggressive");
@@ -398,8 +313,8 @@ describe("AgentLoop direct processing", () => {
     expect(seenSpec.retryWaitCallback).toBeTypeOf("function");
     expect(seenSpec.checkpointCallback).toBeTypeOf("function");
     expect(seenSpec.llmTimeoutS).toBe(0);
-    expect(seenSpec.goalActivePredicate).toBeUndefined();
-    expect(seenSpec.goalContinueMessage).toBeUndefined();
+    expect(seenSpec.goalActivePredicate()).toBe(true);
+    expect(seenSpec.goalContinueMessage).toContain("Finish the TypeScript parity fixes.");
   });
 
   it("extracts document media before building prompt and keeps image media for multimodal content", async () => {

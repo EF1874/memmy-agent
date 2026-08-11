@@ -24,6 +24,7 @@ export function loadCliMemoryConfig(configPath?: string): {
   const memmyMemory = asRecord(rootConfig.memmyMemory);
   const storage = asRecord(memmyMemory.storage);
   const app = asRecord(rootConfig.app);
+  const profile = activeMemoryProfile(memmyMemory);
 
   return {
     config: {
@@ -38,6 +39,7 @@ export function loadCliMemoryConfig(configPath?: string): {
       userId: optionalString(process.env.MEMMY_MEMORY_USER_ID) ??
         optionalString(process.env.MEMMY_USER_ID) ??
         optionalString(process.env.MEMORY_SERVICE_USER_ID) ??
+        optionalString(profile.userId) ??
         optionalString(memmyMemory.userId) ??
         optionalString(app.userId)
     },
@@ -73,4 +75,13 @@ export function asRecord(value: unknown): Record<string, unknown> {
 
 export function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function activeMemoryProfile(memmyMemory: Record<string, unknown>): Record<string, unknown> {
+  const activeProfile = optionalString(memmyMemory.activeProfile);
+  const profiles = asRecord(memmyMemory.profiles);
+  if (activeProfile !== "account" && activeProfile !== "byok") {
+    return {};
+  }
+  return asRecord(profiles[activeProfile]);
 }

@@ -10,12 +10,9 @@ import {
   type MemmyConfig
 } from "../config/index.js";
 import { createMemoryLogger } from "../logging/logger.js";
+import { resolveMemoryAgentRegion } from "../model/agent-region.js";
 import { createEmbedder } from "../model/embedder.js";
 import { createLlmClient } from "../model/llm.js";
-import {
-  MemoryModelTaskRouter,
-  type MemoryModelTaskContext
-} from "../model/task-routing.js";
 import type { MemoryLlmModelRole } from "../model/token-usage.js";
 import type { Embedder,LlmClient } from "../model/types.js";
 import {
@@ -158,7 +155,10 @@ function evolutionUsesSharedLlm(config: MemmyConfig): boolean {
 function createConfiguredMemoryLlm(config: MemmyConfig, modelRole: MemoryLlmModelRole): LlmClient {
   return createLlmClient(
     modelRole === "memory_summary" ? config.summary : resolveEvolutionConfig(config),
-    { modelRole }
+    {
+      modelRole,
+      agentRegion: resolveMemoryAgentRegion(config.activeProfile)
+    }
   );
 }
 
@@ -243,7 +243,6 @@ export class MemoryService {
   private readonly startedAt = Date.now();
   private readonly mode: "local" | "cloud" | "dev";
   private config: MemmyConfig;
-  private readonly modelTasks: MemoryModelTaskRouter;
   private llm: LlmClient;
   private skillLlm: LlmClient;
   private embedder: Embedder;
@@ -253,9 +252,11 @@ export class MemoryService {
     this.repos = options.backend?.repositories() ?? new Repositories(requireMemoryDb(options).db);
     this.mode = options.mode ?? "local";
     this.config = cloneMemmyConfig(options.config ?? DEFAULT_MEMMY_CONFIG);
-    this.modelTasks = new MemoryModelTaskRouter(() => this.resolveModelTaskContext());
-    this.llm = this.modelTasks.client("summary");
-    this.skillLlm = this.modelTasks.client("evolution");
+    this.llm = options.llm ?? createConfiguredMemoryLlm(this.config, "memory_summary");
+    this.skillLlm = options.skillLlm ??
+      (options.llm && evolutionUsesSharedLlm(this.config)
+        ? options.llm
+        : createConfiguredMemoryLlm(this.config, "memory_evolution"));
     this.embedder = options.embedder ?? createEmbedder(this.config.embedding);
     const workerHandlerOwner = this;
     this.workerHandlers = createWorkerJobHandlers({
@@ -406,11 +407,7 @@ export class MemoryService {
       enqueueEmbeddingRetry: this.workerHandlers.enqueueEmbeddingRetry,
       appendJobChange: this.workerHandlers.appendJobChange,
       appendEmbeddingRetryChange: this.workerHandlers.appendEmbeddingRetryChange,
-      jobHandlers: {
-        processJob: (job) => this.withModelTaskContext(
-          () => this.workerHandlers.processJob(job)
-        )
-      },
+      jobHandlers: this.workerHandlers,
       embeddingJobs: this.embeddingJobs
     });
     this.episodeReadModel = new EpisodeReadModel({
@@ -465,18 +462,9 @@ export class MemoryService {
       schemaVersion: this.schemaVersion.bind(this),
       health: this.health.bind(this),
       models: () => ({
-        summary: {
-          ...panelReadOwner.llm.status(),
-          routing: panelReadOwner.config.roleRouting.summary
-        },
-        evolution: {
-          ...panelReadOwner.skillLlm.status(),
-          routing: panelReadOwner.config.roleRouting.evolution
-        },
-        embedding: {
-          ...panelReadOwner.embedder.status(),
-          mode: panelReadOwner.config.embedding.mode
-        }
+        summary: panelReadOwner.llm.status(),
+        evolution: panelReadOwner.skillLlm.status(),
+        embedding: panelReadOwner.embedder.status()
       }),
       resolveContext: this.resolveContext.bind(this),
       encodeChangeCursor: this.encodeChangeCursor.bind(this),
@@ -561,31 +549,6 @@ export class MemoryService {
     serviceLogger.info("initialized", memoryConfigLogFields(this.config));
   }
 
-  private resolveModelTaskContext(): MemoryModelTaskContext {
-    const taskConfig = cloneMemmyConfig(
-      this.options.configPath || this.options.configLoader
-        ? (this.options.configLoader ?? loadMemmyConfig)(this.options.configPath).config
-        : this.config
-    );
-    const summary = this.options.llm
-      ?? createConfiguredMemoryLlm(taskConfig, "memory_summary");
-    const evolution = this.options.skillLlm
-      ?? (
-        this.options.llm && evolutionUsesSharedLlm(taskConfig)
-          ? this.options.llm
-          : createConfiguredMemoryLlm(taskConfig, "memory_evolution")
-      );
-    return {
-      config: taskConfig,
-      summary,
-      evolution
-    };
-  }
-
-  private withModelTaskContext<T>(operation: () => T): T {
-    return this.modelTasks.run(operation);
-  }
-
   private memoryAddEnabled(): boolean {
     return this.config.algorithm.enableMemoryAdd;
   }
@@ -611,6 +574,7 @@ export class MemoryService {
       version: PROJECT_VERSION,
       uptimeMs: Date.now() - this.startedAt,
       mode: this.mode,
+      activeProfile: this.config.activeProfile,
       storage: {
         ...backend,
         schemaVersion: String(schema.version),
@@ -618,18 +582,9 @@ export class MemoryService {
         lastMigrationId: schema.lastMigrationId
       },
       models: {
-        summary: {
-          ...this.llm.status(),
-          routing: this.config.roleRouting.summary
-        },
-        evolution: {
-          ...this.skillLlm.status(),
-          routing: this.config.roleRouting.evolution
-        },
-        embedding: {
-          ...this.embedder.status(),
-          mode: this.config.embedding.mode
-        }
+        summary: this.llm.status(),
+        evolution: this.skillLlm.status(),
+        embedding: this.embedder.status()
       },
       capabilities: {
         routes,
@@ -662,9 +617,9 @@ export class MemoryService {
     const reloadedAt = nowIso();
 
     this.config = nextConfig;
-    if (stableStringify(previousConfig.embedding) !== stableStringify(nextConfig.embedding)) {
-      this.embedder = createEmbedder(nextConfig.embedding);
-    }
+    this.llm = createConfiguredMemoryLlm(nextConfig, "memory_summary");
+    this.skillLlm = createConfiguredMemoryLlm(nextConfig, "memory_evolution");
+    this.embedder = createEmbedder(nextConfig.embedding);
     if (!requiresRestart && request.restartFailedProcessing !== false) {
       this.restartFailedProcessing(reloadedAt);
     }
@@ -676,21 +631,13 @@ export class MemoryService {
     });
 
     return {
+      activeProfile: this.config.activeProfile,
       changed,
       requiresRestart,
       models: {
-        summary: {
-          ...this.llm.status(),
-          routing: this.config.roleRouting.summary
-        },
-        evolution: {
-          ...this.skillLlm.status(),
-          routing: this.config.roleRouting.evolution
-        },
-        embedding: {
-          ...this.embedder.status(),
-          mode: this.config.embedding.mode
-        }
+        summary: this.llm.status(),
+        evolution: this.skillLlm.status(),
+        embedding: this.embedder.status()
       },
       reloadedAt
     };
@@ -724,15 +671,14 @@ export class MemoryService {
     fingerprint: unknown,
     run: () => T | Promise<T>
   ): Promise<T> {
-    const scopedRun = () => this.withModelTaskContext(run);
     if (!this.memoryAddEnabled()) {
-      return scopedRun();
+      return run();
     }
     const idempotencyKey = request.adapterId && request.requestId
       ? `${operation}:${request.adapterId}:${request.requestId}`
       : undefined;
     if (!idempotencyKey) {
-      return scopedRun();
+      return run();
     }
     const requestHash = stableHash({ operation, fingerprint });
     const existing = this.repos.runtime.getIdempotency(idempotencyKey);
@@ -742,7 +688,7 @@ export class MemoryService {
       }
       return withDuplicateFlag(existing.response) as T;
     }
-    const response = await scopedRun();
+    const response = await run();
     this.repos.runtime.saveIdempotency(idempotencyKey, requestHash, response);
     return response;
   }
@@ -860,7 +806,7 @@ export class MemoryService {
     status: string[];
     serverTime: string;
   }> {
-    return this.withModelTaskContext(() => this.sessionTurns.startTurn(this.withTimeZone(request)));
+    return this.sessionTurns.startTurn(this.withTimeZone(request));
   }
 
   completeTurn(turnId: string, request: TurnCompleteRequest & Record<string, unknown>): CompleteTurnResponse {
@@ -876,7 +822,7 @@ export class MemoryService {
     syncCursor?: string;
     serverTime: string;
   }> {
-    return this.withModelTaskContext(() => this.sessionTurns.observeTool(this.withTimeZone(input)));
+    return this.sessionTurns.observeTool(this.withTimeZone(input));
   }
 
 
@@ -909,7 +855,7 @@ export class MemoryService {
     reason?: string;
     sourceMemoryIds: string[];
   }> {
-    return this.withModelTaskContext(() => this.sessionTurns.repairSuggestion(this.withTimeZone(input)));
+    return this.sessionTurns.repairSuggestion(this.withTimeZone(input));
   }
 
   async search(request: InternalMemorySearchRequest): Promise<{
@@ -935,7 +881,7 @@ export class MemoryService {
     verbose: boolean;
     serverTime: string;
   }> {
-    return this.withModelTaskContext(() => this.retrieval.search(this.withTimeZone(request)));
+    return this.retrieval.search(this.withTimeZone(request));
   }
 
 
@@ -1027,7 +973,7 @@ export class MemoryService {
     status: string[];
     serverTime: string;
   }> {
-    return this.withModelTaskContext(() => this.retrieval.worldModelQuery(this.withTimeZone(input)));
+    return this.retrieval.worldModelQuery(this.withTimeZone(input));
   }
 
   listSkills(input: RequestEnvelope & {
@@ -1097,7 +1043,7 @@ export class MemoryService {
   }
 
   async feedback(request: FeedbackRequest): Promise<FeedbackResponse> {
-    return this.withModelTaskContext(() => this.feedbackExperience.feedback(request));
+    return this.feedbackExperience.feedback(request);
   }
 
   exportBundle(request: MemoryExportRequest = {}): {
@@ -2397,9 +2343,7 @@ function cloneMemmyConfig(config: MemmyConfig): MemmyConfig {
 function memoryConfigLogFields(config: MemmyConfig): Record<string, unknown> {
   const evolution = resolveEvolutionConfig(config);
   return {
-    summaryRouting: config.roleRouting.summary,
-    evolutionRouting: config.roleRouting.evolution,
-    embeddingMode: config.embedding.mode,
+    activeProfile: config.activeProfile,
     memoryAddEnabled: config.algorithm.enableMemoryAdd,
     memorySearchEnabled: config.algorithm.enableMemorySearch,
     summaryModel: {

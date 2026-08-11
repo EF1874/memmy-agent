@@ -3,19 +3,18 @@ import { describe, expect, it } from "vitest";
 import { resolveComposerCursorPosition } from "../../../src/entrypoints/cli/tui-cursor.js";
 
 describe("TUI composer cursor", () => {
-  it("uses the shared Gateway and closes only the TUI connection on cleanup", () => {
+  it("reuses one AgentLoop across turns and closes runtime tools on TUI cleanup", () => {
     const tuiSource = readFileSync(
       new URL("../../../src/entrypoints/cli/tui.tsx", import.meta.url),
       "utf8",
     );
 
-    expect(tuiSource).toContain("const gateway = new TuiGatewayClient(");
-    expect(tuiSource).toContain("await gateway.start();");
-    expect(tuiSource).toMatch(
-      /const cleanup = onceCleanup[\s\S]*?unsubscribe\(\);[\s\S]*?gateway\.close\(\);/,
+    expect(tuiSource).toContain(
+      "const loop = activeLoopRef.current ?? AgentLoop.fromConfig(config);",
     );
-    expect(tuiSource).not.toContain("AgentLoop.fromConfig");
-    expect(tuiSource).not.toContain("cancelActiveTasks");
+    expect(tuiSource).toMatch(
+      /const cleanup = onceCleanup[\s\S]*?if \(activeLoop\) activeLoop\.stop\(\);[\s\S]*?loop\.closeRuntimeTools\(\)/,
+    );
   });
 
   it("keeps the fullscreen correction wired into the live composer", () => {

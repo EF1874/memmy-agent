@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import type { MemoryProfileName } from "../config/index.js";
 
 export type MemoryAgentRegion = "cn" | "intl";
 
@@ -20,10 +21,10 @@ export function packagedDesktopEditionManifestPath(
 }
 
 export function resolveMemoryAgentRegion(
-  sourceProvider: string | null | undefined,
+  activeProfile: MemoryProfileName,
   options: ResolveMemoryAgentRegionOptions = {}
 ): MemoryAgentRegion | undefined {
-  if (sourceProvider !== "memmy_account") return undefined;
+  if (activeProfile !== "account") return undefined;
 
   const manifest = readDesktopEditionManifest(
     options.manifestPath ?? packagedDesktopEditionManifestPath()

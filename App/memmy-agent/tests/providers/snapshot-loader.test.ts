@@ -22,28 +22,6 @@ afterEach(() => {
 });
 
 describe("provider snapshot loader", () => {
-  it("uses registry defaults when a preset provider has no YAML provider block", () => {
-    const snapshot = buildProviderSnapshot(
-      new Config({
-        agents: {
-          defaults: {
-            modelPreset: "local",
-          },
-        },
-        modelPresets: {
-          local: {
-            provider: "ollama",
-            model: "llama3",
-          },
-        },
-      }),
-    );
-
-    expect(snapshot.model).toBe("llama3");
-    expect((snapshot.provider as any).spec?.name).toBe("ollama");
-    expect((snapshot.provider as any).apiBase).toBe("http://localhost:11434/v1");
-  });
-
   it("builds snapshots from standard provider and model config", () => {
     const snapshot = buildProviderSnapshot(
       new Config({

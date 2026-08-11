@@ -1199,59 +1199,6 @@ describe("AgentThreadMessages", () => {
     expect(html).not.toContain("Edited /tmp/a.txt");
   });
 
-  it("renders confirmed no-op files as unchanged without a diff or edited summary", () => {
-    const html = renderToString(
-      <I18nProvider language="zh-CN">
-        <AgentThreadMessages
-          chatScopeKey="chat-file-noop"
-          messages={[
-            {
-              id: "file-noop",
-              role: "tool",
-              kind: "trace",
-              content: "",
-              traces: [],
-              fileEdits: [
-                {
-                  call_id: "call-noop",
-                  ui_tool_call_id: "ui-noop",
-                  tool: "apply_patch",
-                  path: "src/a.ts",
-                  phase: "end",
-                  status: "done",
-                  added: 0,
-                  deleted: 0,
-                  unchanged: true,
-                },
-                {
-                  call_id: "call-noop",
-                  ui_tool_call_id: "ui-noop",
-                  tool: "apply_patch",
-                  path: "src/b.ts",
-                  phase: "end",
-                  status: "done",
-                  added: 0,
-                  deleted: 0,
-                  unchanged: true,
-                },
-              ],
-              activitySegmentId: "activity-file-noop",
-              isStreaming: true,
-              stoppedByUser: true,
-            },
-          ]}
-        />
-      </I18nProvider>,
-    );
-
-    expect(html).toContain("文件未修改");
-    expect(html).toContain("未修改 src/a.ts");
-    expect(html).toContain("未修改 src/b.ts");
-    expect(html).not.toContain("编辑了 2 个文件");
-    expect(html).not.toContain("+0");
-    expect(html).not.toContain("Edited src/a.ts");
-  });
-
   it.each(["write_file", "edit_file", "apply_patch"] as const)("does not render %s file edit content fallback", (toolName) => {
     const html = renderToString(
       <I18nProvider language="zh-CN">

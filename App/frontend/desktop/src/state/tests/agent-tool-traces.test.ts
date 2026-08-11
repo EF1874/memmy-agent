@@ -4,11 +4,9 @@
 import { describe, expect, it } from "vitest";
 import {
   formatToolCallTrace,
-  mergeFileEdits,
   mergeToolProgressEvents,
   mergeUniqueToolTraceLines,
   normalizeToolProgressEvents,
-  normalizeFileEdits,
   summarizeToolCall,
   toolTraceLinesFromEvents
 } from "../agent-tool-traces.js";
@@ -34,111 +32,6 @@ describe("agent tool trace helpers", () => {
 
     expect(merged).toEqual([
       { phase: "error", call_id: "1", name: "web_fetch", arguments: { url: "https://example.com" }, error: "timeout" }
-    ]);
-  });
-
-  it("merges one UI tool call while preserving distinct calls with repeated Provider ids", () => {
-    const merged = mergeToolProgressEvents(
-      [{ phase: "start", call_id: "stream-id", ui_tool_call_id: "ui-1", name: "write_file" }],
-      [
-        { phase: "end", call_id: "provider-final", ui_tool_call_id: "ui-1", name: "write_file" },
-        { phase: "end", call_id: "provider-final", ui_tool_call_id: "ui-2", name: "write_file" }
-      ]
-    );
-
-    expect(merged).toHaveLength(2);
-    expect(merged[0]).toMatchObject({ phase: "end", call_id: "provider-final", ui_tool_call_id: "ui-1" });
-    expect(merged[1]).toMatchObject({ phase: "end", call_id: "provider-final", ui_tool_call_id: "ui-2" });
-  });
-
-  it("keeps trace lines for distinct UI calls with a repeated Provider id", () => {
-    expect(toolTraceLinesFromEvents([
-      { phase: "end", call_id: "provider-final", ui_tool_call_id: "ui-1", name: "write_file", arguments: { path: "a.ts" } },
-      { phase: "end", call_id: "provider-final", ui_tool_call_id: "ui-2", name: "write_file", arguments: { path: "b.ts" } }
-    ])).toHaveLength(2);
-  });
-
-  it("keeps multi-file edits inside one UI call and rejects late phase downgrades", () => {
-    const pending = normalizeFileEdits({
-      call_id: "stream-id",
-      ui_tool_call_id: "ui-patch",
-      tool: "apply_patch",
-      path: "",
-      pending: true,
-      phase: "start"
-    });
-    const completed = normalizeFileEdits([
-      {
-        call_id: "provider-final",
-        ui_tool_call_id: "ui-patch",
-        tool: "apply_patch",
-        path: "src/a.ts",
-        absolute_path: "/workspace/src/a.ts",
-        phase: "end",
-        added: 20
-      },
-      {
-        call_id: "provider-final",
-        ui_tool_call_id: "ui-patch",
-        tool: "apply_patch",
-        path: "src/b.ts",
-        absolute_path: "/workspace/src/b.ts",
-        phase: "end",
-        added: 467
-      }
-    ]);
-    const lateStart = normalizeFileEdits({
-      call_id: "stream-id",
-      ui_tool_call_id: "ui-patch",
-      tool: "apply_patch",
-      path: "src/a.ts",
-      absolute_path: "/workspace/src/a.ts",
-      phase: "start",
-      added: 1,
-      approximate: true
-    });
-
-    const merged = mergeFileEdits(mergeFileEdits(pending, completed), lateStart);
-    expect(merged).toHaveLength(2);
-    expect(merged[0]).toMatchObject({ path: "src/a.ts", phase: "end", status: "done", added: 20 });
-    expect(merged[0]?.approximate).not.toBe(true);
-    expect(merged[1]).toMatchObject({ path: "src/b.ts", phase: "end", status: "done", added: 467 });
-  });
-
-  it("does not synthesize a Provider call id for legacy file edits", () => {
-    expect(normalizeFileEdits({ tool: "edit_file", path: "src/a.ts", phase: "end" })[0]?.call_id).toBe("");
-  });
-
-  it("preserves unchanged through normalization and terminal event merging", () => {
-    const started = normalizeFileEdits({
-      call_id: "call-noop",
-      ui_tool_call_id: "ui-noop",
-      tool: "edit_file",
-      path: "src/a.ts",
-      phase: "start",
-      status: "editing",
-      added: 1,
-    });
-    const completed = normalizeFileEdits({
-      call_id: "call-noop",
-      ui_tool_call_id: "ui-noop",
-      tool: "edit_file",
-      path: "src/a.ts",
-      phase: "end",
-      status: "done",
-      added: 0,
-      deleted: 0,
-      unchanged: true,
-    });
-
-    expect(mergeFileEdits(started, completed)).toEqual([
-      expect.objectContaining({
-        phase: "end",
-        status: "done",
-        added: 0,
-        deleted: 0,
-        unchanged: true,
-      }),
     ]);
   });
 

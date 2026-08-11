@@ -508,14 +508,12 @@ try {
 }
 
 const defaults = config.agents?.defaults ?? {};
-const presetName = defaults.modelPreset;
-const preset = presetName ? config.modelPresets?.[presetName] : null;
-const providerName = preset?.provider;
-const modelName = preset?.model;
+const providerName = defaults.provider;
+const modelName = defaults.model;
 const provider = providerName ? config.providers?.[providerName] : null;
 const apiKey = provider?.apiKey;
 
-if (!presetName || !providerName || !modelName || !apiKey) process.exit(1);
+if (!providerName || !modelName || !apiKey) process.exit(1);
 process.exit(0);
 NODE
 }
@@ -576,30 +574,6 @@ run_main() {
 
   stop_existing_stack
 
-  log "building memmy-agent from current source"
-  ensure_memmy_agent_dependencies
-  cd "$MEMMY_AGENT_DIR"
-  npm run build
-
-  local config_parent config_name
-  config_parent="$(dirname "$MEMMY_CONFIG_PATH")"
-  config_name="$(basename "$MEMMY_CONFIG_PATH")"
-  mkdir -p "$config_parent" "$MEMMY_WORKSPACE_DIR"
-  config_parent="$(cd "$config_parent" && pwd -P)"
-  MEMMY_CONFIG_PATH="$config_parent/$config_name"
-  MEMMY_WORKSPACE_DIR="$(cd "$MEMMY_WORKSPACE_DIR" && pwd -P)"
-  export MEMMY_CONFIG="$MEMMY_CONFIG_PATH"
-  export MEMMY_AGENT_WORKSPACE="$MEMMY_WORKSPACE_DIR"
-
-  unset MEMMY_MIGRATIONS_READY_CONFIG MEMMY_MIGRATIONS_READY_WORKSPACE MEMMY_MIGRATIONS_READY_SESSION_DAG
-  log "running startup migrations"
-  "$MEMMY_RUNTIME_NODE_PATH" dist/main.js migrate \
-    --config "$MEMMY_CONFIG_PATH" \
-    --workspace "$MEMMY_WORKSPACE_DIR"
-  export MEMMY_MIGRATIONS_READY_CONFIG="$MEMMY_CONFIG_PATH"
-  export MEMMY_MIGRATIONS_READY_WORKSPACE="$MEMMY_WORKSPACE_DIR"
-  export MEMMY_MIGRATIONS_READY_SESSION_DAG="${MEMMY_AGENT_SESSION_DAG_DIR:-$HOME/.memmy/session-dag}"
-
   build_and_install_memory_cli
 
   log "rebuilding better-sqlite3 for local Node runtime"
@@ -609,7 +583,10 @@ run_main() {
 
   ensure_electron_runtime
 
+  log "building memmy-agent from current source"
+  ensure_memmy_agent_dependencies
   cd "$MEMMY_AGENT_DIR"
+  npm run build
 
   install_user_cli_link "memmy" "$MEMMY_AGENT_DIR/dist/main.js"
   "$(user_cli_path "memmy")" --version >/dev/null

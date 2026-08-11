@@ -126,7 +126,6 @@ describe("stop preserves context", () => {
         estimatePromptTokens: () => [10_000, "test"],
       } as any,
       sessionManager: {
-        get: () => session,
         getOrCreate: () => session,
         save: () => {
           saved = true;
@@ -159,7 +158,6 @@ describe("stop preserves context", () => {
         estimatePromptTokens: () => [10_000, "test"],
       } as any,
       sessionManager: {
-        get: () => session,
         getOrCreate: () => session,
         save: () => {
           saved = true;
@@ -184,9 +182,9 @@ describe("stop preserves context", () => {
     const running = await bus.consumeOutbound();
     const turnEnd = await bus.consumeOutbound();
     const idle = await bus.consumeOutbound();
-    expect(running.metadata).toMatchObject({ runStatusEvent: true, runStatus: "running" });
+    expect(running.metadata).toMatchObject({ goalStatusEvent: true, goalStatus: "running" });
     expect(turnEnd.metadata).toMatchObject({ turnEnd: true });
-    expect(idle.metadata).toMatchObject({ runStatusEvent: true, runStatus: "idle" });
+    expect(idle.metadata).toMatchObject({ goalStatusEvent: true, goalStatus: "idle" });
     expect(websocketTurnWallStartedAt("c1")).toBeNull();
     expect(session.messages.map((message) => message.role)).toEqual(["user", "assistant", "tool", "tool"]);
     expect(session.messages.at(-1)).toMatchObject({

@@ -38,7 +38,6 @@ records general tool contracts and less obvious usage patterns.
 - When a patch is uncertain and you want validation and a change summary before writing, use `apply_patch dry_run=true`.
 - Use `edit_file` only for small exact replacements in a single file, with `old_text` copied from `read_file`; when ambiguity matters, add `occurrence`, `line_hint`, or `expected_replacements`.
 - Use `write_file` for new files or intentional full-file rewrites, not routine local edits.
-- If a write tool returns `No changes made`, do not repeat the same tool call with identical arguments. Re-read the target and change the arguments or editing strategy.
 - If `apply_patch` or `edit_file` fails, reread with `force=true`, narrow the context, and try a smaller patch instead of switching to shell `sed` or `echo`.
 
 ## Process Execution

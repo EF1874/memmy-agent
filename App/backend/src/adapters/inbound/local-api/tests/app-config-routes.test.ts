@@ -69,16 +69,23 @@ describe("app config local api routes", () => {
         async getModelConfig() {
           calls.push("model:get");
           return modelConfigView({
+            provider: "openai_compatible",
+            baseUrl: "https://api.example.com/v1",
+            modelId: "gpt-4.1-mini",
             hasApiKey: true,
-            apiKeyMasked: "sk-l••••cret"
+            apiKeyMasked: "sk-l••••cret",
+            embedding: localEmbeddingView()
           });
         },
         async setModelConfig(input) {
-          calls.push(`model:${input.providers[0]?.provider}`);
+          calls.push(`model:${input.provider}`);
           return modelConfigView({
-            configRevision: "revision-after-save",
-            hasApiKey: Boolean(input.providers[0]?.apiKey),
-            apiKeyMasked: "sk-l••••cret"
+            provider: input.provider,
+            baseUrl: input.baseUrl,
+            modelId: input.modelId,
+            hasApiKey: Boolean(input.apiKey),
+            apiKeyMasked: "sk-l••••cret",
+            embedding: localEmbeddingView()
           });
         },
         async testModelConfig(input) {
@@ -103,23 +110,10 @@ describe("app config local api routes", () => {
     const improvement = await injectJson("PATCH", "/api/app/improvement-program", { improvementProgram: "declined" });
     const tokenUsage = await injectJson("GET", "/api/app/token-usage");
     const modelConfig = await injectJson("PUT", "/api/app/model-config", {
-      configRevision: "revision-before-save",
-      providers: [{
-        provider: "openai",
-        apiBase: "https://api.example.com/v1",
-        apiKey: "sk-live-secret",
-        apiType: "chatCompletions",
-        models: [{
-          presetName: "work-gpt",
-          model: "gpt-4.1-mini"
-        }]
-      }],
-      defaultModelPreset: "work-gpt",
-      embedding: { mode: "local" },
-      memmyMemory: {
-        summary: { mode: "follow" },
-        evolution: { mode: "follow" }
-      }
+      provider: "openai_compatible",
+      baseUrl: "https://api.example.com/v1",
+      modelId: "gpt-4.1-mini",
+      apiKey: "sk-live-secret"
     });
     const modelConfigTest = await injectJson("POST", "/api/app/model-config/test", {
       provider: "openai_compatible",
@@ -143,22 +137,14 @@ describe("app config local api routes", () => {
       lastSyncedAt: "2026-06-24T10:00:00.000Z"
     });
     expect(modelConfigBeforeSave.json()).toMatchObject({
-      defaultModelPreset: "work-gpt",
-      providers: [{
-        provider: "openai",
-        hasApiKey: true,
-        apiKeyMasked: "sk-l••••cret",
-        models: [{ model: "gpt-4.1-mini" }]
-      }]
+      provider: "openai_compatible",
+      hasApiKey: true,
+      apiKeyMasked: "sk-l••••cret"
     });
     expect(modelConfig.json()).toMatchObject({
-      configRevision: "revision-after-save",
-      defaultModelPreset: "work-gpt",
-      providers: [{
-        provider: "openai",
-        hasApiKey: true,
-        apiKeyMasked: "sk-l••••cret"
-      }]
+      provider: "openai_compatible",
+      hasApiKey: true,
+      apiKeyMasked: "sk-l••••cret"
     });
     expect(JSON.stringify(modelConfig.json())).not.toContain("sk-live-secret");
     expect(modelConfigTest.json()).toEqual({
@@ -175,7 +161,7 @@ describe("app config local api routes", () => {
       "onboarding:completed",
       "improvement:declined",
       "tokenUsage:get",
-      "model:openai",
+      "model:openai_compatible",
       "model:test:openai_compatible:gpt-5.5",
       "skin:midnight"
     ]);
@@ -276,14 +262,22 @@ function createServer(overrides: Record<string, unknown> = {}): FastifyInstance 
       },
       async getModelConfig() {
         return modelConfigView({
+          provider: "openai_compatible",
+          baseUrl: "https://api.example.com/v1",
+          modelId: "gpt-4.1-mini",
           hasApiKey: false,
-          apiKeyMasked: ""
+          apiKeyMasked: "",
+          embedding: localEmbeddingView()
         });
       },
       async setModelConfig() {
         return modelConfigView({
+          provider: "openai_compatible",
+          baseUrl: "https://api.example.com/v1",
+          modelId: "gpt-4.1-mini",
           hasApiKey: false,
-          apiKeyMasked: ""
+          apiKeyMasked: "",
+          embedding: localEmbeddingView()
         });
       },
       async testModelConfig() {
@@ -340,35 +334,35 @@ function createPermissionManager(): PermissionManager {
 }
 
 function modelConfigView(overrides: Record<string, unknown> = {}) {
+  const provider = (overrides.provider ?? "openai_compatible") as string;
+  const baseUrl = (overrides.baseUrl ?? "https://api.example.com/v1") as string;
+  const modelId = (overrides.modelId ?? "gpt-4.1-mini") as string;
   const hasApiKey = Boolean(overrides.hasApiKey);
   const apiKeyMasked = (overrides.apiKeyMasked ?? "") as string;
   return {
-    configRevision: overrides.configRevision ?? "revision-before-save",
-    providers: [{
-      provider: "openai",
-      apiBase: "https://api.example.com/v1",
-      apiType: "chatCompletions",
-      configured: hasApiKey,
-      hasApiKey,
-      apiKeyMasked,
-      apiKey: "",
-      accountManaged: false,
-      editable: true,
-      models: [{
-        presetName: "work-gpt",
-        model: "gpt-4.1-mini",
-        isDefault: true,
-        available: hasApiKey
-      }]
-    }],
-    defaultModelPreset: hasApiKey ? "work-gpt" : null,
-    configured: hasApiKey,
+    provider,
+    baseUrl,
+    modelId,
+    hasApiKey,
+    apiKeyMasked,
     embedding: overrides.embedding ?? localEmbeddingView(),
     asr: overrides.asr ?? null,
     imageGen: overrides.imageGen ?? null,
     memmyMemory: {
-      summary: { mode: "follow", fixed: null },
-      evolution: { mode: "follow", fixed: null }
+      summary: {
+        provider,
+        baseUrl,
+        modelId,
+        hasApiKey,
+        apiKeyMasked
+      },
+      evolution: {
+        provider,
+        baseUrl,
+        modelId,
+        hasApiKey,
+        apiKeyMasked
+      }
     },
     updatedAt: "2026-06-02T10:00:00.000Z"
   };
@@ -377,7 +371,10 @@ function modelConfigView(overrides: Record<string, unknown> = {}) {
 function localEmbeddingView() {
   return {
     mode: "local",
-    custom: null
+    baseUrl: null,
+    modelId: null,
+    hasApiKey: false,
+    apiKeyMasked: ""
   };
 }
 

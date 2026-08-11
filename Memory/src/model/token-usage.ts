@@ -138,10 +138,6 @@ export class HttpByokTokenUsageRecorder {
   }
 
   record(event: MemoryModelUsageEvent): void {
-    if (!event.provider.trim()) {
-      console.error("Memory BYOK token usage skipped event without an actual provider");
-      return;
-    }
     if (isCloudAccountLlm(event) || isEmptyUsage(event.usage)) {
       return;
     }
@@ -185,9 +181,9 @@ function toByokTokenUsageEvent(event: MemoryModelUsageEvent): Record<string, unk
     cacheCreationInputTokens: event.usage.cacheCreationInputTokens,
     metadata: {
       operation: event.operation,
+      provider: event.provider,
       model: event.model ?? null,
-      ...event.metadata,
-      provider: event.provider
+      ...event.metadata
     },
     rawUsage: event.usage.rawUsage,
     createdAt: new Date().toISOString()

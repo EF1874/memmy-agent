@@ -531,22 +531,11 @@ export class ProvidersConfig extends Base {
     for (const spec of PROVIDERS) {
       if (spec.isOauth) continue;
       const value = this[spec.name];
-      if (!providerConfigHasValues(value)) continue;
-      dump[spec.name] = value && typeof value.toObject === "function"
-        ? value.toObject()
-        : value;
+      if (value && typeof value.toObject === "function") dump[spec.name] = value.toObject();
+      else dump[spec.name] = value;
     }
     return dump;
   }
-}
-
-function providerConfigHasValues(value: any): boolean {
-  if (!value || typeof value !== "object") return false;
-  if (optionalString(value.apiKey) || optionalString(value.apiBase)) return true;
-  if (value.apiType && value.apiType !== "auto") return true;
-  if (isRecord(value.extraHeaders) && Object.keys(value.extraHeaders).length > 0) return true;
-  if (isRecord(value.extraBody) && Object.keys(value.extraBody).length > 0) return true;
-  return optionalString(value.region) !== undefined || optionalString(value.profile) !== undefined;
 }
 
 export class WebSearchConfig extends Base {

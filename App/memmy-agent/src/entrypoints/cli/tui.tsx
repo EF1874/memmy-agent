@@ -1,24 +1,17 @@
-import crypto from "node:crypto";
 import { Box, Text, render, useApp, useCursor, useInput, useStdout } from "ink";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import stringWidth from "string-width";
+import { AgentLoop } from "../../core/agent-runtime/loop.js";
 import { Config } from "../../config/schema.js";
 import { getConfigPath, getWorkspacePath } from "../../config/paths.js";
+import { withProgressCapabilities, type ProgressOptions } from "../../utils/progress-events.js";
 import { VERSION } from "../../version.js";
-import { GUI_IM_CHANNELS } from "../frontend-bridge/gui-session-projection.js";
-import type { TerminalTarget } from "./commands.js";
-import {
-  TuiGatewayClient,
-  tuiGatewayOptionsFromConfig,
-  type TuiGatewayQueueItem,
-  type TuiGatewayState,
-} from "./tui-gateway-client.js";
 import { resolveComposerCursorPosition, type ComposerLayout } from "./tui-cursor.js";
 
 type TuiMessageRole = "assistant" | "progress" | "system" | "user";
 
 type TuiMessage = {
-  id: number | string;
+  id: number;
   role: TuiMessageRole;
   text: string;
 };
@@ -27,10 +20,8 @@ type TuiCleanup = () => Promise<void>;
 
 type TuiProps = {
   config: Config;
-  gateway: TuiGatewayClient;
   registerCleanup: (cleanup: TuiCleanup) => void;
   sessionId: string;
-  target: TerminalTarget | null;
   toolsets: ToolsetSummary[];
   version: string;
 };
@@ -146,16 +137,14 @@ function displayModelName(model: string): string {
 function modelLabel(config: Config): string {
   const resolved = config.resolvePreset();
   const preset = config.agents.defaults.modelPreset;
-  const provider = config.getProviderName(resolved.model, { preset: resolved }) ?? "unknown";
-  const value = `${provider} / ${displayModelName(resolved.model)}`;
-  return preset ? `${value} @${preset}` : value;
+  return preset ? `${displayModelName(resolved.model)} @${preset}` : displayModelName(resolved.model);
 }
 
 const TOOLSET_ORDER = ["web", "exec", "file", "runtime", "image", "goal", "cron", "mcp", "other"] as const;
 
 const TOOLSET_BY_TOOL_NAME: Record<string, string> = {
   apply_patch: "file",
-  create_goal: "goal",
+  complete_goal: "goal",
   cron: "cron",
   edit_file: "file",
   exec: "exec",
@@ -164,8 +153,7 @@ const TOOLSET_BY_TOOL_NAME: Record<string, string> = {
   grep: "file",
   list_dir: "file",
   list_exec_sessions: "exec",
-  get_goal: "goal",
-  update_goal: "goal",
+  long_task: "goal",
   message: "runtime",
   read_file: "file",
   spawn: "runtime",
@@ -215,8 +203,9 @@ function summarizeToolsets(config: Config, toolNames: string[]): ToolsetSummary[
     .sort((a, b) => toolsetRank(a.name) - toolsetRank(b.name) || a.name.localeCompare(b.name));
 }
 
-function readToolsets(config: Config, toolNames: string[]): ToolsetSummary[] {
-  return summarizeToolsets(config, toolNames);
+function readToolsets(config: Config): ToolsetSummary[] {
+  const loop = AgentLoop.fromConfig(config);
+  return summarizeToolsets(config, loop.toolNames);
 }
 
 function useTerminalSize(): TerminalSize {
@@ -249,6 +238,13 @@ function onceCleanup(fn: TuiCleanup): TuiCleanup {
     promise ??= fn();
     return promise;
   };
+}
+
+async function settleWithTimeout(promises: Array<Promise<unknown>>, timeoutMs: number): Promise<void> {
+  await Promise.race([
+    Promise.allSettled(promises),
+    new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
+  ]);
 }
 
 function messageFrameWidth(columns: number): number {
@@ -694,15 +690,11 @@ function formatCompactToolsets(toolsets: ToolsetSummary[]): string {
 function Banner({
   columns,
   config,
-  model,
-  target,
   toolsets,
   version,
 }: {
   columns: number;
   config: Config;
-  model: string;
-  target: TerminalTarget | null;
   toolsets: ToolsetSummary[];
   version: string;
 }) {
@@ -730,29 +722,11 @@ function Banner({
             <TitledFrameRow width={panelWidth}>
               <MetaLine label="workspace" value={workspace} />
             </TitledFrameRow>
-            {target ? (
-              <TitledFrameRow width={panelWidth}>
-                <MetaLine label="session" value={target.sessionId} />
-              </TitledFrameRow>
-            ) : null}
-            {target ? (
-              <TitledFrameRow width={panelWidth}>
-                <MetaLine
-                  label={target.target === "project" ? "project" : "task"}
-                  value={target.projectName ?? target.target}
-                />
-              </TitledFrameRow>
-            ) : null}
-            {target ? (
-              <TitledFrameRow width={panelWidth}>
-                <MetaLine label="root" value={target.cwd} />
-              </TitledFrameRow>
-            ) : null}
             <TitledFrameRow width={panelWidth}>
               <MetaLine label="config" value={getConfigPath()} />
             </TitledFrameRow>
             <TitledFrameRow width={panelWidth}>
-              <MetaLine label="model" value={model} />
+              <MetaLine label="model" value={modelLabel(config)} />
             </TitledFrameRow>
             <TitledFrameRow width={panelWidth}>
               <MetaLine label="tools" value={formatCompactToolsets(toolsets)} />
@@ -809,7 +783,7 @@ function Banner({
             <TitledFrameRow width={panelWidth}>
               <Box flexDirection={contentDirection}>
                 <Box width={workspaceColumnWidth}>
-                  <MetaLine label="model" value={model} />
+                  <MetaLine label="model" value={modelLabel(config)} />
                 </Box>
                 <Box paddingLeft={toolColumnGap} width={toolColumnWidth + toolColumnGap}>
                   {visibleToolsets[2] ? (
@@ -856,7 +830,6 @@ function StatusRule({
   busy,
   columns,
   config,
-  model,
   elapsedMs,
   inputLength,
   notice,
@@ -864,7 +837,6 @@ function StatusRule({
   busy: boolean;
   columns: number;
   config: Config;
-  model: string;
   elapsedMs: number;
   inputLength: number;
   notice: string;
@@ -878,7 +850,7 @@ function StatusRule({
     <Box flexDirection="column">
       <Box paddingLeft={1}>
         <Text color={busy ? PALETTE.primary : PALETTE.success} bold>
-          {busy ? "*" : "$"} {model}
+          {busy ? "*" : "$"} {modelLabel(config)}
         </Text>
         <Text color={PALETTE.lineDim}> | </Text>
         <Text color={PALETTE.lemon}>{ctx}</Text>
@@ -896,166 +868,176 @@ function StatusRule({
   );
 }
 
-export function tuiQueueSourceLabel(item: TuiGatewayQueueItem): string {
-  if (item.source.kind === "gui") return "GUI";
-  if (item.source.kind === "tui") return "TUI";
-  if (Object.prototype.hasOwnProperty.call(GUI_IM_CHANNELS, item.source.channel)) {
-    return GUI_IM_CHANNELS[item.source.channel as keyof typeof GUI_IM_CHANNELS];
-  }
-  return "IM";
-}
-
-export function tuiQueuePreview(text: string, maxWidth: number): string {
-  return truncateEnd(text.replace(/\s*[\r\n]+\s*/g, " "), maxWidth);
-}
-
-function QueuePanel({
-  columns,
-  items,
-  loading,
-}: {
-  columns: number;
-  items: TuiGatewayQueueItem[];
-  loading: boolean;
-}) {
-  if (!loading && items.length === 0) return null;
-  const visible = items.slice(0, 3);
-  return (
-    <Box flexDirection="column" marginBottom={1} paddingLeft={1}>
-      <Text color={PALETTE.primary} bold>
-        {loading ? "Queued (loading...)" : `Queued (${items.length})`}
-      </Text>
-      {!loading ? visible.map((item, index) => {
-        const source = `[${tuiQueueSourceLabel(item)}]`;
-        const previewWidth = Math.max(8, columns - stringWidth(source) - 9);
-        return (
-          <Text key={item.clientRequestId} color={PALETTE.ink}>
-            {`  ${index + 1}. `}
-            <Text color={PALETTE.lemon}>{source}</Text>
-            {` ${tuiQueuePreview(item.text, previewWidth)}`}
-          </Text>
-        );
-      }) : null}
-      {!loading && items.length > visible.length ? (
-        <Text color={PALETTE.muted}>{`  ... and ${items.length - visible.length} more`}</Text>
-      ) : null}
-    </Box>
-  );
-}
-
-function MemmyTui({ config, gateway, registerCleanup, target, toolsets, version }: TuiProps) {
+function MemmyTui({ config, registerCleanup, sessionId, toolsets, version }: TuiProps) {
   const { exit } = useApp();
+  const exitTriggerRef = useRef<"quit" | "interrupt">("quit");
   const { columns, rows } = useTerminalSize();
+  const activeLoopRef = useRef<AgentLoop | null>(null);
+  const activeAssistantIdRef = useRef<number | null>(null);
   const idRef = useRef(1);
+  const [busy, setBusy] = useState(false);
   const [input, setInput] = useState("");
   const [inputCursor, setInputCursor] = useState(0);
   const inputRef = useRef("");
   const inputCursorRef = useRef(0);
-  const draftRequestRef = useRef<{
-    admission: "queue" | "steer";
-    clientRequestId: string;
-    text: string;
-  } | null>(null);
-  const [localMessages, setLocalMessages] = useState<TuiMessage[]>(() => []);
-  const [gatewayState, setGatewayState] = useState<TuiGatewayState>(() => gateway.snapshot());
-  const [notice, setNotice] = useState("");
+  const [messages, setMessages] = useState<TuiMessage[]>(() => []);
+  const [notice, setNotice] = useState("ready");
+  const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
+  const sessionParts = useMemo(
+    () => (sessionId.includes(":") ? (sessionId.split(/:(.*)/s).filter(Boolean).slice(0, 2) as [string, string]) : ["cli", sessionId]),
+    [sessionId],
+  );
+
   const appendMessage = useCallback((role: TuiMessageRole, text: string) => {
-    setLocalMessages((prev) => [...prev, { id: idRef.current++, role, text }].slice(-MAX_MESSAGES));
+    setMessages((prev) => [...prev, { id: idRef.current++, role, text }].slice(-MAX_MESSAGES));
   }, []);
 
   const setDraft = useCallback((nextInput: string, nextCursor: number) => {
     const safeCursor = snapCursor(nextInput, nextCursor);
-    if (nextInput !== inputRef.current) draftRequestRef.current = null;
     inputRef.current = nextInput;
     inputCursorRef.current = safeCursor;
     setInput(nextInput);
     setInputCursor(safeCursor);
   }, []);
 
+  const appendAssistantDelta = useCallback((delta: string) => {
+    if (!delta) return;
+    let id = activeAssistantIdRef.current;
+    if (id == null) {
+      id = idRef.current++;
+      activeAssistantIdRef.current = id;
+      const next: TuiMessage = { id, role: "assistant", text: delta };
+      setMessages((prev) => [...prev, next].slice(-MAX_MESSAGES));
+      return;
+    }
+    setMessages((prev) => prev.map((message) => (message.id === id ? { ...message, text: message.text + delta } : message)));
+  }, []);
+
+  const finishTurn = useCallback(() => {
+    activeAssistantIdRef.current = null;
+    setBusy(false);
+    setTurnStartedAt(null);
+    setNotice("ready");
+  }, []);
+
   useEffect(() => {
-    const unsubscribe = gateway.subscribe(setGatewayState);
+    if (!busy) return;
+    setNow(Date.now());
+    const id = setInterval(() => setNow(Date.now()), 250);
+    return () => clearInterval(id);
+  }, [busy]);
+
+  useEffect(() => {
     const cleanup = onceCleanup(async () => {
-      unsubscribe();
-      gateway.close();
+      const activeLoop = activeLoopRef.current;
+      const loop = activeLoop ?? AgentLoop.fromConfig(config);
+      try {
+        await settleWithTimeout(
+          [loop.emitSessionEnd(null, sessionId, exitTriggerRef.current)],
+          5_000,
+        );
+      } finally {
+        if (activeLoop) activeLoop.stop();
+        await settleWithTimeout([
+          typeof (loop as any).closeRuntimeTools === "function"
+            ? loop.closeRuntimeTools()
+            : loop.closeMcp(),
+        ], 1_500);
+        if (activeLoopRef.current === activeLoop) activeLoopRef.current = null;
+      }
     });
     registerCleanup(cleanup);
     return () => {
       void cleanup();
     };
-  }, [gateway, registerCleanup]);
+  }, [config, registerCleanup, sessionId]);
 
-  useEffect(() => {
-    if (!gatewayState.busy) return;
-    setNow(Date.now());
-    const id = setInterval(() => setNow(Date.now()), 250);
-    return () => clearInterval(id);
-  }, [gatewayState.busy]);
+  const handleProgress = useCallback(
+    async (content: string, opts: ProgressOptions = {}) => {
+      const metadata: ProgressOptions & { agentProgress: boolean } = { agentProgress: true, ...opts };
+      const text = content ?? "";
+      if (metadata.reasoning || metadata.reasoningDelta) {
+        if (text.trim()) setNotice(text.trim().slice(0, 80));
+        return;
+      }
+      if (metadata.reasoningEnd) return;
+      if (metadata.agentProgress && text.trim()) {
+        appendMessage("progress", text.trim());
+        setNotice(text.trim().slice(0, 80));
+      }
+    },
+    [appendMessage],
+  );
 
   const submit = useCallback(
-    (value: string, turnAdmission: "queue" | "steer") => {
-      const text = value.trim();
+    (value: string) => {
+      const text = value.replace(/[\r\n]+/g, "").trim();
+      setDraft("", 0);
       if (!text) return;
       if (["exit", "quit", "/exit", "/quit", ":q"].includes(text.toLowerCase())) {
         appendMessage("system", "Goodbye.");
+        exitTriggerRef.current = "quit";
         exit();
         return;
       }
-      if (turnAdmission === "steer" && !gatewayState.ownedByTui) {
-        setNotice("The current Turn belongs to another channel; use Enter to queue.");
+      if (busy) {
+        appendMessage("system", "The agent is still working; wait for the current turn to finish.");
         return;
       }
-      const existing = draftRequestRef.current;
-      const request = existing
-        && existing.text === text
-        && existing.admission === turnAdmission
-        ? existing
-        : {
-            admission: turnAdmission,
-            clientRequestId: crypto.randomUUID(),
-            text,
-          };
-      draftRequestRef.current = request;
-      setNotice(turnAdmission === "steer" ? "sending addition to current Turn" : "sending to Gateway");
-      void gateway.submit(text, turnAdmission, request.clientRequestId)
-        .then((result) => {
-          if (draftRequestRef.current?.clientRequestId !== result.clientRequestId) return;
-          draftRequestRef.current = null;
-          setDraft("", 0);
-          setNotice(result.status === "steered" ? "added to current Turn" : result.status);
-        })
-        .catch((error) => {
-          setNotice(`Error: ${error instanceof Error ? error.message : String(error)}`);
-        });
+
+      const [channel, chatId] = sessionParts;
+      appendMessage("user", text);
+      setBusy(true);
+      setNotice("queued");
+      const startedAt = Date.now();
+      setTurnStartedAt(startedAt);
+      activeAssistantIdRef.current = null;
+      const loop = activeLoopRef.current ?? AgentLoop.fromConfig(config);
+      activeLoopRef.current = loop;
+      void (async () => {
+        try {
+          const response = await loop.processDirect(text, {
+            sessionKey: sessionId,
+            channel,
+            chatId,
+            onProgress: withProgressCapabilities(handleProgress, {
+              fileEditEvents: true,
+              reasoning: true,
+              toolEvents: true,
+            }),
+            onStream: async (delta: string) => {
+              appendAssistantDelta(delta);
+            },
+            onStreamEnd: async () => undefined,
+          });
+          if (activeAssistantIdRef.current == null && response?.content) appendMessage("assistant", response.content);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          appendMessage("system", `Error: ${message}`);
+        } finally {
+          finishTurn();
+        }
+      })();
     },
-    [appendMessage, exit, gateway, gatewayState.ownedByTui, setDraft],
+    [appendAssistantDelta, appendMessage, busy, config, exit, finishTurn, handleProgress, sessionId, sessionParts, setDraft],
   );
 
   useInput((value, key) => {
     if (key.ctrl && value === "c") {
-      if (gatewayState.busy && gatewayState.ownedByTui) {
-        appendMessage("system", "Stopping this TUI Turn...");
-        void gateway.stopOwnedTurn()
-          .then((outcome) => appendMessage("system", `Stop: ${outcome}`))
-          .catch((error) => appendMessage("system", `Stop failed: ${error instanceof Error ? error.message : String(error)}`))
-          .finally(() => exit());
-      } else {
-        appendMessage("system", gatewayState.busy ? "Disconnected; the external Turn keeps running." : "Goodbye.");
-        exit();
-      }
+      appendMessage("system", busy ? "Interrupted by user." : "Goodbye.");
+      exitTriggerRef.current = "interrupt";
+      exit();
       return;
     }
 
     if (key.return) {
-      submit(inputRef.current, "queue");
+      submit(inputRef.current);
       return;
     }
 
-    if (key.tab && gatewayState.ownedByTui) {
-      submit(inputRef.current, "steer");
-      return;
-    }
+    if (busy) return;
 
     const currentInput = inputRef.current;
     const currentCursor = inputCursorRef.current;
@@ -1134,7 +1116,7 @@ function MemmyTui({ config, gateway, registerCleanup, target, toolsets, version 
     const text = value.replace(/\r/g, "");
     if (!text) return;
     if (text.includes("\n")) {
-      submit(currentInput.slice(0, currentCursor) + text.replace(/\n.*$/s, ""), "queue");
+      submit(currentInput.slice(0, currentCursor) + text.replace(/\n.*$/s, ""));
       return;
     }
 
@@ -1142,29 +1124,14 @@ function MemmyTui({ config, gateway, registerCleanup, target, toolsets, version 
     setDraft(currentInput.slice(0, cursor) + text + currentInput.slice(cursor), cursor + text.length);
   });
 
-  const messages: TuiMessage[] = [
-    ...gatewayState.messages.map((message) => ({
-      id: message.id,
-      role: message.role,
-      text: message.text,
-    })),
-    ...localMessages,
-  ].slice(-MAX_MESSAGES);
   const visibleMessages = messages.slice(-8);
-  const elapsedMs = gatewayState.startedAt ? now - gatewayState.startedAt : 0;
+  const elapsedMs = turnStartedAt ? now - turnStartedAt : 0;
   const ruleWidth = Math.max(0, columns - 2);
-  const inputPlaceholder = gatewayState.busy
-    ? gatewayState.ownedByTui
-      ? "Enter: queue next turn · Tab: add to current turn"
-      : "Session is running from another channel · Enter: queue next turn"
-    : "Ask memmy, /quit to exit";
-  const currentModelLabel = gatewayState.modelName
-    ? displayModelName(gatewayState.modelName)
-    : modelLabel(config);
+  const inputPlaceholder = busy ? "agent is working..." : "Ask memmy, /quit to exit";
 
   return (
     <Box flexDirection="column" paddingX={1}>
-      <Banner columns={columns} config={config} model={currentModelLabel} target={target} toolsets={toolsets} version={version} />
+      <Banner columns={columns} config={config} toolsets={toolsets} version={version} />
 
       {messages.length ? (
         <Box flexDirection="column">
@@ -1174,25 +1141,18 @@ function MemmyTui({ config, gateway, registerCleanup, target, toolsets, version 
         </Box>
       ) : null}
 
-      <QueuePanel
-        columns={columns}
-        items={gatewayState.queueItems}
-        loading={gatewayState.queueLoading}
-      />
-
       <StatusRule
-        busy={gatewayState.busy}
+        busy={busy}
         columns={columns}
         config={config}
-        model={currentModelLabel}
         elapsedMs={elapsedMs}
         inputLength={input.length}
-        notice={notice || gatewayState.notice}
+        notice={notice}
       />
 
       <Box flexDirection="column">
         <ComposerInput
-          active
+          active={!busy}
           columns={columns}
           cursor={inputCursor}
           placeholder={inputPlaceholder}
@@ -1205,15 +1165,9 @@ function MemmyTui({ config, gateway, registerCleanup, target, toolsets, version 
   );
 }
 
-export async function runInkInteractiveAgent(
-  config: Config,
-  sessionId = "cli:direct",
-  target: TerminalTarget | null = null,
-): Promise<null> {
+export async function runInkInteractiveAgent(config: Config, sessionId = "cli:direct"): Promise<null> {
   if (!process.stdin.isTTY) return null;
-  const gateway = new TuiGatewayClient(tuiGatewayOptionsFromConfig(config, sessionId));
-  await gateway.start();
-  const toolsets = readToolsets(config, gateway.snapshot().toolNames);
+  const toolsets = readToolsets(config);
   let cleanup: TuiCleanup = async () => undefined;
   const registerCleanup = (next: TuiCleanup) => {
     cleanup = next;
@@ -1221,15 +1175,7 @@ export async function runInkInteractiveAgent(
 
   process.stdout.write("\x1b[2J\x1b[H\x1b[3J");
   const instance = render(
-    <MemmyTui
-      config={config}
-      gateway={gateway}
-      registerCleanup={registerCleanup}
-      sessionId={sessionId}
-      target={target}
-      toolsets={toolsets}
-      version={VERSION}
-    />,
+    <MemmyTui config={config} registerCleanup={registerCleanup} sessionId={sessionId} toolsets={toolsets} version={VERSION} />,
     { exitOnCtrlC: false, maxFps: 60 },
   );
 

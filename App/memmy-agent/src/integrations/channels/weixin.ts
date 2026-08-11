@@ -175,10 +175,6 @@ export class WeixinChannel extends BaseChannel {
     return new WeixinConfig() as any;
   }
 
-  override get supportsStreaming(): boolean {
-    return false;
-  }
-
   constructor(config: Partial<WeixinConfig> & Record<string, any> = {}, bus?: any) {
     const normalized = config instanceof WeixinConfig ? config : new WeixinConfig(config);
     super("weixin", normalized, bus);

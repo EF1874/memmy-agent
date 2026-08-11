@@ -201,74 +201,6 @@ describe("AppFrame", () => {
     expect(source).toContain('"app-frame-task-row--current"');
   });
 
-  it("renders supported IM task rows as channel icon followed by the plain title", () => {
-    const html = renderToString(
-      <I18nProvider language="zh-CN">
-        <TaskRow
-          task={task("wechat", { title: "微信用户询问助手身份 · 微信" })}
-          isCurrent={false}
-          showPreview={false}
-          onOpen={() => undefined}
-          onContextMenu={() => undefined}
-          onPin={() => undefined}
-          archiveConfirming={false}
-          onRequestArchive={() => undefined}
-          onConfirmArchive={() => undefined}
-          onUnarchive={() => undefined}
-          onDeleteArchived={() => undefined}
-        />
-      </I18nProvider>
-    );
-
-    expect(html).toContain('aria-label="微信 logo"');
-    expect(html).toContain("微信用户询问助手身份");
-    expect(html).not.toContain("微信用户询问助手身份 · 微信");
-    expect(html.indexOf('aria-label="微信 logo"')).toBeLessThan(html.indexOf("微信用户询问助手身份"));
-  });
-
-  it("aligns IM channel icons to the full text line height", () => {
-    const stylesSource = readFileSync(resolve(__dirname, "..", "..", "styles.css"), "utf8");
-    const iconBlock = stylesSource.slice(
-      stylesSource.indexOf(".im-channel-title-icon {"),
-      stylesSource.indexOf(".generic-integration-icon-badge svg")
-    );
-    const conversationIconBlock = stylesSource.slice(
-      stylesSource.indexOf(".agent-conversation-title > .im-channel-title-icon"),
-      stylesSource.indexOf(".agent-conversation-scroll")
-    );
-
-    expect(iconBlock).toContain("--im-channel-title-icon-size: 18px;");
-    expect(iconBlock).toContain("width: var(--im-channel-title-icon-size);");
-    expect(iconBlock).toContain("height: var(--im-channel-title-icon-size);");
-    expect(iconBlock).toContain(":is(.integration-logo-slot, .channel-integration-icon)");
-    expect(iconBlock).toContain("width: 100%;");
-    expect(iconBlock).toContain("height: 100%;");
-    expect(conversationIconBlock).toContain("--im-channel-title-icon-size: var(--codex-leading-base);");
-  });
-
-  it("keeps unsupported channel task titles unchanged", () => {
-    const html = renderToString(
-      <I18nProvider language="zh-CN">
-        <TaskRow
-          task={task("slack", { title: "团队消息 · Slack" })}
-          isCurrent={false}
-          showPreview={false}
-          onOpen={() => undefined}
-          onContextMenu={() => undefined}
-          onPin={() => undefined}
-          archiveConfirming={false}
-          onRequestArchive={() => undefined}
-          onConfirmArchive={() => undefined}
-          onUnarchive={() => undefined}
-          onDeleteArchived={() => undefined}
-        />
-      </I18nProvider>
-    );
-
-    expect(html).toContain("团队消息 · Slack");
-    expect(html).not.toContain("im-channel-title-icon");
-  });
-
   it("labels project tasks whose project record or registry is unavailable", () => {
     const unavailableTask = task("unavailable", {
       projectId: "project-a",
@@ -526,41 +458,6 @@ describe("AppFrame", () => {
     expect(html).toContain('data-icon="user"');
     expect(html).toContain('data-icon="settings-2"');
     expect(source).not.toContain('className={`app-frame-profile-settings shrink-0 inline-flex items-center justify-center transition-colors cursor-pointer');
-  });
-
-  it("settingsNav replaces the main sidebar with settings section links", () => {
-    const html = renderToString(
-      <AppProviders>
-        <AppFrame
-          title="设置"
-          settingsNav={{
-            activeTab: "model",
-            onSelectTab: () => undefined
-          }}
-        >
-          <div>设置内容</div>
-        </AppFrame>
-      </AppProviders>
-    );
-
-    expect(html).toContain('id="settings-tab-account"');
-    expect(html).toContain('id="settings-tab-model"');
-    expect(html).toContain('id="settings-tab-tokens"');
-    expect(html).toContain('id="settings-tab-preferences"');
-    expect(html).toContain('id="settings-tab-about"');
-    expect(html).toContain("账户");
-    expect(html).toContain("模型配置");
-    expect(html).toContain("Token 用量");
-    expect(html).toContain("偏好");
-    expect(html).toContain("关于");
-    expect(html).toContain("memory-page-back-button");
-    expect(html).toContain("账户");
-    expect(html).toContain("模型配置");
-    expect(html).toContain("Token 用量");
-    expect(html).toContain("偏好");
-    expect(html).toContain("关于");
-    expect(html).not.toContain("app-frame-task-list");
-    expect(html).not.toContain("app-frame-sidebar-footer");
   });
 
   it("keeps sidebar account settings icon pinned to the footer right edge", () => {

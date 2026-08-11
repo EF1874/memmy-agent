@@ -1,7 +1,7 @@
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { mkdir, readdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import YAML from "yaml";
@@ -31,7 +31,6 @@ export interface PackagedRuntimeServices {
     baseUrl: string;
     bootstrapSecret: string;
     configPath: string;
-    workspace: string;
   };
   restartMemory(): Promise<void>;
   close(): Promise<void>;
@@ -100,14 +99,6 @@ const AGENT_GATEWAY_STABLE_MS = 30_000;
 const DESKTOP_MANAGED_GATEWAY_ENV = "MEMMY_DESKTOP_MANAGED_GATEWAY";
 const BROWSER_PREPARATION_ATTEMPT_ID_ENV = "MEMMY_BROWSER_PREPARATION_ATTEMPT_ID";
 const MANAGED_RESTART_IPC_TYPE = "memmy-agent:restart";
-const MIGRATIONS_READY_CONFIG_ENV = "MEMMY_MIGRATIONS_READY_CONFIG";
-const MIGRATIONS_READY_WORKSPACE_ENV = "MEMMY_MIGRATIONS_READY_WORKSPACE";
-const MIGRATIONS_READY_SESSION_DAG_ENV = "MEMMY_MIGRATIONS_READY_SESSION_DAG";
-
-function sessionDagMigrationTarget(env: NodeJS.ProcessEnv = process.env): string {
-  const override = env.MEMMY_AGENT_SESSION_DAG_DIR;
-  return resolve(override && override.trim() ? override : join(homedir(), ".memmy", "session-dag"));
-}
 
 interface DesktopManagedRestartNotice {
   type: typeof MANAGED_RESTART_IPC_TYPE;
@@ -123,17 +114,7 @@ export async function startPackagedRuntimeServices(
   options: StartPackagedRuntimeServicesOptions
 ): Promise<PackagedRuntimeServices> {
   const entries = resolveRuntimeEntryPaths(options);
-  const migrationTargets = await resolvePackagedRuntimeMigrationTargets();
-  await runPackagedMigrationCommand({
-    agentEntry: entries.agentEntry,
-    configPath: migrationTargets.configPath,
-    agentWorkspace: migrationTargets.agentWorkspace,
-    logDirectory: options.logDirectory,
-    logLevel: options.logLevel
-  });
   const runtimeConfig = await preparePackagedRuntimeConfig();
-  runtimeConfig.configPath = migrationTargets.configPath;
-  runtimeConfig.agentWorkspace = migrationTargets.agentWorkspace;
   const browserPreparationAttemptId = randomUUID();
   const children: ManagedChild[] = [];
   const gatewaySupervisor = new AgentGatewaySupervisor(
@@ -173,8 +154,7 @@ export async function startPackagedRuntimeServices(
       agentGateway: {
         baseUrl: runtimeConfig.agentGatewayBaseUrl,
         bootstrapSecret: runtimeConfig.agentGatewayBootstrapSecret,
-        configPath: runtimeConfig.configPath,
-        workspace: runtimeConfig.agentWorkspace
+        configPath: runtimeConfig.configPath
       },
       async restartMemory() {
         if (closing) {
@@ -241,6 +221,7 @@ export async function preparePackagedRuntimeConfig(
     config.fileMemory.enabled = false;
     changed = true;
   }
+  changed = repairMemoryActiveProfile(memmyMemory) || changed;
   const defaultWorkspace = join(memmyHome, "workspace");
   const configuredWorkspace = stringValue(defaults.workspace);
   const agentWorkspace = resolvePath(env.MEMMY_AGENT_WORKSPACE ?? configuredWorkspace ?? defaultWorkspace);
@@ -313,120 +294,6 @@ export async function preparePackagedRuntimeConfig(
     agentGatewayHealthPort: gatewayHealthPort,
     agentGatewayBootstrapSecret
   };
-}
-
-export async function resolvePackagedRuntimeMigrationTargets(
-  env: RuntimeEnv = process.env
-): Promise<{ configPath: string; agentWorkspace: string }> {
-  const memmyHome = resolvePath(env.MEMMY_HOME ?? "~/.memmy");
-  const configPath = resolvePath(env.MEMMY_CONFIG ?? join(memmyHome, "config.yaml"));
-  const defaultWorkspace = join(memmyHome, "workspace");
-  let configuredWorkspace: string | undefined;
-  try {
-    const source = await readFile(configPath, "utf8");
-    const parsed = source.trim() ? YAML.parse(source) : {};
-    if (isRecord(parsed)) {
-      const agents = isRecord(parsed.agents) ? parsed.agents : null;
-      const defaults = agents && isRecord(agents.defaults) ? agents.defaults : null;
-      configuredWorkspace = defaults ? stringValue(defaults.workspace) : undefined;
-    }
-  } catch (error) {
-    if (!isMissingFileError(error) && (error as Error).name !== "YAMLParseError") {
-      throw error;
-    }
-  }
-  const agentWorkspace = resolvePath(
-    env.MEMMY_AGENT_WORKSPACE ?? configuredWorkspace ?? defaultWorkspace
-  );
-  await mkdir(agentWorkspace, { recursive: true });
-  return { configPath, agentWorkspace: await realpath(agentWorkspace) };
-}
-
-export async function runPackagedMigrationCommand(options: {
-  agentEntry: string;
-  configPath: string;
-  agentWorkspace: string;
-  logDirectory: string;
-  logLevel: LogLevel;
-  spawnProcess?: typeof spawn;
-  timeoutMs?: number;
-}): Promise<void> {
-  const logWriter = createRotatingWriter({
-    filePath: join(options.logDirectory, "migration.log"),
-    maxSize: DAEMON_LOG_MAX_SIZE,
-    maxFiles: DAEMON_LOG_MAX_FILES
-  });
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    ELECTRON_RUN_AS_NODE: "1",
-    NODE_ENV: process.env.NODE_ENV ?? "production",
-    MEMMY_LOG_LEVEL: options.logLevel
-  };
-  delete env[MIGRATIONS_READY_CONFIG_ENV];
-  delete env[MIGRATIONS_READY_WORKSPACE_ENV];
-  delete env[MIGRATIONS_READY_SESSION_DAG_ENV];
-
-  let child: ChildProcess;
-  try {
-    child = (options.spawnProcess ?? spawn)(
-      process.execPath,
-      [
-        options.agentEntry,
-        "migrate",
-        "--config",
-        options.configPath,
-        "--workspace",
-        options.agentWorkspace
-      ],
-      {
-        env,
-        stdio: ["ignore", "pipe", "pipe"],
-        detached: process.platform !== "win32",
-        windowsHide: true,
-        shell: false
-      }
-    );
-  } catch (error) {
-    logWriter.close();
-    throw new Error(`Migration command failed to start: ${String(error)}`);
-  }
-
-  child.stdout?.setEncoding("utf8");
-  child.stderr?.setEncoding("utf8");
-  child.stdout?.on("data", (chunk) => logWriter.write(String(chunk)));
-  child.stderr?.on("data", (chunk) => logWriter.write(String(chunk)));
-
-  try {
-    await new Promise<void>((resolveCommand, rejectCommand) => {
-      let settled = false;
-      const finish = (error?: Error): void => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeout);
-        if (error) rejectCommand(error);
-        else resolveCommand();
-      };
-      const timeout = setTimeout(() => {
-        terminateProcessTreeSync(child);
-        finish(new Error(`Migration command timed out after ${options.timeoutMs ?? STARTUP_TIMEOUT_MS}ms`));
-      }, options.timeoutMs ?? STARTUP_TIMEOUT_MS);
-      timeout.unref?.();
-      child.once("error", (error) => finish(
-        new Error(`Migration command failed: ${error.message}`)
-      ));
-      child.once("close", (code, signal) => {
-        if (code === 0) {
-          finish();
-          return;
-        }
-        finish(new Error(
-          `Migration command exited with ${signal ? `signal ${signal}` : `code ${code ?? "unknown"}`}`
-        ));
-      });
-    });
-  } finally {
-    logWriter.close();
-  }
 }
 
 export async function resolveAgentGatewayRuntimeConfig(): Promise<{
@@ -877,9 +744,6 @@ export class AgentGatewaySupervisor {
       MEMMY_MEMORY_TOKEN: this.runtimeConfig.memoryToken,
       MEMORY_SERVICE_URL: this.runtimeConfig.memoryBaseUrl,
       MEMORY_SERVICE_TOKEN: this.runtimeConfig.memoryToken,
-      [MIGRATIONS_READY_CONFIG_ENV]: this.runtimeConfig.configPath,
-      [MIGRATIONS_READY_WORKSPACE_ENV]: this.runtimeConfig.agentWorkspace,
-      [MIGRATIONS_READY_SESSION_DAG_ENV]: sessionDagMigrationTarget(),
       [DESKTOP_MANAGED_GATEWAY_ENV]: "1",
       ...(this.browserPreparationAttemptId
         ? { [BROWSER_PREPARATION_ATTEMPT_ID_ENV]: this.browserPreparationAttemptId }
@@ -1301,6 +1165,29 @@ function setMissing(record: ConfigRecord, key: string, value: unknown): boolean 
   }
   record[key] = value;
   return true;
+}
+
+function repairMemoryActiveProfile(memmyMemory: ConfigRecord): boolean {
+  const profiles = isRecord(memmyMemory.profiles) ? memmyMemory.profiles : null;
+  if (!profiles || memoryProfileName(memmyMemory.activeProfile)) {
+    return false;
+  }
+
+  const fallbackProfile = isRecord(profiles.byok)
+    ? "byok"
+    : isRecord(profiles.account)
+      ? "account"
+      : undefined;
+  if (!fallbackProfile) {
+    return false;
+  }
+
+  memmyMemory.activeProfile = fallbackProfile;
+  return true;
+}
+
+function memoryProfileName(value: unknown): "account" | "byok" | undefined {
+  return value === "account" || value === "byok" ? value : undefined;
 }
 
 function isRecord(value: unknown): value is ConfigRecord {

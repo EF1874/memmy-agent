@@ -147,47 +147,4 @@ describe("AgentLoop browser runtime registration", () => {
     expect(browser.close).toHaveBeenCalledOnce();
     expect(loop.closeMcp).toHaveBeenCalledOnce();
   });
-
-  it("uses one canonical browser scope for IM and GUI projected routes", async () => {
-    const loop = new AgentLoop({
-      config: new Config({ tools: { browser: { enabled: true } } }),
-      provider: { generation: {}, getDefaultModel: () => "test-model" },
-      workspace: root(),
-    });
-    const browser = fakeBrowserManager();
-    loop.browserSessionManager = browser;
-    vi.spyOn(loop, "connectMcp").mockResolvedValue();
-    await loop.initializeRuntimeTools();
-
-    loop.setToolContext(
-      "telegram",
-      "chat",
-      null,
-      { webui: true },
-      "telegram:chat",
-    );
-    await loop.tools.get("browser_snapshot")!.execute({});
-
-    loop.setToolContext(
-      "websocket",
-      "ext_dGVsZWdyYW06Y2hhdA",
-      null,
-      { webui: true },
-      "telegram:chat",
-    );
-    await loop.tools.get("browser_snapshot")!.execute({});
-
-    expect(browser.callTool.mock.calls.map((call: any[]) => call[0])).toEqual([
-      {
-        sessionKey: "telegram:chat",
-        channel: "projected-session",
-        chatId: "telegram:chat",
-      },
-      {
-        sessionKey: "telegram:chat",
-        channel: "projected-session",
-        chatId: "telegram:chat",
-      },
-    ]);
-  });
 });

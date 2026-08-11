@@ -1,10 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import {
-  bindUiToolCallId,
-  createUiToolCallId,
-  getOrCreateUiToolCallId,
-} from "./progress-events.js";
 
 export type FileEditEvent = { path: string; action?: string; [key: string]: any };
 
@@ -55,7 +50,6 @@ export class FileSnapshot {
 
 export class FileEditTracker {
   callId: string;
-  uiToolCallId: string;
   tool: string;
   path: string;
   displayPath: string;
@@ -63,21 +57,18 @@ export class FileEditTracker {
 
   constructor({
     callId,
-    uiToolCallId,
     tool,
     path: filePath,
     displayPath,
     before,
   }: {
     callId?: string;
-    uiToolCallId?: string;
     tool: string;
     path: string;
     displayPath?: string;
     before: FileSnapshot;
   }) {
     this.callId = callId ?? "";
-    this.uiToolCallId = uiToolCallId ?? createUiToolCallId();
     this.tool = tool;
     this.path = filePath;
     this.displayPath = displayPath ?? filePath;
@@ -211,14 +202,12 @@ function resolveApplyPatchPaths(tool: any, workspace: string | null | undefined,
 
 export function prepareFileEditTrackers({
   callId = "",
-  uiToolCallId,
   toolName,
   tool,
   workspace,
   params,
 }: {
   callId?: string;
-  uiToolCallId?: string;
   toolName?: string;
   tool: any;
   workspace?: string | null;
@@ -226,7 +215,6 @@ export function prepareFileEditTrackers({
 }): FileEditTracker[] {
   const name = toolName ?? "";
   if (!isFileEditTool(name)) return [];
-  const resolvedUiToolCallId = uiToolCallId ?? createUiToolCallId();
   const seen = new Set<string>();
   return resolveFileEditPaths(name, tool, workspace, params)
     .filter((filePath) => {
@@ -237,7 +225,6 @@ export function prepareFileEditTrackers({
     })
     .map((filePath) => new FileEditTracker({
       callId,
-      uiToolCallId: resolvedUiToolCallId,
       tool: name,
       path: path.resolve(filePath),
       displayPath: displayFileEditPath(filePath, workspace),
@@ -256,7 +243,6 @@ function eventPayload(
   const payload: Record<string, any> = {
     version: 1,
     call_id: tracker.callId,
-    ui_tool_call_id: tracker.uiToolCallId,
     tool: tracker.tool,
     path: tracker.displayPath,
     absolute_path: path.resolve(tracker.path).split(path.sep).join("/"),
@@ -291,23 +277,7 @@ export function buildFileEditStartEvent(tracker: FileEditTracker, params?: Recor
   return eventPayload(tracker, { phase: "start", status: "editing", added, deleted, approximate: true });
 }
 
-export function buildFileEditEndEvent(
-  tracker: FileEditTracker,
-  params?: Record<string, any> | null,
-  outcome?: { changed: boolean } | null,
-): Record<string, any> {
-  if (outcome?.changed === false) {
-    return {
-      ...eventPayload(tracker, {
-        phase: "end",
-        status: "done",
-        added: 0,
-        deleted: 0,
-        approximate: false,
-      }),
-      unchanged: true,
-    };
-  }
+export function buildFileEditEndEvent(tracker: FileEditTracker, params?: Record<string, any> | null): Record<string, any> {
   const after = readFileSnapshot(tracker.path);
   let counted = false;
   let added = 0;
@@ -344,13 +314,11 @@ export function buildFileEditLiveEvent(tracker: FileEditTracker, { added, delete
 
 export function buildFileEditPendingEvent({
   callId,
-  uiToolCallId,
   toolName,
   added = 0,
   deleted = 0,
 }: {
   callId?: string;
-  uiToolCallId: string;
   toolName?: string;
   added?: number;
   deleted?: number;
@@ -358,7 +326,6 @@ export function buildFileEditPendingEvent({
   return {
     version: 1,
     call_id: String(callId ?? ""),
-    ui_tool_call_id: uiToolCallId,
     tool: toolName ?? "",
     path: "",
     phase: "start",
@@ -372,19 +339,16 @@ export function buildFileEditPendingEvent({
 
 export function buildFileEditPendingErrorEvent({
   callId,
-  uiToolCallId,
   toolName,
   error = "Task cancelled.",
 }: {
   callId?: string;
-  uiToolCallId: string;
   toolName?: string;
   error?: string | null;
 }): Record<string, any> {
   const payload: Record<string, any> = {
     version: 1,
     call_id: String(callId ?? ""),
-    ui_tool_call_id: uiToolCallId,
     tool: toolName ?? "",
     path: "",
     phase: "error",
@@ -404,12 +368,10 @@ function withCancellationTerminal(event: Record<string, any>): Record<string, an
 }
 
 function terminalEventKey(event: Record<string, any>): string {
-  const uiToolCallId = String(event.ui_tool_call_id ?? "");
   const callId = String(event.call_id ?? "");
   const pathKey = String(event.absolute_path ?? event.path ?? "");
-  const identity = uiToolCallId || callId;
-  if (event.pending === true) return `pending:${identity}:${event.tool ?? ""}`;
-  return `file:${identity}:${pathKey}`;
+  if (event.pending === true) return `pending:${callId}:${event.tool ?? ""}`;
+  return `file:${callId}:${pathKey}`;
 }
 
 function streamKey(payload: Record<string, any>): string {
@@ -601,9 +563,7 @@ export class StreamingJsonStringField {
 
 export class StreamingFileEditState {
   key: string;
-  index: number | null = null;
   callId = "";
-  uiToolCallId = createUiToolCallId();
   name = "";
   arguments = "";
   path: string | null = null;
@@ -626,7 +586,6 @@ export class StreamingFileEditState {
   }
 
   applyDelta(payload: Record<string, any>): void {
-    if (Number.isInteger(payload.index) && payload.index >= 0) this.index = payload.index;
     if (typeof payload.call_id === "string" && payload.call_id) this.callId = payload.call_id;
     if (typeof payload.callId === "string" && payload.callId) this.callId = payload.callId;
     if (typeof payload.name === "string" && payload.name) this.name = payload.name;
@@ -683,8 +642,13 @@ export class StreamingFileEditState {
     this.lastPendingAt = now;
   }
 
+  canonicalCallId(): string {
+    return this.callId || this.tracker?.callId || this.key;
+  }
+
   matchesFinalToolCall(toolCall: any): boolean {
-    if (toolCall?.id && this.callId && toolCall.id === this.callId) return true;
+    const canonical = this.canonicalCallId();
+    if (toolCall?.id && canonical && toolCall.id === canonical) return true;
     if (toolCall?.name !== this.name) return false;
     if (this.name === "apply_patch") return Array.isArray(toolCall?.arguments?.edits) && this.arguments.includes('"edits"');
     const finalPath = toolCall?.arguments?.path;
@@ -736,21 +700,14 @@ export class StreamingFileEditTracker {
     if (state.path == null) {
       if (state.shouldEmitPending(added, deleted, now)) {
         state.markPendingEmitted(added, deleted, now);
-        await this.emit([buildFileEditPendingEvent({
-          callId: state.callId,
-          uiToolCallId: state.uiToolCallId,
-          toolName: state.name,
-          added,
-          deleted,
-        })]);
+        await this.emit([buildFileEditPendingEvent({ callId: state.callId || state.key, toolName: state.name, added, deleted })]);
       }
       return;
     }
     if (!state.tracker) {
       const tool = typeof this.tools?.get === "function" ? this.tools.get(state.name) : undefined;
       state.tracker = prepareFileEditTracker({
-        callId: state.callId,
-        uiToolCallId: state.uiToolCallId,
+        callId: state.callId || state.key,
         toolName: state.name,
         tool,
         workspace: this.workspace,
@@ -781,8 +738,7 @@ export class StreamingFileEditTracker {
         const filePath = resolveRawFileEditPath(tool, this.workspace, match.rawPath);
         if (!filePath) continue;
         fileState = new StreamingPatchFileState(new FileEditTracker({
-          callId: state.callId,
-          uiToolCallId: state.uiToolCallId,
+          callId: state.callId || state.key,
           tool: "apply_patch",
           path: filePath,
           displayPath: displayFileEditPath(filePath, this.workspace),
@@ -814,8 +770,7 @@ export class StreamingFileEditTracker {
         if (state.path == null) state.path = extractJsonStringPrefix(state.arguments, "path", true);
         if (state.path != null) {
           state.tracker = prepareFileEditTracker({
-            callId: state.callId,
-            uiToolCallId: state.uiToolCallId,
+            callId: state.callId || state.key,
             toolName: state.name,
             tool: undefined,
             workspace: this.workspace,
@@ -832,53 +787,22 @@ export class StreamingFileEditTracker {
     if (events.length) await this.emit(events);
   }
 
-  bindFinalToolCalls(finalToolCalls: any[]): void {
-    const states = [...this.states.values()];
-    const boundStates = new Set<StreamingFileEditState>();
-    const boundCalls = new Set<any>();
-
-    const bind = (state: StreamingFileEditState, toolCall: any): void => {
-      if (boundStates.has(state) || boundCalls.has(toolCall)) return;
-      bindUiToolCallId(toolCall, state.uiToolCallId);
-      boundStates.add(state);
-      boundCalls.add(toolCall);
-    };
-
-    for (const state of states) {
-      if (state.index == null || state.index >= finalToolCalls.length) continue;
-      bind(state, finalToolCalls[state.index]);
-    }
-
-    const stateIds = new Map<string, StreamingFileEditState[]>();
-    const callIds = new Map<string, any[]>();
-    for (const state of states) {
-      if (!boundStates.has(state) && state.callId) {
-        const matching = stateIds.get(state.callId) ?? [];
-        matching.push(state);
-        stateIds.set(state.callId, matching);
-      }
-    }
+  applyFinalCallIds(finalToolCalls: any[]): void {
+    const used = new Set<string>();
     for (const toolCall of finalToolCalls) {
-      const callId = String(toolCall?.id ?? "");
-      if (!boundCalls.has(toolCall) && callId) {
-        const matching = callIds.get(callId) ?? [];
-        matching.push(toolCall);
-        callIds.set(callId, matching);
+      const canonical = this.canonicalCallIdFor(toolCall);
+      if (canonical && !used.has(canonical)) {
+        toolCall.id = canonical;
+        used.add(canonical);
       }
     }
-    for (const [callId, matchingStates] of stateIds) {
-      const matchingCalls = callIds.get(callId) ?? [];
-      if (matchingStates.length === 1 && matchingCalls.length === 1) {
-        bind(matchingStates[0], matchingCalls[0]);
-      }
-    }
+  }
 
-    const remainingStates = states.filter((state) => !boundStates.has(state));
-    const remainingCalls = finalToolCalls.filter((toolCall) => !boundCalls.has(toolCall));
-    for (let index = 0; index < Math.min(remainingStates.length, remainingCalls.length); index += 1) {
-      bind(remainingStates[index], remainingCalls[index]);
+  canonicalCallIdFor(toolCall: any): string | null {
+    for (const state of this.states.values()) {
+      if (state.matchesFinalToolCall(toolCall)) return state.canonicalCallId();
     }
-    for (const toolCall of finalToolCalls) getOrCreateUiToolCallId(toolCall);
+    return null;
   }
 
   async errorUnmatched(finalToolCalls: any[], error: string): Promise<void> {
@@ -918,8 +842,7 @@ export class StreamingFileEditTracker {
       }
       if (state.pendingEmitted) {
         this.pushTerminal(events, buildFileEditPendingErrorEvent({
-          callId: state.callId,
-          uiToolCallId: state.uiToolCallId,
+          callId: state.callId || state.key,
           toolName: state.name,
           error,
         }));

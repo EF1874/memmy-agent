@@ -1,7 +1,6 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import * as lockfile from "proper-lockfile";
 import { getWebuiDir } from "../../config/paths.js";
 
 const MAX_PROJECTS_FILE_BYTES = 8 * 1024 * 1024;
@@ -9,7 +8,6 @@ const MAX_PROJECTS = 100;
 const MAX_PROJECT_NAME_LENGTH = 160;
 const MAX_PROJECT_PATH_LENGTH = 4_096;
 const PROJECT_STATES = new Set(["active", "deleting"]);
-const PROJECT_LOCK_SLEEP = new Int32Array(new SharedArrayBuffer(4));
 
 export type WebuiProject = {
   id: string;
@@ -177,11 +175,9 @@ export class ProjectStore {
   private state: "ready" | "corrupt" = "ready";
   private projects: StoredWebuiProject[] = [];
   private mutating = false;
-  private readonly lockTarget: string;
 
   constructor(options: ProjectStoreOptions = {}) {
     this.filePath = path.resolve(options.filePath ?? path.join(getWebuiDir(), "projects.json"));
-    this.lockTarget = `${this.filePath}.target`;
     this.load();
   }
 
@@ -221,38 +217,15 @@ export class ProjectStore {
   }
 
   private runMutation<T>(operation: () => T): T {
+    this.assertReady();
     if (this.mutating) {
       throw new WebuiProjectError("project_mutation_conflict", 409);
     }
-    fs.mkdirSync(path.dirname(this.lockTarget), { recursive: true });
-    if (!fs.existsSync(this.lockTarget)) fs.closeSync(fs.openSync(this.lockTarget, "a"));
-    let release: (() => void) | null = null;
-    const deadline = Date.now() + 10_000;
-    while (!release) {
-      try {
-        release = lockfile.lockSync(this.lockTarget, {
-          realpath: false,
-          stale: 10_000,
-          update: 2_000,
-        });
-      } catch (error) {
-        if (
-          (error as NodeJS.ErrnoException)?.code !== "ELOCKED"
-          || Date.now() >= deadline
-        ) {
-          throw error;
-        }
-        Atomics.wait(PROJECT_LOCK_SLEEP, 0, 0, 20);
-      }
-    }
     this.mutating = true;
     try {
-      this.load();
-      this.assertReady();
       return operation();
     } finally {
       this.mutating = false;
-      release();
     }
   }
 
@@ -281,7 +254,6 @@ export class ProjectStore {
   }
 
   snapshot(): WebuiProjectRegistrySnapshot {
-    if (!this.mutating) this.load();
     if (this.state === "corrupt") return { state: "corrupt", projects: [] };
     return {
       state: "ready",
@@ -298,14 +270,12 @@ export class ProjectStore {
   }
 
   getActive(id: string): WebuiProject | null {
-    if (!this.mutating) this.load();
     this.assertReady();
     const project = this.projects.find((item) => item.id === id && item.state === "active");
     return project ? publicProject(project) : null;
   }
 
   isDeleting(id: string): boolean {
-    if (!this.mutating) this.load();
     this.assertReady();
     return this.projects.some((project) => project.id === id && project.state === "deleting");
   }
@@ -343,44 +313,6 @@ export class ProjectStore {
       this.write(next);
       this.projects = next;
       return publicProject(project);
-    });
-  }
-
-  resolveOrRegisterExisting<T>(
-    rawPath: string,
-    operation: (project: WebuiProject) => T,
-  ): T {
-    return this.runMutation(() => {
-      const rootPath = canonicalDirectory(rawPath, { rejectRoot: true });
-      const existing = this.projects.find((project) => project.root_path === rootPath);
-      if (existing?.state === "deleting") {
-        throw new WebuiProjectError("project_deleting", 409);
-      }
-      if (existing) return operation(publicProject(existing));
-      if (this.projects.length >= MAX_PROJECTS) {
-        throw new WebuiProjectError("project_limit_reached", 409);
-      }
-      const projectName = normalizeName(path.basename(rootPath));
-      if (!projectName) throw new WebuiProjectError("project_name_invalid", 400);
-      const project: StoredWebuiProject = {
-        id: crypto.randomUUID(),
-        name: projectName,
-        root_path: rootPath,
-        pinned: false,
-        state: "active",
-        created_at: new Date().toISOString(),
-      };
-      const before = [...this.projects];
-      const next = [...before, project];
-      this.write(next);
-      this.projects = next;
-      try {
-        return operation(publicProject(project));
-      } catch (error) {
-        this.write(before);
-        this.projects = before;
-        throw error;
-      }
     });
   }
 
