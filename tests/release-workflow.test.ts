@@ -322,7 +322,10 @@ describe("GitHub Draft Release v2 workflow", () => {
   });
 
   it("uses the release environment, minimal permissions, and per-version concurrency", () => {
-    expect(draftWorkflow.permissions).toEqual({ contents: "write" });
+    expect(draftWorkflow.permissions).toEqual({
+      contents: "write",
+      "pull-requests": "read",
+    });
     expect(draftJob.environment).toBe("release");
     expect(draftWorkflow.concurrency["cancel-in-progress"]).toBe(false);
     expect(draftWorkflow.concurrency.group).toContain("inputs.version");

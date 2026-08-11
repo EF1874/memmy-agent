@@ -28,6 +28,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: read
 
 concurrency:
   group: draft-release-v2-${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.event.pull_request.head.ref }}
