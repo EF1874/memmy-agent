@@ -12,6 +12,7 @@ import type {
   MemoryProcessingRecord,
   MemoryProcessingState,
   MemoryRow,
+  MemoryStatsRow,
   MemoryStatus,
   RecallHit
 } from "../types.js";
@@ -548,6 +549,48 @@ export class MemoryRepository {
       )
       .all(...built.params, limit, offset) as MemorySqlRow[];
     return this.hydrateMany(rows.map(memoryFromSql));
+  }
+
+  listStats(): MemoryStatsRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT conversation_id,
+                session_id,
+                agent_id,
+                app_id,
+                status,
+                memory_layer,
+                created_at,
+                updated_at,
+                json_extract(info_json, '$.source') AS info_source,
+                json_extract(properties_json, '$.internal_info.source') AS internal_source
+         FROM memories
+         WHERE deleted_at IS NULL`
+      )
+      .all() as Array<{
+        conversation_id: string | null;
+        session_id: string | null;
+        agent_id: string | null;
+        app_id: string | null;
+        status: MemoryStatus;
+        memory_layer: MemoryLayer;
+        created_at: string;
+        updated_at: string;
+        info_source: unknown;
+        internal_source: unknown;
+      }>;
+    return rows.map((row) => ({
+      conversationId: row.conversation_id ?? undefined,
+      sessionId: row.session_id ?? undefined,
+      agentId: row.agent_id ?? undefined,
+      appId: row.app_id ?? undefined,
+      status: row.status,
+      memoryLayer: row.memory_layer,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      infoSource: row.info_source,
+      internalSource: row.internal_source
+    }));
   }
 
   listPendingAgentSourceImportSummaries(limit = 10000, targetMemoryIds?: readonly string[]): MemoryRow[] {
@@ -2112,6 +2155,21 @@ export class RuntimeRepository {
       )
       .all(...params, limit) as SqlJobRow[];
     return rows.map(jobFromSql);
+  }
+
+  countJobsByStatus(): Record<JobStatus, number> {
+    const rows = this.db
+      .prepare(`SELECT status, COUNT(*) AS count FROM evolution_jobs GROUP BY status`)
+      .all() as Array<{ status: JobStatus; count: number }>;
+    const counts: Record<JobStatus, number> = {
+      queued: 0,
+      leased: 0,
+      succeeded: 0,
+      failed: 0,
+      dead_letter: 0
+    };
+    for (const row of rows) counts[row.status] = Number(row.count);
+    return counts;
   }
 
   nextWorkerRunAt(): number | undefined {

@@ -1,4 +1,4 @@
-import type { MemoryListItem, MemoryProcessingRecord, MemoryRow } from "../../types.js";
+import type { MemoryListItem, MemoryProcessingRecord, MemoryRow, MemoryStatsRow } from "../../types.js";
 import { isRecord } from "../../utils/json.js";
 import {
   IMPORT_FAILED_TAG,
@@ -33,10 +33,10 @@ function panelSpanGoalForMemory(memory: MemoryRow): string | undefined {
   return typeof goal === "string" && goal.trim() ? goal.trim() : undefined;
 }
 
-export function panelSourceDistribution(memories: MemoryRow[]): Array<{ source: string; count: number; percentage: number }> {
+export function panelSourceDistribution(memories: MemoryStatsRow[]): Array<{ source: string; count: number; percentage: number }> {
   const counts = new Map<string, number>();
   for (const memory of memories) {
-    const source = panelSourceForMemory(memory);
+    const source = panelSourceForStatsRow(memory);
     counts.set(source, (counts.get(source) ?? 0) + 1);
   }
 
@@ -80,7 +80,22 @@ export function panelSourceForMemory(memory: MemoryRow): string {
   const internalInfo: Record<string, unknown> = isRecord(memory.properties.internal_info)
     ? memory.properties.internal_info
     : {};
-  const explicitSources = [memory.info.source, internalInfo.source];
+  return panelSourceForStatsRow({
+    conversationId: memory.conversationId,
+    sessionId: memory.sessionId,
+    agentId: memory.agentId,
+    appId: memory.appId,
+    status: memory.status,
+    memoryLayer: memory.memoryLayer,
+    createdAt: memory.createdAt,
+    updatedAt: memory.updatedAt,
+    infoSource: memory.info.source,
+    internalSource: internalInfo.source
+  });
+}
+
+function panelSourceForStatsRow(memory: MemoryStatsRow): string {
+  const explicitSources = [memory.infoSource, memory.internalSource];
   const explicitSource = firstString(...explicitSources.map(panelNormalizeExplicitSource));
   if (explicitSource) return explicitSource;
 

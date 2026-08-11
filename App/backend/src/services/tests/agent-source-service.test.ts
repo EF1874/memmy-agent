@@ -489,7 +489,7 @@ describe("agent source service", () => {
     expect(events).toEqual(["scan:cursor", "scan:custom", "ingest:cursor", "ingest:custom"]);
   });
 
-  it("enqueues every scanned source into one global priority drain", async () => {
+  it("enqueues and drains scanned memories as a targeted cohort", async () => {
     const baseMemoryClient = createMockMemoryClient();
     const enqueueCalls: string[][] = [];
     const workerCalls: Array<{
@@ -563,11 +563,11 @@ describe("agent source service", () => {
     expect(enqueueCalls).toEqual([["memory-cursor", "memory-custom"]]);
     expect(workerCalls).toEqual([
       expect.objectContaining({
-        limit: 4,
+        limit: 20,
+        targetMemoryIds: ["memory-cursor", "memory-custom"],
         priorityCohortOnly: true
       })
     ]);
-    expect(workerCalls[0]?.targetMemoryIds).toBeUndefined();
   });
 
   it("reconciles summary progress when another worker finishes the scan memories", async () => {
@@ -623,8 +623,8 @@ describe("agent source service", () => {
       }
     })).resolves.toEqual([]);
 
-    expect(workerTargets).toEqual([[]]);
-    expect(workerLimits).toEqual([4]);
+    expect(workerTargets).toEqual([["memory-a", "memory-b"]]);
+    expect(workerLimits).toEqual([20]);
     expect(workerPriorityCohorts).toEqual([true]);
     expect(progress).toEqual([
       { current: 0, total: 2 },
@@ -658,9 +658,55 @@ describe("agent source service", () => {
       }
     })).resolves.toEqual([]);
 
-    expect(enqueued).toEqual([[]]);
+    expect(enqueued).toEqual([]);
     expect(workerCalls).toBe(0);
     expect(progress).toEqual([{ current: 0, total: 0 }]);
+  });
+
+  it("bounds full-scan processing and status requests to 100-memory cohorts", async () => {
+    const baseMemoryClient = createMockMemoryClient();
+    const enqueueCalls: string[][] = [];
+    const statusCalls: string[][] = [];
+    const workerTargets: string[][] = [];
+    const memoryIds = Array.from({ length: 205 }, (_item, index) => `memory-${index}`);
+    const service = createService({
+      memoryClient: {
+        ...baseMemoryClient,
+        async enqueueImportSummaries(ids) {
+          enqueueCalls.push([...(ids ?? [])]);
+          return { enqueued: ids?.length ?? 0, memoryIds: ids ?? [], serverTime: "2026-05-28T10:00:00.000Z" };
+        },
+        async runWorker(input) {
+          workerTargets.push([...(input.targetMemoryIds ?? [])]);
+          return baseMemoryClient.runWorker(input);
+        },
+        async getMemoryProcessingStatus(ids) {
+          statusCalls.push([...ids]);
+          return {
+            items: ids.map((memoryId) => ({
+              memoryId,
+              state: "ready" as const,
+              stage: null,
+              activeJobId: null,
+              attemptCount: 1,
+              manualRetryCount: 0,
+              retryAction: "retry" as const,
+              errorCode: null,
+              errorMessage: null,
+              failedAt: null,
+              updatedAt: "2026-05-28T10:00:00.000Z"
+            })),
+            serverTime: "2026-05-28T10:00:00.000Z"
+          };
+        }
+      }
+    });
+
+    await expect(service.processImportSummaries(memoryIds)).resolves.toEqual([]);
+
+    expect(enqueueCalls.map((ids) => ids.length)).toEqual([100, 100, 5]);
+    expect(statusCalls.map((ids) => ids.length)).toEqual([100, 100, 5]);
+    expect(workerTargets).toEqual(statusCalls);
   });
 
   it("treats a terminal processing failure as completed progress and reports its reason", async () => {
