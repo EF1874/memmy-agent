@@ -66,6 +66,17 @@ function mockCallOrder(fn: { mock: { invocationCallOrder: readonly number[] } },
 }
 
 describe("HomePage", () => {
+  it("shows project environment controls on the new-task screen before a Session exists", () => {
+    const source = readFileSync(homePageSourcePath, "utf8");
+
+    expect(source).toContain('selectedDraftProject\n      ? { kind: "project" as const, key: selectedDraftProject.id }');
+    expect(source).toContain('topBar={hasActiveConversation || environmentScope ? (');
+    expect(source.match(/\{environmentPanel\}/g)).toHaveLength(2);
+    expect(source).toContain('scope={environmentScope.kind}');
+    expect(source).toContain('<AgentWorkspaceContext');
+    expect(source).toContain('projectId={selectedDraftProject?.id ?? null}');
+  });
+
   it("renders the first-phase agent input controls", () => {
     const html = renderToString(
       <AppProviders>
@@ -217,11 +228,11 @@ describe("HomePage", () => {
     expect(source).toContain("const activeConversationTitle = state.agent.currentSessionKey");
     expect(source).toContain("const activeImTitleDisplay = imChannelTitleDisplay(activeConversationTitle);");
     expect(source).toContain("formatConversationTitleForDisplay(activeImTitleDisplay?.title ?? activeConversationTitle)");
-    expect(source).toContain("topBar={hasActiveConversation ? (");
-    expect(source).toContain('<h1 className="agent-conversation-title" title={activeConversationTitle}>');
-    expect(source).toContain('<span className="agent-conversation-title__text">{activeConversationTitleDisplay}</span>');
+    expect(source).toContain("topBar={hasActiveConversation || environmentScope ? (");
+    expect(source).toContain('<h1 className="agent-conversation-title" title={hasActiveConversation ? activeConversationTitle : selectedDraftProject?.name}>');
+    expect(source).toContain("{hasActiveConversation ? activeConversationTitleDisplay : selectedDraftProject?.name}");
     expect(source).toContain('<ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} />');
-    expect(source).toContain("{activeConversationTitleDisplay}");
+    expect(source).toContain("activeConversationTitleDisplay");
     expect(source).toContain("topBarBorder={hasActiveConversation}");
     expect(source).not.toContain("agent-conversation-titlebar");
     expect(source).toContain("app-frame-page-content agent-conversation-scroll flex-1 overflow-y-auto");

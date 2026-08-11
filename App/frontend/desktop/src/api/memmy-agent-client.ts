@@ -563,6 +563,9 @@ export interface MemmyAgentClient {
   readWorkspaceEnvironment(sessionKey: string): Promise<WorkspaceEnvironmentSnapshot>;
   listWorkspaceEnvironmentFiles(sessionKey: string): Promise<WorkspaceEnvironmentFiles>;
   readWorkspaceEnvironmentDiff(sessionKey: string, path: string): Promise<WorkspaceEnvironmentDiff>;
+  readProjectWorkspaceEnvironment(projectId: string): Promise<WorkspaceEnvironmentSnapshot>;
+  listProjectWorkspaceEnvironmentFiles(projectId: string): Promise<WorkspaceEnvironmentFiles>;
+  readProjectWorkspaceEnvironmentDiff(projectId: string, path: string): Promise<WorkspaceEnvironmentDiff>;
   listSlashCommands(): Promise<MemmyAgentSlashCommand[]>;
   readSidebarState(): Promise<MemmyAgentSidebarState>;
   writeSidebarState(
@@ -902,6 +905,28 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
     const query = new URLSearchParams({ path });
     return this.request(
       `/api/sessions/${encodeURIComponent(sessionKey)}/environment/diff?${query.toString()}`,
+      WorkspaceEnvironmentDiffSchema
+    );
+  }
+
+  async readProjectWorkspaceEnvironment(projectId: string): Promise<WorkspaceEnvironmentSnapshot> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/environment`,
+      WorkspaceEnvironmentSnapshotSchema
+    );
+  }
+
+  async listProjectWorkspaceEnvironmentFiles(projectId: string): Promise<WorkspaceEnvironmentFiles> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/environment/files`,
+      WorkspaceEnvironmentFilesSchema
+    );
+  }
+
+  async readProjectWorkspaceEnvironmentDiff(projectId: string, path: string): Promise<WorkspaceEnvironmentDiff> {
+    const query = new URLSearchParams({ path });
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/environment/diff?${query.toString()}`,
       WorkspaceEnvironmentDiffSchema
     );
   }

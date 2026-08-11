@@ -125,7 +125,19 @@ describe("memmy-agent client", () => {
     await expect(client.readWorkspaceEnvironmentDiff("websocket:chat-1", "src/panel.tsx")).resolves.toMatchObject({
       diff: "+panel"
     });
+    await expect(client.readProjectWorkspaceEnvironment("project-1")).resolves.toMatchObject({
+      repository: { branch: "zy_git_v1.0.7" }
+    });
+    await expect(client.listProjectWorkspaceEnvironmentFiles("project-1")).resolves.toMatchObject({
+      files: [{ path: "src/panel.tsx" }]
+    });
+    await expect(client.readProjectWorkspaceEnvironmentDiff("project-1", "src/panel.tsx")).resolves.toMatchObject({
+      diff: "+panel"
+    });
     expect(calls).toContain("/api/sessions/websocket%3Achat-1/environment/diff?path=src%2Fpanel.tsx");
+    expect(calls).toContain("/api/projects/project-1/environment");
+    expect(calls).toContain("/api/projects/project-1/environment/files");
+    expect(calls).toContain("/api/projects/project-1/environment/diff?path=src%2Fpanel.tsx");
   });
 
   it("prefers env override, then current origin, then local gateway default for base URL", () => {

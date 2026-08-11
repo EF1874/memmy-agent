@@ -20,7 +20,8 @@ import type {
 
 type AgentEnvironmentPanelProps = {
   client: MemmyAgentClient | null;
-  sessionKey: string;
+  scope: "session" | "project";
+  scopeKey: string;
   language: MemmyAgentUiLanguage;
   running: boolean;
   onClose: () => void;
@@ -34,15 +35,21 @@ function countLabel(value: number | null, prefix: "+" | "-"): string {
   return value == null ? "?" : `${prefix}${value.toLocaleString()}`;
 }
 
-async function loadEnvironment(client: MemmyAgentClient, sessionKey: string) {
+async function loadEnvironment(client: MemmyAgentClient, scope: "session" | "project", scopeKey: string) {
+  const readSnapshot = scope === "session"
+    ? () => client.readWorkspaceEnvironment(scopeKey)
+    : () => client.readProjectWorkspaceEnvironment(scopeKey);
+  const readFiles = scope === "session"
+    ? () => client.listWorkspaceEnvironmentFiles(scopeKey)
+    : () => client.listProjectWorkspaceEnvironmentFiles(scopeKey);
   let [snapshot, fileEnvelope] = await Promise.all([
-    client.readWorkspaceEnvironment(sessionKey),
-    client.listWorkspaceEnvironmentFiles(sessionKey),
+    readSnapshot(),
+    readFiles(),
   ]);
   if (snapshot.session_key !== fileEnvelope.session_key || snapshot.revision !== fileEnvelope.revision) {
     [snapshot, fileEnvelope] = await Promise.all([
-      client.readWorkspaceEnvironment(sessionKey),
-      client.listWorkspaceEnvironmentFiles(sessionKey),
+      readSnapshot(),
+      readFiles(),
     ]);
   }
   if (snapshot.session_key !== fileEnvelope.session_key || snapshot.revision !== fileEnvelope.revision) {
@@ -53,7 +60,8 @@ async function loadEnvironment(client: MemmyAgentClient, sessionKey: string) {
 
 export function AgentEnvironmentPanel({
   client,
-  sessionKey,
+  scope,
+  scopeKey,
   language,
   running,
   onClose,
@@ -68,11 +76,11 @@ export function AgentEnvironmentPanel({
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
-    if (!client || !sessionKey) return;
+    if (!client || !scopeKey) return;
     setLoading(true);
     setError(null);
     try {
-      const next = await loadEnvironment(client, sessionKey);
+      const next = await loadEnvironment(client, scope, scopeKey);
       setSnapshot(next.snapshot);
       setFiles(next.files);
       setDiff(null);
@@ -82,14 +90,14 @@ export function AgentEnvironmentPanel({
     } finally {
       setLoading(false);
     }
-  }, [client, sessionKey]);
+  }, [client, scope, scopeKey]);
 
   useEffect(() => {
     let active = true;
-    if (!client || !sessionKey) return;
+    if (!client || !scopeKey) return;
     setLoading(true);
     setError(null);
-    void loadEnvironment(client, sessionKey).then((next) => {
+    void loadEnvironment(client, scope, scopeKey).then((next) => {
       if (!active) return;
       setSnapshot(next.snapshot);
       setFiles(next.files);
@@ -103,7 +111,7 @@ export function AgentEnvironmentPanel({
     return () => {
       active = false;
     };
-  }, [client, sessionKey, running]);
+  }, [client, scope, scopeKey, running]);
 
   useEffect(() => {
     function closeOnEscape(event: globalThis.KeyboardEvent) {
@@ -123,7 +131,9 @@ export function AgentEnvironmentPanel({
     setSelectedPath(file.path);
     setDiff(null);
     try {
-      setDiff(await client.readWorkspaceEnvironmentDiff(sessionKey, file.path));
+      setDiff(scope === "session"
+        ? await client.readWorkspaceEnvironmentDiff(scopeKey, file.path)
+        : await client.readProjectWorkspaceEnvironmentDiff(scopeKey, file.path));
     } catch (cause) {
       setDiff({
         path: file.path,

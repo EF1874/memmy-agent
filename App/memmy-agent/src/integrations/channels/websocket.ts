@@ -1600,6 +1600,45 @@ export class WebSocketChannel extends BaseChannel {
     }
   }
 
+  handleProjectWorkspaceEnvironment(
+    request: HttpRequestLike,
+    rawId: string,
+    view: "snapshot" | "files" | "diff",
+  ): HttpLikeResponse {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    if ((request.method ?? "GET").toUpperCase() !== "GET") return httpError(405, "method not allowed");
+    try {
+      const id = decodeApiKey(rawId);
+      if (!id) throw new WebuiProjectError("project_not_found", 404);
+      const project = this.activeProject(id);
+      const cwd = assertWebuiWorkspaceAvailable(project.rootPath);
+      if (cwd !== project.rootPath) throw new WebuiProjectError("project_directory_unavailable", 422);
+      const context = {
+        key: `project:${id}`,
+        metadata: {
+          [WEBUI_PROJECT_ID_METADATA_KEY]: id,
+          [WEBUI_WORKSPACE_CWD_METADATA_KEY]: cwd,
+        },
+      };
+      const environment = readWorkspaceEnvironment(context);
+      if (view === "snapshot") return httpJsonResponse(environment.snapshot);
+      if (view === "files") {
+        return httpJsonResponse({
+          session_key: environment.snapshot.session_key,
+          revision: environment.snapshot.revision,
+          files: environment.files,
+        });
+      }
+      const [, query] = parseRequestPath(String(request?.path ?? ""));
+      const relativePath = queryFirst(query, "path");
+      if (!relativePath) return httpError(400, "missing path");
+      const diff = readWorkspaceFileDiff(context, relativePath);
+      return diff ? httpJsonResponse(diff) : httpError(404, "changed file not found");
+    } catch (error) {
+      return this.projectErrorResponse(error);
+    }
+  }
+
   settingsErrorResponse(error: any): HttpLikeResponse {
     if (error instanceof WebUISettingsError || typeof error?.status === "number") {
       return httpError(error.status ?? 400, error.message ?? String(error));
@@ -2591,6 +2630,12 @@ export class WebSocketChannel extends BaseChannel {
     if (match) return this.handleSessionDelete(request, match[1]);
     match = got.match(/^\/api\/sessions\/([^/]+)\/title$/);
     if (match) return this.handleSessionTitleUpdate(request, match[1]);
+    match = got.match(/^\/api\/projects\/([^/]+)\/environment$/);
+    if (match) return this.handleProjectWorkspaceEnvironment(request, match[1], "snapshot");
+    match = got.match(/^\/api\/projects\/([^/]+)\/environment\/files$/);
+    if (match) return this.handleProjectWorkspaceEnvironment(request, match[1], "files");
+    match = got.match(/^\/api\/projects\/([^/]+)\/environment\/diff$/);
+    if (match) return this.handleProjectWorkspaceEnvironment(request, match[1], "diff");
     match = got.match(/^\/api\/projects\/([^/]+)\/reveal$/);
     if (match) return this.handleProjectReveal(request, match[1]);
     match = got.match(/^\/api\/projects\/([^/]+)$/);

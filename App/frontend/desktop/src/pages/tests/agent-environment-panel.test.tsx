@@ -86,7 +86,8 @@ describe("AgentEnvironmentPanel", () => {
       root.render(
         <AgentEnvironmentPanel
           client={client}
-          sessionKey="websocket:chat-1"
+          scope="session"
+          scopeKey="websocket:chat-1"
           language="zh-CN"
           running={false}
           onClose={onClose}
@@ -107,5 +108,34 @@ describe("AgentEnvironmentPanel", () => {
 
     act(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })));
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("loads project environment before a Session exists", async () => {
+    const projectSnapshot = { ...snapshot, session_key: "project:project-1", goal: null };
+    const client = {
+      readProjectWorkspaceEnvironment: vi.fn(async () => projectSnapshot),
+      listProjectWorkspaceEnvironmentFiles: vi.fn(async () => ({
+        session_key: "project:project-1",
+        revision: "rev-1",
+        files: [],
+      })),
+    } as unknown as MemmyAgentClient;
+
+    await act(async () => {
+      root.render(
+        <AgentEnvironmentPanel
+          client={client}
+          scope="project"
+          scopeKey="project-1"
+          language="zh-CN"
+          running={false}
+          onClose={vi.fn()}
+        />
+      );
+    });
+
+    expect(client.readProjectWorkspaceEnvironment).toHaveBeenCalledWith("project-1");
+    expect(container.textContent).toContain("zy_git_v1.0.7");
+    expect(container.textContent).not.toContain("Goal 证据");
   });
 });

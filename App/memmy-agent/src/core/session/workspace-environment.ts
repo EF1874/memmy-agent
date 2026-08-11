@@ -59,6 +59,7 @@ export type WorkspaceEnvironmentSnapshot = {
 };
 
 type GitStatusEntry = Omit<WorkspaceEnvironmentFile, "attribution">;
+type WorkspaceEnvironmentContext = Pick<Session, "key" | "metadata">;
 
 type GitState = {
   root: string;
@@ -219,7 +220,7 @@ function fileSignature(root: string, file: GitStatusEntry): string {
   return `${file.status}:${fingerprint ?? "unavailable"}`;
 }
 
-function readBaseline(session: Session, goalId: string): GoalWorkspaceBaseline | null {
+function readBaseline(session: WorkspaceEnvironmentContext, goalId: string): GoalWorkspaceBaseline | null {
   const raw = session.metadata?.[GOAL_WORKSPACE_BASELINE_KEY];
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const baseline = raw as Partial<GoalWorkspaceBaseline>;
@@ -259,7 +260,7 @@ export function captureGoalWorkspaceBaseline(session: Session, goalId: string): 
   } satisfies GoalWorkspaceBaseline;
 }
 
-function attributedFiles(session: Session, state: GitState): WorkspaceEnvironmentFile[] {
+function attributedFiles(session: WorkspaceEnvironmentContext, state: GitState): WorkspaceEnvironmentFile[] {
   const goal = readGoalState(session.metadata);
   if (!goal) return state.files.map((file) => ({ ...file, attribution: "unattributed" }));
   const baseline = readBaseline(session, goal.goalId);
@@ -280,7 +281,7 @@ function revisionFor(value: unknown): string {
   return crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 16);
 }
 
-export function readWorkspaceEnvironment(session: Session): {
+export function readWorkspaceEnvironment(session: WorkspaceEnvironmentContext): {
   snapshot: WorkspaceEnvironmentSnapshot;
   files: WorkspaceEnvironmentFile[];
 } {
@@ -371,7 +372,7 @@ export function readWorkspaceEnvironment(session: Session): {
   };
 }
 
-export function readWorkspaceFileDiff(session: Session, relativePath: string): {
+export function readWorkspaceFileDiff(session: WorkspaceEnvironmentContext, relativePath: string): {
   path: string;
   diff: string;
   truncated: boolean;

@@ -7,6 +7,7 @@ import { ChannelManager } from "../../../src/integrations/channels/manager.js";
 import { WebSocketChannel, normalizeConfigPath, stripTrailingSlash } from "../../../src/integrations/channels/websocket.js";
 import { Session, SessionManager } from "../../../src/core/session/manager.js";
 import { appendTranscriptObject, webuiTranscriptPath } from "../../../src/entrypoints/frontend-bridge/transcript.js";
+import { ProjectStore } from "../../../src/entrypoints/frontend-bridge/projects.js";
 import { loadConfig } from "../../../src/config/loader.js";
 
 const routeMocks = vi.hoisted(() => ({
@@ -112,6 +113,7 @@ describe("WebSocket HTTP route helpers", () => {
     cancelActiveTasks = undefined,
     closeBrowserChat = undefined,
     config = {},
+    projectStore = null,
   }: {
     sessionManager?: SessionManager | null;
     staticDistPath?: string | null;
@@ -122,6 +124,7 @@ describe("WebSocket HTTP route helpers", () => {
     cancelActiveTasks?: (sessionKey: string) => Promise<number>;
     closeBrowserChat?: (channel: string, chatId: string) => Promise<void>;
     config?: Record<string, any>;
+    projectStore?: ProjectStore | null;
   } = {}): WebSocketChannel {
     return new WebSocketChannel(
       {
@@ -143,6 +146,7 @@ describe("WebSocket HTTP route helpers", () => {
         fileMemoryEnabled,
         cancelActiveTasks,
         closeBrowserChat,
+        projectStore,
       },
     );
   }
@@ -176,6 +180,24 @@ describe("WebSocket HTTP route helpers", () => {
     const configPath = path.join(root, "config.yaml");
     fs.writeFileSync(configPath, `model: ${model}\n`, "utf8");
     process.env.MEMMY_CONFIG = configPath;
+  }
+
+  function mockDirtyGitWorkspace(root: string): void {
+    childProcessMocks.spawnSync.mockImplementation((_command?: string, args: string[] = []) => {
+      if (args[0] === "rev-parse") return { status: 0, stdout: `${root}\n`, stderr: "" };
+      if (args[0] === "status") {
+        return {
+          status: 0,
+          stdout: "# branch.oid 84d10f8f00\u0000# branch.head zy_git_v1.0.7\u00001 .M N... 100644 100644 100644 abc abc tracked.ts\u0000",
+          stderr: "",
+        };
+      }
+      if (args[0] === "diff" && args.includes("--numstat")) {
+        return { status: 0, stdout: "2\t1\ttracked.ts\0", stderr: "" };
+      }
+      if (args[0] === "diff") return { status: 0, stdout: "+changed\n", stderr: "" };
+      return { status: 1, stdout: "", stderr: "unexpected git command" };
+    });
   }
 
   const localConnection = { remoteAddress: "127.0.0.1" };
@@ -272,21 +294,7 @@ describe("WebSocket HTTP route helpers", () => {
     const manager = seedSession(path.join(root, "sessions"), "websocket:environment", root);
     const channel = makeChannel({ sessionManager: manager, workspacePath: root });
     const headers = withApiToken(channel);
-    childProcessMocks.spawnSync.mockImplementation((_command?: string, args: string[] = []) => {
-      if (args[0] === "rev-parse") return { status: 0, stdout: `${root}\n`, stderr: "" };
-      if (args[0] === "status") {
-        return {
-          status: 0,
-          stdout: "# branch.oid 84d10f8f00\u0000# branch.head zy_git_v1.0.7\u00001 .M N... 100644 100644 100644 abc abc tracked.ts\u0000",
-          stderr: "",
-        };
-      }
-      if (args[0] === "diff" && args.includes("--numstat")) {
-        return { status: 0, stdout: "2\t1\ttracked.ts\0", stderr: "" };
-      }
-      if (args[0] === "diff") return { status: 0, stdout: "+changed\n", stderr: "" };
-      return { status: 1, stdout: "", stderr: "unexpected git command" };
-    });
+    mockDirtyGitWorkspace(root);
 
     const encoded = encodeURIComponent("websocket:environment");
     const snapshotResponse = await channel.dispatchHttp(localConnection, {
@@ -311,6 +319,32 @@ describe("WebSocket HTTP route helpers", () => {
       headers,
     });
     expect(responseJson(diffResponse!)).toMatchObject({ path: "tracked.ts", diff: "+changed\n" });
+  });
+
+  it("serves the selected project environment before a Session exists", async () => {
+    const root = tmpRoot();
+    const workspace = path.join(root, "workspace");
+    fs.mkdirSync(workspace);
+    fs.writeFileSync(path.join(workspace, "tracked.ts"), "changed\n", "utf8");
+    const projectStore = new ProjectStore({ filePath: path.join(root, "projects.json") });
+    const project = projectStore.add(workspace, "existing");
+    const channel = makeChannel({ projectStore, workspacePath: workspace });
+    const headers = withApiToken(channel);
+    mockDirtyGitWorkspace(workspace);
+
+    const response = await channel.dispatchHttp(localConnection, {
+      path: `/api/projects/${encodeURIComponent(project.id)}/environment`,
+      headers,
+    });
+
+    expect(response?.status).toBe(200);
+    expect(responseJson(response!)).toMatchObject({
+      session_key: `project:${project.id}`,
+      cwd: fs.realpathSync(workspace),
+      status: "ready",
+      repository: { branch: "zy_git_v1.0.7" },
+      goal: null,
+    });
   });
 
   it("serves bootstrap, session listing, and session messages behind API tokens", async ({ task }) => {

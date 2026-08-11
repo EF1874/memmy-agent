@@ -336,6 +336,59 @@ body.memmy-window-fullscreen {
   background: transparent;
 }
 
+.home-workspace-context {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  color: color-mix(in srgb, var(--color-text-ink) 66%, transparent);
+  font-family: var(--font-sans);
+  font-size: var(--codex-text-sm);
+  line-height: 1;
+}
+
+.home-workspace-context__mode,
+.home-workspace-context__branch {
+  display: inline-flex;
+  min-width: 0;
+  height: 28px;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.home-workspace-context__mode {
+  flex: 0 0 auto;
+  padding: 0 8px;
+  border-radius: var(--radius-input);
+  background: color-mix(in srgb, var(--color-text-ink) 5%, transparent);
+}
+
+.home-workspace-context__branch {
+  max-width: min(14rem, 30vw);
+  flex: 0 1 auto;
+}
+
+.home-workspace-context__branch > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.home-workspace-context svg {
+  flex: 0 0 auto;
+}
+
+@media (max-width: 640px) {
+  .home-workspace-context {
+    gap: 6px;
+  }
+
+  .home-workspace-context__branch {
+    max-width: 28vw;
+  }
+}
+
 .composer-command-chip-slot {
   position: absolute;
   z-index: 10;
@@ -1309,6 +1362,11 @@ body:has(.memory-drawer) .window-drag-region {
 }
 
 .agent-workspace-layout > .agent-conversation-panel {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.agent-workspace-layout > .home-empty-screen {
   min-width: 0;
   flex: 1 1 auto;
 }
