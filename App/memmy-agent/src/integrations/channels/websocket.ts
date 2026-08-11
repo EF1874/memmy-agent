@@ -45,6 +45,10 @@ import { websocketTurnWallStartedAt, websocketTurnWallStartTimes } from "../../c
 import type { WebuiTitleService } from "../../core/session/webui-title.js";
 import { visibleWebuiUserContent } from "../../core/session/webui-user-content.js";
 import { TerminalRunControl } from "../../core/session/terminal-session-control.js";
+import {
+  readWorkspaceEnvironment,
+  readWorkspaceFileDiff,
+} from "../../core/session/workspace-environment.js";
 import { scrubSubagentMessagesForChannel } from "../../utils/subagent-channel-display.js";
 import {
   mcpPresetsSettingsAction,
@@ -1764,6 +1768,39 @@ export class WebSocketChannel extends BaseChannel {
     return httpJsonResponse(data);
   }
 
+  private workspaceEnvironmentSession(key: string): Session | HttpLikeResponse {
+    if (!this.sessionManager) return httpError(503, "session manager unavailable");
+    const decodedKey = decodeGuiSessionApiKey(key);
+    if (decodedKey == null) return invalidGuiSessionKeyResponse(key);
+    const resolved = this.resolveGuiSessionResponse(decodedKey);
+    if ("status" in resolved) return resolved;
+    const session = this.sessionManager.get?.(resolved.canonicalSessionKey) as Session | null;
+    return session ?? httpError(404, "session not found");
+  }
+
+  handleWorkspaceEnvironment(request: any, key: string, view: "snapshot" | "files" | "diff"): HttpLikeResponse {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    if ((request.method ?? "GET").toUpperCase() !== "GET") return httpError(405, "method not allowed");
+    const session = this.workspaceEnvironmentSession(key);
+    if ("status" in session) return session;
+    const environment = readWorkspaceEnvironment(session);
+    const publicSessionKey = decodeGuiSessionApiKey(key) ?? environment.snapshot.session_key;
+    const snapshot = { ...environment.snapshot, session_key: publicSessionKey };
+    if (view === "snapshot") return httpJsonResponse(snapshot);
+    if (view === "files") {
+      return httpJsonResponse({
+        session_key: snapshot.session_key,
+        revision: snapshot.revision,
+        files: environment.files,
+      });
+    }
+    const [, query] = parseRequestPath(String(request?.path ?? ""));
+    const relativePath = queryFirst(query, "path");
+    if (!relativePath) return httpError(400, "missing path");
+    const diff = readWorkspaceFileDiff(session, relativePath);
+    return diff ? httpJsonResponse(diff) : httpError(404, "changed file not found");
+  }
+
   handleWebuiThreadGet(request: any, key: string): HttpLikeResponse {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
     const [, query] = parseRequestPath(String(request?.path ?? ""));
@@ -2540,6 +2577,12 @@ export class WebSocketChannel extends BaseChannel {
     if (MCP_PRESET_ACTIONS_BY_PATH[got]) return this.handleSettingsMcpPresets(request, MCP_PRESET_ACTIONS_BY_PATH[got]);
     let match = got.match(/^\/api\/sessions\/([^/]+)\/messages$/);
     if (match) return this.handleSessionMessages(request, match[1]);
+    match = got.match(/^\/api\/sessions\/([^/]+)\/environment$/);
+    if (match) return this.handleWorkspaceEnvironment(request, match[1], "snapshot");
+    match = got.match(/^\/api\/sessions\/([^/]+)\/environment\/files$/);
+    if (match) return this.handleWorkspaceEnvironment(request, match[1], "files");
+    match = got.match(/^\/api\/sessions\/([^/]+)\/environment\/diff$/);
+    if (match) return this.handleWorkspaceEnvironment(request, match[1], "diff");
     match = got.match(/^\/api\/sessions\/([^/]+)\/webui-thread$/);
     if (match) return this.handleWebuiThreadGet(request, match[1]);
     match = got.match(/^\/api\/sessions\/([^/]+)\/last-compaction$/);

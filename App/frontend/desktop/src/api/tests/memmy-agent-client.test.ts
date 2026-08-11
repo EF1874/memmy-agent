@@ -58,6 +58,76 @@ afterEach(() => {
 });
 
 describe("memmy-agent client", () => {
+  it("reads the workspace snapshot, changed files, and a selected diff", async () => {
+    const calls: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      calls.push(`${url.pathname}${url.search}`);
+      if (url.pathname === "/webui/bootstrap") return json(bootstrap);
+      if (url.pathname.endsWith("/environment/files")) {
+        return json({
+          session_key: "websocket:chat-1",
+          revision: "rev-1",
+          files: [{
+            path: "src/panel.tsx",
+            status: ".M",
+            staged: false,
+            unstaged: true,
+            untracked: false,
+            conflict: false,
+            additions: 8,
+            deletions: 1,
+            attribution: "goal"
+          }]
+        });
+      }
+      if (url.pathname.endsWith("/environment/diff")) {
+        expect(url.searchParams.get("path")).toBe("src/panel.tsx");
+        return json({ path: "src/panel.tsx", diff: "+panel", truncated: false, unavailable_reason: null });
+      }
+      if (url.pathname.endsWith("/environment")) {
+        return json({
+          session_key: "websocket:chat-1",
+          cwd: "/workspace",
+          status: "ready",
+          revision: "rev-1",
+          captured_at: "2026-08-11T08:00:00.000Z",
+          repository: {
+            display_name: "memmy-agent",
+            root: "/workspace",
+            head_sha: "84d10f8",
+            branch: "zy_git_v1.0.7",
+            detached: false,
+            upstream: null,
+            ahead: 0,
+            behind: 0,
+            worktree: "dirty"
+          },
+          changes: { file_count: 1, additions: 8, deletions: 1, conflicts: 0, staged: 0, unstaged: 1, untracked: 0 },
+          goal: null
+        });
+      }
+      return json({ error: "not found" }, 404);
+    });
+    const client = createMemmyAgentClient({
+      baseUrl: "http://127.0.0.1:18980",
+      fetchFn: fetchMock as typeof fetch
+    });
+
+    await expect(client.readWorkspaceEnvironment("websocket:chat-1")).resolves.toMatchObject({
+      repository: { branch: "zy_git_v1.0.7" },
+      changes: { file_count: 1 }
+    });
+    await expect(client.listWorkspaceEnvironmentFiles("websocket:chat-1")).resolves.toMatchObject({
+      revision: "rev-1",
+      files: [{ path: "src/panel.tsx", attribution: "goal" }]
+    });
+    await expect(client.readWorkspaceEnvironmentDiff("websocket:chat-1", "src/panel.tsx")).resolves.toMatchObject({
+      diff: "+panel"
+    });
+    expect(calls).toContain("/api/sessions/websocket%3Achat-1/environment/diff?path=src%2Fpanel.tsx");
+  });
+
   it("prefers env override, then current origin, then local gateway default for base URL", () => {
     vi.stubEnv("VITE_MEMMY_AGENT_WEBUI_URL", "http://127.0.0.1:19000");
     expect(defaultMemmyAgentBaseUrl()).toBe("http://127.0.0.1:19000");

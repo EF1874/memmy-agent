@@ -1262,6 +1262,349 @@ body:has(.memory-drawer) .window-drag-region {
   margin-left: 6px;
 }
 
+.agent-conversation-topbar {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+}
+
+.agent-environment-toggle,
+.agent-environment-panel__actions button {
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: color-mix(in srgb, var(--color-text-ink) 50%, transparent);
+  transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.agent-environment-toggle:hover,
+.agent-environment-toggle--active,
+.agent-environment-panel__actions button:hover {
+  border-color: color-mix(in srgb, var(--color-border-stone) 46%, transparent);
+  background: color-mix(in srgb, var(--color-text-ink) 6%, transparent);
+  color: var(--color-text-ink);
+}
+
+.agent-environment-toggle:focus-visible,
+.agent-environment-panel button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-action-sky) 48%, transparent);
+  outline-offset: 2px;
+}
+
+.agent-workspace-layout {
+  position: relative;
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.agent-workspace-layout > .agent-conversation-panel {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.agent-environment-panel {
+  position: relative;
+  z-index: 20;
+  display: flex;
+  width: clamp(300px, 22vw, 420px);
+  min-width: 300px;
+  height: 100%;
+  flex: 0 0 auto;
+  flex-direction: column;
+  overflow: hidden;
+  border-left: 1px solid color-mix(in srgb, var(--color-border-stone) 42%, transparent);
+  background: color-mix(in srgb, var(--color-content-base) 96%, var(--color-background-paper) 4%);
+  color: var(--color-text-ink);
+  font-family: var(--font-sans);
+}
+
+.agent-environment-panel__header {
+  display: flex;
+  min-height: 70px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 13px 14px 11px 16px;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-border-stone) 34%, transparent);
+}
+
+.agent-environment-panel__header h2,
+.agent-environment-panel__eyebrow {
+  margin: 0;
+}
+
+.agent-environment-panel__header h2 {
+  max-width: 230px;
+  overflow: hidden;
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-environment-panel__eyebrow {
+  color: color-mix(in srgb, var(--color-text-ink) 46%, transparent);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.agent-environment-panel__actions {
+  display: flex;
+  gap: 2px;
+}
+
+.agent-environment-panel__actions button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.agent-environment-panel__body {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+}
+
+.agent-environment-panel__notice,
+.agent-environment-panel__empty {
+  margin: 0;
+  padding: 14px 16px;
+  color: color-mix(in srgb, var(--color-text-ink) 55%, transparent);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.agent-environment-panel__notice--error {
+  color: var(--color-status-error);
+}
+
+.agent-environment-section {
+  padding: 10px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-border-stone) 30%, transparent);
+}
+
+.agent-environment-row {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 16px;
+  color: color-mix(in srgb, var(--color-text-ink) 72%, transparent);
+}
+
+.agent-environment-row__content {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+
+.agent-environment-row__content span {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 18px;
+}
+
+.agent-environment-row__content small {
+  overflow: hidden;
+  color: color-mix(in srgb, var(--color-text-ink) 46%, transparent);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-environment-row__meta {
+  color: color-mix(in srgb, var(--color-text-ink) 46%, transparent);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.agent-environment-section__toggle,
+.agent-environment-section__heading {
+  display: flex;
+  width: 100%;
+  min-height: 34px;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 16px;
+  border: 0;
+  background: transparent;
+  color: color-mix(in srgb, var(--color-text-ink) 76%, transparent);
+  font-size: 13px;
+  font-weight: 650;
+  text-align: left;
+}
+
+.agent-environment-section__toggle:hover {
+  background: color-mix(in srgb, var(--color-text-ink) 4%, transparent);
+}
+
+.agent-environment-section__count {
+  margin-right: auto;
+  color: color-mix(in srgb, var(--color-text-ink) 48%, transparent);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.agent-environment-section__lines {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.agent-environment-section__lines--add {
+  color: var(--color-status-success);
+}
+
+.agent-environment-section__lines--delete {
+  color: var(--color-status-error);
+}
+
+.agent-environment-file {
+  display: flex;
+  width: 100%;
+  min-height: 34px;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 16px 5px 38px;
+  border: 0;
+  background: transparent;
+  color: color-mix(in srgb, var(--color-text-ink) 68%, transparent);
+  text-align: left;
+}
+
+.agent-environment-file:hover,
+.agent-environment-file--selected {
+  background: color-mix(in srgb, var(--color-text-ink) 5%, transparent);
+  color: var(--color-text-ink);
+}
+
+.agent-environment-file__path {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-environment-file__attribution {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--color-text-ink) 5%, transparent);
+  color: color-mix(in srgb, var(--color-text-ink) 48%, transparent);
+  font-size: 9px;
+  line-height: 14px;
+}
+
+.agent-environment-file__attribution--goal {
+  background: color-mix(in srgb, var(--color-status-success) 10%, transparent);
+  color: color-mix(in srgb, var(--color-status-success) 76%, var(--color-text-ink));
+}
+
+.agent-environment-file__attribution--uncertain {
+  background: color-mix(in srgb, var(--color-status-warning) 12%, transparent);
+  color: color-mix(in srgb, var(--color-status-warning) 72%, var(--color-text-ink));
+}
+
+.agent-environment-diff {
+  margin: 0 12px 8px 38px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 36%, transparent);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--color-text-ink) 3%, transparent);
+}
+
+.agent-environment-diff pre {
+  max-height: 260px;
+  margin: 0;
+  overflow: auto;
+  padding: 9px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  line-height: 14px;
+  white-space: pre;
+}
+
+.agent-environment-diff p,
+.agent-environment-diff small {
+  display: block;
+  margin: 0;
+  padding: 9px;
+  color: color-mix(in srgb, var(--color-text-ink) 48%, transparent);
+  font-size: 10px;
+  line-height: 15px;
+}
+
+.agent-environment-goal dl {
+  margin: 2px 0 0;
+  padding: 0 16px;
+}
+
+.agent-environment-goal dl > div {
+  display: flex;
+  min-height: 28px;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 11px;
+}
+
+.agent-environment-goal dt {
+  color: color-mix(in srgb, var(--color-text-ink) 48%, transparent);
+}
+
+.agent-environment-goal dd {
+  margin: 0;
+  overflow: hidden;
+  color: color-mix(in srgb, var(--color-text-ink) 72%, transparent);
+  font-family: var(--font-mono);
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-environment-panel__spin {
+  animation: agent-environment-spin 900ms linear infinite;
+}
+
+@keyframes agent-environment-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (max-width: 1279px) {
+  .agent-environment-panel {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(420px, calc(100% - 24px));
+    box-shadow: -16px 0 36px color-mix(in srgb, var(--color-text-ink) 12%, transparent);
+  }
+}
+
+@media (max-width: 959px) {
+  .agent-environment-panel {
+    width: min(100%, 560px);
+    min-width: 0;
+  }
+}
+
 .agent-conversation-scroll {
   padding-top: 12px;
   padding-bottom: calc(var(--agent-composer-overlay-height, 120px) + 8px);

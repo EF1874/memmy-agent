@@ -124,6 +124,86 @@ const SessionSnapshotSchema = z.object({
   sessions: z.array(SessionSummarySchema)
 });
 
+const WorkspaceEnvironmentFileSchema = z.object({
+  path: z.string(),
+  status: z.string(),
+  staged: z.boolean(),
+  unstaged: z.boolean(),
+  untracked: z.boolean(),
+  conflict: z.boolean(),
+  additions: z.number().nullable(),
+  deletions: z.number().nullable(),
+  attribution: z.union([
+    z.literal("goal"),
+    z.literal("preexisting"),
+    z.literal("uncertain"),
+    z.literal("unattributed")
+  ])
+});
+
+const WorkspaceEnvironmentSnapshotSchema = z.object({
+  session_key: z.string(),
+  cwd: z.string(),
+  status: z.union([
+    z.literal("ready"),
+    z.literal("not_git"),
+    z.literal("workspace_unavailable"),
+    z.literal("error")
+  ]),
+  revision: z.string(),
+  captured_at: z.string(),
+  repository: z.object({
+    display_name: z.string(),
+    root: z.string(),
+    head_sha: z.string(),
+    branch: z.string().nullable(),
+    detached: z.boolean(),
+    upstream: z.string().nullable(),
+    ahead: z.number(),
+    behind: z.number(),
+    worktree: z.union([z.literal("clean"), z.literal("dirty")])
+  }).nullable(),
+  changes: z.object({
+    file_count: z.number(),
+    additions: z.number().nullable(),
+    deletions: z.number().nullable(),
+    conflicts: z.number(),
+    staged: z.number(),
+    unstaged: z.number(),
+    untracked: z.number()
+  }).nullable(),
+  goal: z.object({
+    goal_id: z.string(),
+    base_head: z.string().nullable(),
+    base_branch: z.string().nullable(),
+    goal_files: z.number(),
+    preexisting_files: z.number(),
+    uncertain_files: z.number(),
+    verification: z.union([
+      z.literal("not_run"),
+      z.literal("running"),
+      z.literal("passed"),
+      z.literal("failed"),
+      z.literal("stale")
+    ]),
+    completion_audit: z.union([z.literal("pending"), z.literal("risk"), z.literal("satisfied")]),
+    baseline_status: z.union([z.literal("captured"), z.literal("unavailable")])
+  }).nullable()
+});
+
+const WorkspaceEnvironmentFilesSchema = z.object({
+  session_key: z.string(),
+  revision: z.string(),
+  files: z.array(WorkspaceEnvironmentFileSchema)
+});
+
+const WorkspaceEnvironmentDiffSchema = z.object({
+  path: z.string(),
+  diff: z.string(),
+  truncated: z.boolean(),
+  unavailable_reason: z.string().nullable()
+});
+
 const ProjectMutationResponseSchema = z.object({
   project: ProjectSchema,
   snapshot: SessionSnapshotSchema
@@ -296,6 +376,10 @@ export type MemmyAgentBootstrap = z.infer<typeof BootstrapSchema>;
 export type ChatModelPreset = z.infer<typeof ChatModelPresetSchema>;
 export type MemmyAgentSettings = z.infer<typeof AgentSettingsSchema>;
 export type MemmyAgentSessionSummary = z.infer<typeof SessionSummarySchema>;
+export type WorkspaceEnvironmentSnapshot = z.infer<typeof WorkspaceEnvironmentSnapshotSchema>;
+export type WorkspaceEnvironmentFile = z.infer<typeof WorkspaceEnvironmentFileSchema>;
+export type WorkspaceEnvironmentFiles = z.infer<typeof WorkspaceEnvironmentFilesSchema>;
+export type WorkspaceEnvironmentDiff = z.infer<typeof WorkspaceEnvironmentDiffSchema>;
 export type MemmyAgentProject = z.infer<typeof ProjectSchema>;
 export type MemmyAgentSessionSnapshot = z.infer<typeof SessionSnapshotSchema>;
 export type MemmyAgentSidebarState = z.infer<typeof SidebarStateSchema>;
@@ -476,6 +560,9 @@ export interface MemmyAgentClient {
   getSettings(): Promise<MemmyAgentSettings>;
   getSessionSnapshot(options?: MemmyAgentRequestOptions): Promise<MemmyAgentSessionSnapshot>;
   listSessions(): Promise<MemmyAgentSessionSummary[]>;
+  readWorkspaceEnvironment(sessionKey: string): Promise<WorkspaceEnvironmentSnapshot>;
+  listWorkspaceEnvironmentFiles(sessionKey: string): Promise<WorkspaceEnvironmentFiles>;
+  readWorkspaceEnvironmentDiff(sessionKey: string, path: string): Promise<WorkspaceEnvironmentDiff>;
   listSlashCommands(): Promise<MemmyAgentSlashCommand[]>;
   readSidebarState(): Promise<MemmyAgentSidebarState>;
   writeSidebarState(
@@ -795,6 +882,28 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
 
   async listSessions(): Promise<MemmyAgentSessionSummary[]> {
     return (await this.getSessionSnapshot()).sessions;
+  }
+
+  async readWorkspaceEnvironment(sessionKey: string): Promise<WorkspaceEnvironmentSnapshot> {
+    return this.request(
+      `/api/sessions/${encodeURIComponent(sessionKey)}/environment`,
+      WorkspaceEnvironmentSnapshotSchema
+    );
+  }
+
+  async listWorkspaceEnvironmentFiles(sessionKey: string): Promise<WorkspaceEnvironmentFiles> {
+    return this.request(
+      `/api/sessions/${encodeURIComponent(sessionKey)}/environment/files`,
+      WorkspaceEnvironmentFilesSchema
+    );
+  }
+
+  async readWorkspaceEnvironmentDiff(sessionKey: string, path: string): Promise<WorkspaceEnvironmentDiff> {
+    const query = new URLSearchParams({ path });
+    return this.request(
+      `/api/sessions/${encodeURIComponent(sessionKey)}/environment/diff?${query.toString()}`,
+      WorkspaceEnvironmentDiffSchema
+    );
   }
 
   async listSlashCommands(): Promise<MemmyAgentSlashCommand[]> {

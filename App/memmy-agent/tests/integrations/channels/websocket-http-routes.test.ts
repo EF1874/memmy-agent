@@ -14,7 +14,7 @@ const routeMocks = vi.hoisted(() => ({
 }));
 const childProcessMocks = vi.hoisted(() => ({
   spawn: vi.fn(() => ({ unref: vi.fn() })),
-  spawnSync: vi.fn(() => ({ status: 0, stderr: "" })),
+  spawnSync: vi.fn((_command?: string, _args?: string[]) => ({ status: 0, stderr: "" })),
 }));
 
 vi.mock("node:child_process", () => ({
@@ -39,8 +39,10 @@ afterEach(async () => {
   await Promise.all(running.splice(0).map((channel) => channel.stop()));
   for (const dir of tmpDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
   vi.restoreAllMocks();
-  childProcessMocks.spawn.mockClear();
-  childProcessMocks.spawnSync.mockClear();
+  childProcessMocks.spawn.mockReset();
+  childProcessMocks.spawn.mockImplementation(() => ({ unref: vi.fn() }));
+  childProcessMocks.spawnSync.mockReset();
+  childProcessMocks.spawnSync.mockImplementation((_command?: string, _args?: string[]) => ({ status: 0, stderr: "" }));
   routeMocks.mcpPresetsSettingsAction.mockReset();
   if (originalMemmyAgentConfig === undefined) delete process.env.MEMMY_CONFIG;
   else process.env.MEMMY_CONFIG = originalMemmyAgentConfig;
@@ -262,6 +264,53 @@ describe("WebSocket HTTP route helpers", () => {
     });
     expect(admin.configure).toHaveBeenCalledWith("feishu");
     expect(admin.stop).toHaveBeenCalledWith("feishu");
+  });
+
+  it("serves read-only workspace environment snapshot, files, and diff routes", async () => {
+    const root = tmpRoot();
+    fs.writeFileSync(path.join(root, "tracked.ts"), "changed\n", "utf8");
+    const manager = seedSession(path.join(root, "sessions"), "websocket:environment", root);
+    const channel = makeChannel({ sessionManager: manager, workspacePath: root });
+    const headers = withApiToken(channel);
+    childProcessMocks.spawnSync.mockImplementation((_command?: string, args: string[] = []) => {
+      if (args[0] === "rev-parse") return { status: 0, stdout: `${root}\n`, stderr: "" };
+      if (args[0] === "status") {
+        return {
+          status: 0,
+          stdout: "# branch.oid 84d10f8f00\u0000# branch.head zy_git_v1.0.7\u00001 .M N... 100644 100644 100644 abc abc tracked.ts\u0000",
+          stderr: "",
+        };
+      }
+      if (args[0] === "diff" && args.includes("--numstat")) {
+        return { status: 0, stdout: "2\t1\ttracked.ts\0", stderr: "" };
+      }
+      if (args[0] === "diff") return { status: 0, stdout: "+changed\n", stderr: "" };
+      return { status: 1, stdout: "", stderr: "unexpected git command" };
+    });
+
+    const encoded = encodeURIComponent("websocket:environment");
+    const snapshotResponse = await channel.dispatchHttp(localConnection, {
+      path: `/api/sessions/${encoded}/environment`,
+      headers,
+    });
+    expect(snapshotResponse?.status).toBe(200);
+    expect(responseJson(snapshotResponse!)).toMatchObject({
+      status: "ready",
+      repository: { branch: "zy_git_v1.0.7", head_sha: "84d10f8f00" },
+      changes: { file_count: 1, additions: 2, deletions: 1 },
+    });
+
+    const filesResponse = await channel.dispatchHttp(localConnection, {
+      path: `/api/sessions/${encoded}/environment/files`,
+      headers,
+    });
+    expect(responseJson(filesResponse!).files).toMatchObject([{ path: "tracked.ts", status: ".M" }]);
+
+    const diffResponse = await channel.dispatchHttp(localConnection, {
+      path: `/api/sessions/${encoded}/environment/diff?path=tracked.ts`,
+      headers,
+    });
+    expect(responseJson(diffResponse!)).toMatchObject({ path: "tracked.ts", diff: "+changed\n" });
   });
 
   it("serves bootstrap, session listing, and session messages behind API tokens", async ({ task }) => {
