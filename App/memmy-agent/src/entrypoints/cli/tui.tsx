@@ -5,6 +5,7 @@ import stringWidth from "string-width";
 import { Config } from "../../config/schema.js";
 import { getConfigPath, getWorkspacePath } from "../../config/paths.js";
 import { VERSION } from "../../version.js";
+import { resolveModelSelection } from "../../providers/model-catalog.js";
 import { GUI_IM_CHANNELS } from "../frontend-bridge/gui-session-projection.js";
 import type { TerminalTarget } from "./commands.js";
 import {
@@ -12,6 +13,7 @@ import {
   tuiGatewayOptionsFromConfig,
   type TuiGatewayQueueItem,
   type TuiGatewayState,
+  type TuiModelSelection,
 } from "./tui-gateway-client.js";
 import { resolveComposerCursorPosition, type ComposerLayout } from "./tui-cursor.js";
 
@@ -143,12 +145,16 @@ function displayModelName(model: string): string {
   return model.split("/").pop() || model;
 }
 
-function modelLabel(config: Config): string {
-  const resolved = config.resolvePreset();
-  const preset = config.agents.defaults.modelPreset;
-  const provider = config.getProviderName(resolved.model, { preset: resolved }) ?? "unknown";
-  const value = `${provider} / ${displayModelName(resolved.model)}`;
-  return preset ? `${value} @${preset}` : value;
+function modelSelectionLabel(selection: TuiModelSelection): string {
+  const model = selection.source === "account" && selection.capabilities.includes("agent")
+    ? "General text"
+    : displayModelName(selection.model);
+  return `${selection.provider} / ${model}`;
+}
+
+function modelLabel(_config: Config): string {
+  const resolved = resolveModelSelection({});
+  return resolved ? modelSelectionLabel(resolved) : "(none configured)";
 }
 
 const TOOLSET_ORDER = ["web", "exec", "file", "runtime", "image", "goal", "cron", "mcp", "other"] as const;
@@ -1158,8 +1164,10 @@ function MemmyTui({ config, gateway, registerCleanup, target, toolsets, version 
       ? "Enter: queue next turn · Tab: add to current turn"
       : "Session is running from another channel · Enter: queue next turn"
     : "Ask memmy, /quit to exit";
-  const currentModelLabel = gatewayState.modelName
-    ? displayModelName(gatewayState.modelName)
+  const currentModelLabel = gatewayState.modelSelection
+    ? modelSelectionLabel(gatewayState.modelSelection)
+    : gatewayState.modelName
+      ? displayModelName(gatewayState.modelName)
     : modelLabel(config);
 
   return (

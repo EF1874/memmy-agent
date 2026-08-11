@@ -73,6 +73,12 @@ class HttpEmbedder implements Embedder {
   }
 
   async embed(texts: string[], role: "query" | "document" = "document"): Promise<number[][]> {
+    if (this.config.selectionError) {
+      throw Object.assign(new Error("Assigned embedding model is unavailable"), {
+        code: this.config.selectionError,
+        actualModelContext: this.config.actualModelContext
+      });
+    }
     if (texts.length === 0) return [];
     const out = new Array<number[]>(texts.length);
     const missing: Array<{ text: string; index: number }> = [];
@@ -211,16 +217,21 @@ class HttpEmbedder implements Embedder {
       throw new Error(`${provider} embedding provider requires apiKey or endpoint`);
     }
     const response = await postJsonWithRetry<OpenAiEmbeddingResponse>({
+      actualModelContext: this.config.actualModelContext,
       provider: this.config.sourceProvider ?? provider,
       operation: `embedding.${role}`,
       model: this.config.model,
       url,
-      headers: bearer(this.config.apiKey),
+      headers: {
+        ...bearer(this.config.apiKey),
+        ...(this.config.extraHeaders ?? {})
+      },
       timeoutMs: this.config.timeoutMs,
       maxRetries: this.config.maxRetries,
       body: {
         model: this.config.model,
-        input: texts
+        input: texts,
+        ...(this.config.extraBody ?? {})
       }
     });
     const vectors = validateVectors(provider, response.data?.map((row) => row.embedding), texts.length);
@@ -236,17 +247,20 @@ class HttpEmbedder implements Embedder {
     const model = this.config.model || "text-embedding-004";
     const url = `${base}/models/${encodeURIComponent(model)}:batchEmbedContents?key=${encodeURIComponent(this.config.apiKey)}`;
     const response = await postJsonWithRetry<GeminiEmbeddingResponse>({
+      actualModelContext: this.config.actualModelContext,
       provider: "gemini",
       operation: `embedding.${role}`,
       model,
       url,
+      headers: this.config.extraHeaders,
       timeoutMs: this.config.timeoutMs,
       maxRetries: this.config.maxRetries,
       body: {
         requests: texts.map((text) => ({
           model: `models/${model}`,
           content: { parts: [{ text }] }
-        }))
+        })),
+        ...(this.config.extraBody ?? {})
       }
     });
     const vectors = validateVectors("gemini", response.embeddings?.map((row) => row.values), texts.length);
@@ -260,18 +274,23 @@ class HttpEmbedder implements Embedder {
     }
     const url = this.config.endpoint || "https://api.cohere.com/v2/embed";
     const response = await postJsonWithRetry<CohereEmbeddingResponse>({
+      actualModelContext: this.config.actualModelContext,
       provider: "cohere",
       operation: `embedding.${role}`,
       model: this.config.model || "embed-v4.0",
       url,
-      headers: bearer(this.config.apiKey),
+      headers: {
+        ...bearer(this.config.apiKey),
+        ...(this.config.extraHeaders ?? {})
+      },
       timeoutMs: this.config.timeoutMs,
       maxRetries: this.config.maxRetries,
       body: {
         model: this.config.model || "embed-v4.0",
         texts,
         input_type: role === "query" ? "search_query" : "search_document",
-        embedding_types: ["float"]
+        embedding_types: ["float"],
+        ...(this.config.extraBody ?? {})
       }
     });
     const vectors = Array.isArray(response.embeddings)
@@ -299,6 +318,7 @@ class HttpEmbedder implements Embedder {
       provider,
       model: this.config.model,
       endpoint: this.config.endpoint,
+      actualModelContext: this.config.actualModelContext,
       usage: extractModelTokenUsage(response),
       metadata: { role }
     });

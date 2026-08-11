@@ -82,7 +82,9 @@ describe("memory LLM token usage recording", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const client = createLlmClient(llmConfig("summary-model"), { modelRole: "memory_summary" });
+    const client = createLlmClient(llmConfig("summary-model", {
+      actualModelContext: actualContext("memory_summary", "summary-model")
+    }), { modelRole: "memory_summary" });
 
     await expect(client.complete([{ role: "user", content: "summarize" }], { operation: "episode.summarize" })).resolves.toBe("summary");
 
@@ -97,6 +99,10 @@ describe("memory LLM token usage recording", () => {
       kind: "memory_summary",
       source: "memory",
       operationId: expect.stringMatching(/^episode\.summarize:byok_usage_/),
+      presetId: "byok-memory_summary",
+      provider: "openai",
+      model: "summary-model",
+      capability: "memory_summary",
       inputTokens: 11,
       outputTokens: 7,
       cachedInputTokens: 3,
@@ -104,7 +110,7 @@ describe("memory LLM token usage recording", () => {
       totalTokens: 18,
       metadata: {
         operation: "episode.summarize",
-        provider: "openai_compatible",
+        provider: "openai",
         model: "summary-model"
       },
       rawUsage: {
@@ -131,7 +137,9 @@ describe("memory LLM token usage recording", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const client = createLlmClient(llmConfig("evolver-model"), { modelRole: "memory_evolution" });
+    const client = createLlmClient(llmConfig("evolver-model", {
+      actualModelContext: actualContext("memory_evolution", "evolver-model")
+    }), { modelRole: "memory_evolution" });
 
     await expect(client.completeJson<{ ok: boolean }>(
       [{ role: "user", content: "evolve" }],
@@ -143,13 +151,17 @@ describe("memory LLM token usage recording", () => {
       kind: "memory_evolution",
       source: "memory",
       operationId: expect.stringMatching(/^skill\.crystallize:byok_usage_/),
+      presetId: "byok-memory_evolution",
+      provider: "openai",
+      model: "evolver-model",
+      capability: "memory_evolution",
       inputTokens: 21,
       outputTokens: 9,
       cachedInputTokens: 5,
       totalTokens: 30,
       metadata: {
         operation: "skill.crystallize",
-        provider: "openai_compatible",
+        provider: "openai",
         model: "evolver-model"
       }
     });
@@ -180,7 +192,8 @@ describe("memory LLM token usage recording", () => {
       normalize: false,
       cache: false,
       timeoutMs: 60_000,
-      maxRetries: 0
+      maxRetries: 0,
+      actualModelContext: actualContext("embedding", "embedding-model")
     });
 
     await expect(embedder.embed(["remember this"], "document")).resolves.toEqual([[0.1, 0.2, 0.3]]);
@@ -189,12 +202,16 @@ describe("memory LLM token usage recording", () => {
       kind: "embedding",
       source: "memory",
       operationId: expect.stringMatching(/^embedding\.document:byok_usage_/),
+      presetId: "byok-embedding",
+      provider: "openai",
+      model: "embedding-model",
+      capability: "embedding",
       inputTokens: 13,
       outputTokens: 0,
       totalTokens: 13,
       metadata: {
         operation: "embedding.document",
-        provider: "openai_compatible",
+        provider: "openai",
         model: "embedding-model",
         role: "document"
       }
@@ -214,7 +231,8 @@ describe("memory LLM token usage recording", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const client = createLlmClient(llmConfig("summary-model", {
-      endpoint: "https://memtensor.cn/api/agentExternal/v1"
+      endpoint: "https://memtensor.cn/api/agentExternal/v1",
+      actualModelContext: actualContext("memory_summary", "summary-model", "account")
     }), { modelRole: "memory_summary" });
 
     await expect(client.complete([{ role: "user", content: "summarize" }], { operation: "episode.summarize" })).resolves.toBe("summary");
@@ -237,6 +255,24 @@ function llmConfig(model: string, overrides: Partial<LlmConfig> = {}): LlmConfig
     maxRetries: 0,
     malformedRetries: 0,
     ...overrides
+  };
+}
+
+function actualContext(
+  capability: "memory_summary" | "memory_evolution" | "embedding",
+  model: string,
+  source: "account" | "byok" = "byok"
+) {
+  return {
+    presetId: `${source}-${capability}`,
+    provider: source === "byok" ? "openai" : "memmy_account",
+    endpointId: capability === "embedding" ? "embedding" : "chat",
+    protocol: capability === "embedding" ? "openai-embeddings" as const : source === "byok" ? "openai-chat-completions" as const : "memmy-account" as const,
+    model,
+    source,
+    ownerAccountId: source === "account" ? "owner-a" : null,
+    capability,
+    capabilities: [capability]
   };
 }
 

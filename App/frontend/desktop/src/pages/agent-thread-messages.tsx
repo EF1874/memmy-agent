@@ -73,7 +73,6 @@ interface AgentThreadMessagesProps {
   historyVersion?: number;
   isSending?: boolean;
   sanitizePlatformApiErrors?: boolean;
-  accountMode?: boolean;
 }
 
 export type AgentDisplayUnit =
@@ -215,7 +214,6 @@ export const AgentThreadMessages = memo(function AgentThreadMessages(props: Agen
               deferContentRender={shouldDeferAgentMessageContent(unit, index, units.length)}
               deferredRevealDelayMs={deferredAgentMessageRevealDelay(index, units.length)}
               sanitizePlatformApiErrors={props.sanitizePlatformApiErrors === true}
-              accountMode={props.accountMode === true}
             />
             {unit.message.id === props.afterMessageId ? props.afterMessageContent : null}
           </Fragment>
@@ -238,8 +236,7 @@ function areAgentThreadMessagesPropsEqual(previous: AgentThreadMessagesProps, ne
     && previous.historyVersion === next.historyVersion
     && previous.isSending === next.isSending
     && previous.retryWaitStatus === next.retryWaitStatus
-    && previous.sanitizePlatformApiErrors === next.sanitizePlatformApiErrors
-    && previous.accountMode === next.accountMode;
+    && previous.sanitizePlatformApiErrors === next.sanitizePlatformApiErrors;
 }
 
 export function buildAgentDisplayUnits(messages: AgentChatMessage[], options: { chatScopeKey: string; retryWaitStatus?: AgentRetryWaitStatus | null }): AgentDisplayUnit[] {
@@ -396,7 +393,6 @@ interface SingleMessageProps {
   deferContentRender?: boolean;
   deferredRevealDelayMs?: number;
   sanitizePlatformApiErrors?: boolean;
-  accountMode?: boolean;
 }
 
 const SingleMessage = memo(function SingleMessage(props: SingleMessageProps) {
@@ -457,7 +453,6 @@ const SingleMessage = memo(function SingleMessage(props: SingleMessageProps) {
       <div className="flex min-w-0 justify-start">
         <AgentModelErrorNotice
           content={message.content}
-          accountMode={props.accountMode === true}
           modelError={message.modelError}
         />
       </div>
@@ -553,12 +548,10 @@ function RetryWaitStatusLine(props: { status: AgentRetryWaitStatus }) {
 
 function AgentModelErrorNotice(props: {
   content: string;
-  accountMode?: boolean;
   modelError?: AgentChatMessage["modelError"];
 }) {
   const { t } = useTranslation();
   const { title, detail } = formatAgentModelError(props.content, t, {
-    accountMode: props.accountMode === true,
     modelError: props.modelError
   });
 
@@ -654,8 +647,7 @@ function areSingleMessagePropsEqual(previous: SingleMessageProps, next: SingleMe
     && previous.forceMessageActions === next.forceMessageActions
     && previous.deferContentRender === next.deferContentRender
     && previous.deferredRevealDelayMs === next.deferredRevealDelayMs
-    && previous.sanitizePlatformApiErrors === next.sanitizePlatformApiErrors
-    && previous.accountMode === next.accountMode;
+    && previous.sanitizePlatformApiErrors === next.sanitizePlatformApiErrors;
 }
 
 export function resolveAgentMessageDisplayContent(message: AgentChatMessage, input: { sanitizePlatformApiErrors: boolean; fallback: string }): string {

@@ -115,6 +115,12 @@ class HttpLlmClient implements LlmClient {
       maxRetries: options.maxRetries ?? this.config.maxRetries,
       jsonMode: options.jsonMode ?? false
     };
+    if (this.config.selectionError) {
+      throw Object.assign(new Error("Assigned model is unavailable"), {
+        code: this.config.selectionError,
+        actualModelContext: this.config.actualModelContext
+      });
+    }
     if (!this.isConfigured()) {
       const error = new Error(`LLM provider is not configured: ${this.config.provider || "(empty)"}`);
       this.lastError = error.message;
@@ -299,12 +305,14 @@ class HttpLlmClient implements LlmClient {
       : undefined;
     const agentRegion = resolveMemoryAgentRegion(this.config.sourceProvider);
     const response = await postJsonWithRetry<OpenAiChatResponse>({
+      actualModelContext: this.config.actualModelContext,
       provider: "openai_compatible",
       operation: options.operation,
       model: this.config.model,
       url,
       headers: {
         ...bearer(this.config.apiKey),
+        ...(this.config.extraHeaders ?? {}),
         ...(agentRegion ? { "X-Agent-Region": agentRegion } : {})
       },
       timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
@@ -317,7 +325,8 @@ class HttpLlmClient implements LlmClient {
         stream: false,
         ...thinking.fields,
         ...(thinkingBudget !== undefined ? { thinking_budget: thinkingBudget } : {}),
-        ...(options.jsonMode && !omitJsonMode ? { response_format: { type: "json_object" } } : {})
+        ...(options.jsonMode && !omitJsonMode ? { response_format: { type: "json_object" } } : {}),
+        ...(this.config.extraBody ?? {})
       }
     });
     const choice = response.choices?.[0];
@@ -368,11 +377,14 @@ class HttpLlmClient implements LlmClient {
     if (systemParts.length > 0) {
       body.systemInstruction = { parts: systemParts };
     }
+    Object.assign(body, this.config.extraBody ?? {});
     const response = await postJsonWithRetry<GeminiGenerateResponse>({
+      actualModelContext: this.config.actualModelContext,
       provider: "gemini",
       operation: options.operation,
       model: this.config.model,
       url,
+      headers: this.config.extraHeaders,
       timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
       maxRetries: options.maxRetries ?? this.config.maxRetries,
       body
@@ -401,13 +413,15 @@ class HttpLlmClient implements LlmClient {
       .map((message) => message.content)
       .join("\n\n");
     const response = await postJsonWithRetry<AnthropicResponse>({
+      actualModelContext: this.config.actualModelContext,
       provider: "anthropic",
       operation: options.operation,
       model: this.config.model,
       url,
       headers: {
         "x-api-key": this.config.apiKey,
-        "anthropic-version": "2023-06-01"
+        "anthropic-version": "2023-06-01",
+        ...(this.config.extraHeaders ?? {})
       },
       timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
       maxRetries: options.maxRetries ?? this.config.maxRetries,
@@ -424,7 +438,8 @@ class HttpLlmClient implements LlmClient {
           .map((message) => ({
             role: message.role === "assistant" ? "assistant" : "user",
             content: message.content
-          }))
+          })),
+        ...(this.config.extraBody ?? {})
       }
     });
     const text = (response.content ?? [])
@@ -451,11 +466,15 @@ class HttpLlmClient implements LlmClient {
       ? Math.max(requestedMaxTokens ?? 1200, ANTHROPIC_MIN_THINKING_OUTPUT_TOKENS)
       : requestedMaxTokens;
     const response = await postJsonWithRetry<BedrockResponse>({
+      actualModelContext: this.config.actualModelContext,
       provider: "bedrock",
       operation: options.operation,
       model: this.config.model,
       url: `${base}/model/${model}/converse`,
-      headers: this.config.apiKey ? { authorization: this.config.apiKey } : {},
+      headers: {
+        ...(this.config.apiKey ? { authorization: this.config.apiKey } : {}),
+        ...(this.config.extraHeaders ?? {})
+      },
       timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
       maxRetries: options.maxRetries ?? this.config.maxRetries,
       body: {
@@ -474,7 +493,8 @@ class HttpLlmClient implements LlmClient {
             : {}),
           maxTokens
         },
-        ...thinking.fields
+        ...thinking.fields,
+        ...(this.config.extraBody ?? {})
       }
     });
     const text = response.output?.message?.content?.map((part) => part.text ?? "").join("");
@@ -490,11 +510,15 @@ class HttpLlmClient implements LlmClient {
       throw new Error("host provider requires endpoint");
     }
     const response = await postJsonWithRetry<HostResponse>({
+      actualModelContext: this.config.actualModelContext,
       provider: "host",
       operation: options.operation,
       model: this.config.model,
       url: this.config.endpoint,
-      headers: bearer(this.config.apiKey),
+      headers: {
+        ...bearer(this.config.apiKey),
+        ...(this.config.extraHeaders ?? {})
+      },
       timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
       maxRetries: options.maxRetries ?? this.config.maxRetries,
       body: {
@@ -503,7 +527,8 @@ class HttpLlmClient implements LlmClient {
         temperature: options.temperature ?? this.config.temperature,
         maxTokens: options.maxTokens ?? this.config.maxTokens,
         enableThinking: resolveThinkingEnabled(this.config.enableThinking, options.thinkingMode),
-        jsonMode: options.jsonMode ?? false
+        jsonMode: options.jsonMode ?? false,
+        ...(this.config.extraBody ?? {})
       }
     });
     const text = response.text ?? response.content ?? response.output;
@@ -530,6 +555,7 @@ class HttpLlmClient implements LlmClient {
       provider: this.config.sourceProvider ?? this.config.provider,
       model: this.config.model,
       endpoint: this.config.endpoint,
+      actualModelContext: this.config.actualModelContext,
       usage: extractModelTokenUsage(response)
     });
   }

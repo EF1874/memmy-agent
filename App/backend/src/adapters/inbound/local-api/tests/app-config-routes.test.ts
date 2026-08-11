@@ -106,24 +106,27 @@ describe("app config local api routes", () => {
       configRevision: "revision-before-save",
       providers: [{
         provider: "openai",
-        apiBase: "https://api.example.com/v1",
         apiKey: "sk-live-secret",
-        apiType: "chatCompletions",
+        endpoints: [{
+          endpointId: "primary",
+          apiBase: "https://api.example.com/v1",
+          protocol: "openai-chat-completions"
+        }],
         models: [{
-          presetName: "work-gpt",
-          model: "gpt-4.1-mini"
+          presetId: "work-gpt",
+          endpointId: "primary",
+          model: "gpt-4.1-mini",
+          source: "byok",
+          capabilities: ["agent"]
         }]
       }],
-      defaultModelPreset: "work-gpt",
-      embedding: { mode: "local" },
-      memmyMemory: {
-        summary: { mode: "follow" },
-        evolution: { mode: "follow" }
-      }
+      modelAssignments: modelAssignments()
     });
     const modelConfigTest = await injectJson("POST", "/api/app/model-config/test", {
       provider: "openai_compatible",
-      baseUrl: "https://api.example.com/v1",
+      endpointId: "primary",
+      protocol: "openai-chat-completions",
+      apiBase: "https://api.example.com/v1",
       modelId: "gpt-5.5",
       apiKey: "sk-test-secret"
     });
@@ -143,17 +146,17 @@ describe("app config local api routes", () => {
       lastSyncedAt: "2026-06-24T10:00:00.000Z"
     });
     expect(modelConfigBeforeSave.json()).toMatchObject({
-      defaultModelPreset: "work-gpt",
+      modelAssignments: { byok: { agent: { default: "work-gpt" } } },
       providers: [{
         provider: "openai",
         hasApiKey: true,
         apiKeyMasked: "sk-l••••cret",
-        models: [{ model: "gpt-4.1-mini" }]
+        models: [{ presetId: "work-gpt", model: "gpt-4.1-mini" }]
       }]
     });
     expect(modelConfig.json()).toMatchObject({
       configRevision: "revision-after-save",
-      defaultModelPreset: "work-gpt",
+      modelAssignments: { byok: { agent: { default: "work-gpt" } } },
       providers: [{
         provider: "openai",
         hasApiKey: true,
@@ -342,42 +345,61 @@ function createPermissionManager(): PermissionManager {
 function modelConfigView(overrides: Record<string, unknown> = {}) {
   const hasApiKey = Boolean(overrides.hasApiKey);
   const apiKeyMasked = (overrides.apiKeyMasked ?? "") as string;
+  const model = {
+    presetId: "work-gpt",
+    provider: "openai",
+    endpointId: "primary",
+    protocol: "openai-chat-completions",
+    model: "gpt-4.1-mini",
+    source: "byok",
+    capabilities: ["agent"],
+    available: hasApiKey
+  };
   return {
     configRevision: overrides.configRevision ?? "revision-before-save",
     providers: [{
       provider: "openai",
-      apiBase: "https://api.example.com/v1",
-      apiType: "chatCompletions",
       configured: hasApiKey,
       hasApiKey,
       apiKeyMasked,
       apiKey: "",
       accountManaged: false,
       editable: true,
-      models: [{
-        presetName: "work-gpt",
-        model: "gpt-4.1-mini",
-        isDefault: true,
-        available: hasApiKey
-      }]
+      endpoints: [{
+        endpointId: "primary",
+        apiBase: "https://api.example.com/v1",
+        protocol: "openai-chat-completions",
+        hasApiKey,
+        apiKeyMasked,
+        apiKey: ""
+      }],
+      models: [model]
     }],
-    defaultModelPreset: hasApiKey ? "work-gpt" : null,
+    modelAssignments: modelAssignments(),
+    effectiveCandidates: { byok: [model], account: [] },
     configured: hasApiKey,
-    embedding: overrides.embedding ?? localEmbeddingView(),
-    asr: overrides.asr ?? null,
-    imageGen: overrides.imageGen ?? null,
-    memmyMemory: {
-      summary: { mode: "follow", fixed: null },
-      evolution: { mode: "follow", fixed: null }
-    },
     updatedAt: "2026-06-02T10:00:00.000Z"
   };
 }
 
-function localEmbeddingView() {
+function modelAssignments() {
   return {
-    mode: "local",
-    custom: null
+    byok: {
+      agent: { candidates: ["work-gpt"], default: "work-gpt" },
+      memorySummary: null,
+      memoryEvolution: null,
+      embedding: null,
+      asr: null,
+      imageGeneration: null
+    },
+    account: {
+      agent: { candidates: [], default: null },
+      memorySummary: null,
+      memoryEvolution: null,
+      embedding: null,
+      asr: null,
+      imageGeneration: null
+    }
   };
 }
 

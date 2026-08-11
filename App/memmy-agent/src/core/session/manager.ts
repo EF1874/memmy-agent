@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
+import { modelSelectionWire } from "../../providers/model-catalog.js";
 import { scrubSubagentAnnounceBody } from "../../utils/subagent-channel-display.js";
 import { findLegalMessageStart, imagePlaceholderText, stripThink } from "../../utils/helpers.js";
 import { visibleWebuiUserContent } from "./webui-user-content.js";
@@ -104,6 +105,7 @@ function sessionSummary(session: Session, filePath: string, options: { repairPre
     model_preset: typeof session.metadata?.modelPreset === "string"
       ? session.metadata.modelPreset
       : null,
+    model_selection: modelSelectionWire(session.metadata?.modelSelection),
   };
   if (session.metadata?.[WEBUI_SESSION_METADATA_KEY] === true) {
     const binding = readWebuiSessionBinding(session);

@@ -23,6 +23,16 @@ function workspace(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "memmy-self-model-preset-"));
 }
 
+function modelPreset(init: Record<string, unknown>): ModelPresetConfig {
+  return new ModelPresetConfig({
+    endpoint: "chat",
+    provider: "openai",
+    source: "byok",
+    capabilities: ["agent"],
+    ...init,
+  });
+}
+
 function makeLoop(presets: Record<string, ModelPresetConfig> = {}, activePreset: string | null = null): AgentLoop {
   return new AgentLoop({
     config: new Config({ fileMemory: { enabled: true } }),
@@ -46,7 +56,7 @@ describe("model preset runtime", () => {
 
   it("updates model preset state and model-dependent helpers through the setter", () => {
     const presets = {
-      fast: new ModelPresetConfig({
+      fast: modelPreset({
         model: "openai/gpt-4.1",
         provider: "openai",
         maxTokens: 4096,
@@ -81,7 +91,7 @@ describe("model preset runtime", () => {
       workspace: workspace(),
       model: "base-model",
       contextWindowTokens: 1000,
-      modelPresets: { fast: new ModelPresetConfig({ model: "openai/gpt-4.1" }) },
+      modelPresets: { fast: modelPreset({ model: "openai/gpt-4.1" }) },
       runtimeModelPublisher: (model, preset) => published.push([model, preset]),
     });
 
@@ -93,7 +103,7 @@ describe("model preset runtime", () => {
   it("replaces provider instances from preset snapshots", () => {
     const oldProvider = provider("base-model");
     const newProvider = provider("anthropic/claude-opus-4-5", 2048);
-    const preset = new ModelPresetConfig({
+    const preset = modelPreset({
       model: "anthropic/claude-opus-4-5",
       provider: "anthropic",
       maxTokens: 2048,
@@ -138,7 +148,7 @@ describe("model preset runtime", () => {
       workspace: workspace(),
       model: "base-model",
       contextWindowTokens: 1000,
-      modelPresets: { fast: new ModelPresetConfig({ model: "openai/gpt-4.1", maxTokens: 4096 }) },
+      modelPresets: { fast: modelPreset({ model: "openai/gpt-4.1", maxTokens: 4096 }) },
       presetSnapshotLoader: () => {
         throw new Error("provider unavailable");
       },
@@ -176,7 +186,7 @@ describe("model preset runtime", () => {
       model: "base-model",
       contextWindowTokens: 1000,
       providerSignature: defaultSnapshot.signature,
-      modelPresets: { fast: new ModelPresetConfig({ model: "openai/gpt-4.1" }) },
+      modelPresets: { fast: modelPreset({ model: "openai/gpt-4.1" }) },
       providerSnapshotLoader: () => defaultSnapshot,
       presetSnapshotLoader: () => fastSnapshot,
     });
@@ -212,7 +222,7 @@ describe("model preset runtime", () => {
       model: "base-model",
       contextWindowTokens: 1000,
       providerSignature: ["base-model", "auto", "openai", "sk-old"],
-      modelPresets: { fast: new ModelPresetConfig({ model: "openai/gpt-4.1" }) },
+      modelPresets: { fast: modelPreset({ model: "openai/gpt-4.1" }) },
       providerSnapshotLoader: () => webuiSnapshot,
       presetSnapshotLoader: () => fastSnapshot,
     });
@@ -257,7 +267,23 @@ describe("model preset runtime", () => {
   it("uses a static preset loader from config without enabling provider hot reload", () => {
     const config = Config.fromObject({
       agents: { defaults: { model: "openai/gpt-4.1", workspace: workspace() } },
-      modelPresets: { fast: { model: "openai/gpt-4.1-mini" } },
+      providers: {
+        openai: {
+          apiKey: "test-key",
+          endpoints: {
+            chat: { apiBase: "https://api.example.test/v1", protocol: "openai-chat-completions" },
+          },
+        },
+      },
+      modelPresets: {
+        fast: {
+          endpoint: "chat",
+          model: "openai/gpt-4.1-mini",
+          provider: "openai",
+          source: "byok",
+          capabilities: ["agent"],
+        },
+      },
     });
     const loop = AgentLoop.fromConfig(config, undefined as any, { provider: provider("openai/gpt-4.1") });
 

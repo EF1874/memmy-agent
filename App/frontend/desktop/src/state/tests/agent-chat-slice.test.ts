@@ -1,6 +1,6 @@
 /** Agent chat slice tests. */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { MemmyAgentSessionSummary, MemmyAgentSidebarState, WebuiQueuedMessage } from "../../api/memmy-agent-client.js";
+import type { MemmyAgentModelSelection, MemmyAgentSessionSummary, MemmyAgentSidebarState, WebuiQueuedMessage } from "../../api/memmy-agent-client.js";
 import type { PendingAttachment } from "../agent-composer-state.js";
 import {
   agentReducer,
@@ -13,6 +13,32 @@ import {
 } from "../agent-chat-slice.js";
 
 const WINDOWS_COMMAND_ERROR = "'node' 不是内部或外部命令，也不是可运行的程序\r\n或批处理文件。";
+
+function modelSelection(presetId: string, provider = "openai", model = "gpt-a"): MemmyAgentModelSelection {
+  return {
+    presetId,
+    provider,
+    endpointId: "chat",
+    protocol: "openai-chat-completions",
+    model,
+    source: "byok",
+    ownerAccountId: null,
+    capabilities: ["agent"]
+  };
+}
+
+function modelSelectionWire(presetId: string, provider = "openai", model = "gpt-a") {
+  return {
+    preset_id: presetId,
+    provider,
+    endpoint_id: "chat",
+    protocol: "openai-chat-completions",
+    model,
+    source: "byok",
+    owner_account_id: null,
+    capabilities: ["agent"]
+  };
+}
 
 const sessions: MemmyAgentSessionSummary[] = [
   {
@@ -387,7 +413,7 @@ describe("agent chat slice", () => {
       .toBe(false);
   });
 
-  it("moves deleted Session and draft selections to the latest available default", () => {
+  it("keeps a deleted Session selection as a disabled tombstone while drafts use the latest default", () => {
     const state: AgentState = {
       ...initialAgentState,
       modelPresets: [
@@ -396,7 +422,7 @@ describe("agent chat slice", () => {
       ],
       defaultModelPreset: "model-a",
       pendingPresetByScope: { "draft:1": "model-a" },
-      committedPresetByScope: { "chat-1": "model-a" }
+      committedModelSelectionByScope: { "chat-1": modelSelection("model-a") }
     };
 
     const refreshed = agentReducer(state, {
@@ -408,9 +434,18 @@ describe("agent chat slice", () => {
     });
 
     expect(refreshed.pendingPresetByScope).not.toHaveProperty("draft:1");
-    expect(refreshed.committedPresetByScope["chat-1"]).toBeNull();
+    expect(refreshed.committedModelSelectionByScope["chat-1"]).toEqual(modelSelection("model-a"));
     expect(selectedModelPresetForScope(refreshed, "draft:1")).toBe("model-b");
-    expect(selectedModelPresetForScope(refreshed, "chat-1")).toBe("model-b");
+    expect(selectedModelPresetForScope(refreshed, "chat-1")).toBe("model-a");
+  });
+
+  it("restores the complete committed selection from the session snapshot", () => {
+    const restored = agentReducer(initialAgentState, {
+      type: "agent/sessionsLoaded",
+      sessions: [{ ...sessions[0]!, model_selection: modelSelection("model-a") }]
+    });
+
+    expect(restored.committedModelSelectionByScope["chat-1"]).toEqual(modelSelection("model-a"));
   });
 
   it("keeps a Session model change temporary until the gateway confirms a sent message", () => {
@@ -422,23 +457,69 @@ describe("agent chat slice", () => {
       ],
       defaultModelPreset: "model-a",
       pendingPresetByScope: { "chat-1": "model-b" },
-      committedPresetByScope: { "chat-1": "model-a" }
+      committedModelSelectionByScope: { "chat-1": modelSelection("model-a") }
     };
 
     expect(selectedModelPresetForScope(state, "chat-1")).toBe("model-b");
 
-    const confirmed = agentReducer(state, {
+    const awaitingAck = agentReducer(state, {
+      type: "agent/modelSelectionRequestStarted",
+      scopeKey: "chat-1",
+      chatId: "chat-1",
+      clientRequestId: "11111111-1111-4111-8111-111111111111",
+      presetId: "model-b"
+    });
+    const confirmed = agentReducer(awaitingAck, {
       type: "agent/wsEvent",
       event: {
         event: "message_accepted",
         chat_id: "chat-1",
         client_request_id: "11111111-1111-4111-8111-111111111111",
-        model_preset: "model-b"
+        model_preset: "model-b",
+        model_selection: modelSelectionWire("model-b", "anthropic", "claude-b")
       }
     });
 
     expect(confirmed.pendingPresetByScope).not.toHaveProperty("chat-1");
-    expect(confirmed.committedPresetByScope["chat-1"]).toBe("model-b");
+    expect(confirmed.committedModelSelectionByScope["chat-1"])
+      .toEqual(modelSelection("model-b", "anthropic", "claude-b"));
+  });
+
+  it("ignores mismatched/global model events and clears a removed request", () => {
+    const awaitingAck = agentReducer(initialAgentState, {
+      type: "agent/modelSelectionRequestStarted",
+      scopeKey: "chat-1",
+      chatId: "chat-1",
+      clientRequestId: "request-1",
+      presetId: "model-b"
+    });
+    const wrongChat = agentReducer(awaitingAck, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message_accepted",
+        chat_id: "chat-2",
+        client_request_id: "request-1",
+        model_selection: modelSelectionWire("model-b", "anthropic", "claude-b")
+      }
+    });
+    const globalUpdate = agentReducer(wrongChat, {
+      type: "agent/wsEvent",
+      event: { event: "runtime_model_updated", model_name: "should-not-commit", model_preset: "model-b" }
+    });
+
+    expect(globalUpdate.committedModelSelectionByScope).toEqual({});
+    expect(globalUpdate.modelName).toBe(initialAgentState.modelName);
+    expect(globalUpdate.pendingModelCommitByRequestId).toHaveProperty("request-1");
+    const removed = agentReducer(globalUpdate, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message_queue_removed",
+        chat_id: "chat-1",
+        client_request_id: "request-1",
+        revision: 1
+      }
+    });
+    expect(removed.pendingModelCommitByRequestId).not.toHaveProperty("request-1");
   });
 
   it("starts with the chat view marked invisible until routing bootstrap resolves", () => {
@@ -2476,6 +2557,24 @@ describe("agent chat slice", () => {
 
     expect(state.messages).toEqual([{ id: "user-0", role: "user", content: "已经保存的消息" }]);
     expect(state.operationErrorsBySurface.chat?.message).toBe("home.media.error.sendUnsupported");
+  });
+
+  it("uses the stable rejection reason for a deleted committed model tombstone", () => {
+    const state = agentReducer(initialAgentState, {
+      type: "agent/wsEvent",
+      event: {
+        event: "error",
+        chat_id: "chat-1",
+        detail: "message_request_rejected",
+        reason: "model_selection_unavailable"
+      }
+    });
+
+    expect(state.operationErrorsBySurface.chat).toMatchObject({
+      source: "gateway-command",
+      chatId: "chat-1",
+      message: "model_selection_unavailable"
+    });
   });
 
   it("clears only the target optimistic send when the gateway reports missing content", () => {

@@ -1,5 +1,6 @@
 import path from "node:path";
 import { LLMProvider, LLMResponse, ToolCallRequest } from "../../providers/base.js";
+import type { ActualModelContext } from "@memmy/local-api-contracts";
 import { CONTEXT_SAFETY_BUFFER_TOKENS } from "../../token-budget.js";
 import { ToolRegistry } from "./tools/registry.js";
 import type { FileMutationOutcome, ToolExecutionContext } from "./tools/base.js";
@@ -109,6 +110,7 @@ export class AgentRunSpec {
   turnId?: string | null;
   boundary?: TurnCancellationBoundary | null;
   internalTurnContext?: AgentInternalTurnContext | null;
+  actualModelContext?: ActualModelContext | null;
   onMaxFinalizationStarting?: (() => void) | null;
 
   constructor(init: {
@@ -144,6 +146,7 @@ export class AgentRunSpec {
     turnId?: string | null;
     boundary?: TurnCancellationBoundary | null;
     internalTurnContext?: AgentInternalTurnContext | null;
+    actualModelContext?: ActualModelContext | null;
     onMaxFinalizationStarting?: (() => void) | null;
   } = {}) {
     this.messages = this.initialMessages = init.messages ?? init.initialMessages ?? [];
@@ -177,6 +180,7 @@ export class AgentRunSpec {
     this.turnId = init.turnId ?? null;
     this.boundary = init.boundary ?? null;
     this.internalTurnContext = init.internalTurnContext ?? null;
+    this.actualModelContext = init.actualModelContext ?? null;
     this.onMaxFinalizationStarting = init.onMaxFinalizationStarting ?? null;
   }
 }

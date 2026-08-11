@@ -176,13 +176,20 @@ export function sessionDagTargetKey(sessionDagDir: string): string {
 }
 
 export function migrationTargetFor(
-  definition: Pick<MigrationDefinition, "scope">,
+  definition: Pick<MigrationDefinition, "scope" | "requiredTargets">,
   runtimeConfigFile: string,
   sessionDagDir: string,
+  appDatabaseFile?: string,
 ): AppliedMigrationTarget {
   if (definition.scope === "agent-workspace") return { type: "agent-workspace" };
   if (definition.scope === "runtime-config") {
-    return { type: "runtime-config", key: runtimeConfigTargetKey(runtimeConfigFile) };
+    const runtimeKey = runtimeConfigTargetKey(runtimeConfigFile);
+    const key = definition.requiredTargets?.includes("appDatabaseFile") && appDatabaseFile
+      ? createHash("sha256")
+          .update(`${runtimeKey}\0${path.normalize(path.resolve(appDatabaseFile))}`)
+          .digest("hex")
+      : runtimeKey;
+    return { type: "runtime-config", key };
   }
   return { type: "session-dag", key: sessionDagTargetKey(sessionDagDir) };
 }
@@ -192,8 +199,14 @@ export function isMigrationApplied(
   definition: MigrationDefinition,
   runtimeConfigFile: string,
   sessionDagDir: string,
+  appDatabaseFile?: string,
 ): boolean {
-  const target = migrationTargetFor(definition, runtimeConfigFile, sessionDagDir);
+  const target = migrationTargetFor(
+    definition,
+    runtimeConfigFile,
+    sessionDagDir,
+    appDatabaseFile,
+  );
   const identity = recordIdentity({ id: definition.id, target });
   return state.applied.some((record) => recordIdentity(record) === identity);
 }

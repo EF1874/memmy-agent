@@ -95,7 +95,10 @@ function createDatabaseFixture(): { workspacePath: string; databasePath: string 
   mkdirSync(join(workspacePath, ".git"), { recursive: true });
   const db = new DatabaseSync(databasePath);
   try {
-    db.exec(readFileSync(join(import.meta.dirname, "__fixtures__", "opencode", "state.sql"), "utf8").replaceAll("$WORKSPACE_PATH", workspacePath));
+    const fixtureSql = readFileSync(join(import.meta.dirname, "__fixtures__", "opencode", "state.sql"), "utf8")
+      .replaceAll('"$WORKSPACE_PATH"', JSON.stringify(workspacePath))
+      .replaceAll("$WORKSPACE_PATH", workspacePath.replaceAll("'", "''"));
+    db.exec(fixtureSql);
   } finally {
     db.close();
   }

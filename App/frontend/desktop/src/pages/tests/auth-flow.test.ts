@@ -118,12 +118,13 @@ describe("auth flow pages", () => {
   it("欢迎页 BYOK 入口经 resolveByokEntry 守卫，已完成引导时不重置 completed", () => {
     const source = readSource("welcome-page.tsx");
     const handlerIndex = source.indexOf("async function useOwnApiKey()");
-    const guardIndex = source.indexOf("const byokEntry = resolveByokEntry({ onboarding: state.bootstrap?.onboarding });", handlerIndex);
+    const guardIndex = source.indexOf("const byokEntry = resolveByokEntry({", handlerIndex);
     const persistIndex = source.indexOf("onboarding: byokEntry.onboardingPatch", handlerIndex);
     const navigateIndex = source.indexOf("dispatch(appActions.navigate(byokEntry.nextRoute));", handlerIndex);
 
     expect(handlerIndex).toBeGreaterThanOrEqual(0);
     expect(guardIndex).toBeGreaterThan(handlerIndex);
+    expect(source.slice(guardIndex, persistIndex)).toContain("modelConfig: state.modelConfig");
     expect(persistIndex).toBeGreaterThan(guardIndex);
     expect(navigateIndex).toBeGreaterThan(persistIndex);
     expect(source).not.toContain("const onboardingPatch = buildByokOnboardingSetupPatch();");

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { get_encoding } from "tiktoken";
 import { CONTEXT_SAFETY_BUFFER_TOKENS, DEFAULT_MAX_TOKENS } from "../token-budget.js";
@@ -479,7 +480,7 @@ export function syncWorkspaceTemplates(
   options: { fileMemoryEnabled?: boolean } = {},
 ): string[] {
   const src =
-    templatesDir ?? path.join(path.dirname(new URL(import.meta.url).pathname), "..", "templates");
+    templatesDir ?? path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "templates");
   const fileMemoryEnabled = options.fileMemoryEnabled === true;
   fs.mkdirSync(workspace, { recursive: true });
   const added: string[] = [];

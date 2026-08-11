@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, normalize } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   resolveClaudeCodeHomeDirectory,
@@ -58,24 +58,24 @@ describe("agent paths", () => {
     process.env.QWENWORK_CONFIG_DIR = "/tmp/qwenwork-home";
     process.env.WORKBUDDY_CONFIG_DIR = "/tmp/workbuddy-home";
 
-    expect(resolveClaudeCodeHomeDirectory()).toBe("/tmp/claude-home");
-    expect(resolveCodexHomeDirectory()).toBe("/tmp/codex-home");
-    expect(resolveHermesHomeDirectory()).toBe("/tmp/hermes-home");
-    expect(resolveOpenclawStateDirectory()).toBe("/tmp/openclaw-state");
-    expect(resolveOpenclawConfigPath()).toBe("/tmp/openclaw-config.json");
-    expect(resolvePiAgentDirectory()).toBe("/tmp/pi-agent");
-    expect(resolveQwenworkHomeDirectory()).toBe("/tmp/qwenwork-home");
-    expect(resolveWorkbuddyHomeDirectory()).toBe("/tmp/workbuddy-home");
+    expect(resolveClaudeCodeHomeDirectory()).toBe(normalize("/tmp/claude-home"));
+    expect(resolveCodexHomeDirectory()).toBe(normalize("/tmp/codex-home"));
+    expect(resolveHermesHomeDirectory()).toBe(normalize("/tmp/hermes-home"));
+    expect(resolveOpenclawStateDirectory()).toBe(normalize("/tmp/openclaw-state"));
+    expect(resolveOpenclawConfigPath()).toBe(normalize("/tmp/openclaw-config.json"));
+    expect(resolvePiAgentDirectory()).toBe(normalize("/tmp/pi-agent"));
+    expect(resolveQwenworkHomeDirectory()).toBe(normalize("/tmp/qwenwork-home"));
+    expect(resolveWorkbuddyHomeDirectory()).toBe(normalize("/tmp/workbuddy-home"));
   });
 
   it("uses WorkBuddy's official config directory variables", () => {
     process.env.WORKBUDDY_CONFIG_DIR = "/tmp/workbuddy-current";
     process.env.CODEBUDDY_CONFIG_DIR = "/tmp/workbuddy-legacy-product-name";
 
-    expect(resolveWorkbuddyHomeDirectory()).toBe("/tmp/workbuddy-current");
+    expect(resolveWorkbuddyHomeDirectory()).toBe(normalize("/tmp/workbuddy-current"));
 
     process.env.WORKBUDDY_CONFIG_DIR = " ";
-    expect(resolveWorkbuddyHomeDirectory()).toBe("/tmp/workbuddy-legacy-product-name");
+    expect(resolveWorkbuddyHomeDirectory()).toBe(normalize("/tmp/workbuddy-legacy-product-name"));
   });
 
   it("uses OpenCode's custom config directory and XDG data directory", () => {
@@ -87,7 +87,7 @@ describe("agent paths", () => {
     expect(resolveOpencodeDataDirectory()).toBe(join("/tmp/xdg-data", "opencode"));
 
     process.env.OPENCODE_CONFIG_DIR = "/tmp/custom-opencode";
-    expect(resolveOpencodeConfigDirectory()).toBe("/tmp/custom-opencode");
+    expect(resolveOpencodeConfigDirectory()).toBe(normalize("/tmp/custom-opencode"));
   });
 
   it("resolves all nine Agent source paths on macOS", () => {

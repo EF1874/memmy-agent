@@ -15,6 +15,7 @@ import {
   storeGeneratedImageArtifact,
 } from "../../../utils/artifacts.js";
 import { detectImageMime } from "../../../utils/helpers.js";
+import type { ResolvedModelSelection } from "../../../providers/model-catalog.js";
 
 function isRelativeTo(child: string, parent: string): boolean {
   const rel = path.relative(path.resolve(parent), path.resolve(child));
@@ -36,6 +37,8 @@ export class ImageGenerationTool extends Tool {
 
   workspace: string;
   config: ImageGenerationToolConfig;
+  modelSelection: ResolvedModelSelection | null;
+  private readonly catalogSelectionRequired: boolean;
   private generatedImagesThisTurn = 0;
 
   static configCls(): typeof ImageGenerationToolConfig {
@@ -45,6 +48,13 @@ export class ImageGenerationTool extends Tool {
   static enabled(ctx: any): boolean {
     const cfg = ctx?.config?.imageGeneration ?? ctx?.config?.tools?.imageGeneration;
     if (!cfg?.enabled) return false;
+    if (ctx?.modelSelectionResolver) {
+      try {
+        return Boolean(ctx.modelSelectionResolver({ capability: "image_generation" }));
+      } catch {
+        return false;
+      }
+    }
     const config = cfg instanceof ImageGenerationToolConfig ? cfg : new ImageGenerationToolConfig(cfg);
     if (!config.profileMode) return true;
     if (!config.hasCompleteEffectiveProfile()) return false;
@@ -57,23 +67,33 @@ export class ImageGenerationTool extends Tool {
     const parsedConfig =
       rawConfig instanceof ImageGenerationToolConfig ? rawConfig : new ImageGenerationToolConfig(rawConfig);
     const config = parsedConfig.profileMode ? parsedConfig.effectiveImageGenerationConfig() : parsedConfig;
+    const catalogSelectionRequired = typeof ctx?.modelSelectionResolver === "function";
+    const modelSelection = ctx?.modelSelectionResolver?.({ capability: "image_generation" }) ?? null;
     return new ImageGenerationTool({
       workspace: ctx?.workspace ?? process.cwd(),
       config,
+      modelSelection,
+      catalogSelectionRequired,
     });
   }
 
   constructor({
     workspace = process.cwd(),
     config = new ImageGenerationToolConfig(),
+    modelSelection = null,
+    catalogSelectionRequired = false,
   }: {
     workspace?: string;
     config?: ImageGenerationToolConfig;
+    modelSelection?: ResolvedModelSelection | null;
+    catalogSelectionRequired?: boolean;
   } = {}) {
     super();
     this.workspace = path.resolve(workspace);
     this.config =
       config instanceof ImageGenerationToolConfig ? config : new ImageGenerationToolConfig(config);
+    this.modelSelection = modelSelection;
+    this.catalogSelectionRequired = catalogSelectionRequired;
   }
 
   get name(): string {
@@ -102,13 +122,15 @@ export class ImageGenerationTool extends Tool {
   }
 
   providerClient(): ImageGenerationProvider | null {
-    const cls = getImageGenProvider(this.config.provider);
+    const provider = this.modelSelection?.provider ?? this.config.provider;
+    const providerConfig = this.modelSelection?.providerConfig;
+    const cls = getImageGenProvider(provider);
     if (!cls) return null;
     return new cls({
-      apiKey: this.config.apiKey || null,
-      apiBase: this.config.apiBase || null,
-      extraHeaders: this.config.extraHeaders,
-      extraBody: this.config.extraBody,
+      apiKey: (providerConfig?.apiKey ?? this.config.apiKey) || null,
+      apiBase: (providerConfig?.apiBase ?? this.config.apiBase) || null,
+      extraHeaders: providerConfig ? { ...providerConfig.extraHeaders } : this.config.extraHeaders,
+      extraBody: providerConfig ? { ...providerConfig.extraBody } : this.config.extraBody,
     });
   }
 
@@ -146,9 +168,14 @@ export class ImageGenerationTool extends Tool {
     } = {},
   ): Promise<string> {
     if (!params.prompt) return "Error: missing prompt";
-    if (!this.config.model.trim()) return "Error: tools.imageGeneration.model is required";
+    if (this.catalogSelectionRequired && !this.modelSelection) {
+      return "Error: model_selection_unavailable";
+    }
+    const model = this.modelSelection?.model ?? this.config.model;
+    const provider = this.modelSelection?.provider ?? this.config.provider;
+    if (!model.trim()) return "Error: image generation model selection is required";
     const client = this.providerClient();
-    if (!client) return `Error: unsupported image generation provider '${this.config.provider}'`;
+    if (!client) return `Error: unsupported image generation provider '${provider}'`;
     const requested = params.count ?? 1;
     const max = this.config.maxImagesPerTurn;
     if (max !== null) {
@@ -168,7 +195,7 @@ export class ImageGenerationTool extends Tool {
       while (artifacts.length < requested) {
         const response = await client.generate({
           prompt: params.prompt,
-          model: this.config.model,
+          model,
           referenceImages: refs,
           aspectRatio: params.aspect_ratio ?? params.aspectRatio ?? this.config.defaultAspectRatio,
           imageSize: params.image_size ?? params.imageSize ?? this.config.defaultImageSize,
@@ -176,10 +203,10 @@ export class ImageGenerationTool extends Tool {
         for (const imageDataUrl of response.images) {
           const artifact = storeGeneratedImageArtifact(imageDataUrl, {
             prompt: params.prompt,
-            model: this.config.model,
+            model,
             sourceImages: refs,
             saveDir: this.config.saveDir,
-            provider: this.config.provider,
+            provider,
           });
           artifacts.push(artifact);
           this.generatedImagesThisTurn += 1;
@@ -193,6 +220,16 @@ export class ImageGenerationTool extends Tool {
         error instanceof ImageGenerationError ||
         error instanceof Error
       ) {
+        if (error instanceof ImageGenerationError && error.errorCategory && this.modelSelection) {
+          return `Error: ${error.message}\nmodel_error: ${JSON.stringify({
+            category: error.errorCategory,
+            presetId: this.modelSelection.presetId,
+            source: this.modelSelection.source,
+            provider: this.modelSelection.provider,
+            model: this.modelSelection.model,
+            capability: this.modelSelection.capability,
+          })}`;
+        }
         return `Error: ${error.message}`;
       }
       return `Error: ${String(error)}`;

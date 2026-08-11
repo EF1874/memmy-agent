@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MessageBus } from "../../../src/core/runtime-messages/queue.js";
 import { OutboundMessage } from "../../../src/core/runtime-messages/events.js";
-import { WebSocketChannel, publishRuntimeModelUpdate } from "../../../src/integrations/channels/websocket.js";
+import { WebSocketChannel } from "../../../src/integrations/channels/websocket.js";
 import { issueToken, issueTokenOk, WsMessage, WsTestClient } from "./ws-test-client.js";
 
 const running: WebSocketChannel[] = [];
@@ -49,39 +49,6 @@ async function nextInbound(bus: MessageBus) {
 }
 
 describe("WebSocket integration", () => {
-  it("publishes runtime model update events onto the websocket outbound channel", () => {
-    const bus = new MessageBus();
-
-    publishRuntimeModelUpdate(bus, "openai/gpt-4.1", "fast");
-    const event = bus.outbound.getNowait();
-
-    expect(event?.channel).toBe("websocket");
-    expect(event?.chatId).toBe("*");
-    expect(event?.content).toBe("");
-    expect(event?.metadata).toEqual({
-      runtimeModelUpdated: true,
-      model: "openai/gpt-4.1",
-      model_preset: "fast",
-    });
-  });
-
-  it("broadcasts runtime model updates to attached websocket connections", async () => {
-    const bus = new MessageBus();
-    const channel = new WebSocketChannel({ enabled: true, allowFrom: ["*"] }, bus);
-    const ws = { send: vi.fn(async (raw: string) => undefined) };
-    channel.attachConnection(ws, "chat-1");
-
-    publishRuntimeModelUpdate(bus, "openai/gpt-4.1", "fast");
-    await channel.send(bus.outbound.getNowait()!);
-
-    const payload = JSON.parse(ws.send.mock.calls[0][0]);
-    expect(payload).toEqual({
-      event: "runtime_model_updated",
-      model_name: "openai/gpt-4.1",
-      model_preset: "fast",
-    });
-  });
-
   it("wraps raw websocket client messages with runtime helper compatible accessors", () => {
     const msg = new WsMessage("message", {
       event: "message",

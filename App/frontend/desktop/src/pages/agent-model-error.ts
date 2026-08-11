@@ -59,8 +59,6 @@ export interface AgentModelErrorPresentation {
 }
 
 export interface AgentModelErrorFormatOptions {
-  /** Account mode (memmy_account): the credential is the projected login token, not a user-supplied API key. */
-  accountMode?: boolean;
   modelError?: MemmyAgentModelError | null;
 }
 
@@ -88,7 +86,7 @@ export function formatAgentModelError(content: string, t: Translate, options?: A
   }
   if (/401|403|unauthorized|invalid.*api.*key|authentication|api key/.test(haystack)) {
     return {
-      title: t(options?.accountMode === true ? "agent.error.loginExpired" : "agent.error.authFailed"),
+      title: t(options?.modelError?.source === "account" ? "agent.error.loginExpired" : "agent.error.authFailed"),
       detail: structuredDetail ?? null
     };
   }

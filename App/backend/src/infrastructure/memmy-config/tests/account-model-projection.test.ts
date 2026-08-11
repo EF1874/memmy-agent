@@ -1,25 +1,24 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import YAML from "yaml";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   clearAccountModelProjectionFromMemmyConfig,
   writeAccountModelProjectionToMemmyConfig
 } from "../index.js";
 
-const temporaryRoots: string[] = [];
+const roots: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(temporaryRoots.splice(0).map((root) => (
-    rm(root, { recursive: true, force: true })
-  )));
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
 async function configFile(config: Record<string, unknown>): Promise<string> {
-  const root = await mkdtemp(path.join(os.tmpdir(), "memmy-account-model-"));
-  temporaryRoots.push(root);
-  const file = path.join(root, "config.yaml");
+  const root = await mkdtemp(join(tmpdir(), "memmy-account-catalog-"));
+  roots.push(root);
+  const file = join(root, "config.yaml");
   await writeFile(file, YAML.stringify(config), "utf8");
   return file;
 }
@@ -28,140 +27,141 @@ async function readConfig(file: string): Promise<any> {
   return YAML.parse(await readFile(file, "utf8"));
 }
 
-describe("account model projection", () => {
-  it("adds the account Provider without replacing a valid BYOK default", async () => {
-    const file = await configFile({
-      providers: {
-        openai: {
-          apiBase: "https://api.openai.com/v1",
-          apiKey: "byok-secret"
-        }
-      },
-      modelPresets: {
-        "work-gpt": {
-          provider: "openai",
-          model: "gpt-5"
-        }
-      },
-      agents: {
-        defaults: {
-          modelPreset: "work-gpt"
-        }
-      },
-      memmyMemory: {
-        userId: "local-user",
-        roleRouting: {
-          summary: "fixed",
-          evolution: "follow"
-        },
-        summary: {
-          provider: "openai_compatible",
-          endpoint: "https://memory.example.test/v1",
-          model: "memory-model",
-          apiKey: "memory-secret"
-        },
-        embedding: {
-          mode: "local"
+function accountId(owner: string, capability: string): string {
+  const hash = createHash("sha256").update(owner).digest("hex").slice(0, 12);
+  return `memmy-account-${hash}-${capability.replaceAll("_", "-")}`;
+}
+
+function currentByokCatalog(): Record<string, unknown> {
+  return {
+    futureSection: { keepMe: true },
+    providers: {
+      openai: {
+        apiKey: "byok-secret",
+        futureProviderField: "keep-provider",
+        endpoints: {
+          chat: { apiBase: "https://api.example.test/v1", protocol: "openai-chat-completions" }
         }
       }
-    });
+    },
+    modelPresets: {
+      byokAgent: {
+        provider: "openai", endpoint: "chat", model: "gpt-5", source: "byok", capabilities: ["agent"]
+      },
+      byokSummary: {
+        provider: "openai", endpoint: "chat", model: "gpt-5-mini", source: "byok", capabilities: ["memory_summary"]
+      }
+    },
+    modelAssignments: {
+      byok: {
+        agent: { candidates: ["byokAgent"], default: "byokAgent" },
+        memorySummary: "byokSummary",
+        memoryEvolution: null,
+        embedding: null,
+        asr: null,
+        imageGeneration: null
+      },
+      account: {
+        ownerAccountId: "previous-owner",
+        agent: { candidates: ["byokAgent"], default: "byokAgent" },
+        memorySummary: "byokSummary",
+        memoryEvolution: null,
+        embedding: null,
+        asr: null,
+        imageGeneration: null,
+        futureAssignmentField: "keep-assignment"
+      }
+    },
+    agents: { defaults: { modelPreset: "byokAgent", timezone: "+08:00" } }
+  };
+}
 
-    await writeAccountModelProjectionToMemmyConfig({
-      cloudUuid: "cloud-uuid",
-      userId: "account-user"
+describe("account model projection current catalog", () => {
+  it("creates an owner-scoped Provider, endpoint, six presets, and isolated assignment", async () => {
+    const file = await configFile(currentByokCatalog());
+    const beforeByok = (await readConfig(file)).modelAssignments.byok;
+
+    const result = await writeAccountModelProjectionToMemmyConfig({
+      cloudUuid: "cloud-token",
+      userId: "owner-a"
     }, file);
-    const loggedIn = await readConfig(file);
 
-    expect(loggedIn.agents.defaults.modelPreset).toBe("work-gpt");
-    expect(loggedIn.providers.openai.apiKey).toBe("byok-secret");
-    expect(loggedIn.providers.memmy_account.apiKey).toBe("cloud-uuid");
-    expect(loggedIn.modelPresets["memmy-account"]).toEqual({
-      provider: "memmy_account",
-      model: "agent_chat"
-    });
-    expect(loggedIn.app).toMatchObject({
-      cloudUuid: "cloud-uuid",
-      userId: "account-user"
-    });
-    expect(loggedIn.memmyMemory).toMatchObject({
-      userId: "local-user",
-      roleRouting: {
-        summary: "fixed",
-        evolution: "follow"
-      },
-      embedding: {
-        mode: "local"
+    expect(result).toEqual({ changed: true, memoryConfigAffected: false });
+    const saved = await readConfig(file);
+    expect(saved.providers.memmy_account).toMatchObject({
+      ownerAccountId: "owner-a",
+      apiKey: "cloud-token",
+      endpoints: {
+        platform: {
+          apiBase: expect.stringContaining("/api/agentExternal/v1"),
+          protocol: "memmy-account"
+        }
       }
     });
-
-    await clearAccountModelProjectionFromMemmyConfig(file);
-    const loggedOut = await readConfig(file);
-    expect(loggedOut.providers.openai.apiKey).toBe("byok-secret");
-    expect(loggedOut.providers.memmy_account).toBeUndefined();
-    expect(loggedOut.modelPresets["memmy-account"]).toBeUndefined();
-    expect(loggedOut.agents.defaults.modelPreset).toBe("work-gpt");
-    expect(loggedOut.app?.cloudUuid).toBeUndefined();
-    expect(loggedOut.app?.userId).toBeUndefined();
-    expect(loggedOut.memmyMemory.userId).toBe("local-user");
-    expect(loggedOut.memmyMemory.summary.model).toBe("memory-model");
+    expect(saved.providers.memmy_account).not.toHaveProperty("apiBase");
+    for (const capability of ["agent", "memory_summary", "memory_evolution", "embedding", "asr", "image_generation"]) {
+      expect(saved.modelPresets[accountId("owner-a", capability)]).toMatchObject({
+        provider: "memmy_account",
+        endpoint: "platform",
+        source: "account",
+        ownerAccountId: "owner-a",
+        capabilities: [capability]
+      });
+    }
+    expect(saved.modelAssignments.byok).toEqual(beforeByok);
+    expect(saved.modelAssignments.account).toMatchObject({
+      ownerAccountId: "owner-a",
+      agent: {
+        candidates: ["byokAgent", accountId("owner-a", "agent")],
+        default: "byokAgent"
+      },
+      memorySummary: "byokSummary",
+      memoryEvolution: accountId("owner-a", "memory_evolution"),
+      futureAssignmentField: "keep-assignment"
+    });
+    expect(saved.futureSection.keepMe).toBe(true);
+    expect(saved.providers.openai.futureProviderField).toBe("keep-provider");
   });
 
-  it("uses the account model only when no valid default exists and clears it on logout", async () => {
-    const file = await configFile({
-      memmyMemory: {
-        roleRouting: {
-          summary: "follow",
-          evolution: "follow"
-        },
-        embedding: {
-          mode: "cloud",
-          custom: {
-            endpoint: "https://embedding.example.test/v1",
-            model: "embedding-model",
-            apiKey: "embedding-secret"
-          }
-        }
-      }
-    });
+  it("switches owners without reviving the previous owner's platform definitions", async () => {
+    const file = await configFile(currentByokCatalog());
+    await writeAccountModelProjectionToMemmyConfig({ cloudUuid: "token-a", userId: "owner-a" }, file);
+    const afterA = await readConfig(file);
+    const beforeByok = afterA.modelAssignments.byok;
 
-    await writeAccountModelProjectionToMemmyConfig({
-      cloudUuid: "cloud-uuid",
-      userId: "account-user"
-    }, file);
-    expect((await readConfig(file)).agents.defaults.modelPreset).toBe("memmy-account");
+    await writeAccountModelProjectionToMemmyConfig({ cloudUuid: "token-b", userId: "owner-b" }, file);
+    const afterB = await readConfig(file);
+    expect(afterB.modelPresets[accountId("owner-a", "agent")]).toBeUndefined();
+    expect(afterB.modelPresets[accountId("owner-b", "agent")]).toBeDefined();
+    expect(afterB.providers.memmy_account.ownerAccountId).toBe("owner-b");
+    expect(afterB.modelAssignments.account.ownerAccountId).toBe("owner-b");
+    expect(afterB.modelAssignments.byok).toEqual(beforeByok);
 
-    await clearAccountModelProjectionFromMemmyConfig(file);
-    const loggedOut = await readConfig(file);
-    expect(loggedOut.agents.defaults.modelPreset).toBeNull();
-    expect(loggedOut.memmyMemory.embedding.mode).toBe("custom");
-    expect(loggedOut.memmyMemory.roleRouting).toEqual({
-      summary: "follow",
-      evolution: "follow"
-    });
+    await expect(writeAccountModelProjectionToMemmyConfig({ cloudUuid: "token-b", userId: "owner-b" }, file))
+      .resolves.toEqual({ changed: false, memoryConfigAffected: false });
   });
 
-  it("rejects an occupied memmy-account preset without modifying the file", async () => {
-    const file = await configFile({
-      providers: {
-        openai: {
-          apiKey: "byok-secret"
-        }
-      },
-      modelPresets: {
-        "memmy-account": {
-          provider: "openai",
-          model: "gpt-5"
-        }
-      }
-    });
-    const before = await readFile(file, "utf8");
+  it("logout removes account definitions but leaves both assignment namespaces byte-equivalent", async () => {
+    const file = await configFile(currentByokCatalog());
+    await writeAccountModelProjectionToMemmyConfig({ cloudUuid: "token-a", userId: "owner-a" }, file);
+    const before = await readConfig(file);
 
-    await expect(writeAccountModelProjectionToMemmyConfig({
-      cloudUuid: "cloud-uuid",
-      userId: "account-user"
-    }, file)).rejects.toMatchObject({
-      code: "account_model_preset_conflict"
-    });
-    await expect(readFile(file, "utf8")).resolves.toBe(before);
+    const result = await clearAccountModelProjectionFromMemmyConfig(file);
+    const after = await readConfig(file);
+    expect(result).toEqual({ changed: true, memoryConfigAffected: false });
+    expect(after.providers.memmy_account).toBeUndefined();
+    expect(Object.values(after.modelPresets).some((preset: any) => preset.source === "account")).toBe(false);
+    expect(after.modelAssignments.account).toEqual(before.modelAssignments.account);
+    expect(after.modelAssignments.byok).toEqual(before.modelAssignments.byok);
+    expect(after.app?.cloudUuid).toBeUndefined();
+    expect(after.app?.userId).toBeUndefined();
+  });
+
+  it("does not expose the account identifier in deterministic preset IDs", async () => {
+    const file = await configFile({});
+    await writeAccountModelProjectionToMemmyConfig({ cloudUuid: "secret-token", userId: "person@example.test" }, file);
+    const ids = Object.keys((await readConfig(file)).modelPresets);
+    expect(ids).toHaveLength(6);
+    expect(ids.every((id) => !id.includes("person") && !id.includes("example"))).toBe(true);
   });
 });

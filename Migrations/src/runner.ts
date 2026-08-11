@@ -10,7 +10,10 @@ import {
   readMigrationState,
   writeMigrationState,
 } from "./state-store.js";
-import { withRuntimeConfigWriteLock } from "./runtime-config-lock.js";
+import {
+  withRuntimeConfigWriteLock,
+  type RuntimeConfigLockHandle,
+} from "./runtime-config-lock.js";
 import {
   MigrationError,
   type MigrationDefinition,
@@ -104,6 +107,25 @@ function resolveSessionDagTarget(target: string): string {
   return path.normalize(path.resolve(target));
 }
 
+function resolveOptionalFileTarget(target: string | undefined): string | undefined {
+  if (target === undefined) return undefined;
+  if (typeof target !== "string" || !target.trim()) {
+    throw new MigrationError(
+      "migration_target_unavailable",
+      "App database migration target is unavailable",
+      { scope: "runtime-config" },
+    );
+  }
+  return path.normalize(path.resolve(target));
+}
+
+function hasRequiredTargets(
+  definition: MigrationDefinition,
+  targets: RunMigrationsOptions["targets"],
+): boolean {
+  return (definition.requiredTargets ?? []).every((target) => Boolean(targets[target]));
+}
+
 function isLockContention(error: unknown): boolean {
   return (
     typeof error === "object" &&
@@ -136,6 +158,13 @@ async function runMigrationsInternal(
   const profileWorkspace = await resolveTarget(options.targets.agentWorkspace);
   const runtimeConfigFile = resolveRuntimeConfigTarget(options.targets.runtimeConfigFile);
   const sessionDagDir = resolveSessionDagTarget(options.targets.sessionDagDir);
+  const appDatabaseFile = resolveOptionalFileTarget(options.targets.appDatabaseFile);
+  const resolvedTargets = {
+    agentWorkspace: profileWorkspace,
+    runtimeConfigFile,
+    sessionDagDir,
+    ...(appDatabaseFile ? { appDatabaseFile } : {}),
+  };
   const statePaths = getMigrationStatePaths(profileWorkspace);
   try {
     await fs.mkdir(statePaths.directory, { recursive: true });
@@ -167,12 +196,25 @@ async function runMigrationsInternal(
   try {
     const state = await readMigrationState(statePaths.file, definitions);
     const skipped = definitions
-      .filter((definition) => isMigrationApplied(state, definition, runtimeConfigFile, sessionDagDir))
+      .filter((definition) =>
+        isMigrationApplied(state, definition, runtimeConfigFile, sessionDagDir, appDatabaseFile),
+      )
       .map((definition) => definition.id);
     const applied: RunMigrationsResult["applied"] = [];
+    const deferred: string[] = [];
 
     for (const definition of definitions) {
-      if (isMigrationApplied(state, definition, runtimeConfigFile, sessionDagDir)) continue;
+      if (
+        isMigrationApplied(state, definition, runtimeConfigFile, sessionDagDir, appDatabaseFile)
+      ) continue;
+      if (!hasRequiredTargets(definition, resolvedTargets)) {
+        deferred.push(definition.id);
+        options.logger.info("migration_deferred", {
+          migrationId: definition.id,
+          scope: definition.scope,
+        });
+        continue;
+      }
       options.logger.info("migration_started", {
         migrationId: definition.id,
         scope: definition.scope,
@@ -180,15 +222,17 @@ async function runMigrationsInternal(
 
       let result: MigrationResult;
       try {
-        const run = () => definition.up({
+        const run = (runtimeConfigLock?: RuntimeConfigLockHandle) => definition.up({
           profileWorkspace,
           sessionsDir: path.join(profileWorkspace, "sessions"),
           runtimeConfigFile,
           sessionDagDir,
+          ...(appDatabaseFile ? { appDatabaseFile } : {}),
+          ...(runtimeConfigLock ? { runtimeConfigLock } : {}),
           logger: options.logger,
         });
         result = definition.scope === "runtime-config"
-          ? await withRuntimeConfigWriteLock(runtimeConfigFile, run)
+          ? await withRuntimeConfigWriteLock(runtimeConfigFile, (lock) => run(lock))
           : await run();
       } catch (error) {
         const migrationError =
@@ -212,11 +256,25 @@ async function runMigrationsInternal(
         throw migrationError;
       }
 
+      if (result.deferred) {
+        deferred.push(definition.id);
+        options.logger.info("migration_deferred", {
+          migrationId: definition.id,
+          scope: definition.scope,
+        });
+        continue;
+      }
+
       state.applied.push({
         id: definition.id,
         introducedIn: definition.introducedIn,
         appliedAt: (internals.now ?? (() => new Date()))().toISOString(),
-        target: migrationTargetFor(definition, runtimeConfigFile, sessionDagDir),
+        target: migrationTargetFor(
+          definition,
+          runtimeConfigFile,
+          sessionDagDir,
+          appDatabaseFile,
+        ),
       });
       await writeMigrationState(statePaths, state, definition.id);
       applied.push({
@@ -236,6 +294,7 @@ async function runMigrationsInternal(
     return {
       applied,
       skipped,
+      deferred,
       results: totalResults(applied),
     };
   } catch (error) {

@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type SetStateAction, type UIEvent } from "react";
 import { hydrateAgentThreadInBackground, refreshAgentTaskList, useAgentRuntimeBridge, type AgentTaskStateCoordinator } from "../app/agent-runtime-bridge.js";
 import { useApiClients } from "../app/providers.js";
-import { FOCUSED_AGENT_CHAT_STORAGE_KEY, clearFocusedAgentTarget, normalizeAgentChatId, readLaunchAgentChatId, removeLaunchAgentChatIdFromUrl } from "../app/routes.js";
+import { FOCUSED_AGENT_CHAT_STORAGE_KEY, clearFocusedAgentTarget, isAccountTokenQuotaExhausted, normalizeAgentChatId, readLaunchAgentChatId, removeLaunchAgentChatIdFromUrl } from "../app/routes.js";
 import {
   MemmyAgentRequestError,
   MemmyAgentGoalControlError,
@@ -50,8 +50,7 @@ import {
   type PendingFileAttachment,
   type PendingImage
 } from "../state/agent-composer-state.js";
-import { copyScopedModelSelection, resolveScopedModelSelection } from "../state/model-workspace.js";
-import { useModelWorkspace } from "../state/use-model-workspace.js";
+import { createModelWorkspace, resolveModelSelection } from "../state/model-workspace.js";
 import {
   AgentCommandPalette,
   buildVisibleSlashCommands,
@@ -263,6 +262,7 @@ export interface SubmitAgentComposerMessageInput {
   setCreatingChat?: (value: boolean) => void;
   setComposerMediaError?: (message: string | null) => void;
   clearComposer: () => void;
+  onChatResolved?: (chatId: string) => void;
   onNewChatMessageSent?: (chatId: string) => void;
   chatSelectionEpoch?: number;
   getChatSelectionEpoch?: () => number;
@@ -645,10 +645,13 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
       );
       chatId = created.chatId;
       confirmedModelPreset = created.modelPreset;
+      input.onChatResolved?.(chatId);
     } catch (error) {
       input.dispatch(agentActions.operationFailed("chat", createAgentOperationError({
         source: "new-chat",
-        message: readableError(error),
+        message: error instanceof MemmyAgentMessageRejectedError
+          ? `${error.detail}:${error.reason}`
+          : readableError(error),
         ...(input.scopeKey ? { scopeKey: input.scopeKey } : {})
       })));
       return false;
@@ -767,7 +770,7 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
 export function HomePage() {
   const { clients } = useApiClients();
   const { state, dispatch } = useAppState();
-  const { workspace: modelWorkspace, commit: commitModelWorkspace } = useModelWorkspace(state.modelConfig);
+  const modelWorkspace = createModelWorkspace(state.modelConfig);
   const { language, t } = useTranslation();
   const { track } = useAnalytics();
   const { syncAgentConversation } = useTaskBus();
@@ -826,10 +829,13 @@ export function HomePage() {
   const chatScopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
   const modelSelectionScopeKey = state.agent.currentChatId ?? NEW_TASK_MODEL_SCOPE_KEY;
   const modelWorkspaceMode = state.bootstrap?.app.userMode === "byok" ? "byok" : "account";
-  const resolvedConversationModel = resolveScopedModelSelection(
+  const selectedModelPreset = state.agent.pendingPresetByScope[modelSelectionScopeKey]
+    ?? state.agent.committedModelSelectionByScope[modelSelectionScopeKey]?.presetId
+    ?? null;
+  const resolvedConversationModel = resolveModelSelection(
     modelWorkspace,
     modelWorkspaceMode,
-    modelSelectionScopeKey
+    selectedModelPreset
   );
   const input = composerDrafts[chatScopeKey] ?? "";
   const composerCommandDraft = parseComposerCommandDraft(input);
@@ -1607,14 +1613,31 @@ export function HomePage() {
       })));
       return;
     }
+    if (
+      resolvedConversationModel.candidate?.source === "platform"
+      && isAccountTokenQuotaExhausted(state.bootstrap)
+    ) {
+      dispatch(agentActions.operationFailed("chat", createAgentOperationError({
+        source: "send",
+        message: "agent.error.quotaExceeded",
+        ...(state.agent.currentChatId ? { chatId: state.agent.currentChatId } : { scopeKey: chatScopeKey })
+      })));
+      return;
+    }
     const sendScopeKey = chatScopeKey;
     if (messageSendLocksRef.current.has(sendScopeKey)) return;
     const clientRequestId = crypto.randomUUID();
     messageSendLocksRef.current.add(sendScopeKey);
     dispatch(agentActions.messageSendLockUpdated(sendScopeKey, clientRequestId));
+    dispatch(agentActions.modelSelectionRequestStarted(
+      sendScopeKey,
+      state.agent.currentChatId,
+      clientRequestId,
+      resolvedConversationModel.candidateId
+    ));
     const target: WebuiSessionTarget | null = state.agent.currentChatId ? null : draftTarget;
     try {
-      await submitAgentComposerMessage({
+      const submitted = await submitAgentComposerMessage({
         chatId: state.agent.currentChatId,
         target,
         clientRequestId,
@@ -1633,9 +1656,15 @@ export function HomePage() {
         chatSelectionEpoch: state.agent.chatSelectionEpoch,
         getChatSelectionEpoch: () => chatSelectionEpochRef.current,
         scopeKey: sendScopeKey,
+        modelPreset: resolvedConversationModel.candidateId ?? undefined,
+        onChatResolved: (chatId) => dispatch(agentActions.modelSelectionRequestStarted(
+          sendScopeKey,
+          chatId,
+          clientRequestId,
+          resolvedConversationModel.candidateId
+        )),
         onNewChatMessageSent: clients?.memmyAgent
           ? (chatId) => {
-            commitModelWorkspace(copyScopedModelSelection(modelWorkspace, modelSelectionScopeKey, chatId));
             rememberFirstEncounterRelayChatIfArmed(chatId);
             taskStateCoordinator.refreshTaskState({
               expectedChatId: chatId,
@@ -1645,6 +1674,12 @@ export function HomePage() {
           }
           : undefined
       });
+      if (!submitted) {
+        dispatch(agentActions.modelSelectionRequestCancelled(clientRequestId));
+      }
+    } catch (error) {
+      dispatch(agentActions.modelSelectionRequestCancelled(clientRequestId));
+      throw error;
     } finally {
       messageSendLocksRef.current.delete(sendScopeKey);
       dispatch(agentActions.messageSendLockUpdated(sendScopeKey, null));
@@ -2551,7 +2586,6 @@ export function HomePage() {
                 retryWaitStatus={state.agent.currentChatId ? state.agent.retryWaitStatusByChatId[state.agent.currentChatId] ?? null : null}
                 isSending={state.agent.isSending}
                 sanitizePlatformApiErrors={sanitizePlatformApiErrors}
-                accountMode={isAccountMode}
                 artifactClient={sessionArtifactClient}
               />
             </div>
@@ -3186,6 +3220,7 @@ const AGENT_OPERATION_ERROR_MESSAGE_KEYS: Record<string, MessageKey> = {
   project_limit_reached: "home.error.projectLimit",
   project_registry_corrupt: "home.error.projectRegistry",
   message_request_conflict: "home.error.messageConflict",
+  model_selection_unavailable: "home.modelSelector.unavailable",
   result_unknown: "home.error.resultUnknown",
   attachment_read_failed: "home.media.error.sendReadFailed"
 };

@@ -1,7 +1,7 @@
 /** Registry initialization tests. */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   AGENT_ADAPTER_PLUGIN_MANIFEST,
@@ -23,7 +23,7 @@ afterEach(() => {
 describe("default agent adapter registry", () => {
   it("resolves the built-in plugin directory from a base directory", () => {
     expect(resolveBuiltinAgentAdapterPluginDirectory("/memmy/dist/src/adapters/outbound/agent-adapter")).toBe(
-      "/memmy/dist/src/adapters/outbound/agent-adapter/plugins"
+      resolve("/memmy/dist/src/adapters/outbound/agent-adapter/plugins")
     );
   });
 

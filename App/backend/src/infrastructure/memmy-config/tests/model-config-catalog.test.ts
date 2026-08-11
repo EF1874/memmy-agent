@@ -1,345 +1,318 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import YAML from "yaml";
-import type { ModelConfigInput } from "@memmy/local-api-contracts";
+import { afterEach, describe, expect, it } from "vitest";
+import type { ModelAssignments, ModelConfigInput } from "@memmy/local-api-contracts";
 import {
-  generateDesktopPresetName,
+  InvalidModelConfigError,
+  ModelConfigChangedError,
   readModelConfigCatalog,
   writeModelConfigCatalog
 } from "../model-config-catalog.js";
-import { systemUtcOffset } from "../../../utils/time-zone.js";
 
-const temporaryRoots: string[] = [];
+const roots: string[] = [];
 
-afterEach(async () => {
-  await Promise.all(temporaryRoots.splice(0).map((root) => (
-    rm(root, { recursive: true, force: true })
-  )));
+afterEach(() => {
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-async function fixture(): Promise<string> {
-  const root = await mkdtemp(path.join(os.tmpdir(), "memmy-model-catalog-"));
-  temporaryRoots.push(root);
-  const configPath = path.join(root, "config.yaml");
-  await writeFile(configPath, YAML.stringify({
-    providers: {
-      openai: {
-        apiBase: "https://api.openai.com/v1",
-        apiKey: "openai-secret",
-        unknownProviderField: "keep"
-      }
-    },
-    modelPresets: {
-      "work-gpt": {
-        provider: "openai",
-        model: "gpt-5",
-        maxTokens: 3210,
-        contextWindowTokens: 98765,
-        temperature: 0.2,
-        reasoningEffort: "high",
-        unknownPresetField: "keep"
-      }
-    },
-    agents: {
-      defaults: {
-        modelPreset: "work-gpt",
-        fallbackModels: ["work-gpt", "missing-preset"],
-        maxToolIterations: 77
-      }
-    },
-    memmyMemory: {
-      roleRouting: {
-        summary: "follow",
-        evolution: "fixed"
-      },
-      evolution: {
-        provider: "openai_compatible",
-        vendor: "openai_compatible",
-        endpoint: "https://memory.example.test/v1",
-        model: "memory-model",
-        apiKey: "memory-secret"
-      },
-      embedding: {
-        mode: "local"
-      }
-    },
-    unrelated: {
-      value: "keep"
-    }
-  }), "utf8");
-  return configPath;
+function fixture(initial: Record<string, unknown> = {}): string {
+  const root = mkdtempSync(join(tmpdir(), "memmy-model-catalog-"));
+  roots.push(root);
+  const file = join(root, "config.yaml");
+  writeFileSync(file, YAML.stringify(initial), "utf8");
+  return file;
 }
 
-function input(
-  configRevision: string,
-  overrides: Partial<ModelConfigInput> = {}
-): ModelConfigInput {
-  const generated = generateDesktopPresetName("openai", "gpt-5-mini");
+function emptyAssignment(ownerAccountId?: string): ModelAssignments["account"] {
   return {
-    configRevision,
-    providers: [
-      {
-        provider: "openai",
-        apiBase: "https://api.openai.com/v1",
-        models: [
-          { presetName: "work-gpt", model: "gpt-5" },
-          { presetName: generated, model: "gpt-5-mini" }
-        ]
-      },
-      {
-        provider: "anthropic",
-        apiBase: "https://api.anthropic.com",
-        apiKey: "anthropic-secret",
-        models: [
-          {
-            presetName: generateDesktopPresetName("anthropic", "claude-sonnet-4"),
-            model: "claude-sonnet-4"
-          }
-        ]
-      }
-    ],
-    defaultModelPreset: generated,
-    memmyMemory: {
-      summary: { mode: "follow" },
-      evolution: {
-        mode: "fixed",
-        fixed: {
-          provider: "openai_compatible",
-          baseUrl: "https://memory.example.test/v1",
-          modelId: "memory-model"
-        }
-      }
-    },
-    embedding: { mode: "local" },
-    ...overrides
+    ...(ownerAccountId ? { ownerAccountId } : {}),
+    agent: { candidates: [], default: null },
+    memorySummary: null,
+    memoryEvolution: null,
+    embedding: null,
+    asr: null,
+    imageGeneration: null
+  };
+}
+
+function emptyAssignments(): ModelAssignments {
+  return { byok: emptyAssignment(), account: emptyAssignment() };
+}
+
+function openAiInput(revision: string, presetId?: string): ModelConfigInput {
+  return {
+    configRevision: revision,
+    providers: [{
+      provider: "openai",
+      apiKey: "sk-new-secret",
+      endpoints: [{
+        endpointId: "chat",
+        apiBase: "https://api.example.test/v1/",
+        protocol: "openai-chat-completions"
+      }],
+      models: [{
+        ...(presetId ? { presetId } : {}),
+        endpointId: "chat",
+        model: "gpt-5",
+        source: "byok",
+        capabilities: ["agent", "memory_summary", "memory_evolution"]
+      }]
+    }],
+    modelAssignments: emptyAssignments()
   };
 }
 
 describe("model config catalog", () => {
-  it("returns only providers that have at least one configured model", async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), "memmy-model-catalog-"));
-    temporaryRoots.push(root);
-    const configPath = path.join(root, "config.yaml");
-    await writeFile(configPath, YAML.stringify({
-      providers: {
-        openai: { apiKey: "openai-secret" },
-        anthropic: {},
-        gemini: {},
-        deepseek: {},
-        zhipu: {},
-        qwen: {},
-        kimi: {},
-        minimax: {},
-        baidu: {},
-        doubao: {},
-      },
-      modelPresets: {
-        configured: {
-          provider: "openai",
-          model: "gpt-5",
-        },
-      },
-      agents: {
-        defaults: {
-          modelPreset: "configured",
-        },
-      },
-    }), "utf8");
-
-    const view = await readModelConfigCatalog(configPath);
-
-    expect(view.providers).toHaveLength(1);
-    expect(view.providers[0]).toMatchObject({
-      provider: "openai",
-      models: [{ presetName: "configured", model: "gpt-5" }],
+  it("creates unique server preset IDs, masks all credentials, and never persists labels", async () => {
+    const file = fixture({ futureSection: { keepMe: true } });
+    const current = await readModelConfigCatalog(file);
+    const createInput = openAiInput(current.configRevision);
+    createInput.providers[0]!.extraHeaders = { Authorization: "provider-header-secret" };
+    createInput.providers[0]!.extraBody = { token: "provider-body-secret" };
+    createInput.providers[0]!.endpoints[0]!.extraHeaders = { "x-api-key": "endpoint-header-secret" };
+    createInput.providers[0]!.endpoints[0]!.extraBody = { token: "endpoint-body-secret" };
+    const first = await writeModelConfigCatalog(file, createInput);
+    const firstId = first.providers[0]?.models[0]?.presetId;
+    expect(firstId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(first.providers[0]).toMatchObject({
+      hasApiKey: true,
+      apiKeyMasked: "sk-••••cret",
+      apiKey: ""
     });
-  });
-
-  it("returns a configured model even when its provider has no API key", async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), "memmy-model-catalog-"));
-    temporaryRoots.push(root);
-    const configPath = path.join(root, "config.yaml");
-    await writeFile(configPath, YAML.stringify({
-      providers: {
-        openai: {},
-      },
-      modelPresets: {
-        configured: {
-          provider: "openai",
-          model: "gpt-5",
-        },
-      },
-      agents: {
-        defaults: {
-          modelPreset: "configured",
-        },
-      },
-    }), "utf8");
-
-    const view = await readModelConfigCatalog(configPath);
-
-    expect(view.providers).toHaveLength(1);
-    expect(view.providers[0]).toMatchObject({
-      provider: "openai",
-      configured: false,
+    expect(first.providers[0]?.endpoints[0]).toMatchObject({
+      apiBase: "https://api.example.test/v1",
       hasApiKey: false,
-      models: [{
-        presetName: "configured",
-        model: "gpt-5",
-        available: false,
-      }],
+      apiKey: ""
     });
+
+    const secondInput = openAiInput(first.configRevision, firstId);
+    secondInput.providers[0]!.models.push({
+      endpointId: "chat",
+      model: "gpt-5-mini",
+      source: "byok",
+      capabilities: ["agent"]
+    });
+    const second = await writeModelConfigCatalog(file, secondInput);
+    const ids = second.providers[0]!.models.map((model) => model.presetId);
+    expect(new Set(ids).size).toBe(2);
+    expect(ids).toContain(firstId);
+    const raw = YAML.parse(readFileSync(file, "utf8")) as any;
+    expect(raw.futureSection.keepMe).toBe(true);
+    expect(raw.providers.openai.extraHeaders.Authorization).toBe("provider-header-secret");
+    expect(raw.providers.openai.extraBody.token).toBe("provider-body-secret");
+    expect(raw.providers.openai.endpoints.chat.extraHeaders["x-api-key"]).toBe("endpoint-header-secret");
+    expect(raw.providers.openai.endpoints.chat.extraBody.token).toBe("endpoint-body-secret");
+    expect(JSON.stringify(raw)).not.toContain("label");
+    const serializedView = JSON.stringify(second);
+    expect(serializedView).not.toContain("sk-new-secret");
+    expect(serializedView).not.toContain("provider-header-secret");
+    expect(serializedView).not.toContain("provider-body-secret");
+    expect(serializedView).not.toContain("endpoint-header-secret");
+    expect(serializedView).not.toContain("endpoint-body-secret");
   });
 
-  it("round-trips multiple Providers/models and preserves unchanged advanced fields", async () => {
-    const configPath = await fixture();
-    const before = await readModelConfigCatalog(configPath);
-    const saved = await writeModelConfigCatalog(configPath, input(before.configRevision));
-    const raw = YAML.parse(await readFile(configPath, "utf8"));
-    const generated = generateDesktopPresetName("openai", "gpt-5-mini");
+  it("removes a deleted canonical Provider even when it has no presets", async () => {
+    const file = fixture({
+      providers: {
+        openai: {
+          apiKey: "sk-orphan-secret",
+          endpoints: {
+            chat: {
+              apiBase: "https://api.openai.com/v1",
+              protocol: "openai-chat-completions"
+            }
+          }
+        }
+      },
+      modelPresets: {},
+      modelAssignments: emptyAssignments()
+    });
+    const current = await readModelConfigCatalog(file);
+    expect(current.providers).toEqual([]);
 
-    expect(saved.defaultModelPreset).toBe(generated);
-    expect(saved.providers.map((provider) => provider.provider)).toEqual(["openai", "anthropic"]);
-    expect(saved.providers[0]?.models.map((model) => model.model)).toEqual(["gpt-5", "gpt-5-mini"]);
-    expect(raw.modelPresets["work-gpt"]).toMatchObject({
-      provider: "openai",
+    await writeModelConfigCatalog(file, {
+      configRevision: current.configRevision,
+      providers: [],
+      modelAssignments: emptyAssignments()
+    });
+
+    const raw = YAML.parse(readFileSync(file, "utf8")) as any;
+    expect(raw.providers.openai).toBeUndefined();
+    expect(JSON.stringify(raw)).not.toContain("sk-orphan-secret");
+  });
+
+  it("keeps a preset ID while every mutable catalog field changes", async () => {
+    const file = fixture({
+      futureSection: { keepMe: true },
+      providers: {
+        openai: {
+          apiKey: "sk-old",
+          futureProviderField: "keep",
+          endpoints: {
+            chat: {
+              apiBase: "https://old.example/v1",
+              protocol: "openai-chat-completions",
+              futureEndpointField: "keep"
+            }
+          }
+        }
+      },
+      modelPresets: {
+        "preset-stable": {
+          provider: "openai",
+          endpoint: "chat",
+          model: "gpt-old",
+          source: "byok",
+          capabilities: ["agent"],
+          futurePresetField: "keep"
+        }
+      },
+      modelAssignments: emptyAssignments()
+    });
+    const current = await readModelConfigCatalog(file);
+    const saved = await writeModelConfigCatalog(file, {
+      configRevision: current.configRevision,
+      providers: [{
+        provider: "anthropic",
+        apiKey: "sk-anthropic",
+        endpoints: [{
+          endpointId: "messages-v2",
+          apiBase: "https://new.example/v2",
+          protocol: "anthropic-messages"
+        }],
+        models: [{
+          presetId: "preset-stable",
+          endpointId: "messages-v2",
+          model: "claude-new",
+          source: "byok",
+          capabilities: ["memory_summary", "memory_evolution"]
+        }]
+      }],
+      modelAssignments: emptyAssignments()
+    });
+    expect(saved.providers[0]?.models[0]?.presetId).toBe("preset-stable");
+    const raw = YAML.parse(readFileSync(file, "utf8")) as any;
+    expect(raw.modelPresets["preset-stable"]).toMatchObject({
+      provider: "anthropic",
+      endpoint: "messages-v2",
+      model: "claude-new",
+      capabilities: ["memory_summary", "memory_evolution"],
+      futurePresetField: "keep"
+    });
+    expect(raw.futureSection.keepMe).toBe(true);
+    expect(raw.providers.openai).toBeUndefined();
+  });
+
+  it("preserves an omitted key and unknown nested fields when editing in place", async () => {
+    const file = fixture({
+      providers: {
+        openai: {
+          apiKey: "sk-existing",
+          futureProviderField: "keep",
+          endpoints: {
+            chat: {
+              apiBase: "https://old.example/v1",
+              protocol: "openai-chat-completions",
+              futureEndpointField: "keep"
+            }
+          }
+        }
+      },
+      modelPresets: {
+        stable: {
+          provider: "openai", endpoint: "chat", model: "gpt-old", source: "byok",
+          capabilities: ["agent"], futurePresetField: "keep"
+        }
+      },
+      modelAssignments: emptyAssignments()
+    });
+    const current = await readModelConfigCatalog(file);
+    const input = openAiInput(current.configRevision, "stable");
+    input.providers[0]!.apiKey = "";
+    input.providers[0]!.endpoints[0]!.apiKey = "";
+    await writeModelConfigCatalog(file, input);
+    const raw = YAML.parse(readFileSync(file, "utf8")) as any;
+    expect(raw.providers.openai).toMatchObject({ apiKey: "sk-existing", futureProviderField: "keep" });
+    expect(raw.providers.openai.endpoints.chat.futureEndpointField).toBe("keep");
+    expect(raw.modelPresets.stable.futurePresetField).toBe("keep");
+  });
+
+  it("stores account and BYOK assignments independently", async () => {
+    const file = fixture();
+    const created = await writeModelConfigCatalog(file, openAiInput((await readModelConfigCatalog(file)).configRevision));
+    const presetId = created.providers[0]!.models[0]!.presetId;
+    const byokInput = openAiInput(created.configRevision, presetId);
+    byokInput.modelAssignments.byok = {
+      ...emptyAssignment(),
+      agent: { candidates: [presetId], default: presetId },
+      memorySummary: presetId,
+      memoryEvolution: presetId
+    };
+    const byokSaved = await writeModelConfigCatalog(file, byokInput);
+    const accountBefore = structuredClone(byokSaved.modelAssignments.account);
+    const accountInput = openAiInput(byokSaved.configRevision, presetId);
+    accountInput.modelAssignments = structuredClone(byokSaved.modelAssignments);
+    accountInput.modelAssignments.account.agent = { candidates: [presetId], default: presetId };
+    const accountSaved = await writeModelConfigCatalog(file, accountInput);
+    expect(accountSaved.modelAssignments.byok).toEqual(byokSaved.modelAssignments.byok);
+    expect(accountSaved.modelAssignments.account).not.toEqual(accountBefore);
+  });
+
+  it("rejects duplicate endpoint definitions, invalid protocol capabilities, and duplicate models", async () => {
+    const file = fixture();
+    const revision = (await readModelConfigCatalog(file)).configRevision;
+    const duplicateEndpoint = openAiInput(revision);
+    duplicateEndpoint.providers[0]!.endpoints.push({
+      endpointId: "chat-copy",
+      apiBase: "https://api.example.test/v1",
+      protocol: "openai-chat-completions"
+    });
+    await expect(writeModelConfigCatalog(file, duplicateEndpoint)).rejects.toThrow(/Duplicate endpoint definition/);
+
+    const wrongProtocol = openAiInput(revision);
+    wrongProtocol.providers[0]!.models[0]!.capabilities = ["embedding"];
+    await expect(writeModelConfigCatalog(file, wrongProtocol)).rejects.toThrow(/does not support capability embedding/);
+
+    const unsupportedMemoryResponses = openAiInput(revision);
+    unsupportedMemoryResponses.providers[0]!.endpoints[0]!.protocol = "openai-responses";
+    unsupportedMemoryResponses.providers[0]!.models[0]!.capabilities = ["memory_summary"];
+    await expect(writeModelConfigCatalog(file, unsupportedMemoryResponses))
+      .rejects.toThrow(/does not support capability memory_summary/);
+
+    const duplicateModel = openAiInput(revision);
+    duplicateModel.providers[0]!.models.push({
+      endpointId: "chat",
       model: "gpt-5",
-      maxTokens: 3210,
-      contextWindowTokens: 98765,
-      temperature: 0.2,
-      reasoningEffort: "high",
-      unknownPresetField: "keep"
+      source: "byok",
+      capabilities: ["agent"]
     });
-    expect(raw.modelPresets[generated]).toMatchObject({
-      provider: "openai",
-      model: "gpt-5-mini"
-    });
-    expect(raw.providers.openai).toMatchObject({
-      apiKey: "openai-secret",
-      unknownProviderField: "keep"
-    });
-    expect(raw.agents.defaults).toMatchObject({
-      modelPreset: generated,
-      timezone: systemUtcOffset(),
-      maxToolIterations: 77,
-      fallbackModels: ["work-gpt"]
-    });
-    expect(raw.unrelated).toEqual({ value: "keep" });
+    await expect(writeModelConfigCatalog(file, duplicateModel)).rejects.toThrow(/Duplicate Provider\/endpoint\/model/);
   });
 
-  it("rejects duplicate Provider/model pairs without changing the file", async () => {
-    const configPath = await fixture();
-    const before = await readModelConfigCatalog(configPath);
-    const contentBefore = await readFile(configPath, "utf8");
-    const duplicate = input(before.configRevision, {
-      providers: [{
-        provider: "openai",
-        apiBase: "https://api.openai.com/v1",
-        models: [
-          { presetName: "work-gpt", model: "gpt-5" },
-          { model: "gpt-5" }
-        ]
+  it("rejects stale revisions without exposing or overwriting the newer config", async () => {
+    const file = fixture({ futureSection: { value: 1 } });
+    const current = await readModelConfigCatalog(file);
+    writeFileSync(file, YAML.stringify({
+      futureSection: { value: 2 },
+      providers: { openai: { endpoints: {} } }
+    }), "utf8");
+    await expect(writeModelConfigCatalog(file, openAiInput(current.configRevision))).rejects.toBeInstanceOf(ModelConfigChangedError);
+    expect((YAML.parse(readFileSync(file, "utf8")) as any).futureSection.value).toBe(2);
+  });
+
+  it("rejects account definitions at the desktop write boundary", async () => {
+    const file = fixture();
+    const input = openAiInput((await readModelConfigCatalog(file)).configRevision);
+    input.providers = [{
+      provider: "memmy_account",
+      ownerAccountId: "owner-a",
+      endpoints: [{ endpointId: "platform", apiBase: "https://cloud.example/v1", protocol: "memmy-account" }],
+      models: [{
+        endpointId: "platform", model: "agent_chat", source: "account", ownerAccountId: "owner-a", capabilities: ["agent"]
       }]
-    });
-
-    await expect(writeModelConfigCatalog(configPath, duplicate)).rejects.toMatchObject({
-      code: "invalid_argument"
-    });
-    await expect(readFile(configPath, "utf8")).resolves.toBe(contentBefore);
-  });
-
-  it("rejects a stale revision and leaves a newer external edit intact", async () => {
-    const configPath = await fixture();
-    const before = await readModelConfigCatalog(configPath);
-    const raw = YAML.parse(await readFile(configPath, "utf8"));
-    raw.unrelated.value = "changed elsewhere";
-    raw.providers.openai.apiKey = "newer-secret";
-    await writeFile(configPath, YAML.stringify(raw), "utf8");
-
-    await expect(writeModelConfigCatalog(configPath, input(before.configRevision))).rejects.toMatchObject({
-      code: "model_config_changed"
-    });
-    const after = YAML.parse(await readFile(configPath, "utf8"));
-    expect(after.unrelated.value).toBe("changed elsewhere");
-    expect(after.providers.openai.apiKey).toBe("newer-secret");
-  });
-
-  it("preserves hidden CLI providers, presets, orphan provider settings, and the hidden default", async () => {
-    const configPath = await fixture();
-    const raw = YAML.parse(await readFile(configPath, "utf8"));
-    raw.providers.openrouter = {
-      apiKey: "router-secret",
-      apiBase: "https://openrouter.ai/api/v1",
-      extraHeaders: { "X-CLI": "keep" },
-    };
-    raw.providers.groq = {
-      apiKey: "orphan-secret",
-    };
-    raw.modelPresets["cli-router"] = {
-      provider: "openrouter",
-      model: "anthropic/claude-sonnet-4",
-      maxTokens: 4444,
-      unknownPresetField: "keep",
-    };
-    raw.agents.defaults.modelPreset = "cli-router";
-    await writeFile(configPath, YAML.stringify(raw), "utf8");
-    const before = await readModelConfigCatalog(configPath);
-
-    await writeModelConfigCatalog(configPath, input(before.configRevision, {
-      defaultModelPreset: "cli-router",
-    }));
-
-    const saved = YAML.parse(await readFile(configPath, "utf8"));
-    expect(saved.providers.openrouter).toEqual(raw.providers.openrouter);
-    expect(saved.providers.groq).toEqual(raw.providers.groq);
-    expect(saved.modelPresets["cli-router"]).toEqual(raw.modelPresets["cli-router"]);
-    expect(saved.agents.defaults.modelPreset).toBe("cli-router");
-  });
-
-  it("rejects desktop writes for unsupported providers", async () => {
-    const configPath = await fixture();
-    const before = await readModelConfigCatalog(configPath);
-
-    await expect(writeModelConfigCatalog(configPath, input(before.configRevision, {
-      providers: [{
-        provider: "openrouter",
-        apiBase: "https://openrouter.ai/api/v1",
-        models: [{ model: "openai/gpt-5" }],
-      }],
-    }))).rejects.toThrow(/not supported by desktop settings/);
-  });
-
-  it("rejects a Provider/model pair that duplicates a hidden CLI preset", async () => {
-    const configPath = await fixture();
-    const raw = YAML.parse(await readFile(configPath, "utf8"));
-    raw.providers.openrouter = {
-      apiKey: "router-secret",
-      apiBase: "https://openrouter.ai/api/v1",
-    };
-    raw.modelPresets["cli-router"] = {
-      provider: "openrouter",
-      model: "shared-model",
-    };
-    await writeFile(configPath, YAML.stringify(raw), "utf8");
-    const before = await readModelConfigCatalog(configPath);
-
-    await expect(writeModelConfigCatalog(configPath, input(before.configRevision, {
-      providers: [{
-        provider: "openrouter",
-        apiBase: "https://openrouter.ai/api/v1",
-        models: [{ model: "shared-model" }],
-      }],
-    }))).rejects.toThrow(/not supported by desktop settings/);
-  });
-
-  it("uses the agreed deterministic desktop preset name", () => {
-    expect(generateDesktopPresetName("OpenAI", "GPT 5 / Mini")).toMatch(
-      /^desktop-openai-gpt-5-mini-[a-f0-9]{8}$/
-    );
-    expect(generateDesktopPresetName("OpenAI", "GPT 5 / Mini")).toBe(
-      generateDesktopPresetName("OpenAI", "GPT 5 / Mini")
-    );
+    }];
+    await expect(writeModelConfigCatalog(file, input)).rejects.toBeInstanceOf(InvalidModelConfigError);
   });
 });

@@ -5,6 +5,20 @@ import { describe, expect, it } from "vitest";
 import { ChatModelSelector } from "../home-page.js";
 
 describe("ChatModelSelector", () => {
+  it("Agent selector uses catalog Agent candidates and Agent-state preset selection only", () => {
+    const source = readFileSync(resolve(__dirname, "..", "..", "components", "agent-model-selector.tsx"), "utf8");
+
+    expect(source).toContain("getTaskModelCandidates(workspace, props.mode)");
+    expect(source).toContain("pendingPresetByScope");
+    expect(source).toContain("committedModelSelectionByScope");
+    expect(source).toContain("agentActions.pendingModelPresetUpdated");
+    expect(source).toContain("if (resolved.unavailable && resolved.candidateId)");
+    expect(source).toContain('value={resolved.candidateId ?? ""}');
+    expect(source).not.toContain("!hasNoModels && resolved.unavailable");
+    expect(source).not.toContain("useModelWorkspace");
+    expect(source).not.toContain("localStorage");
+  });
+
   it("uses provider logos with model-only labels and omits unavailable presets", () => {
     const html = renderToString(
       <ChatModelSelector
