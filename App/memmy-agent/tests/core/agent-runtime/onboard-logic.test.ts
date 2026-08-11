@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ContextBuilder } from "../../../src/core/agent-runtime/context.js";
+import { SessionManager } from "../../../src/core/session/manager.js";
 import {
   MODEL_PRESET_CACHE,
   SETTINGS_GETTER,
@@ -122,7 +123,7 @@ describe("onboard logic", () => {
   it("exposes workspace identity without file memory locations by default", () => {
     const builder = new ContextBuilder({ workspace: "/tmp/memmy-onboard" });
 
-    expect(builder.buildSystemPrompt()).toContain("Your workspace is at: /tmp/memmy-onboard");
+    expect(builder.buildSystemPrompt()).toContain(`Your workspace is at: ${path.resolve("/tmp/memmy-onboard")}`);
     expect(builder.buildSystemPrompt()).not.toContain("memory/MEMORY.md");
     expect(builder.buildSystemPrompt()).not.toContain("memory/history.jsonl");
   });
@@ -282,18 +283,104 @@ describe("onboard logic", () => {
     const config = new Config();
     await configureModelPresets(config, [
       { type: "add", name: "fast", preset: { model: "openai/gpt-4.1", provider: "openai" } },
-      { type: "edit", name: "fast", preset: new ModelPresetConfig({ model: "openai/gpt-4.1-mini", provider: "openai" }) },
+      { type: "edit", name: "fast", preset: new ModelPresetConfig({
+        endpoint: "chat",
+        model: "openai/gpt-4.1-mini",
+        provider: "openai",
+        source: "byok",
+        capabilities: ["agent"],
+      }) },
     ]);
     expect(config.modelPresets.fast.model).toBe("openai/gpt-4.1-mini");
+    expect(config.modelPresets.fast.toObject()).toMatchObject({
+      endpoint: "chat",
+      provider: "openai",
+      source: "byok",
+      capabilities: ["agent"],
+    });
+    expect(config.providers.openai.endpoints.chat.toObject()).toMatchObject({
+      apiBase: "https://api.openai.com/v1",
+      protocol: "openai-chat-completions",
+    });
+    expect(config.modelAssignments.byok.agent).toMatchObject({ candidates: ["fast"], default: "fast" });
+    expect(config.resolvePreset()).toBe(config.modelPresets.fast);
+    expect(() => new Config(config.toObject())).not.toThrow();
     expect(MODEL_PRESET_CACHE.has("fast")).toBe(true);
 
-    usePrompt(["[+] Add new preset", "deep", /^Model:/, "anthropic/claude-opus", "done", "back"]);
+    usePrompt(["[+] Add new preset", "deep", /^Model:/, "anthropic/claude-opus", "done", "chat", "agent", "back"]);
     await configureModelPresets(config, null);
     expect(config.modelPresets.deep.model).toBe("anthropic/claude-opus");
+    expect(config.modelPresets.deep).toMatchObject({
+      endpoint: "chat",
+      provider: "anthropic",
+      source: "byok",
+      capabilities: ["agent"],
+    });
+    expect(config.modelAssignments.byok.agent).toMatchObject({
+      candidates: ["fast", "deep"],
+      default: "deep",
+    });
 
-    usePrompt(["deep (anthropic/claude-opus)", "Delete", true, "back"]);
+    usePrompt(["deep (anthropic/claude-opus)", "Delete", true, true, "fast", "back"]);
     await configureModelPresets(config, null);
     expect(config.modelPresets.deep).toBeUndefined();
+    expect(config.modelAssignments.byok.agent).toMatchObject({ candidates: ["fast"], default: "fast" });
+  });
+
+  it("keeps account model providers and presets read-only during onboarding", async () => {
+    const config = new Config({
+      providers: {
+        memmy_account: {
+          ownerAccountId: "account-1",
+          apiKey: "cloud-secret",
+          endpoints: {
+            platform: {
+              apiBase: "https://cloud.example.test/api/agentExternal/v1",
+              protocol: "memmy-account",
+            },
+          },
+        },
+      },
+      modelPresets: {
+        platform: {
+          endpoint: "platform",
+          model: "agent_chat",
+          provider: "memmy_account",
+          source: "account",
+          ownerAccountId: "account-1",
+          capabilities: ["agent"],
+        },
+      },
+      modelAssignments: {
+        byok: { agent: { candidates: [], default: null } },
+        account: {
+          ownerAccountId: "account-1",
+          agent: { candidates: ["platform"], default: "platform" },
+        },
+      },
+      agents: { defaults: { modelPreset: "platform" } },
+    });
+    const before = config.toObject();
+
+    await expect(configureModelPresets(config, [{
+      type: "edit",
+      name: "platform",
+      preset: {
+        endpoint: "platform",
+        model: "changed",
+        provider: "memmy_account",
+        source: "account",
+        ownerAccountId: "account-1",
+        capabilities: ["agent"],
+      },
+    }])).rejects.toThrow("account model presets are read-only");
+    await expect(configureModelPresets(config, [{ type: "delete", name: "platform" }]))
+      .rejects.toThrow("account model presets are read-only");
+    await expect(configureProvider(config, "memmy_account"))
+      .rejects.toThrow("account model providers are read-only");
+
+    expect(config.toObject()).toEqual(before);
+    expect(() => new Config(config.toObject())).not.toThrow();
   });
 
   it("handles model preset, provider, and fallback-model fields", async () => {
@@ -316,10 +403,64 @@ describe("onboard logic", () => {
   it("pre-fills provider apiBase from the provider registry default", async () => {
     const config = new Config();
 
-    usePrompt(["done"]);
+    usePrompt(["done", "back"]);
     await configureProvider(config, "deepseek");
 
     expect(config.providers.deepseek.apiBase).toBe("https://api.deepseek.com");
+    expect(config.providers.deepseek.endpoints.chat.toObject()).toEqual({
+      apiBase: "https://api.deepseek.com",
+      protocol: "openai-chat-completions",
+    });
+  });
+
+  it("manages distinct BYOK endpoints and rejects deletion while presets reference them", async () => {
+    const config = new Config({
+      providers: {
+        openai: {
+          endpoints: {
+            chat: { apiBase: "https://api.openai.com/v1", protocol: "openai-chat-completions" },
+          },
+        },
+      },
+      modelPresets: {
+        chat: {
+          endpoint: "chat",
+          model: "gpt-4.1-mini",
+          provider: "openai",
+          source: "byok",
+          capabilities: ["agent"],
+        },
+      },
+      modelAssignments: {
+        byok: { agent: { candidates: ["chat"], default: "chat" } },
+        account: { agent: { candidates: [], default: null } },
+      },
+    });
+
+    await expect(configureProvider(config, "openai", [{ type: "delete", endpointId: "chat" }]))
+      .rejects.toThrow("still referenced by model presets: chat");
+    await configureProvider(config, "openai", [{
+      type: "add",
+      endpointId: "embedding",
+      endpoint: { apiBase: "https://api.openai.com/v1/embeddings", protocol: "openai-embeddings" },
+    }]);
+    await configureModelPresets(config, [{
+      type: "add",
+      name: "embed",
+      preset: {
+        endpoint: "embedding",
+        model: "text-embedding-3-small",
+        provider: "openai",
+        source: "byok",
+        capabilities: ["embedding"],
+      },
+    }]);
+    expect(config.providers.openai.endpoints.embedding.toObject()).toEqual({
+      apiBase: "https://api.openai.com/v1/embeddings",
+      protocol: "openai-embeddings",
+    });
+    expect(config.modelAssignments.byok.embedding).toBe("embed");
+    expect(config.modelPresets.embed.toObject()).not.toHaveProperty("label");
   });
 
   it("uses nanobot-equivalent TS field skips for settings sections", () => {
@@ -344,7 +485,9 @@ describe("onboard logic", () => {
 
   it("views the summary, syncs preset cache, and detects dirty drafts", async () => {
     const config = new Config();
-    config.modelPresets.fast = new ModelPresetConfig({ model: "gpt-test" });
+    config.modelPresets.fast = new ModelPresetConfig({
+      endpoint: "chat", model: "gpt-test", provider: "openai", source: "byok", capabilities: ["agent"],
+    });
     syncPresetCache(config);
     expect(MODEL_PRESET_CACHE.has("fast")).toBe(true);
 
@@ -805,6 +948,8 @@ describe("onboard logic", () => {
       /^Model:/,
       "anthropic/claude-opus",
       "done",
+      "chat",
+      "agent",
       "back",
       "[S] Save and Exit",
     ]);
@@ -833,17 +978,105 @@ describe("onboard logic", () => {
 
   it("syncs all model preset names into the cache", () => {
     const config = new Config();
-    config.modelPresets.fast = new ModelPresetConfig({ model: "gpt-4.1-mini" });
-    config.modelPresets.power = new ModelPresetConfig({ model: "gpt-4.1" });
+    config.modelPresets.fast = new ModelPresetConfig({ endpoint: "chat", model: "gpt-4.1-mini", provider: "openai", source: "byok", capabilities: ["agent"] });
+    config.modelPresets.power = new ModelPresetConfig({ endpoint: "chat", model: "gpt-4.1", provider: "openai", source: "byok", capabilities: ["agent"] });
     syncPresetCache(config);
     expect(MODEL_PRESET_CACHE).toEqual(new Set(["fast", "power"]));
   });
 
   it("deletes model presets through direct actions", async () => {
-    const config = new Config();
-    config.modelPresets.old = new ModelPresetConfig({ model: "x" });
+    const config = new Config({
+      providers: {
+        openai: {
+          endpoints: { chat: { apiBase: "https://api.openai.com/v1", protocol: "openai-chat-completions" } },
+        },
+      },
+      modelPresets: {
+        old: {
+          endpoint: "chat",
+          model: "gpt-old",
+          provider: "openai",
+          source: "byok",
+          capabilities: ["agent", "memory_summary", "memory_evolution"],
+        },
+      },
+      modelAssignments: {
+        byok: {
+          agent: { candidates: ["old"], default: "old" },
+          memorySummary: "old",
+          memoryEvolution: "old",
+        },
+        account: {
+          ownerAccountId: "account-1",
+          agent: { candidates: ["old"], default: "old" },
+          memorySummary: "old",
+          memoryEvolution: "old",
+        },
+      },
+      agents: { defaults: { modelPreset: "old", fallbackModels: ["old"] } },
+    });
+    await expect(configureModelPresets(config, [{ type: "delete", name: "old" }]))
+      .rejects.toThrow("reassign it before deleting");
+    expect(config.modelPresets.old).toBeDefined();
+    config.modelAssignments.byok.agent.candidates = [];
+    config.modelAssignments.byok.agent.default = null;
+    config.modelAssignments.byok.memorySummary = null;
+    config.modelAssignments.byok.memoryEvolution = null;
+    config.modelAssignments.account.agent.candidates = [];
+    config.modelAssignments.account.agent.default = null;
+    config.modelAssignments.account.memorySummary = null;
+    config.modelAssignments.account.memoryEvolution = null;
+    config.agents.defaults.modelPreset = null;
+    config.agents.defaults.fallbackModels = [];
     await configureModelPresets(config, [{ type: "delete", name: "old" }]);
     expect(config.modelPresets.old).toBeUndefined();
+    expect(config.modelAssignments.byok.agent).toMatchObject({ candidates: [], default: null });
+    expect(config.modelAssignments.account.agent).toMatchObject({ candidates: [], default: null });
+    expect(config.modelAssignments.byok.memorySummary).toBeNull();
+    expect(config.modelAssignments.byok.memoryEvolution).toBeNull();
+    expect(config.modelAssignments.account.memorySummary).toBeNull();
+    expect(config.modelAssignments.account.memoryEvolution).toBeNull();
+    expect(config.agents.defaults.modelPreset).toBeNull();
+    expect(config.agents.defaults.fallbackModels).toEqual([]);
+    expect(() => new Config(config.toObject())).not.toThrow();
+  });
+
+  it("requires an explicit session tombstone decision before deleting an unassigned preset", async () => {
+    const workspace = makeTempDir();
+    const config = new Config({
+      agents: { defaults: { workspace } },
+      providers: {
+        openai: {
+          endpoints: { chat: { apiBase: "https://api.openai.com/v1", protocol: "openai-chat-completions" } },
+        },
+      },
+      modelPresets: {
+        old: {
+          endpoint: "chat",
+          model: "gpt-old",
+          provider: "openai",
+          source: "byok",
+          capabilities: ["agent"],
+        },
+      },
+    });
+    const sessions = new SessionManager(path.join(workspace, "sessions"));
+    const session = sessions.getOrCreate("cli:old-model");
+    session.metadata.modelPreset = "old";
+    session.metadata.modelSelection = { presetId: "old" };
+    sessions.save(session);
+
+    await expect(configureModelPresets(config, [{ type: "delete", name: "old" }]))
+      .rejects.toThrow("explicitly preserve session tombstones");
+    await configureModelPresets(config, [{
+      type: "delete",
+      name: "old",
+      preserveSessionTombstone: true,
+    }]);
+
+    expect(config.modelPresets.old).toBeUndefined();
+    expect(new SessionManager(path.join(workspace, "sessions")).get("cli:old-model")?.metadata.modelPreset)
+      .toBe("old");
   });
 
   it("adds fallback model presets through the field handler", async () => {

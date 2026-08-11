@@ -1,6 +1,12 @@
 /** App config service tests. */
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import YAML from "yaml";
 import { describe, expect, it } from "vitest";
 import { createAppConfigService } from "../app-config-service.js";
+import { createAppStateStore } from "../../infrastructure/app-state-store/index.js";
+import { createMemmyConfigWriter } from "../../infrastructure/memmy-config/index.js";
 import type {
   AppSettingsDto,
   ModelConfigView,
@@ -56,7 +62,7 @@ describe("AppConfigService", () => {
     expect(result).toMatchObject({ autoInjectSkill: true });
   });
 
-  it("does not change the model directory when userMode changes", async () => {
+  it("persists userMode without changing the model directory", async () => {
     const calls: unknown[] = [];
     const service = createAppConfigService({
       bootstrapRepository: {
@@ -70,6 +76,9 @@ describe("AppConfigService", () => {
         }
       },
       memmyConfigWriter: {
+        async writeUserMode(mode) {
+          calls.push({ runtimeMode: mode });
+        },
         async readModelConfig() {
           calls.push("model:read");
           return modelConfigView();
@@ -98,7 +107,9 @@ describe("AppConfigService", () => {
     await expect(service.updateSettings({ userMode: "account" })).resolves.toMatchObject({ userMode: "account" });
 
     expect(calls).toEqual([
+      { runtimeMode: "byok" },
       { settings: { userMode: "byok" } },
+      { runtimeMode: "account" },
       { settings: { userMode: "account" } }
     ]);
   });
@@ -345,12 +356,7 @@ describe("AppConfigService", () => {
     });
 
     await expect(
-      service.setModelConfig({
-        provider: "openai_compatible",
-        baseUrl: "https://api.example.com/v1",
-        modelId: "gpt-4.1-mini",
-        apiKey: "sk-local-secret"
-      })
+      service.setModelConfig(currentModelConfigInput("sk-local-secret"))
     ).resolves.toMatchObject({
       provider: "openai_compatible",
       baseUrl: "https://api.example.com/v1",
@@ -372,7 +378,7 @@ describe("AppConfigService", () => {
 
     expect(calls).toContainEqual({
       writeModel: expect.objectContaining({
-        apiKey: "sk-local-secret"
+        providers: expect.arrayContaining([expect.objectContaining({ apiKey: "sk-local-secret" })])
       })
     });
     expect(calls).toContainEqual({ settings: { userMode: "byok" } });
@@ -519,12 +525,7 @@ describe("AppConfigService", () => {
     });
 
     await expect(
-      service.setModelConfig({
-        provider: "openai_compatible",
-        baseUrl: "https://api.example.com/v1",
-        modelId: "gpt-4.1-mini",
-        apiKey: "sk-local-secret"
-      })
+      service.setModelConfig(currentModelConfigInput("sk-local-secret"))
     ).resolves.toMatchObject({
       hasApiKey: true,
       apiKeyMasked: "sk-l••••cret"
@@ -532,7 +533,7 @@ describe("AppConfigService", () => {
 
     expect(calls).toContainEqual({
       writeModel: expect.objectContaining({
-        apiKey: "sk-local-secret"
+        providers: expect.arrayContaining([expect.objectContaining({ apiKey: "sk-local-secret" })])
       })
     });
     expect(calls).toContainEqual({ reload: { reason: "model_config_saved" } });
@@ -948,12 +949,7 @@ describe("AppConfigService", () => {
       apiKeyMasked: "sk-t••••cret"
     });
     await expect(
-      service.setModelConfig({
-        provider: "openai_compatible",
-        baseUrl: "https://api.example.com/v1",
-        modelId: "gpt-4.1-mini",
-        apiKey: "sk-test-secret"
-      })
+      service.setModelConfig(currentModelConfigInput("sk-test-secret"))
     ).resolves.toMatchObject({
       hasApiKey: true,
       apiKeyMasked: "sk-t••••cret"
@@ -961,7 +957,7 @@ describe("AppConfigService", () => {
     expect(calls).toContain("writer:get");
     expect(calls).toContainEqual({
       writerSet: expect.objectContaining({
-        apiKey: "sk-test-secret"
+        providers: expect.arrayContaining([expect.objectContaining({ apiKey: "sk-test-secret" })])
       })
     });
     expect(calls).not.toEqual([
@@ -1033,7 +1029,9 @@ describe("AppConfigService", () => {
     await expect(
       service.testModelConfig({
         provider: "openai_compatible",
-        baseUrl: "https://api.openai.com/v1",
+        endpointId: "chat",
+        protocol: "openai-chat-completions",
+        apiBase: "https://api.openai.com/v1",
         modelId: "gpt-5.5",
         apiKey: "sk-test-secret"
       })
@@ -1046,29 +1044,114 @@ describe("AppConfigService", () => {
     expect(calls).toEqual([
       {
         provider: "openai_compatible",
-        baseUrl: "https://api.openai.com/v1",
+        endpointId: "chat",
+        protocol: "openai-chat-completions",
+        apiBase: "https://api.openai.com/v1",
         modelId: "gpt-5.5",
         apiKey: "sk-test-secret"
       }
     ]);
   });
 
+  it("does not project the post-write catalog back into legacy SQLite model config", async () => {
+    const root = mkdtempSync(join(tmpdir(), "memmy-app-config-secret-switch-"));
+    const configPath = join(root, "config.yaml");
+    const store = createAppStateStore({ databasePath: join(root, "app.sqlite") });
+    try {
+      writeFileSync(configPath, YAML.stringify({
+        app: { userMode: "byok" },
+        agents: { defaults: { modelPreset: "preset-a" } },
+        providers: {
+          openai: {
+            apiKey: "secret-a",
+            endpoints: { chat: { apiBase: "https://a.example.test/v1", protocol: "openai-chat-completions" } }
+          },
+          deepseek: {
+            apiKey: "secret-b",
+            endpoints: { chat: { apiBase: "https://b.example.test/v1", protocol: "openai-chat-completions" } }
+          }
+        },
+        modelPresets: {
+          "preset-a": {
+            provider: "openai", endpoint: "chat", model: "model-a", source: "byok",
+            capabilities: ["agent", "memory_summary", "memory_evolution"]
+          },
+          "preset-b": {
+            provider: "deepseek", endpoint: "chat", model: "model-b", source: "byok",
+            capabilities: ["agent", "memory_summary", "memory_evolution"]
+          }
+        },
+        modelAssignments: {
+          byok: {
+            agent: { candidates: ["preset-a"], default: "preset-a" },
+            memorySummary: "preset-a", memoryEvolution: "preset-a",
+            embedding: null, asr: null, imageGeneration: null
+          },
+          account: {
+            agent: { candidates: [], default: null },
+            memorySummary: null, memoryEvolution: null, embedding: null, asr: null, imageGeneration: null
+          }
+        }
+      }), "utf8");
+      const legacyBefore = store.db.prepare("SELECT * FROM account_model_config ORDER BY uuid").all();
+      const writer = createMemmyConfigWriter({ configPath });
+      const current = await writer.readModelConfig!();
+      const service = createAppConfigService({
+        bootstrapRepository: createBootstrapRepositoryStub(),
+        memmyConfigWriter: writer
+      });
+
+      await service.setModelConfig({
+        configRevision: current.configRevision,
+        providers: [{
+          provider: "deepseek",
+          apiKey: "",
+          endpoints: [{ endpointId: "chat", apiBase: "https://b.example.test/v1", protocol: "openai-chat-completions" }],
+          models: [{
+            presetId: "preset-b", endpointId: "chat", model: "model-b", source: "byok",
+            capabilities: ["agent", "memory_summary", "memory_evolution"]
+          }]
+        }],
+        modelAssignments: {
+          byok: {
+            agent: { candidates: ["preset-b"], default: "preset-b" },
+            memorySummary: "preset-b", memoryEvolution: "preset-b",
+            embedding: null, asr: null, imageGeneration: null
+          },
+          account: {
+            agent: { candidates: [], default: null },
+            memorySummary: null, memoryEvolution: null, embedding: null, asr: null, imageGeneration: null
+          }
+        }
+      });
+
+      await expect(writer.readEndpointApiKey?.("deepseek", "chat")).resolves.toBe("secret-b");
+      expect(store.db.prepare("SELECT * FROM account_model_config ORDER BY uuid").all()).toEqual(legacyBefore);
+    } finally {
+      store.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("tests saved model config with the stored secret when no plaintext key is provided", async () => {
     const calls: unknown[] = [];
     const service = createAppConfigService({
       bootstrapRepository: createBootstrapRepositoryStub(),
-      modelConfigRepository: {
-        get() {
-          return modelConfigView();
-        },
-        upsert() {
-          throw new Error("upsert should not be called");
-        },
-        getTestApiKey(target: string) {
-          calls.push({ secretTarget: target });
+      memmyConfigWriter: {
+        async readEndpointApiKey(provider, endpointId) {
+          calls.push({ provider, endpointId });
           return "sk-stored-secret";
+        },
+        async writeAccountModelProjection() {
+          throw new Error("not used");
+        },
+        async patchChannelConfig() {
+          throw new Error("not used");
+        },
+        async patchMcpServerConfig() {
+          throw new Error("not used");
         }
-      } as any,
+      },
       modelConfigTester: {
         async test(input) {
           calls.push({ testInput: input });
@@ -1084,20 +1167,22 @@ describe("AppConfigService", () => {
     await expect(
       service.testModelConfig({
         provider: "openai_compatible",
-        baseUrl: "https://api.openai.com/v1",
-        modelId: "gpt-4o",
-        secretTarget: "primary"
+        endpointId: "chat",
+        protocol: "openai-chat-completions",
+        apiBase: "https://api.openai.com/v1",
+        modelId: "gpt-4o"
       } as any)
     ).resolves.toMatchObject({ ok: true });
 
     expect(calls).toEqual([
-      { secretTarget: "primary" },
+      { provider: "openai", endpointId: "chat" },
       {
         testInput: {
           provider: "openai_compatible",
-          baseUrl: "https://api.openai.com/v1",
+          endpointId: "chat",
+          protocol: "openai-chat-completions",
+          apiBase: "https://api.openai.com/v1",
           modelId: "gpt-4o",
-          secretTarget: "primary",
           apiKey: "sk-stored-secret"
         }
       }
@@ -1200,6 +1285,45 @@ function appSettings(overrides: Partial<AppSettingsDto> = {}): AppSettingsDto {
     avatarId: "memmy-default",
     skinId: "default",
     ...overrides
+  };
+}
+
+function currentModelConfigInput(apiKey: string): any {
+  const emptyAssignment = {
+    agent: { candidates: [], default: null },
+    memorySummary: null,
+    memoryEvolution: null,
+    embedding: null,
+    asr: null,
+    imageGeneration: null
+  };
+  return {
+    configRevision: "revision-1",
+    providers: [{
+      provider: "openai",
+      apiKey,
+      endpoints: [{
+        endpointId: "chat",
+        apiBase: "https://api.example.com/v1",
+        protocol: "openai-chat-completions"
+      }],
+      models: [{
+        presetId: "byok-agent",
+        endpointId: "chat",
+        model: "gpt-4.1-mini",
+        source: "byok",
+        capabilities: ["agent", "memory_summary", "memory_evolution"]
+      }]
+    }],
+    modelAssignments: {
+      byok: {
+        ...emptyAssignment,
+        agent: { candidates: ["byok-agent"], default: "byok-agent" },
+        memorySummary: "byok-agent",
+        memoryEvolution: "byok-agent"
+      },
+      account: emptyAssignment
+    }
   };
 }
 

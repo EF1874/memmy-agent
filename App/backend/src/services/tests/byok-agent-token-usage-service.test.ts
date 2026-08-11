@@ -17,6 +17,10 @@ describe("ByokTokenUsageService", () => {
       kind: "agent_chat",
       source: "agent",
       operationId: "turn-1",
+      presetId: "byok-agent",
+      provider: "openai",
+      model: "gpt-4.1-mini",
+      capability: "agent",
       totalTokens: 30,
     }));
   });
@@ -53,6 +57,19 @@ describe("ByokTokenUsageService", () => {
           eventCount: 1,
           updatedAt: "2026-06-11T10:00:00.000Z",
         }],
+        byModel: [{
+          presetId: "byok-agent",
+          provider: "openai",
+          model: "gpt-4.1-mini",
+          capability: "agent",
+          inputTokens: 10,
+          outputTokens: 20,
+          totalTokens: 30,
+          cachedInputTokens: 5,
+          cacheCreationInputTokens: 2,
+          eventCount: 1,
+          updatedAt: "2026-06-11T10:00:00.000Z",
+        }],
       })),
     };
     const service = createByokTokenUsageService({ repository });
@@ -60,6 +77,7 @@ describe("ByokTokenUsageService", () => {
     await expect(service.getSummary()).resolves.toMatchObject({
       inputTokens: 10,
       byKind: [{ kind: "agent_chat" }],
+      byModel: [{ presetId: "byok-agent", provider: "openai", model: "gpt-4.1-mini" }],
     });
   });
 });
@@ -70,6 +88,10 @@ function eventFixture(): ByokTokenUsageEvent {
     kind: "agent_chat",
     source: "agent",
     operationId: "turn-1",
+    presetId: "byok-agent",
+    provider: "openai",
+    model: "gpt-4.1-mini",
+    capability: "agent",
     inputTokens: 10,
     outputTokens: 20,
     totalTokens: 30,

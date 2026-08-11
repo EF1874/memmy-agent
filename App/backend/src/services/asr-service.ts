@@ -1,14 +1,16 @@
 /** Asr service module. */
 import {
   AsrTranscriptionResponseSchema,
+  type ActualModelContext,
   type AppSettingsDto,
   type AsrTranscriptionInput,
-  type AsrTranscriptionResponse
+  type AsrTranscriptionResponse,
+  type ResolvedProviderSnapshot
 } from "@memmy/local-api-contracts";
 import type { CloudClient } from "../adapters/outbound/cloud-client/index.js";
 import type { AccountSessionRepository } from "../infrastructure/app-state-store/repositories/account-session-repo.js";
 import type { BootstrapRepository } from "../infrastructure/app-state-store/repositories/bootstrap-repo.js";
-import type { AsrRuntimeConfig, ModelConfigRepository } from "../infrastructure/app-state-store/repositories/model-config-repo.js";
+import type { MemmyConfigWriter } from "../infrastructure/memmy-config/index.js";
 
 export interface AsrService {
   transcribe(input: AsrTranscriptionInput): Promise<AsrTranscriptionResponse>;
@@ -18,9 +20,9 @@ export interface CreateAsrServiceOptions {
   /** Bootstrap repository. */
   bootstrapRepository: Pick<BootstrapRepository, "getAppSettings"> | { getAppSettings(): Pick<AppSettingsDto, "userMode"> };
   /** Account session repository. */
-  accountSessionRepository?: Pick<AccountSessionRepository, "getCloudUuid">;
-  /** Model config repository. */
-  modelConfigRepository?: Pick<ModelConfigRepository, "getAsrRuntimeConfig">;
+  accountSessionRepository?: Pick<AccountSessionRepository, "get" | "getCloudUuid">;
+  /** Current YAML model catalog reader. */
+  memmyConfigWriter?: Pick<MemmyConfigWriter, "resolveAssignedModel">;
   /** Cloud client. */
   cloudClient: Pick<CloudClient, "transcribeAudio">;
   /** Fetch. */
@@ -42,15 +44,24 @@ export function createAsrService(options: CreateAsrServiceOptions): AsrService {
   return {
     async transcribe(input) {
       const userMode = options.bootstrapRepository.getAppSettings().userMode;
-      if (userMode === "account") {
-        return transcribeWithAccount(input, options, now);
+      if (userMode !== "account" && userMode !== "byok") {
+        throw Object.assign(new Error("ASR requires account or BYOK mode"), { code: "invalid_argument" as const });
       }
-
-      if (userMode === "byok") {
-        return transcribeWithByok(input, requireByokAsrConfig(options), fetchImpl, timeoutMs, now);
+      const resolved = await requireAsrSelection(options, userMode);
+      if (resolved.context.source === "account") {
+        return transcribeWithAccount(input, options, resolved.context, now);
       }
-
-      throw Object.assign(new Error("ASR requires account or BYOK mode"), { code: "invalid_argument" as const });
+      if (resolved.context.protocol !== "dashscope-input-audio-chat") {
+        throw modelSelectionUnavailable(resolved.context);
+      }
+      return transcribeWithByok(
+        input,
+        resolved.context,
+        resolved.provider,
+        fetchImpl,
+        timeoutMs,
+        now
+      );
     }
   };
 }
@@ -59,6 +70,7 @@ export function createAsrService(options: CreateAsrServiceOptions): AsrService {
 async function transcribeWithAccount(
   input: AsrTranscriptionInput,
   options: CreateAsrServiceOptions,
+  context: Readonly<ActualModelContext>,
   now: () => string
 ): Promise<AsrTranscriptionResponse> {
   const uuid = options.accountSessionRepository?.getCloudUuid();
@@ -66,18 +78,23 @@ async function transcribeWithAccount(
     throw Object.assign(new Error("Cloud account is not authenticated"), { code: "unauthorized" as const });
   }
 
-  const result = await options.cloudClient.transcribeAudio({
-    uuid,
-    audioBase64: input.audioBase64,
-    mimeType: input.mimeType,
-    durationMs: input.durationMs
-  });
+  let result: Awaited<ReturnType<CloudClient["transcribeAudio"]>>;
+  try {
+    result = await options.cloudClient.transcribeAudio({
+      uuid,
+      audioBase64: input.audioBase64,
+      mimeType: input.mimeType,
+      durationMs: input.durationMs
+    });
+  } catch (error) {
+    throw withActualModelContext(error, context);
+  }
 
   return AsrTranscriptionResponseSchema.parse({
     text: result.text,
-    modelId: result.modelId,
-    provider: result.provider,
-    source: "account",
+    modelId: context.model,
+    provider: context.provider,
+    source: context.source,
     transcribedAt: now()
   });
 }
@@ -85,19 +102,21 @@ async function transcribeWithAccount(
 /** Handles transcribe with byok. */
 async function transcribeWithByok(
   input: AsrTranscriptionInput,
-  config: AsrRuntimeConfig,
+  context: Readonly<ActualModelContext>,
+  provider: Readonly<ResolvedProviderSnapshot>,
   fetchImpl: typeof fetch,
   timeoutMs: number,
   now: () => string
 ): Promise<AsrTranscriptionResponse> {
-  const response = await fetchImpl(toChatCompletionsUrl(config.baseUrl), {
+  const response = await fetchImpl(toChatCompletionsUrl(provider.apiBase), {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      Authorization: `Bearer ${config.apiKey}`
+      ...(provider.apiKey ? { Authorization: `Bearer ${provider.apiKey}` } : {}),
+      ...provider.extraHeaders
     },
     body: JSON.stringify({
-      model: config.modelId,
+      model: context.model,
       stream: false,
       messages: [
         {
@@ -114,17 +133,18 @@ async function transcribeWithByok(
       ],
       asr_options: {
         enable_itn: false
-      }
+      },
+      ...provider.extraBody
     }),
     signal: AbortSignal.timeout(timeoutMs)
   });
 
-  const text = await readDashScopeTranscript(response);
+  const text = await readDashScopeTranscript(response, context);
   return AsrTranscriptionResponseSchema.parse({
     text,
-    modelId: config.modelId,
-    provider: config.provider,
-    source: "byok",
+    modelId: context.model,
+    provider: context.provider,
+    source: context.source,
     transcribedAt: now()
   });
 }
@@ -135,12 +155,26 @@ async function transcribeWithByok(
  * @param options Service dependencies.
  * @returns The BYOK ASR runtime config.
  */
-function requireByokAsrConfig(options: CreateAsrServiceOptions): AsrRuntimeConfig {
-  if (!options.modelConfigRepository) {
-    throw Object.assign(new Error("ASR model config repository is not configured"), { code: "invalid_argument" as const });
+async function requireAsrSelection(
+  options: CreateAsrServiceOptions,
+  mode: "account" | "byok"
+) {
+  const resolver = options.memmyConfigWriter?.resolveAssignedModel;
+  if (!resolver) {
+    throw Object.assign(new Error("ASR model catalog is not configured"), { code: "invalid_argument" as const });
   }
+  const session = options.accountSessionRepository?.get();
+  const activeAccountId = session?.authenticated ? session.profile.userId : null;
+  const resolved = await resolver({ mode, activeAccountId, capability: "asr" });
+  if (!resolved.ok) throw modelSelectionUnavailable();
+  return resolved;
+}
 
-  return options.modelConfigRepository.getAsrRuntimeConfig();
+function modelSelectionUnavailable(context?: Readonly<ActualModelContext>): Error {
+  return Object.assign(new Error("Assigned ASR model is unavailable"), {
+    code: "model_selection_unavailable" as const,
+    ...(context ? { actualModelContext: context } : {})
+  });
 }
 
 /**
@@ -169,12 +203,16 @@ function toAudioDataUrl(input: AsrTranscriptionInput): string {
  * @param response Fetch response.
  * @returns The transcribed text.
  */
-async function readDashScopeTranscript(response: Response): Promise<string> {
+async function readDashScopeTranscript(
+  response: Response,
+  context: Readonly<ActualModelContext>
+): Promise<string> {
   const value = await readJson(response);
   if (!response.ok) {
-    throw Object.assign(new Error(readErrorMessage(value) ?? `ASR request failed with HTTP ${response.status}`), {
-      code: classifyHttpError(response.status)
-    });
+    throw withActualModelContext(Object.assign(
+      new Error(readErrorMessage(value) ?? `ASR request failed with HTTP ${response.status}`),
+      { code: classifyHttpError(response.status) }
+    ), context);
   }
 
   const text = readChoiceMessageContent(value);
@@ -183,6 +221,14 @@ async function readDashScopeTranscript(response: Response): Promise<string> {
   }
 
   return text;
+}
+
+function withActualModelContext(
+  error: unknown,
+  context: Readonly<ActualModelContext>
+): Error {
+  const normalized = error instanceof Error ? error : new Error(String(error));
+  return Object.assign(normalized, { actualModelContext: context });
 }
 
 /**

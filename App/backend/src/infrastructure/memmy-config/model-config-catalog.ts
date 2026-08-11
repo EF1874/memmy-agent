@@ -1,53 +1,45 @@
 import {
-  ASR_PROVIDER,
-  QWEN_ASR_MODEL_ID,
-  type AgentApiType,
-  type EmbeddingConfigInput,
-  type EmbeddingConfigView,
-  type ImageGenModelConfigInput,
-  type ImageGenModelConfigView,
-  type MemoryRoleInput,
-  type MemoryRoleView,
+  type CatalogEndpointInput,
+  type CatalogProviderId,
+  type ModelAssignment,
+  type ModelAssignments,
+  type ModelCapability,
   type ModelConfigInput,
   type ModelConfigView,
-  type ModelProvider,
-  type RoleModelConfigInput,
-  type RoleModelConfigView,
+  type ModelEndpointProtocol,
+  type TextModelItemInput,
+  type TextModelItemView,
   type TextModelProviderInput,
   type TextModelProviderView
 } from "@memmy/local-api-contracts";
-import { withRuntimeConfigWriteLock } from "@memmy/migrations";
-import { createHash, randomBytes } from "node:crypto";
-import { mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
-import { basename, dirname, resolve } from "node:path";
+import { mutateRuntimeConfig } from "@memmy/migrations";
+import { createHash, randomUUID } from "node:crypto";
+import { readFile, stat } from "node:fs/promises";
+import { resolve } from "node:path";
 import YAML from "yaml";
-import { systemUtcOffset } from "../../utils/time-zone.js";
 
-const ACCOUNT_PROVIDER = "memmy_account";
-const ACCOUNT_PRESET = "memmy-account";
-const ACCOUNT_MODEL = "agent_chat";
-const DESKTOP_TEXT_PROVIDERS = new Set([
-  "openai",
-  "anthropic",
-  "gemini",
-  "google",
-  "deepseek",
-  "zhipu",
-  "qwen",
-  "kimi",
-  "minimax",
-  "baidu",
-  "doubao",
-  ACCOUNT_PROVIDER
-]);
-const API_KEY_OPTIONAL_PROVIDERS = new Set([
-  "ollama",
-  "lmstudio",
-  "openai_codex",
-  "github_copilot"
-]);
+const ACCOUNT_PROVIDER = "memmy_account" as const;
+const API_KEY_OPTIONAL_PROVIDERS = new Set<CatalogProviderId>();
+const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 type ConfigRecord = Record<string, unknown>;
+
+const CAPABILITY_PROTOCOLS: Readonly<Record<ModelCapability, ReadonlySet<ModelEndpointProtocol>>> = {
+  agent: new Set(["openai-chat-completions", "openai-responses", "anthropic-messages", "gemini-generate-content", "memmy-account"]),
+  memory_summary: new Set(["openai-chat-completions", "anthropic-messages", "gemini-generate-content", "memmy-account"]),
+  memory_evolution: new Set(["openai-chat-completions", "anthropic-messages", "gemini-generate-content", "memmy-account"]),
+  embedding: new Set(["openai-embeddings", "memmy-account"]),
+  asr: new Set(["dashscope-input-audio-chat", "memmy-account"]),
+  image_generation: new Set(["openai-images", "dashscope-multimodal-generation", "memmy-account"])
+};
+
+const ASSIGNMENT_CAPABILITIES = {
+  memorySummary: "memory_summary",
+  memoryEvolution: "memory_evolution",
+  embedding: "embedding",
+  asr: "asr",
+  imageGeneration: "image_generation"
+} as const satisfies Readonly<Record<Exclude<keyof ModelAssignment, "ownerAccountId" | "agent">, ModelCapability>>;
 
 export class ModelConfigChangedError extends Error {
   readonly code = "model_config_changed";
@@ -79,20 +71,14 @@ export async function writeModelConfigCatalog(
 ): Promise<ModelConfigView> {
   const target = resolve(configPath);
   try {
-    return await withRuntimeConfigWriteLock(target, async () => {
-      const source = await readConfig(target);
-      if (input.configRevision !== revisionFor(source.config)) {
-        throw new ModelConfigChangedError();
-      }
-
-      const next = mergeModelConfig(source.config, input);
-      const sourceBeforeCommit = await readContent(target);
-      if (sourceBeforeCommit !== source.content) {
-        throw new ModelConfigChangedError();
-      }
-      await writeConfigAtomic(target, next);
-      return buildModelConfigView(next, revisionFor(next), new Date().toISOString());
+    const result = await mutateRuntimeConfig(target, (current) => {
+      if (input.configRevision !== revisionFor(current)) throw new ModelConfigChangedError();
+      const next = mergeModelConfig(current, input);
+      for (const key of Object.keys(current)) delete current[key];
+      Object.assign(current, next);
+      return next;
     });
+    return buildModelConfigView(result.value, revisionFor(result.value), new Date().toISOString());
   } catch (error) {
     if (isErrorCode(error, "migration_lock_timeout")) {
       throw Object.assign(new Error("Model configuration is busy; try again"), {
@@ -103,366 +89,333 @@ export async function writeModelConfigCatalog(
   }
 }
 
+/** @deprecated Runtime-created preset IDs are UUIDs; deterministic IDs belong to registered migrations. */
 export function generateDesktopPresetName(provider: string, model: string): string {
-  const normalizedProvider = readablePresetPart(provider, null) || "provider";
-  const normalizedModel = readablePresetPart(model, 48) || "model";
-  const hash = createHash("sha256")
-    .update(`${provider.trim()}\0${model.trim()}`, "utf8")
-    .digest("hex")
-    .slice(0, 8);
-  return `desktop-${normalizedProvider}-${normalizedModel}-${hash}`;
+  const hash = createHash("sha256").update(`${provider.trim()}\0${model.trim()}`, "utf8").digest("hex").slice(0, 8);
+  return `desktop-${readableIdPart(provider, 24) || "provider"}-${readableIdPart(model, 48) || "model"}-${hash}`;
 }
 
 function mergeModelConfig(config: ConfigRecord, input: ModelConfigInput): ConfigRecord {
   const existingProviders = record(config.providers);
   const existingPresets = record(config.modelPresets);
-  const inputProviders = input.providers.map(normalizeProviderInput);
-  validateProviderInputs(inputProviders);
-  validateAccountProvider(inputProviders, existingProviders, existingPresets);
+  const existingAssignments = normalizeStoredAssignments(config.modelAssignments);
+  const normalizedProviders = input.providers.map(normalizeProviderInput);
+  validateProviderIds(normalizedProviders);
+  validateAccountInputs(normalizedProviders, existingProviders, existingPresets);
 
-  const editableExistingProviders = existingEditableProviderNames(config);
-  const nextProviders = Object.fromEntries(
-    Object.entries(existingProviders).filter(([provider]) => (
-      !DESKTOP_TEXT_PROVIDERS.has(provider) || !editableExistingProviders.has(provider)
-    ))
-  );
-  const nextPresets = Object.fromEntries(
-    Object.entries(existingPresets).filter(([, value]) => (
-      preserveHiddenPreset(record(value))
-    ))
-  );
-  const generatedNames = new Map<string, string>();
-  const retainedNames = new Set(
-    Object.entries(nextPresets)
-      .filter(([, value]) => presetPair(record(value)) !== null)
-      .map(([name]) => name)
-  );
-  const retainedPairs = new Set(
-    Object.values(nextPresets)
-      .map((value) => presetPair(record(value)))
-      .filter((pair): pair is string => pair !== null)
-  );
-  const existingDefaults = record(record(config.agents).defaults);
-
-  for (const providerInput of inputProviders) {
-    const providerName = providerInput.provider;
-    const previousProvider = record(existingProviders[providerName]);
-    if (providerName === ACCOUNT_PROVIDER) {
-      nextProviders[providerName] = previousProvider;
-    } else {
-      nextProviders[providerName] = mergeProvider(previousProvider, providerInput);
+  const managedProviderIds = new Set<string>(normalizedProviders.filter((provider) => provider.provider !== ACCOUNT_PROVIDER).map((provider) => provider.provider));
+  for (const providerId of Object.keys(existingProviders)) {
+    if (providerId !== ACCOUNT_PROVIDER && isCatalogProviderId(providerId)) {
+      managedProviderIds.add(providerId);
     }
-
-    for (const item of providerInput.models) {
-      const pair = providerModelPair(providerName, item.model);
-      if (retainedPairs.has(pair)) {
-        throw new InvalidModelConfigError(
-          `Duplicate Provider/model: ${providerName} / ${item.model}`
-        );
-      }
-      const previousPresetName = item.presetName?.trim();
-      const legacyDefault = (
-        previousPresetName === "default"
-        && stringValue(existingDefaults.provider) === providerName
-        && stringValue(existingDefaults.model) === item.model
-      );
-      if (legacyDefault) {
-        retainedNames.add("default");
-        generatedNames.set("default", "default");
-        continue;
-      }
-      const previousPreset = previousPresetName ? record(existingPresets[previousPresetName]) : {};
-      const unchanged = Boolean(
-        previousPresetName
-        && stringValue(previousPreset.provider) === providerName
-        && stringValue(previousPreset.model) === item.model
-      );
-      const presetName = unchanged
-        ? previousPresetName!
-        : generateDesktopPresetName(providerName, item.model);
-      const occupied = nextPresets[presetName] ?? existingPresets[presetName];
-      if (
-        occupied
-        && (!unchanged || stringValue(record(occupied).provider) !== providerName
-          || stringValue(record(occupied).model) !== item.model)
-      ) {
-        throw new InvalidModelConfigError(`Preset name conflict: ${presetName}`);
-      }
-      if (retainedNames.has(presetName)) {
-        throw new InvalidModelConfigError(`Duplicate preset name: ${presetName}`);
-      }
-      retainedNames.add(presetName);
-      retainedPairs.add(pair);
-      generatedNames.set(previousPresetName ?? `${providerName}\0${item.model}`, presetName);
-      nextPresets[presetName] = unchanged
-        ? { ...previousPreset, provider: providerName, model: item.model }
-        : createDefaultPreset(providerName, item.model);
+  }
+  for (const preset of Object.values(existingPresets)) {
+    const value = record(preset);
+    if (value.source === "byok") {
+      const providerId = stringValue(value.provider);
+      if (providerId) managedProviderIds.add(providerId);
     }
   }
 
-  const currentFallbacks = arrayValue(record(record(config.agents).defaults).fallbackModels);
-  const agents = { ...record(config.agents) };
-  const defaults = { ...record(agents.defaults) };
-  const fallbackModels = currentFallbacks.filter((fallback) => (
-    typeof fallback !== "string" || retainedNames.has(fallback)
-  ));
-  if (fallbackModels.length) defaults.fallbackModels = fallbackModels;
-  else delete defaults.fallbackModels;
+  const nextProviders: ConfigRecord = Object.fromEntries(
+    Object.entries(existingProviders).filter(([providerId]) => !managedProviderIds.has(providerId))
+  );
+  const nextPresets: ConfigRecord = Object.fromEntries(
+    Object.entries(existingPresets).filter(([, value]) => record(value).source !== "byok")
+  );
+  const usedPresetIds = new Set(Object.keys(nextPresets));
+  const existingByokPresets = Object.fromEntries(
+    Object.entries(existingPresets).filter(([, value]) => record(value).source === "byok")
+  );
 
-  const defaultPreset = resolveRequestedDefault(input.defaultModelPreset, generatedNames, retainedNames);
-  if (!defaultPreset && retainedNames.size > 0) {
-    throw new InvalidModelConfigError("A default model is required");
+  for (const providerInput of normalizedProviders) {
+    if (providerInput.provider === ACCOUNT_PROVIDER) continue;
+    const previousProvider = record(existingProviders[providerInput.provider]);
+    const provider = mergeProvider(previousProvider, providerInput);
+    nextProviders[providerInput.provider] = provider;
+    validateEndpointDefinitions(providerInput, provider);
+
+    for (const modelInput of providerInput.models) {
+      if (modelInput.source !== "byok" || modelInput.ownerAccountId) {
+        throw new InvalidModelConfigError("Desktop model settings may only create ownerless BYOK presets");
+      }
+      const endpoint = record(record(provider.endpoints)[modelInput.endpointId]);
+      validatePresetEndpoint(providerInput.provider, modelInput, endpoint);
+      const presetId = resolvePresetId(modelInput.presetId, existingByokPresets, usedPresetIds);
+      const previousPreset = record(existingByokPresets[presetId]);
+      nextPresets[presetId] = {
+        ...previousPreset,
+        provider: providerInput.provider,
+        endpoint: modelInput.endpointId,
+        model: modelInput.model,
+        source: "byok",
+        capabilities: [...new Set(modelInput.capabilities)]
+      };
+      delete record(nextPresets[presetId]).label;
+      delete record(nextPresets[presetId]).ownerAccountId;
+    }
   }
-  if (defaultPreset === "default") {
-    defaults.modelPreset = null;
-  } else if (defaultPreset) {
-    defaults.modelPreset = defaultPreset;
-  } else {
-    defaults.modelPreset = null;
-    delete defaults.provider;
-    delete defaults.model;
-  }
-  defaults.timezone ??= systemUtcOffset();
-  agents.defaults = defaults;
+
+  validateUniqueModels(nextPresets);
+  const modelAssignments = cloneAssignments(input.modelAssignments);
+  validateAssignments(modelAssignments, nextPresets, existingAssignments);
 
   const next: ConfigRecord = {
     ...config,
     providers: nextProviders,
     modelPresets: nextPresets,
-    agents
+    modelAssignments
   };
-  next.memmyMemory = mergeMemoryConfig(record(config.memmyMemory), input);
-  next.tools = mergeOptionalToolConfigs(record(config.tools), input);
+  patchCompatibilityDefault(next, modelAssignments);
   return next;
-}
-
-function resolveRequestedDefault(
-  requested: string | null,
-  generatedNames: ReadonlyMap<string, string>,
-  retainedNames: ReadonlySet<string>
-): string | null {
-  if (requested === null) return retainedNames.values().next().value ?? null;
-  if (requested === "default") return "default";
-  const resolvedName = generatedNames.get(requested) ?? requested;
-  if (!retainedNames.has(resolvedName)) {
-    throw new InvalidModelConfigError("Default model does not reference a retained preset");
-  }
-  return resolvedName;
-}
-
-function validateProviderInputs(providers: readonly TextModelProviderInput[]): void {
-  const providerNames = new Set<string>();
-  const combinations = new Set<string>();
-  let modelCount = 0;
-  for (const provider of providers) {
-    const providerName = provider.provider.trim();
-    if (!DESKTOP_TEXT_PROVIDERS.has(providerName)) {
-      throw new InvalidModelConfigError(`Provider is not supported by desktop settings: ${providerName}`);
-    }
-    if (providerNames.has(providerName)) {
-      throw new InvalidModelConfigError(`Duplicate Provider: ${providerName}`);
-    }
-    providerNames.add(providerName);
-    if (provider.models.length === 0) {
-      throw new InvalidModelConfigError(`Provider ${providerName} must contain at least one model`);
-    }
-    for (const item of provider.models) {
-      const key = `${providerName}\0${item.model.trim()}`;
-      if (combinations.has(key)) {
-        throw new InvalidModelConfigError(`Duplicate Provider/model: ${providerName} / ${item.model.trim()}`);
-      }
-      combinations.add(key);
-      modelCount += 1;
-    }
-  }
-  if (modelCount === 0) {
-    throw new InvalidModelConfigError("At least one text model must remain");
-  }
-}
-
-function existingEditableProviderNames(config: ConfigRecord): Set<string> {
-  const names = new Set<string>();
-  const defaults = record(record(config.agents).defaults);
-  const namedDefault = stringValue(defaults.modelPreset);
-  if (!namedDefault || namedDefault === "default") {
-    const provider = stringValue(defaults.provider);
-    const model = stringValue(defaults.model);
-    if (provider && model && DESKTOP_TEXT_PROVIDERS.has(provider)) names.add(provider);
-  }
-  for (const value of Object.values(record(config.modelPresets))) {
-    const preset = record(value);
-    const provider = stringValue(preset.provider);
-    if (provider && stringValue(preset.model) && DESKTOP_TEXT_PROVIDERS.has(provider)) {
-      names.add(provider);
-    }
-  }
-  return names;
-}
-
-function preserveHiddenPreset(preset: ConfigRecord): boolean {
-  const provider = stringValue(preset.provider);
-  const model = stringValue(preset.model);
-  return !provider || !model || !DESKTOP_TEXT_PROVIDERS.has(provider);
-}
-
-function presetPair(preset: ConfigRecord): string | null {
-  const provider = stringValue(preset.provider);
-  const model = stringValue(preset.model);
-  return provider && model ? providerModelPair(provider, model) : null;
-}
-
-function providerModelPair(provider: string, model: string): string {
-  return `${provider}\0${model}`;
-}
-
-function validateAccountProvider(
-  inputs: readonly TextModelProviderInput[],
-  existingProviders: ConfigRecord,
-  existingPresets: ConfigRecord
-): void {
-  const existingAccountProvider = record(existingProviders[ACCOUNT_PROVIDER]);
-  const existingAccountPreset = record(existingPresets[ACCOUNT_PRESET]);
-  const hasManagedAccount = (
-    stringValue(existingAccountPreset.provider) === ACCOUNT_PROVIDER
-    && stringValue(existingAccountPreset.model) === ACCOUNT_MODEL
-  );
-  const input = inputs.find((provider) => provider.provider === ACCOUNT_PROVIDER);
-  if (!hasManagedAccount && !input) return;
-  if (!hasManagedAccount || !input) {
-    throw new InvalidModelConfigError("The account Provider is managed by account login");
-  }
-  if (
-    input.models.length !== 1
-    || input.models[0]?.presetName !== ACCOUNT_PRESET
-    || input.models[0]?.model !== ACCOUNT_MODEL
-    || (input.apiBase && input.apiBase !== stringValue(existingAccountProvider.apiBase))
-    || input.apiKey
-  ) {
-    throw new InvalidModelConfigError("The account Provider cannot be edited in model settings");
-  }
 }
 
 function normalizeProviderInput(input: TextModelProviderInput): TextModelProviderInput {
   return {
     ...input,
-    provider: input.provider.trim(),
-    apiBase: input.apiBase?.trim(),
     apiKey: input.apiKey?.trim(),
-    models: input.models.map((item) => ({
-      presetName: item.presetName?.trim(),
-      model: item.model.trim()
+    ownerAccountId: input.ownerAccountId?.trim(),
+    endpoints: input.endpoints.map((endpoint) => ({
+      ...endpoint,
+      endpointId: endpoint.endpointId.trim(),
+      apiBase: normalizeApiBase(endpoint.apiBase),
+      apiKey: endpoint.apiKey?.trim()
+    })),
+    models: input.models.map((model) => ({
+      ...model,
+      presetId: model.presetId?.trim(),
+      endpointId: model.endpointId.trim(),
+      model: model.model.trim(),
+      ownerAccountId: model.ownerAccountId?.trim(),
+      capabilities: [...new Set(model.capabilities)]
     }))
   };
 }
 
-function mergeProvider(
-  previous: ConfigRecord,
-  input: TextModelProviderInput
-): ConfigRecord {
-  const next = { ...previous };
-  if (input.apiBase !== undefined) next.apiBase = input.apiBase;
-  if (input.apiKey) next.apiKey = input.apiKey;
-  if (input.provider === "openai") {
-    next.apiType = input.apiType ?? stringValue(previous.apiType) ?? "auto";
+function validateProviderIds(providers: readonly TextModelProviderInput[]): void {
+  const seen = new Set<CatalogProviderId>();
+  for (const provider of providers) {
+    if (seen.has(provider.provider)) throw new InvalidModelConfigError(`Duplicate Provider: ${provider.provider}`);
+    seen.add(provider.provider);
+    if (!ID_PATTERN.test(provider.provider)) throw new InvalidModelConfigError(`Invalid Provider ID: ${provider.provider}`);
+    if (provider.provider !== ACCOUNT_PROVIDER && provider.ownerAccountId) {
+      throw new InvalidModelConfigError("BYOK Providers cannot have ownerAccountId");
+    }
+    const endpointIds = new Set<string>();
+    for (const endpoint of provider.endpoints) {
+      if (!ID_PATTERN.test(endpoint.endpointId)) throw new InvalidModelConfigError(`Invalid endpoint ID: ${endpoint.endpointId}`);
+      if (endpointIds.has(endpoint.endpointId)) throw new InvalidModelConfigError(`Duplicate endpoint ID: ${provider.provider}/${endpoint.endpointId}`);
+      endpointIds.add(endpoint.endpointId);
+    }
   }
-  return next;
 }
 
-function createDefaultPreset(provider: string, model: string): ConfigRecord {
-  return {
-    model,
-    provider,
-    maxTokens: 8192,
-    contextWindowTokens: 200000,
-    temperature: 0.7,
-    reasoningEffort: null
-  };
-}
-
-function mergeMemoryConfig(memory: ConfigRecord, input: ModelConfigInput): ConfigRecord {
-  const next = { ...memory };
-  const roleRouting = { ...record(next.roleRouting) };
-  if (input.memmyMemory) {
-    mergeMemoryRole(next, roleRouting, "summary", input.memmyMemory.summary);
-    mergeMemoryRole(next, roleRouting, "evolution", input.memmyMemory.evolution);
-  }
-  next.roleRouting = roleRouting;
-  if (input.embedding) {
-    next.embedding = mergeEmbedding(record(next.embedding), input.embedding);
-  }
-  delete next.activeProfile;
-  delete next.profiles;
-  return next;
-}
-
-function mergeMemoryRole(
-  memory: ConfigRecord,
-  routing: ConfigRecord,
-  role: "summary" | "evolution",
-  input: MemoryRoleInput
+function validateAccountInputs(
+  inputs: readonly TextModelProviderInput[],
+  providers: ConfigRecord,
+  presets: ConfigRecord
 ): void {
-  routing[role] = input.mode;
-  if (!input.fixed) return;
-  memory[role] = mergeFixedRole(record(memory[role]), input.fixed);
-}
-
-function mergeFixedRole(previous: ConfigRecord, input: RoleModelConfigInput): ConfigRecord {
-  return {
-    ...previous,
-    provider: memoryProviderName(input.provider),
-    vendor: input.provider,
-    endpoint: input.baseUrl,
-    model: input.modelId,
-    apiKey: input.apiKey?.trim() || stringValue(previous.apiKey)
-  };
-}
-
-function mergeEmbedding(previous: ConfigRecord, input: EmbeddingConfigInput): ConfigRecord {
-  const next: ConfigRecord = { ...previous, mode: input.mode };
-  if (input.mode === "custom") {
-    const custom = { ...record(previous.custom) };
-    custom.endpoint = input.custom.baseUrl;
-    custom.model = input.custom.modelId;
-    if (input.custom.apiKey?.trim()) custom.apiKey = input.custom.apiKey.trim();
-    next.custom = custom;
+  const input = inputs.find((provider) => provider.provider === ACCOUNT_PROVIDER);
+  if (!input) return;
+  const existingProvider = record(providers[ACCOUNT_PROVIDER]);
+  if (!Object.keys(existingProvider).length) throw new InvalidModelConfigError("The account Provider is managed by account login");
+  if (input.apiKey?.trim()) throw new InvalidModelConfigError("The account Provider credentials cannot be edited in model settings");
+  if (input.ownerAccountId !== stringValue(existingProvider.ownerAccountId)) {
+    throw new InvalidModelConfigError("The account Provider owner cannot be edited in model settings");
   }
-  return next;
+  const existingEndpoints = record(existingProvider.endpoints);
+  for (const endpoint of input.endpoints) {
+    const existing = record(existingEndpoints[endpoint.endpointId]);
+    if (
+      normalizeApiBase(endpoint.apiBase) !== normalizeApiBase(stringValue(existing.apiBase) ?? "")
+      || endpoint.protocol !== existing.protocol
+      || endpoint.apiKey?.trim()
+    ) {
+      throw new InvalidModelConfigError("The account Provider cannot be edited in model settings");
+    }
+  }
+  for (const model of input.models) {
+    const existing = record(model.presetId ? presets[model.presetId] : undefined);
+    if (
+      !model.presetId
+      || existing.source !== "account"
+      || existing.provider !== ACCOUNT_PROVIDER
+      || existing.endpoint !== model.endpointId
+      || existing.model !== model.model
+      || stableJson(existing.capabilities) !== stableJson(model.capabilities)
+      || existing.ownerAccountId !== model.ownerAccountId
+    ) {
+      throw new InvalidModelConfigError("Account presets cannot be created or edited in model settings");
+    }
+  }
 }
 
-function mergeOptionalToolConfigs(tools: ConfigRecord, input: ModelConfigInput): ConfigRecord {
-  const next = { ...tools };
-  if (input.imageGen) {
-    const imageGeneration = { ...record(next.imageGeneration) };
-    const profiles = { ...record(imageGeneration.profiles) };
-    profiles.byok = mergeImageProfile(record(profiles.byok), input.imageGen);
-    imageGeneration.profiles = profiles;
-    if (!imageGeneration.activeProfile) imageGeneration.activeProfile = "byok";
-    imageGeneration.enabled = true;
-    next.imageGeneration = imageGeneration;
-  }
-  if (input.asr) {
-    const asr = { ...record(next.asr) };
-    asr.provider = input.asr.provider;
-    asr.apiBase = input.asr.baseUrl;
-    asr.model = input.asr.modelId;
-    if (input.asr.apiKey?.trim()) asr.apiKey = input.asr.apiKey.trim();
-    next.asr = asr;
-  }
-  return next;
-}
-
-function mergeImageProfile(
-  previous: ConfigRecord,
-  input: ImageGenModelConfigInput
-): ConfigRecord {
+function mergeProvider(previous: ConfigRecord, input: TextModelProviderInput): ConfigRecord {
+  const previousEndpoints = record(previous.endpoints);
+  const endpoints = Object.fromEntries(input.endpoints.map((endpoint) => {
+    const previousEndpoint = record(previousEndpoints[endpoint.endpointId]);
+    return [endpoint.endpointId, mergeEndpoint(previousEndpoint, endpoint)];
+  }));
   const next: ConfigRecord = {
     ...previous,
-    provider: imageProviderName(input.provider),
-    apiBase: input.baseUrl,
-    model: input.modelId
+    endpoints
   };
-  if (input.apiKey?.trim()) next.apiKey = input.apiKey.trim();
+  setOptionalSecret(next, "apiKey", input.apiKey, previous.apiKey);
+  setOptionalRecord(next, "extraHeaders", input.extraHeaders, previous.extraHeaders);
+  setOptionalRecord(next, "extraBody", input.extraBody, previous.extraBody);
+  delete next.apiBase;
+  delete next.apiType;
+  delete next.ownerAccountId;
   return next;
+}
+
+function mergeEndpoint(previous: ConfigRecord, input: CatalogEndpointInput): ConfigRecord {
+  const next: ConfigRecord = {
+    ...previous,
+    apiBase: input.apiBase,
+    protocol: input.protocol
+  };
+  setOptionalSecret(next, "apiKey", input.apiKey, previous.apiKey);
+  setOptionalRecord(next, "extraHeaders", input.extraHeaders, previous.extraHeaders);
+  setOptionalRecord(next, "extraBody", input.extraBody, previous.extraBody);
+  return next;
+}
+
+function validateEndpointDefinitions(input: TextModelProviderInput, provider: ConfigRecord): void {
+  const signatures = new Set<string>();
+  for (const endpoint of input.endpoints) {
+    const merged = record(record(provider.endpoints)[endpoint.endpointId]);
+    const signature = stableJson({
+      provider: input.provider,
+      protocol: merged.protocol,
+      apiBase: normalizeApiBase(stringValue(merged.apiBase) ?? ""),
+      apiKey: stringValue(merged.apiKey) ?? stringValue(provider.apiKey) ?? null,
+      extraHeaders: merged.extraHeaders ?? provider.extraHeaders ?? null,
+      extraBody: merged.extraBody ?? provider.extraBody ?? null
+    });
+    if (signatures.has(signature)) {
+      throw new InvalidModelConfigError(`Duplicate endpoint definition for Provider ${input.provider}`);
+    }
+    signatures.add(signature);
+  }
+}
+
+function validatePresetEndpoint(providerId: CatalogProviderId, model: TextModelItemInput, endpoint: ConfigRecord): void {
+  if (!Object.keys(endpoint).length) {
+    throw new InvalidModelConfigError(`Preset endpoint does not exist: ${providerId}/${model.endpointId}`);
+  }
+  const protocol = endpoint.protocol as ModelEndpointProtocol | undefined;
+  if (!protocol) throw new InvalidModelConfigError(`Endpoint protocol is required: ${providerId}/${model.endpointId}`);
+  for (const capability of model.capabilities) {
+    if (!CAPABILITY_PROTOCOLS[capability].has(protocol)) {
+      throw new InvalidModelConfigError(`Endpoint protocol ${protocol} does not support capability ${capability}`);
+    }
+  }
+}
+
+function resolvePresetId(
+  requested: string | undefined,
+  existing: ConfigRecord,
+  used: Set<string>
+): string {
+  if (requested) {
+    if (!ID_PATTERN.test(requested)) throw new InvalidModelConfigError(`Invalid preset ID: ${requested}`);
+    if (!(requested in existing)) throw new InvalidModelConfigError("New presets must not provide a client-generated preset ID");
+    if (used.has(requested)) throw new InvalidModelConfigError(`Duplicate preset ID: ${requested}`);
+    used.add(requested);
+    return requested;
+  }
+  let generated = randomUUID();
+  while (used.has(generated) || generated in existing) generated = randomUUID();
+  used.add(generated);
+  return generated;
+}
+
+function validateUniqueModels(presets: ConfigRecord): void {
+  const combinations = new Set<string>();
+  for (const [presetId, value] of Object.entries(presets)) {
+    const preset = record(value);
+    const provider = stringValue(preset.provider);
+    const endpoint = stringValue(preset.endpoint);
+    const model = stringValue(preset.model);
+    if (!provider || !endpoint || !model || (preset.source !== "byok" && preset.source !== "account")) continue;
+    const combination = `${provider}\0${endpoint}\0${model}`;
+    if (combinations.has(combination)) {
+      throw new InvalidModelConfigError(`Duplicate Provider/endpoint/model: ${provider} / ${endpoint} / ${model}`);
+    }
+    combinations.add(combination);
+    if (!ID_PATTERN.test(presetId)) throw new InvalidModelConfigError(`Invalid preset ID: ${presetId}`);
+  }
+}
+
+function validateAssignments(
+  assignments: ModelAssignments,
+  presets: ConfigRecord,
+  previous: ModelAssignments
+): void {
+  validateAssignmentNamespace("byok", assignments.byok, presets, previous.byok);
+  validateAssignmentNamespace("account", assignments.account, presets, previous.account);
+}
+
+function validateAssignmentNamespace(
+  namespace: "byok" | "account",
+  assignment: ModelAssignment,
+  presets: ConfigRecord,
+  previous: ModelAssignment
+): void {
+  const agentCandidates = new Set(assignment.agent.candidates);
+  if (agentCandidates.size !== assignment.agent.candidates.length) {
+    throw new InvalidModelConfigError(`Duplicate ${namespace} Agent candidate`);
+  }
+  if (assignment.agent.default && !agentCandidates.has(assignment.agent.default)) {
+    throw new InvalidModelConfigError(`${namespace} Agent default must be one of its candidates`);
+  }
+  if (!assignment.agent.default && agentCandidates.size) {
+    throw new InvalidModelConfigError(`${namespace} Agent default is required when candidates exist`);
+  }
+  for (const presetId of assignment.agent.candidates) {
+    validateAssignmentReference(namespace, presetId, "agent", assignment, presets, previous);
+  }
+  for (const [field, capability] of Object.entries(ASSIGNMENT_CAPABILITIES) as Array<[keyof typeof ASSIGNMENT_CAPABILITIES, ModelCapability]>) {
+    const presetId = assignment[field];
+    if (presetId) validateAssignmentReference(namespace, presetId, capability, assignment, presets, previous);
+  }
+}
+
+function validateAssignmentReference(
+  namespace: "byok" | "account",
+  presetId: string,
+  capability: ModelCapability,
+  assignment: ModelAssignment,
+  presets: ConfigRecord,
+  previous: ModelAssignment
+): void {
+  const preset = record(presets[presetId]);
+  if (!Object.keys(preset).length) {
+    if (namespace === "account" && stableJson(assignment) === stableJson(previous)) return;
+    throw new InvalidModelConfigError(`${namespace} assignment references missing preset ${presetId}`);
+  }
+  if (namespace === "byok" && preset.source !== "byok") {
+    throw new InvalidModelConfigError("BYOK assignments may only reference BYOK presets");
+  }
+  if (preset.source === "account" && (
+    !assignment.ownerAccountId
+    || assignment.ownerAccountId !== preset.ownerAccountId
+  )) {
+    throw new InvalidModelConfigError("Account assignment owner does not match its platform preset");
+  }
+  if (!arrayValue(preset.capabilities).includes(capability)) {
+    throw new InvalidModelConfigError(`Preset ${presetId} does not support capability ${capability}`);
+  }
+}
+
+function patchCompatibilityDefault(config: ConfigRecord, assignments: ModelAssignments): void {
+  const mode = record(config.app).userMode === "account" ? "account" : "byok";
+  const selected = assignments[mode].agent.default;
+  const agents = { ...record(config.agents) };
+  const defaults = { ...record(agents.defaults), modelPreset: selected };
+  agents.defaults = defaults;
+  config.agents = agents;
 }
 
 function buildModelConfigView(
@@ -472,218 +425,174 @@ function buildModelConfigView(
 ): ModelConfigView {
   const providers = record(config.providers);
   const presets = record(config.modelPresets);
-  const defaults = record(record(config.agents).defaults);
-  const namedDefault = stringValue(defaults.modelPreset);
-  const useLegacyDefault = !namedDefault || namedDefault === "default";
-  const presetRows: Array<{ name: string; provider: string; model: string }> = [];
-  if (useLegacyDefault) {
-    const provider = stringValue(defaults.provider);
-    const model = stringValue(defaults.model);
-    if (provider && model) presetRows.push({ name: "default", provider, model });
-  }
-  for (const [name, value] of Object.entries(presets)) {
-    const preset = record(value);
-    const provider = stringValue(preset.provider);
-    const model = stringValue(preset.model);
-    if (provider && model) presetRows.push({ name, provider, model });
-  }
-
-  const providerOrder: string[] = [];
-  for (const preset of presetRows) {
-    if (!providerOrder.includes(preset.provider)) {
-      providerOrder.push(preset.provider);
-    }
-  }
-  const defaultName = useLegacyDefault ? "default" : namedDefault;
-  const providerViews = providerOrder.map((provider) => {
-    const providerConfig = record(providers[provider]);
-    const available = providerAvailable(provider, providerConfig);
-    return {
-      provider,
-      apiBase: stringValue(providerConfig.apiBase) ?? "",
-      apiType: providerApiType(providerConfig.apiType),
-      configured: available,
-      hasApiKey: Boolean(stringValue(providerConfig.apiKey)),
-      apiKeyMasked: maskSecret(stringValue(providerConfig.apiKey)),
-      apiKey: "",
-      accountManaged: provider === ACCOUNT_PROVIDER,
-      editable: provider !== ACCOUNT_PROVIDER,
-      models: presetRows
-        .filter((preset) => preset.provider === provider)
-        .map((preset) => ({
-          presetName: preset.name,
-          model: preset.model,
-          isDefault: preset.name === defaultName,
-          available
-        }))
-    } satisfies TextModelProviderView;
+  const assignments = normalizeStoredAssignments(config.modelAssignments);
+  const providerViews = Object.entries(providers).flatMap(([providerId, value]) => {
+    if (!isCatalogProviderId(providerId)) return [];
+    const provider = record(value);
+    const modelRows = Object.entries(presets).flatMap(([presetId, presetValue]) => {
+      const preset = record(presetValue);
+      if (preset.provider !== providerId || !isCurrentPreset(preset, provider)) return [];
+      return [presetView(presetId, preset, provider)];
+    });
+    if (!modelRows.length) return [];
+    return [providerView(providerId, provider, modelRows)];
   });
-  const flattened = providerViews.flatMap((provider) => provider.models);
-  const validDefault = flattened.some((model) => model.presetName === defaultName && model.available)
-    ? defaultName ?? null
-    : null;
-  const memory = record(config.memmyMemory);
-
+  const models = providerViews.flatMap((provider) => provider.models);
+  const byId = new Map(models.map((model) => [model.presetId, model]));
+  const effectiveCandidates = {
+    byok: assignments.byok.agent.candidates.flatMap((presetId) => byId.get(presetId) ? [byId.get(presetId)!] : []),
+    account: assignments.account.agent.candidates.flatMap((presetId) => byId.get(presetId) ? [byId.get(presetId)!] : [])
+  };
+  const mode = record(config.app).userMode === "account" ? "account" : "byok";
+  const defaultId = assignments[mode].agent.default;
   return {
     configRevision,
     providers: providerViews,
-    defaultModelPreset: validDefault,
-    configured: Boolean(validDefault),
-    memmyMemory: {
-      summary: memoryRoleView(memory, "summary"),
-      evolution: memoryRoleView(memory, "evolution")
-    },
-    embedding: embeddingView(config),
-    asr: asrView(config),
-    imageGen: imageView(config),
+    modelAssignments: assignments,
+    effectiveCandidates,
+    configured: Boolean(defaultId && byId.get(defaultId)?.available),
     updatedAt: updatedAtValue
   };
 }
 
-function memoryRoleView(
-  memory: ConfigRecord,
-  role: "summary" | "evolution"
-): MemoryRoleView {
-  const routing = record(memory.roleRouting);
-  const mode = routing[role] === "fixed" ? "fixed" : "follow";
+function providerView(
+  providerId: CatalogProviderId,
+  provider: ConfigRecord,
+  models: TextModelItemView[]
+): TextModelProviderView {
+  const apiKey = stringValue(provider.apiKey);
+  const endpoints = Object.entries(record(provider.endpoints)).flatMap(([endpointId, value]) => {
+    const endpoint = record(value);
+    const apiBase = stringValue(endpoint.apiBase);
+    const protocol = endpoint.protocol;
+    if (!apiBase || !isEndpointProtocol(protocol)) return [];
+    const endpointApiKey = stringValue(endpoint.apiKey);
+    return [{
+      endpointId,
+      apiBase,
+      protocol,
+      hasApiKey: Boolean(endpointApiKey),
+      apiKeyMasked: maskSecret(endpointApiKey),
+      apiKey: ""
+    }];
+  });
   return {
-    mode,
-    fixed: roleView(record(memory[role]))
-  };
-}
-
-function roleView(role: ConfigRecord): RoleModelConfigView | null {
-  const provider = modelProviderValue(stringValue(role.vendor) ?? stringValue(role.provider));
-  const baseUrl = stringValue(role.endpoint);
-  const modelId = stringValue(role.model);
-  if (!provider || !baseUrl || !modelId) return null;
-  const apiKey = stringValue(role.apiKey);
-  return {
-    provider,
-    baseUrl,
-    modelId,
+    provider: providerId,
+    configured: models.some((model) => model.available),
     hasApiKey: Boolean(apiKey),
     apiKeyMasked: maskSecret(apiKey),
-    apiKey: ""
+    apiKey: "",
+    ...(stringValue(provider.ownerAccountId) ? { ownerAccountId: stringValue(provider.ownerAccountId)! } : {}),
+    endpoints,
+    accountManaged: providerId === ACCOUNT_PROVIDER,
+    editable: providerId !== ACCOUNT_PROVIDER,
+    models
   };
 }
 
-function embeddingView(config: ConfigRecord): EmbeddingConfigView {
-  const memory = record(config.memmyMemory);
-  const embedding = record(memory.embedding);
-  const accountAvailable = accountProjectionValid(config);
-  const mode = embedding.mode === "cloud" && accountAvailable
-    ? "cloud"
-    : embedding.mode === "custom"
-      ? "custom"
-      : embedding.mode === "local"
-        ? "local"
-        : accountAvailable
-          ? "cloud"
-          : "local";
-  const custom = embeddingCustomView(record(embedding.custom));
-  if (mode === "custom") {
-    if (!custom) {
-      return { mode: "local", custom: null };
-    }
-    return { mode, custom };
-  }
-  return { mode, custom };
-}
-
-function embeddingCustomView(custom: ConfigRecord): NonNullable<EmbeddingConfigView["custom"]> | null {
-  const baseUrl = stringValue(custom.endpoint);
-  const modelId = stringValue(custom.model);
-  if (!baseUrl || !modelId) return null;
-  const apiKey = stringValue(custom.apiKey);
-  return {
-    baseUrl,
-    modelId,
-    hasApiKey: Boolean(apiKey),
-    apiKeyMasked: maskSecret(apiKey),
-    apiKey: ""
-  };
-}
-
-function asrView(config: ConfigRecord): ModelConfigView["asr"] {
-  const asr = record(record(config.tools).asr);
-  const baseUrl = stringValue(asr.apiBase);
-  const modelId = stringValue(asr.model);
-  if (!baseUrl || modelId !== QWEN_ASR_MODEL_ID) return null;
-  const apiKey = stringValue(asr.apiKey);
-  return {
-    provider: ASR_PROVIDER,
-    baseUrl,
-    modelId: QWEN_ASR_MODEL_ID,
-    hasApiKey: Boolean(apiKey),
-    apiKeyMasked: maskSecret(apiKey),
-    apiKey: ""
-  };
-}
-
-function imageView(config: ConfigRecord): ImageGenModelConfigView | null {
-  const imageGeneration = record(record(config.tools).imageGeneration);
-  const profiles = record(imageGeneration.profiles);
-  const profile = record(profiles.byok);
-  const provider = imageProviderValue(stringValue(profile.provider));
-  const baseUrl = stringValue(profile.apiBase);
-  const modelId = stringValue(profile.model);
-  if (!provider || !baseUrl || !modelId) return null;
-  const apiKey = stringValue(profile.apiKey);
-  return {
-    provider,
-    baseUrl,
-    modelId,
-    hasApiKey: Boolean(apiKey),
-    apiKeyMasked: maskSecret(apiKey),
-    apiKey: ""
-  };
-}
-
-function accountProjectionValid(config: ConfigRecord): boolean {
-  const app = record(config.app);
-  const provider = record(record(config.providers)[ACCOUNT_PROVIDER]);
-  const preset = record(record(config.modelPresets)[ACCOUNT_PRESET]);
-  return Boolean(
-    stringValue(app.cloudUuid)
-    && stringValue(app.userId)
-    && stringValue(provider.apiKey)
-    && stringValue(preset.provider) === ACCOUNT_PROVIDER
-    && stringValue(preset.model) === ACCOUNT_MODEL
+function presetView(
+  presetId: string,
+  preset: ConfigRecord,
+  provider: ConfigRecord
+): TextModelItemView {
+  const endpointId = stringValue(preset.endpoint)!;
+  const endpoint = record(record(provider.endpoints)[endpointId]);
+  const protocol = endpoint.protocol as ModelEndpointProtocol;
+  const source = preset.source as "account" | "byok";
+  const providerId = preset.provider as CatalogProviderId;
+  const hasCredential = Boolean(stringValue(endpoint.apiKey) ?? stringValue(provider.apiKey));
+  const ownerMatches = source === "byok" || (
+    stringValue(preset.ownerAccountId)
+    && stringValue(preset.ownerAccountId) === stringValue(provider.ownerAccountId)
   );
+  return {
+    presetId,
+    provider: providerId,
+    endpointId,
+    protocol,
+    model: stringValue(preset.model)!,
+    source,
+    ...(stringValue(preset.ownerAccountId) ? { ownerAccountId: stringValue(preset.ownerAccountId)! } : {}),
+    capabilities: arrayValue(preset.capabilities).filter(isModelCapability),
+    available: Boolean((hasCredential || API_KEY_OPTIONAL_PROVIDERS.has(providerId)) && ownerMatches)
+  };
 }
 
-function providerAvailable(provider: string, config: ConfigRecord): boolean {
-  if (provider === ACCOUNT_PROVIDER) return Boolean(stringValue(config.apiKey));
-  if (API_KEY_OPTIONAL_PROVIDERS.has(provider)) return true;
-  return Boolean(stringValue(config.apiKey));
+function isCurrentPreset(preset: ConfigRecord, provider: ConfigRecord): boolean {
+  const endpointId = stringValue(preset.endpoint);
+  const endpoint = record(endpointId ? record(provider.endpoints)[endpointId] : undefined);
+  const protocol = endpoint.protocol;
+  const capabilities = arrayValue(preset.capabilities);
+  return isCatalogProviderId(preset.provider)
+    && Boolean(endpointId)
+    && Boolean(stringValue(preset.model))
+    && (preset.source === "account" || preset.source === "byok")
+    && isEndpointProtocol(protocol)
+    && capabilities.length > 0
+    && capabilities.every((capability) => isModelCapability(capability) && CAPABILITY_PROTOCOLS[capability].has(protocol));
+}
+
+function normalizeStoredAssignments(value: unknown): ModelAssignments {
+  const root = record(value);
+  return {
+    byok: normalizeAssignment(root.byok, false),
+    account: normalizeAssignment(root.account, true)
+  };
+}
+
+function normalizeAssignment(value: unknown, ownerAllowed: boolean): ModelAssignment {
+  const assignment = record(value);
+  const agent = record(assignment.agent);
+  return {
+    ...(ownerAllowed && stringValue(assignment.ownerAccountId) ? { ownerAccountId: stringValue(assignment.ownerAccountId)! } : {}),
+    agent: {
+      candidates: arrayValue(agent.candidates).filter((item): item is string => typeof item === "string" && Boolean(item.trim())),
+      default: stringValue(agent.default) ?? null
+    },
+    memorySummary: stringValue(assignment.memorySummary) ?? null,
+    memoryEvolution: stringValue(assignment.memoryEvolution) ?? null,
+    embedding: stringValue(assignment.embedding) ?? null,
+    asr: stringValue(assignment.asr) ?? null,
+    imageGeneration: stringValue(assignment.imageGeneration) ?? null
+  };
+}
+
+function cloneAssignments(assignments: ModelAssignments): ModelAssignments {
+  return {
+    byok: { ...assignments.byok, agent: { ...assignments.byok.agent, candidates: [...assignments.byok.agent.candidates] } },
+    account: { ...assignments.account, agent: { ...assignments.account.agent, candidates: [...assignments.account.agent.candidates] } }
+  };
 }
 
 function revisionFor(config: ConfigRecord): string {
-  const fragment = {
+  return createHash("sha256").update(stableJson({
     providers: config.providers ?? null,
     modelPresets: config.modelPresets ?? null,
-    agents: { defaults: record(config.agents).defaults ?? null },
-    memmyMemory: {
-      roleRouting: record(config.memmyMemory).roleRouting ?? null,
-      summary: record(config.memmyMemory).summary ?? null,
-      evolution: record(config.memmyMemory).evolution ?? null,
-      embedding: record(config.memmyMemory).embedding ?? null
-    },
-    asr: record(config.tools).asr ?? null,
-    imageGeneration: record(config.tools).imageGeneration ?? null
-  };
-  return createHash("sha256").update(stableJson(fragment)).digest("hex");
+    modelAssignments: config.modelAssignments ?? null,
+    agents: { defaults: record(config.agents).defaults ?? null }
+  })).digest("hex");
 }
 
 function stableJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  if (isRecord(value)) {
-    return `{${Object.keys(value).sort().map((key) => (
-      `${JSON.stringify(key)}:${stableJson(value[key])}`
-    )).join(",")}}`;
-  }
+  if (isRecord(value)) return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
   return JSON.stringify(value) ?? "null";
+}
+
+function normalizeApiBase(value: string): string {
+  return value.trim().replace(/\/+$/, "");
+}
+
+function setOptionalSecret(target: ConfigRecord, key: string, input: unknown, previous: unknown): void {
+  const next = stringValue(input) ?? stringValue(previous);
+  if (next) target[key] = next;
+  else delete target[key];
+}
+
+function setOptionalRecord(target: ConfigRecord, key: string, input: unknown, previous: unknown): void {
+  if (isRecord(input)) target[key] = input;
+  else if (isRecord(previous)) target[key] = previous;
+  else delete target[key];
 }
 
 async function readConfig(configPath: string): Promise<{ content: string | null; config: ConfigRecord }> {
@@ -693,13 +602,9 @@ async function readConfig(configPath: string): Promise<{ content: string | null;
   try {
     parsed = YAML.parse(content);
   } catch (error) {
-    throw new InvalidModelConfigError(
-      `Unable to read model configuration: ${error instanceof Error ? error.message : String(error)}`
-    );
+    throw new InvalidModelConfigError(`Unable to read model configuration: ${error instanceof Error ? error.message : String(error)}`);
   }
-  if (!isRecord(parsed)) {
-    throw new InvalidModelConfigError("Model configuration must be a YAML object");
-  }
+  if (!isRecord(parsed)) throw new InvalidModelConfigError("Model configuration must be a YAML object");
   return { content, config: parsed };
 }
 
@@ -721,97 +626,8 @@ async function updatedAt(configPath: string, content: string | null): Promise<st
   }
 }
 
-async function writeConfigAtomic(configPath: string, config: ConfigRecord): Promise<void> {
-  const directory = dirname(configPath);
-  const tempPath = `${directory}/.${basename(configPath)}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  let handle: Awaited<ReturnType<typeof open>> | null = null;
-  try {
-    handle = await open(tempPath, "wx", 0o600);
-    await handle.writeFile(YAML.stringify(config), "utf8");
-    await handle.sync();
-    await handle.close();
-    handle = null;
-    await rename(tempPath, configPath);
-    const directoryHandle = await open(directory, "r");
-    try {
-      await directoryHandle.sync();
-    } finally {
-      await directoryHandle.close();
-    }
-  } catch (error) {
-    await handle?.close().catch(() => undefined);
-    await rm(tempPath, { force: true }).catch(() => undefined);
-    throw error;
-  }
-}
-
-function readablePresetPart(value: string, maxLength: number | null): string {
-  let result = value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-  if (maxLength !== null) result = result.slice(0, maxLength).replace(/-$/g, "");
-  return result;
-}
-
-function providerApiType(value: unknown): AgentApiType {
-  return value === "chatCompletions" || value === "responses" ? value : "auto";
-}
-
-function memoryProviderName(provider: ModelProvider): string {
-  if (provider === "anthropic") return "anthropic";
-  if (provider === "google") return "gemini";
-  return "openai_compatible";
-}
-
-function modelProviderValue(value: string | undefined): ModelProvider | null {
-  switch (value) {
-    case "openai":
-    case "openai_compatible":
-      return "openai_compatible";
-    case "anthropic":
-      return "anthropic";
-    case "gemini":
-    case "google":
-      return "google";
-    case "deepseek":
-    case "zhipu":
-    case "qwen":
-    case "kimi":
-    case "minimax":
-    case "baidu":
-    case "doubao":
-      return value;
-    default:
-      return null;
-  }
-}
-
-function imageProviderName(provider: ImageGenModelConfigInput["provider"]): string {
-  if (provider === "openai_compatible") return "openai";
-  if (provider === "google") return "gemini";
-  if (provider === "qwen") return "dashscope";
-  if (provider === "baidu") return "qianfan";
-  if (provider === "doubao") return "volcengine";
-  return provider;
-}
-
-function imageProviderValue(value: string | undefined): ImageGenModelConfigInput["provider"] | null {
-  switch (value) {
-    case "openai":
-      return "openai_compatible";
-    case "gemini":
-      return "google";
-    case "dashscope":
-      return "qwen";
-    case "qianfan":
-      return "baidu";
-    case "volcengine":
-      return "doubao";
-    case "zhipu":
-    case "minimax":
-      return value;
-    default:
-      return null;
-  }
+function readableIdPart(value: string, maxLength: number): string {
+  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, maxLength).replace(/-$/g, "");
 }
 
 function maskSecret(value: string | undefined): string {
@@ -836,9 +652,24 @@ function isRecord(value: unknown): value is ConfigRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return isRecord(value) && Object.values(value).every((item) => typeof item === "string");
+}
+
+function isCatalogProviderId(value: unknown): value is CatalogProviderId {
+  return typeof value === "string" && [
+    "openai", "anthropic", "gemini", "deepseek", "zhipu", "dashscope", "moonshot", "minimax", "qianfan", "volcengine", ACCOUNT_PROVIDER
+  ].includes(value);
+}
+
+function isEndpointProtocol(value: unknown): value is ModelEndpointProtocol {
+  return typeof value === "string" && Object.values(CAPABILITY_PROTOCOLS).some((protocols) => protocols.has(value as ModelEndpointProtocol));
+}
+
+function isModelCapability(value: unknown): value is ModelCapability {
+  return typeof value === "string" && value in CAPABILITY_PROTOCOLS;
+}
+
 function isErrorCode(error: unknown, code: string): boolean {
-  return typeof error === "object"
-    && error !== null
-    && "code" in error
-    && (error as { code?: unknown }).code === code;
+  return isRecord(error) && error.code === code;
 }

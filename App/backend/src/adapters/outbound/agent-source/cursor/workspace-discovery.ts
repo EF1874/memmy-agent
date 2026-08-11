@@ -2,6 +2,7 @@
 import { readFile, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { readDirectoryIfExists } from "../read-directory.js";
 
 /** Contract for cursor workspace. */
@@ -83,7 +84,7 @@ function normalizeWorkspacePath(value: string | null): string | null {
   }
 
   try {
-    return new URL(value).pathname;
+    return fileURLToPath(value);
   } catch {
     return null;
   }

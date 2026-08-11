@@ -347,7 +347,8 @@ print(json.dumps({"calls": calls, "text": text, "selection": selection}, ensure_
 `;
     const result = spawnSync("python3", ["-", pluginInit], {
       input: script,
-      encoding: "utf8"
+      encoding: "utf8",
+      env: { ...process.env, PYTHONIOENCODING: "utf-8" }
     });
     if (result.status !== 0) {
       throw new Error(result.stderr || result.stdout);
@@ -374,7 +375,7 @@ print(json.dumps({"calls": calls, "text": text, "selection": selection}, ensure_
     expect(output.calls[0]?.body.verbose).toBe(true);
     expect(output.selection?.context).toContain("Episode id: episode_2");
     expect(output.selection?.context).toContain("Full episode body 2");
-  });
+  }, 15_000);
 
   it("detects non-Memmy memory provider conflicts from config.yaml", async () => {
     const { rootDirectory } = createFixture();

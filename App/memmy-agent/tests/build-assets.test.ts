@@ -23,7 +23,11 @@ describe("build runtime assets", () => {
       fs.writeFileSync(staleFile, "stale build output", "utf8");
     }
 
-    execFileSync(npmBin, ["run", "build"], { cwd: process.cwd(), stdio: "pipe" });
+    execFileSync(
+      process.platform === "win32" ? (process.env.ComSpec ?? "cmd.exe") : npmBin,
+      process.platform === "win32" ? ["/d", "/s", "/c", "npm.cmd run build"] : ["run", "build"],
+      { cwd: process.cwd(), stdio: "pipe" },
+    );
 
     expect(
       fs.existsSync(path.join(process.cwd(), "dist/templates/agent/file-memory.md")),
@@ -46,6 +50,6 @@ describe("build runtime assets", () => {
 
     const tmuxScript = path.join(process.cwd(), "dist/skills/tmux/scripts/find-sessions.sh");
     expect(fs.existsSync(tmuxScript)).toBe(true);
-    expect(fs.statSync(tmuxScript).mode & 0o111).not.toBe(0);
+    if (process.platform !== "win32") expect(fs.statSync(tmuxScript).mode & 0o111).not.toBe(0);
   }, 60_000);
 });

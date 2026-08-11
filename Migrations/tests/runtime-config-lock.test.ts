@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   withRuntimeConfigWriteLock,
   withRuntimeConfigWriteLockForTest,
+  withRuntimeConfigWriteLockSync,
 } from "../src/runtime-config-lock.js";
 
 const temporaryDirectories: string[] = [];
@@ -130,5 +131,24 @@ describe("runtime config write lock", () => {
     await expect(
       withRuntimeConfigWriteLock(configPath, async () => "next"),
     ).resolves.toBe("next");
+  });
+
+  it("supports synchronous callers and reports contention without sync retries", async () => {
+    const directory = await root();
+    const configPath = path.join(directory, "config.yaml");
+    expect(withRuntimeConfigWriteLockSync(configPath, () => "sync")).toBe("sync");
+
+    const release = await lockfile.lock(configPath, {
+      realpath: false,
+      stale: 120_000,
+      update: 10_000,
+    });
+    try {
+      expect(() => withRuntimeConfigWriteLockSync(configPath, () => undefined)).toThrowError(
+        expect.objectContaining({ code: "migration_lock_timeout" }),
+      );
+    } finally {
+      await release();
+    }
   });
 });

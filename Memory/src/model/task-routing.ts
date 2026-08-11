@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { MemmyConfig } from "../config/index.js";
 import type {
+  Embedder,
   LlmClient,
   LlmCompletionOptions,
   LlmMessage,
@@ -13,6 +14,7 @@ export interface MemoryModelTaskContext {
   config: MemmyConfig;
   summary: LlmClient;
   evolution: LlmClient;
+  embedding: Embedder;
 }
 
 export class MemoryModelTaskRouter {
@@ -26,6 +28,10 @@ export class MemoryModelTaskRouter {
     return new TaskRoutedLlmClient(role, this);
   }
 
+  embedder(): Embedder {
+    return new TaskRoutedEmbedder(this);
+  }
+
   currentOrResolve(): MemoryModelTaskContext {
     return this.storage.getStore() ?? this.resolveContext();
   }
@@ -33,6 +39,34 @@ export class MemoryModelTaskRouter {
   run<T>(operation: () => T): T {
     if (this.storage.getStore()) return operation();
     return this.storage.run(this.resolveContext(), operation);
+  }
+}
+
+class TaskRoutedEmbedder implements Embedder {
+  constructor(private readonly router: MemoryModelTaskRouter) {}
+
+  get config() {
+    return this.delegate().config;
+  }
+
+  isRemote(): boolean {
+    return this.delegate().isRemote();
+  }
+
+  embed(texts: string[], role?: "query" | "document"): Promise<number[][]> {
+    return this.router.run(() => this.delegate().embed(texts, role));
+  }
+
+  embedOne(text: string, role?: "query" | "document"): Promise<number[]> {
+    return this.router.run(() => this.delegate().embedOne(text, role));
+  }
+
+  status(): ModelStatus {
+    return this.delegate().status();
+  }
+
+  private delegate(): Embedder {
+    return this.router.currentOrResolve().embedding;
   }
 }
 

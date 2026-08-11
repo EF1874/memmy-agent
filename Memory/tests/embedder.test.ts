@@ -38,7 +38,7 @@ describe("embedder", () => {
   });
 
   it("preserves the provider embedding values and dimension by default", async () => {
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () =>
+    const fetchMock = vi.fn<typeof fetch>(async () =>
       new Response(JSON.stringify({
         data: [
           { embedding: [3, 4, 0, 8, 15] }
@@ -47,7 +47,8 @@ describe("embedder", () => {
         status: 200,
         headers: { "content-type": "application/json" }
       })
-    ));
+    );
+    vi.stubGlobal("fetch", fetchMock);
 
     const embedder = createEmbedder({
       ...DEFAULT_MEMMY_CONFIG.embedding,
@@ -55,12 +56,20 @@ describe("embedder", () => {
       endpoint: "https://api.example.test/v1",
       model: "embedding-model",
       apiKey: "sk-test",
+      extraHeaders: { "x-endpoint-tenant": "tenant-1" },
+      extraBody: { endpoint_option: "exact-endpoint" },
       cache: false,
       maxRetries: 0
     });
 
     expect(embedder.config.normalize).toBe(false);
     await expect(embedder.embedOne("remember this")).resolves.toEqual([3, 4, 0, 8, 15]);
+    const [, init] = fetchMock.mock.calls[0] as [Parameters<typeof fetch>[0], RequestInit];
+    expect(new Headers(init.headers).get("x-endpoint-tenant")).toBe("tenant-1");
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      model: "embedding-model",
+      endpoint_option: "exact-endpoint"
+    });
   });
 
   it("does not ask the local extractor to normalize by default", async () => {

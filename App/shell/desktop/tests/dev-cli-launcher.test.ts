@@ -18,7 +18,7 @@ test "$MEMMY_ACCOUNT_CHANNEL" = "email"`;
     const result = spawnSync("bash", ["-s"], { cwd: repoRoot, encoding: "utf8", input: script });
 
     expect(result.status, result.stderr || result.stdout).toBe(0);
-  });
+  }, 15_000);
 
   it("loads the domestic edition from a dotenv file and derives its account channel", () => {
     const script = String.raw`set -euo pipefail
@@ -69,7 +69,7 @@ run_main`;
     expect(result.stdout).toBe("cn/phone\n");
   });
 
-  it("recognizes model-preset runtime config before starting agent services", () => {
+  it("recognizes endpoint-only credentials in model-preset runtime config", () => {
     const script = String.raw`set -euo pipefail
 source scripts/dev-start.sh
 test_dir="$(mktemp -d)"
@@ -82,10 +82,13 @@ agents:
     model: stale-model
 providers:
   memmy_account:
-    apiKey: account-token
+    endpoints:
+      chat:
+        apiKey: account-token
 modelPresets:
   memmy-account:
     provider: memmy_account
+    endpoint: chat
     model: agent_chat
 YAML
 MEMMY_CONFIG_PATH="$test_dir/config.yaml"

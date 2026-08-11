@@ -47,9 +47,9 @@ function writeSkill(
 function addFakeBin(name: string): void {
   const binDir = path.join(tmpDir(), "bin");
   fs.mkdirSync(binDir, { recursive: true });
-  const file = path.join(binDir, name);
-  fs.writeFileSync(file, "#!/bin/sh\nexit 0\n", "utf8");
-  fs.chmodSync(file, 0o755);
+  const file = path.join(binDir, process.platform === "win32" ? `${name}.cmd` : name);
+  fs.writeFileSync(file, process.platform === "win32" ? "@exit /b 0\r\n" : "#!/bin/sh\nexit 0\n", "utf8");
+  if (process.platform !== "win32") fs.chmodSync(file, 0o755);
   process.env.PATH = `${binDir}${path.delimiter}${oldPath ?? ""}`;
 }
 

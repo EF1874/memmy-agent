@@ -7,6 +7,23 @@ afterEach(() => {
 });
 
 describe("memory LLM thinking configuration", () => {
+  it("sends the selected endpoint headers and body options", async () => {
+    const fetchMock = openAiFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createLlmClient(llmConfig({
+      extraHeaders: { "x-endpoint-tenant": "tenant-1" },
+      extraBody: { endpoint_option: "exact-endpoint" }
+    }));
+
+    await client.complete([{ role: "user", content: "summarize" }], {
+      operation: "test.endpoint-options"
+    });
+
+    const [, init] = fetchMock.mock.calls[0] as [Parameters<typeof fetch>[0], RequestInit];
+    expect(new Headers(init.headers).get("x-endpoint-tenant")).toBe("tenant-1");
+    expect(requestBody(fetchMock)).toMatchObject({ endpoint_option: "exact-endpoint" });
+  });
+
   it("overrides account Qwen per operation and omits incompatible JSON mode while thinking", async () => {
     const fetchMock = openAiFetch();
     vi.stubGlobal("fetch", fetchMock);

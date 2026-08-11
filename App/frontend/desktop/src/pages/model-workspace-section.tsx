@@ -1,5 +1,6 @@
 import { AlertTriangle, Check, CheckCircle2, ChevronDown, ChevronUp, Database, Info, KeyRound, Loader2, Pencil, Plus, Trash2, Wrench, X, XCircle } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import type { ModelEndpointProtocol } from "@memmy/local-api-contracts";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { ConfigClient, ModelProviderConfig } from "../api/config-client.js";
 import { Button } from "../components/button.js";
 import { ConfirmDialog } from "../components/confirm-dialog.js";
@@ -10,10 +11,13 @@ import { Tooltip } from "../components/tooltip.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import {
   deleteModelConnection,
+  createModelWorkspace,
   getModelCandidates,
   getTaskModelCandidates,
+  modelConfigInput,
   setModelAssignment,
   setModelConnectionAvailability,
+  setDefaultTaskModel,
   setTaskModelCandidates,
   upsertModelConnection,
   type ModelCapability,
@@ -22,7 +26,6 @@ import {
   type ModelWorkspaceMode,
   type ModelWorkspaceMutationError
 } from "../state/model-workspace.js";
-import { useModelWorkspace } from "../state/use-model-workspace.js";
 import {
   ConfigField,
   PasswordConfigField,
@@ -37,6 +40,9 @@ import {
 } from "./settings-nav.js";
 
 type TestStatus = "idle" | "testing" | "success" | "error";
+type ModelKind = "text" | "embedding" | "asr" | "image";
+
+const DEFAULT_TEXT_CAPABILITIES: ModelCapability[] = ["chat", "memorySummary", "memoryEvolution"];
 
 interface ConnectionTestState {
   status: TestStatus;
@@ -49,19 +55,21 @@ interface ConnectionEditorState {
   endpoint: string;
   apiKey: string;
   models: Array<{
+    presetId?: string;
     name: string;
-    capability: ModelCapability;
+    capabilities: ModelCapability[];
   }>;
   modelDraft: string;
-  capabilityDraft: ModelCapability;
+  capabilityDrafts: ModelCapability[];
   addingModel: boolean;
-  editingModelName: string | null;
+  editingModelIndex: number | null;
 }
 
 export interface ModelWorkspaceSectionProps {
   mode: ModelWorkspaceMode;
   seedConfig?: ModelProviderConfig | null;
-  configClient?: Pick<ConfigClient, "testModelConfig">;
+  configClient?: Pick<ConfigClient, "getModelConfig" | "saveModelCatalog" | "testModelConfig">;
+  onConfigSaved?: (config: ModelProviderConfig) => void;
   autoOpenAddConnection?: boolean;
   onFinishSetup?: () => void;
   /** Called when the add/edit modal closes and the flow should return to the main chat. */
@@ -70,21 +78,16 @@ export interface ModelWorkspaceSectionProps {
 
 /** Returns addable protocols in display order, excluding those already configured. */
 export function availableConnectionProtocols(connections: readonly ModelConnection[]): Protocol[] {
-  const configured = new Set(
-    connections.map((connection) => protocolFromConnection(connection.provider))
-  );
-  return PROTOCOL_OPTIONS
-    .map((option) => option.value)
-    .filter((provider) => !configured.has(provider));
+  void connections;
+  return PROTOCOL_OPTIONS.map((option) => option.value);
 }
 
 /**
- * Multi-provider settings UI backed only by the frontend workspace adapter.
- * Existing backend model config is read as a seed and remains otherwise intact.
+ * Multi-provider settings UI backed by the revisioned local model catalog API.
  */
 export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
   const { t } = useTranslation();
-  const { workspace, commit } = useModelWorkspace(props.seedConfig);
+  const [workspace, setWorkspace] = useState(() => createModelWorkspace(props.seedConfig));
   const [modelsExpanded, setModelsExpanded] = useState(true);
   const [taskPickerOpen, setTaskPickerOpen] = useState(false);
   const [editor, setEditor] = useState<ConnectionEditorState | null>(null);
@@ -92,26 +95,75 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
   const [showEditorApiKey, setShowEditorApiKey] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<ModelConnection | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
-  const [saveError, setSaveError] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [savePending, setSavePending] = useState(false);
+  const saveInFlightRef = useRef(false);
+  const hasMutatedRef = useRef(false);
   const [testStates, setTestStates] = useState<Record<string, ConnectionTestState>>({});
   const space = workspace.spaces[props.mode];
   const textCandidates = getModelCandidates(workspace, props.mode, "chat");
+  const memorySummaryCandidates = getModelCandidates(workspace, props.mode, "memorySummary");
+  const memoryEvolutionCandidates = getModelCandidates(workspace, props.mode, "memoryEvolution");
   const taskCandidates = getTaskModelCandidates(workspace, props.mode);
   const embeddingCandidates = getModelCandidates(workspace, props.mode, "embedding");
   const asrCandidates = getModelCandidates(workspace, props.mode, "asr");
   const imageCandidates = getModelCandidates(workspace, props.mode, "image");
-  const configuredProviders = new Set(
-    space.connections.map((connection) => protocolFromConnection(connection.provider))
-  );
+  const platformCandidates = props.mode === "account"
+    ? [...textCandidates, ...memorySummaryCandidates, ...memoryEvolutionCandidates, ...embeddingCandidates, ...asrCandidates, ...imageCandidates]
+        .filter((candidate, index, items) => (
+          candidate.source === "platform"
+          && items.findIndex((item) => item.id === candidate.id) === index
+        ))
+    : [];
   const availableProviders = availableConnectionProtocols(space.connections);
   const nextAvailableProvider = availableProviders[0];
   const canAddConnection = Boolean(nextAvailableProvider);
 
   function commitWorkspace(next: typeof workspace): boolean {
-    const saved = commit(next);
-    setSaveError(!saved);
-    return saved;
+    if (saveInFlightRef.current) return false;
+    setWorkspace(next);
+    setSaveError(null);
+    hasMutatedRef.current = true;
+    if (props.configClient) {
+      saveInFlightRef.current = true;
+      setSavePending(true);
+      void (async () => {
+        try {
+          const saved = await props.configClient!.saveModelCatalog(modelConfigInput(next));
+          setWorkspace(createModelWorkspace(saved));
+          props.onConfigSaved?.(saved);
+        } catch (error) {
+          setSaveError(error instanceof Error && error.message ? error.message : t("settings.modelWorkspace.saveFailed"));
+          try {
+            const latest = await props.configClient!.getModelConfig();
+            setWorkspace(createModelWorkspace(latest));
+            props.onConfigSaved?.(latest);
+          } catch {
+            // Keep the optimistic workspace visible when even the conflict reload is unavailable.
+          }
+        } finally {
+          saveInFlightRef.current = false;
+          setSavePending(false);
+        }
+      })();
+    }
+    return true;
   }
+
+  useEffect(() => {
+    if (!saveInFlightRef.current) setWorkspace(createModelWorkspace(props.seedConfig));
+  }, [props.seedConfig]);
+
+  useEffect(() => {
+    if (!props.configClient) return;
+    let active = true;
+    void props.configClient.getModelConfig().then((saved) => {
+      if (!active || hasMutatedRef.current) return;
+      setWorkspace(createModelWorkspace(saved));
+      props.onConfigSaved?.(saved);
+    }).catch((error) => setSaveError(error instanceof Error && error.message ? error.message : t("settings.modelWorkspace.saveFailed")));
+    return () => { active = false; };
+  }, [props.configClient]);
 
   const openAddConnection = useCallback(() => {
     const provider = nextAvailableProvider;
@@ -126,9 +178,9 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
       apiKey: "",
       models: [],
       modelDraft: DEFAULT_MODEL_IDS[provider],
-      capabilityDraft: "chat",
+      capabilityDrafts: [...DEFAULT_TEXT_CAPABILITIES],
       addingModel: true,
-      editingModelName: null
+      editingModelIndex: null
     });
   }, [nextAvailableProvider]);
 
@@ -179,20 +231,21 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
       provider,
       endpoint: connection.endpoint,
       apiKey: "",
-      models: connection.models.map((model) => ({
-        name: model,
-        capability: connection.modelCapabilities?.[model] ?? "chat"
+      models: connection.modelEntries.map((entry) => ({
+        presetId: entry.presetId,
+        name: entry.model,
+        capabilities: entry.capabilities.map(fromCatalogCapability)
       })),
       modelDraft: "",
-      capabilityDraft: "chat",
+      capabilityDrafts: [...DEFAULT_TEXT_CAPABILITIES],
       addingModel: false,
-      editingModelName: null
+      editingModelIndex: null
     });
   }
 
   function resolveEditorModels() {
     if (!editor) {
-      return { models: [] as Array<{ name: string; capability: ModelCapability }>, error: null as string | null };
+      return { models: [] as Array<{ presetId?: string; name: string; capabilities: ModelCapability[] }>, error: null as string | null };
     }
     const draftName = editor.modelDraft.trim();
     if (!editor.addingModel || !draftName) {
@@ -201,16 +254,23 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
         error: editor.models.length === 0 ? t("settings.modelWorkspace.invalidModel") : null
       };
     }
-    if (editor.models.some((model) => (
-      model.name !== editor.editingModelName
+    if (editor.models.some((model, index) => (
+      index !== editor.editingModelIndex
       && model.name.toLocaleLowerCase() === draftName.toLocaleLowerCase()
     ))) {
       return { models: editor.models, error: t("settings.modelWorkspace.duplicateModel") };
     }
-    const nextModel = { name: draftName, capability: editor.capabilityDraft };
+    const editedModel = editor.editingModelIndex === null
+      ? undefined
+      : editor.models[editor.editingModelIndex];
+    const nextModel = {
+      ...(editedModel?.presetId ? { presetId: editedModel.presetId } : {}),
+      name: draftName,
+      capabilities: editor.capabilityDrafts
+    };
     return {
-      models: editor.editingModelName
-        ? editor.models.map((model) => model.name === editor.editingModelName ? nextModel : model)
+      models: editor.editingModelIndex !== null
+        ? editor.models.map((model, index) => index === editor.editingModelIndex ? nextModel : model)
         : [...editor.models, nextModel],
       error: null
     };
@@ -233,20 +293,36 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
       id: editor.connectionId ?? undefined,
       provider: editor.provider,
       endpoint: editor.endpoint,
+      ...(existing && !providerChanged ? { protocol: existing.protocol } : {}),
       apiKey: editor.apiKey || undefined,
       apiKeyMasked: providerChanged ? undefined : existing?.apiKeyMasked,
       models: resolved.models.map((model) => model.name),
+      modelEntries: resolved.models.map((model) => ({
+        ...(model.presetId ? { presetId: model.presetId } : {}),
+        model: model.name,
+        capability: model.capabilities[0]!,
+        capabilities: model.capabilities
+      })),
       modelCapabilities: Object.fromEntries(
-        resolved.models.map((model) => [model.name, model.capability])
+        resolved.models.map((model) => [model.name, model.capabilities[0]!])
       )
     });
     if (result.error) {
       setFormError(mutationErrorText(result.error, t));
       return;
     }
-    const savedConnection = result.workspace.spaces[props.mode].connections.find(
-      (connection) => connection.id === editor.connectionId || connection.provider === editor.provider
-    );
+    const savedConnection = result.workspace.spaces[props.mode].connections.find((connection) => (
+      connection.id === editor.connectionId
+      || (
+        editor.connectionId === null
+        && protocolFromConnection(connection.provider) === editor.provider
+        && connection.endpoint === editor.endpoint.trim().replace(/\/+$/, "")
+        && resolved.models.every((model) => connection.modelEntries.some((entry) => (
+          entry.model === model.name
+          && model.capabilities.every((capability) => entry.capabilities.includes(toCatalogCapabilityForEditor(capability)))
+        )))
+      )
+    ));
     const workspaceWithAvailability = savedConnection && (editorTest.status === "success" || editorTest.status === "error")
       ? setModelConnectionAvailability(
           result.workspace,
@@ -284,39 +360,46 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
       setFormError(t("settings.modelWorkspace.invalidModel"));
       return;
     }
-    if (editor.models.some((model) => (
-      model.name !== editor.editingModelName
+    if (editor.models.some((model, index) => (
+      index !== editor.editingModelIndex
       && model.name.toLocaleLowerCase() === name.toLocaleLowerCase()
     ))) {
       setFormError(t("settings.modelWorkspace.duplicateModel"));
       return;
     }
-    const nextModel = { name, capability: editor.capabilityDraft };
-    const models = editor.editingModelName
-      ? editor.models.map((model) => model.name === editor.editingModelName ? nextModel : model)
+    const editedModel = editor.editingModelIndex === null
+      ? undefined
+      : editor.models[editor.editingModelIndex];
+    const nextModel = {
+      ...(editedModel?.presetId ? { presetId: editedModel.presetId } : {}),
+      name,
+      capabilities: editor.capabilityDrafts
+    };
+    const models = editor.editingModelIndex !== null
+      ? editor.models.map((model, index) => index === editor.editingModelIndex ? nextModel : model)
       : [...editor.models, nextModel];
     setEditor({
       ...editor,
       models,
       modelDraft: "",
-      capabilityDraft: "chat",
+      capabilityDrafts: [...DEFAULT_TEXT_CAPABILITIES],
       addingModel: false,
-      editingModelName: null
+      editingModelIndex: null
     });
     setFormError(null);
     setEditorTest({ status: "idle", message: null });
   }
 
-  function editEditorModel(modelName: string) {
+  function editEditorModel(modelIndex: number) {
     if (!editor) return;
-    const model = editor.models.find((item) => item.name === modelName);
+    const model = editor.models[modelIndex];
     if (!model) return;
     setEditor({
       ...editor,
       modelDraft: model.name,
-      capabilityDraft: model.capability,
+      capabilityDrafts: model.capabilities,
       addingModel: true,
-      editingModelName: model.name
+      editingModelIndex: modelIndex
     });
     setFormError(null);
   }
@@ -326,24 +409,27 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
     setEditor({
       ...editor,
       modelDraft: "",
-      capabilityDraft: "chat",
+      capabilityDrafts: [...DEFAULT_TEXT_CAPABILITIES],
       addingModel: false,
-      editingModelName: null
+      editingModelIndex: null
     });
     setFormError(null);
   }
 
-  function removeEditorModel(modelName: string) {
+  function removeEditorModel(modelIndex: number) {
     if (!editor) return;
     setEditor({
       ...editor,
-      models: editor.models.filter((model) => model.name !== modelName),
-      ...(editor.editingModelName === modelName
+      models: editor.models.filter((_model, index) => index !== modelIndex),
+      editingModelIndex: editor.editingModelIndex !== null && modelIndex < editor.editingModelIndex
+        ? editor.editingModelIndex - 1
+        : editor.editingModelIndex,
+      ...(editor.editingModelIndex === modelIndex
         ? {
             modelDraft: "",
-            capabilityDraft: "chat" as const,
+            capabilityDrafts: [...DEFAULT_TEXT_CAPABILITIES],
             addingModel: false,
-            editingModelName: null
+            editingModelIndex: null
           }
         : {})
     });
@@ -355,7 +441,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
     if (!deleteTarget) return;
     const result = deleteModelConnection(workspace, props.mode, deleteTarget.id);
     if (result.error) {
-      setSaveError(true);
+      setSaveError(t("settings.modelWorkspace.saveFailed"));
       return;
     }
     if (commitWorkspace(result.workspace)) {
@@ -370,9 +456,9 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
       setEditorTest({ status: "error", message: t("settings.modelWorkspace.testNoModel") });
       return;
     }
-    const model = resolved.models.find((item) => item.capability === "chat")?.name
-      ?? resolved.models[0]?.name;
-    if (!model) {
+    const selectedModel = resolved.models.find((item) => item.capabilities.includes("chat"))
+      ?? resolved.models[0];
+    if (!selectedModel) {
       setEditorTest({ status: "error", message: t("settings.modelWorkspace.testNoModel") });
       return;
     }
@@ -390,13 +476,15 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
     try {
       const result = props.configClient
         ? await props.configClient.testModelConfig({
-            provider: fromProtocol(editor.provider),
-            endpoint: editor.endpoint,
-            model,
+          provider: fromProtocol(editor.provider),
+          endpointId: existing?.endpointId ?? editor.connectionId ?? "connection-test-new",
+          protocol: existing?.protocol ?? protocolForEditor(editor.provider, selectedModel.capabilities[0]!),
+          endpoint: editor.endpoint,
+            model: selectedModel.name,
             apiKey: editor.apiKey,
             apiKeyMasked: providerChanged ? "" : existing?.apiKeyMasked ?? "",
             configured: true
-          }, "chat", "primary")
+          }, testCapability(selectedModel.capabilities[0]!), testSecretTarget(selectedModel.capabilities[0]!))
         : await simulateConnectionTest();
       setEditorTest({
         status: result.ok ? "success" : "error",
@@ -421,24 +509,32 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
     commitWorkspace(setTaskModelCandidates(workspace, props.mode, nextIds));
   }
 
-  const textOptions = textCandidates.map((candidate) => candidateOption(
+  function chooseDefaultTaskCandidate(candidateId: string) {
+    commitWorkspace(setDefaultTaskModel(workspace, props.mode, candidateId));
+  }
+
+  const memorySummaryOptions = memorySummaryCandidates.map((candidate) => candidateOption(
     candidate.id,
-    candidate.source === "platform"
-      ? candidate.displayName
-      : connectionProtocolLabel(candidate.provider, t),
-    candidate.model,
-    candidate.source === "platform"
-      ? t("settings.modelWorkspace.platformModels")
-      : t("settings.modelWorkspace.byokConnections"),
+    candidate.source === "platform" ? t("settings.modelWorkspace.platformName") : connectionProtocolLabel(candidate.provider, t),
+    candidate.source === "platform" ? platformModelName(candidate.capability, t) : candidate.model,
+    candidate.source === "platform" ? t("settings.modelWorkspace.platformModels") : t("settings.modelWorkspace.byokConnections"),
+    candidate.source,
+    candidate.provider
+  ));
+  const memoryEvolutionOptions = memoryEvolutionCandidates.map((candidate) => candidateOption(
+    candidate.id,
+    candidate.source === "platform" ? t("settings.modelWorkspace.platformName") : connectionProtocolLabel(candidate.provider, t),
+    candidate.source === "platform" ? platformModelName(candidate.capability, t) : candidate.model,
+    candidate.source === "platform" ? t("settings.modelWorkspace.platformModels") : t("settings.modelWorkspace.byokConnections"),
     candidate.source,
     candidate.provider
   ));
   const embeddingModelOptions = embeddingCandidates.map((candidate) => candidateOption(
     candidate.id,
     candidate.source === "platform"
-      ? candidate.displayName
+      ? t("settings.modelWorkspace.platformName")
       : connectionProtocolLabel(candidate.provider, t),
-    candidate.model,
+    candidate.source === "platform" ? platformModelName(candidate.capability, t) : candidate.model,
     candidate.source === "platform"
       ? t("settings.modelWorkspace.platformModels")
       : t("settings.modelWorkspace.byokConnections"),
@@ -448,9 +544,9 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
   const asrOptions = asrCandidates.map((candidate) => candidateOption(
     candidate.id,
     candidate.source === "platform"
-      ? candidate.displayName
+      ? t("settings.modelWorkspace.platformName")
       : connectionProtocolLabel(candidate.provider, t),
-    candidate.model,
+    candidate.source === "platform" ? platformModelName(candidate.capability, t) : candidate.model,
     candidate.source === "platform"
       ? t("settings.modelWorkspace.platformModels")
       : t("settings.modelWorkspace.byokConnections"),
@@ -460,25 +556,16 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
   const imageOptions = imageCandidates.map((candidate) => candidateOption(
     candidate.id,
     candidate.source === "platform"
-      ? candidate.displayName
+      ? t("settings.modelWorkspace.platformName")
       : connectionProtocolLabel(candidate.provider, t),
-    candidate.model,
+    candidate.source === "platform" ? platformModelName(candidate.capability, t) : candidate.model,
     candidate.source === "platform"
       ? t("settings.modelWorkspace.platformModels")
       : t("settings.modelWorkspace.byokConnections"),
     candidate.source,
     candidate.provider
   ));
-  const embeddingOptions: SelectOption[] = [
-    {
-      value: "builtin:local-embedding",
-      label: t("settings.modelWorkspace.localEmbedding"),
-      selectedLabel: t("settings.modelWorkspace.localEmbeddingShort"),
-      groupLabel: t("settings.modelWorkspace.specialBuiltins")
-    },
-    ...embeddingModelOptions
-  ];
-  const capabilityOptions = modelCapabilityOptions(t);
+  const embeddingOptions: SelectOption[] = embeddingModelOptions;
   const editorExistingConnection = editor?.connectionId
     ? space.connections.find((connection) => connection.id === editor.connectionId)
     : undefined;
@@ -499,11 +586,13 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
     && (editor.models.length > 0 || (editor.addingModel && editor.modelDraft.trim()))
   );
   const selectedTaskModelsText = taskCandidates.length > 0
-    ? taskCandidates.map((candidate) => candidate.model).join("、")
+    ? taskCandidates.map((candidate) => candidate.source === "platform"
+        ? platformModelName(candidate.capability, t)
+        : candidate.model).join("、")
     : t("settings.modelWorkspace.notConfigured");
 
   return (
-    <div className="model-workspace-layout">
+    <div className="model-workspace-layout" aria-busy={savePending}>
       {props.onFinishSetup && (
         <div className="flex items-center justify-between gap-4 rounded-card border border-action-sky/15 bg-action-sky/5 px-4 py-3">
           <p className="text-xs leading-relaxed text-text-ink/55">
@@ -529,7 +618,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
             size="sm"
             variant="secondary"
             onClick={openAddConnection}
-            disabled={!canAddConnection}
+            disabled={!canAddConnection || savePending}
             title={!canAddConnection ? t("settings.modelWorkspace.allProvidersAdded") : undefined}
             aria-label={t("settings.modelWorkspace.addConnection")}
           >
@@ -565,13 +654,13 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
           </div>
 
           <div className="mt-4 space-y-3">
-          {props.mode === "account" && (
+          {props.mode === "account" && platformCandidates.length > 0 && (
             <article className="rounded-card border-content-panel bg-canvas-oat/40 p-4">
               <div className="flex items-center gap-2">
                 <h4 className="flex min-w-0 items-center gap-2 text-sm font-semibold text-text-ink/80">
                   <ModelProviderLogo provider="memmy" size={18} />
                   <span className="truncate">
-                    {workspace.platformModels[0]?.displayName ?? "Memmy Platform"}
+                    {t("settings.modelWorkspace.platformName")}
                   </span>
                 </h4>
                 <span className="inline-flex shrink-0 items-center gap-1 rounded-tag bg-action-sky/10 px-2 py-0.5 text-[10px] text-action-sky">
@@ -580,16 +669,16 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
               </div>
               {modelsExpanded ? (
                 <ProviderModelList
-                  items={workspace.platformModels.map((model) => ({
+                  items={platformCandidates.map((model) => ({
                     id: model.id,
-                    model: model.model,
-                    capability: model.capability
+                    model: platformModelName(model.capability, t),
+                    capabilities: [model.capability]
                   }))}
                 />
               ) : (
                 <p className="mt-2 text-xs text-text-ink/45">
                   {t("settings.modelWorkspace.platformManaged")} · {t("settings.modelWorkspace.modelCount", {
-                    count: workspace.platformModels.length
+                    count: platformCandidates.length
                   })}
                 </p>
               )}
@@ -634,10 +723,10 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
                 {modelsExpanded ? (
                       <ProviderModelList
                         emptyLabel={t("settings.modelWorkspace.noModels")}
-                        items={connection.models.map((model) => ({
-                          id: model,
-                          model,
-                          capability: connection.modelCapabilities?.[model] ?? "chat"
+                        items={connection.modelEntries.map((entry) => ({
+                          id: entry.presetId,
+                          model: entry.model,
+                          capabilities: entry.capabilities.map(fromCatalogCapability)
                         }))}
                       />
                 ) : (
@@ -715,27 +804,43 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
                     {candidates.map((candidate) => {
                       const selected = taskCandidates.some((item) => item.id === candidate.id);
                       const lastSelected = selected && taskCandidates.length === 1;
+                      const isDefault = space.defaultTaskCandidateId === candidate.id;
                       return (
-                        <button
-                          key={candidate.id}
-                          type="button"
-                          role="checkbox"
-                          aria-checked={selected}
-                          disabled={lastSelected}
-                          title={lastSelected ? t("settings.modelWorkspace.taskAtLeastOne") : undefined}
-                          onClick={() => toggleTaskCandidate(candidate.id)}
-                          className="task-model-picker__option"
-                        >
+                        <div key={candidate.id} className="task-model-picker__option">
+                          <button
+                            type="button"
+                            role="checkbox"
+                            aria-checked={selected}
+                            disabled={lastSelected}
+                            title={lastSelected ? t("settings.modelWorkspace.taskAtLeastOne") : undefined}
+                            onClick={() => toggleTaskCandidate(candidate.id)}
+                            className="contents"
+                          >
                           <span className={`task-model-picker__checkbox${selected ? " is-selected" : ""}`}>
                             {selected && <Check size={11} strokeWidth={3} aria-hidden="true" />}
                           </span>
-                          <span className="min-w-0 flex-1 truncate text-left">{candidate.model}</span>
+                          <span className="min-w-0 flex-1 truncate text-left">
+                            {candidate.source === "platform" ? platformModelName(candidate.capability, t) : candidate.model}
+                          </span>
                           <span className="shrink-0 text-[10px] text-text-ink/40">
                             {candidate.source === "platform"
                               ? candidate.displayName
                               : connectionProtocolLabel(candidate.provider, t)}
                           </span>
-                        </button>
+                          </button>
+                          {selected && (
+                            <button
+                              type="button"
+                              aria-pressed={isDefault}
+                              onClick={() => chooseDefaultTaskCandidate(candidate.id)}
+                              className="ml-2 shrink-0 text-[10px] text-action-sky"
+                            >
+                              {isDefault
+                                ? t("settings.modelWorkspace.defaultModel")
+                                : t("settings.modelWorkspace.setDefaultModel")}
+                            </button>
+                          )}
+                        </div>
                       );
                     })}
                   </div>
@@ -750,7 +855,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
             description={t("settings.model.memoryDesc")}
             tip={t("apiKey.modelPage.memoryHint")}
             value={space.assignments.memorySummary}
-            options={textOptions}
+            options={memorySummaryOptions}
             onChange={updateAssignment}
           />
           <div className="h-px bg-border-stone/30" />
@@ -759,7 +864,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
             label={t("settings.model.skillEvolution")}
             description={t("settings.model.skillDesc")}
             value={space.assignments.memoryEvolution}
-            options={textOptions}
+            options={memoryEvolutionOptions}
             onChange={updateAssignment}
           />
           <div className="h-px bg-border-stone/30" />
@@ -798,7 +903,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
       {saveError && (
         <div className="flex items-center gap-2 rounded-card bg-status-error-soft px-3 py-2 text-xs text-status-error" role="alert">
           <AlertTriangle size={13} aria-hidden="true" />
-          {t("settings.modelWorkspace.saveFailed")}
+          {saveError}
         </div>
       )}
 
@@ -834,7 +939,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
                   type="button"
                   size="sm"
                   variant="primary"
-                  disabled={!canSaveConnection || editorTest.status === "testing"}
+                  disabled={!canSaveConnection || editorTest.status === "testing" || savePending}
                   onClick={saveConnection}
                   aria-label={t("common.save")}
                 >
@@ -859,23 +964,18 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
                   : {
                       models: [],
                       modelDraft: DEFAULT_MODEL_IDS[provider],
-                      capabilityDraft: "chat" as const,
+                      capabilityDrafts: [...DEFAULT_TEXT_CAPABILITIES],
                       addingModel: true,
-                      editingModelName: null
+                      editingModelIndex: null
                     })
               } : current);
               setFormError(null);
               setEditorTest({ status: "idle", message: null });
             }}
             options={PROTOCOL_OPTIONS.map((option) => {
-              const usedByAnotherConnection = configuredProviders.has(option.value)
-                && option.value !== editorOriginalProvider;
               return {
                 value: option.value,
-                label: usedByAnotherConnection
-                  ? `${t(option.labelKey)} · ${t("settings.modelWorkspace.providerAdded")}`
-                  : t(option.labelKey),
-                disabled: usedByAnotherConnection,
+                label: t(option.labelKey),
                 icon: <ModelProviderLogo provider={option.value} size={16} />
               };
             })}
@@ -920,9 +1020,9 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
                   onClick={() => setEditor({
                     ...editor,
                     modelDraft: "",
-                    capabilityDraft: "chat",
+                    capabilityDrafts: [...DEFAULT_TEXT_CAPABILITIES],
                     addingModel: true,
-                    editingModelName: null
+                    editingModelIndex: null
                   })}
                   aria-label={t("settings.modelWorkspace.addModel")}
                   className="inline-flex w-fit items-center gap-1 text-xs text-text-ink/55 transition-colors cursor-pointer hover:text-text-ink/75"
@@ -939,20 +1039,21 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
                 ? t("settings.modelWorkspace.noModels")
                 : undefined}
               items={editor.models
-                .filter((model) => model.name !== editor.editingModelName)
-                .map((model) => ({
-                id: model.name,
+                .map((model, index) => ({ model, index }))
+                .filter(({ index }) => index !== editor.editingModelIndex)
+                .map(({ model, index }) => ({
+                id: model.presetId ?? `${model.name}:${model.capabilities.join(":")}:${index}`,
                 model: model.name,
-                capability: model.capability,
+                capabilities: model.capabilities,
                 editLabel: t("settings.modelWorkspace.editModel", { model: model.name }),
-                onEdit: () => editEditorModel(model.name),
+                onEdit: () => editEditorModel(index),
                 deleteLabel: t("settings.modelWorkspace.deleteModel", { model: model.name }),
-                onDelete: () => removeEditorModel(model.name)
+                onDelete: () => removeEditorModel(index)
               }))}
             />
             {editor.addingModel && (
             <div className={`${
-              editor.models.some((model) => model.name !== editor.editingModelName) ? "mt-3" : ""
+              editor.models.some((_model, index) => index !== editor.editingModelIndex) ? "mt-3" : ""
             } grid gap-2`}>
               <div className="model-editor-fields">
                 <ConfigField
@@ -964,18 +1065,13 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
                   }}
                   placeholder={t("settings.modelWorkspace.modelPlaceholder")}
                 />
-                <Select
-                  label={t("settings.modelWorkspace.modelCapability")}
-                  labelClassName="model-capability-select__label"
-                  value={editor.capabilityDraft}
-                  options={capabilityOptions}
-                  onValueChange={(value) => setEditor({
-                    ...editor,
-                    capabilityDraft: value as ModelCapability
-                  })}
-                  className="select-control--subtle model-capability-select"
-                  menuClassName="model-capability-select__menu"
-                />
+                <div className="grid gap-1.5">
+                  <div className="text-xs text-text-ink/65">{t("settings.modelWorkspace.modelCapability")}</div>
+                  <ModelCapabilityPicker
+                    capabilities={editor.capabilityDrafts}
+                    onChange={(capabilityDrafts) => setEditor({ ...editor, capabilityDrafts })}
+                  />
+                </div>
               </div>
               <div className="model-editor-actions">
                 <button
@@ -990,15 +1086,15 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
                   disabled={!editor.modelDraft.trim()}
                   onClick={saveEditorModel}
                   aria-label={t(
-                    editor.editingModelName
+                    editor.editingModelIndex !== null
                       ? "settings.modelWorkspace.saveModel"
                       : "settings.modelWorkspace.addModel"
                   )}
                   className="inline-flex h-7 items-center gap-1 px-2 text-xs text-action-sky transition-colors cursor-pointer hover:text-action-sky-hover disabled:cursor-not-allowed disabled:opacity-35"
                 >
-                  {!editor.editingModelName && <Plus size={12} aria-hidden="true" />}
+                  {editor.editingModelIndex === null && <Plus size={12} aria-hidden="true" />}
                   {t(
-                    editor.editingModelName
+                    editor.editingModelIndex !== null
                       ? "settings.modelWorkspace.saveModel"
                       : "settings.modelWorkspace.addModel"
                   )}
@@ -1045,7 +1141,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
 interface ProviderModelListItem {
   id: string;
   model: string;
-  capability: ModelCapability;
+  capabilities: ModelCapability[];
   editLabel?: string;
   onEdit?: () => void;
   deleteLabel?: string;
@@ -1078,9 +1174,11 @@ function ProviderModelList(props: {
             {item.model}
           </span>
           <div className="flex shrink-0 items-center gap-1.5">
-            <span className="rounded-tag bg-canvas-oat px-2 py-0.5 text-[10px] text-text-ink/50">
-              {t(modelCapabilityMessageKey(item.capability))}
-            </span>
+            {item.capabilities.map((capability) => (
+              <span key={capability} className="rounded-tag bg-canvas-oat px-2 py-0.5 text-[10px] text-text-ink/50">
+                {t(modelCapabilityMessageKey(capability))}
+              </span>
+            ))}
             {item.onEdit && (
               <button
                 type="button"
@@ -1225,27 +1323,139 @@ function connectionProtocolLabel(
 
 function protocolFromConnection(provider: string): Protocol {
   if (provider === "moonshot" || provider === "kimi") return "moonshot";
+  if (provider === "dashscope") return "qwen";
+  if (provider === "qianfan") return "baidu";
+  if (provider === "volcengine") return "doubao";
   if (PROTOCOL_OPTIONS.some((option) => option.value === provider)) return provider as Protocol;
   return "openai";
 }
 
-function modelCapabilityOptions(
-  t: ReturnType<typeof useTranslation>["t"]
-): SelectOption[] {
-  return (["chat", "embedding", "asr", "image"] as const).map((capability) => ({
-    value: capability,
-    label: capability === "chat"
-      ? t("settings.modelWorkspace.capability.chatOption")
-      : t(modelCapabilityMessageKey(capability)),
-    selectedLabel: t(modelCapabilityMessageKey(capability))
-  }));
+function protocolForEditor(provider: Protocol, capability: ModelCapability): ModelEndpointProtocol {
+  if (provider === "anthropic") return "anthropic-messages";
+  if (provider === "gemini") return "gemini-generate-content";
+  if (capability === "embedding") return "openai-embeddings";
+  if (capability === "asr") return "dashscope-input-audio-chat";
+  if (capability === "image") return "openai-images";
+  return "openai-chat-completions";
+}
+
+function modelKindForCapabilities(capabilities: ModelCapability[]): ModelKind {
+  if (capabilities.includes("embedding")) return "embedding";
+  if (capabilities.includes("asr")) return "asr";
+  if (capabilities.includes("image")) return "image";
+  return "text";
+}
+
+function ModelCapabilityPicker(props: {
+  capabilities: ModelCapability[];
+  onChange: (capabilities: ModelCapability[]) => void;
+}) {
+  const { t } = useTranslation();
+  const detailsRef = useRef<HTMLDetailsElement | null>(null);
+  const kind = modelKindForCapabilities(props.capabilities);
+  const textCapabilities = props.capabilities.filter((capability) => DEFAULT_TEXT_CAPABILITIES.includes(capability));
+  const triggerLabel = kind === "text"
+    ? `${t("settings.modelWorkspace.capability.chat")} · ${t("settings.modelWorkspace.capabilityCount", { count: textCapabilities.length })}`
+    : t(modelCapabilityMessageKey(kind));
+
+  return (
+    <details ref={detailsRef} className="model-capability-picker">
+      <summary className="model-capability-picker__trigger" aria-label={t("settings.modelWorkspace.modelCapability")}>
+        <span className="model-capability-picker__value">{triggerLabel}</span>
+        <ChevronDown size={14} aria-hidden="true" />
+      </summary>
+      <div className="model-capability-picker__menu">
+        <fieldset className="model-capability-picker__text-group">
+          <legend>{t("settings.modelWorkspace.textRoles")}</legend>
+          {(["chat", "memorySummary", "memoryEvolution"] as const).map((capability) => {
+            const checked = textCapabilities.includes(capability);
+            return (
+              <label key={capability} className="model-capability-picker__option">
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={() => props.onChange(toggleModelCapability(props.capabilities, capability))}
+                />
+                <span>{capability === "chat"
+                  ? t("settings.modelWorkspace.capability.agent")
+                  : t(modelCapabilityMessageKey(capability))}</span>
+              </label>
+            );
+          })}
+        </fieldset>
+        <div className="model-capability-picker__single-types" role="group" aria-label={t("settings.modelWorkspace.modelType")}>
+          {(["embedding", "asr", "image"] as const).map((capability) => (
+            <button
+              key={capability}
+              type="button"
+              className={`model-capability-picker__type ${kind === capability ? "model-capability-picker__type--selected" : ""}`}
+              onClick={() => {
+                props.onChange([capability]);
+                if (detailsRef.current) detailsRef.current.open = false;
+              }}
+            >
+              <span>{t(modelCapabilityMessageKey(capability))}</span>
+              {kind === capability && <Check size={13} aria-hidden="true" />}
+            </button>
+          ))}
+        </div>
+      </div>
+    </details>
+  );
 }
 
 function modelCapabilityMessageKey(capability: ModelCapability) {
+  if (capability === "memorySummary") return "settings.modelWorkspace.capability.memorySummary" as const;
+  if (capability === "memoryEvolution") return "settings.modelWorkspace.capability.memoryEvolution" as const;
   if (capability === "embedding") return "settings.modelWorkspace.capability.embedding" as const;
   if (capability === "asr") return "settings.modelWorkspace.capability.asr" as const;
   if (capability === "image") return "settings.modelWorkspace.capability.image" as const;
   return "settings.modelWorkspace.capability.chat" as const;
+}
+
+function fromCatalogCapability(capability: "agent" | "memory_summary" | "memory_evolution" | "embedding" | "asr" | "image_generation"): ModelCapability {
+  if (capability === "agent") return "chat";
+  if (capability === "memory_summary") return "memorySummary";
+  if (capability === "memory_evolution") return "memoryEvolution";
+  if (capability === "image_generation") return "image";
+  return capability;
+}
+
+function toCatalogCapabilityForEditor(capability: ModelCapability) {
+  if (capability === "chat") return "agent" as const;
+  if (capability === "memorySummary") return "memory_summary" as const;
+  if (capability === "memoryEvolution") return "memory_evolution" as const;
+  if (capability === "image") return "image_generation" as const;
+  return capability;
+}
+
+function toggleModelCapability(current: ModelCapability[], capability: ModelCapability): ModelCapability[] {
+  const textCapabilities: ModelCapability[] = ["chat", "memorySummary", "memoryEvolution"];
+  if (!textCapabilities.includes(capability)) return [capability];
+  const textCurrent = current.filter((item) => textCapabilities.includes(item));
+  if (!textCurrent.includes(capability)) return [...textCurrent, capability];
+  return textCurrent.length > 1 ? textCurrent.filter((item) => item !== capability) : textCurrent;
+}
+
+function platformModelName(
+  capability: ModelCapability,
+  t: ReturnType<typeof useTranslation>["t"]
+): string {
+  return t(modelCapabilityMessageKey(capability));
+}
+
+function testCapability(capability: ModelCapability): "chat" | "embedding" | "asr" | "image" {
+  if (capability === "embedding") return "embedding";
+  if (capability === "asr") return "asr";
+  if (capability === "image") return "image";
+  return "chat";
+}
+
+function testSecretTarget(capability: ModelCapability): "primary" | "memory" | "skill" | "embedding" | "asr" | "image" {
+  if (capability === "memorySummary") return "memory";
+  if (capability === "memoryEvolution") return "skill";
+  const target = testCapability(capability);
+  return target === "chat" ? "primary" : target;
 }
 
 function mutationErrorText(

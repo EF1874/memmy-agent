@@ -91,7 +91,19 @@ const OPENAI_DALLE2_SUPPORTED_SIZES = new Set(["256x256", "512x512", "1024x1024"
 const OPENAI_DALLE3_SUPPORTED_SIZES = new Set(["1024x1024", "1792x1024", "1024x1792"]);
 const OPENAI_GPT_IMAGE_SUPPORTED_SIZES = new Set(["1024x1024", "1536x1024", "1024x1536", "auto"]);
 
-export class ImageGenerationError extends Error {}
+export class ImageGenerationError extends Error {
+  readonly status: number | null;
+  readonly errorCategory: "quota_exhausted" | "model_failed" | null;
+
+  constructor(
+    message: string,
+    options: { status?: number | null; errorCategory?: "quota_exhausted" | "model_failed" | null } = {},
+  ) {
+    super(message);
+    this.status = options.status ?? null;
+    this.errorCategory = options.errorCategory ?? null;
+  }
+}
 
 export class GeneratedImageResponse {
   images: string[];
@@ -210,6 +222,10 @@ async function assertOk(response: any, label: string): Promise<void> {
     const detail = (await responseText(response)).slice(0, 500) || `HTTP ${status}`;
     throw new ImageGenerationError(
       `${label} image generation failed: ${detail}`,
+      {
+        status,
+        errorCategory: /(?:^|\D)40309(?:\D|$)/u.test(detail) ? "quota_exhausted" : "model_failed",
+      },
     );
   }
 }

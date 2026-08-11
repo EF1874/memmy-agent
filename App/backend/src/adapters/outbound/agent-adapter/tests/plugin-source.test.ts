@@ -88,7 +88,7 @@ describe("agent adapter plugin sources", () => {
       fileSystem
     });
 
-    await expect(source.loadManifests()).rejects.toThrow("Failed to parse /plugins/broken.agent-adapter.json");
+    await expect(source.loadManifests()).rejects.toThrow(`Failed to parse ${join("/plugins", "broken.agent-adapter.json")}`);
   });
 
   it("rethrows non-missing manifest read errors", async () => {

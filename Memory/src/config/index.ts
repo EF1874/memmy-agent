@@ -2,6 +2,13 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
+import {
+  resolveAssignedModel,
+  type ActualModelContext,
+  type ModelCapability,
+  type ModelSelectionResolution,
+  type RuntimeModelCatalog
+} from "@memmy/local-api-contracts";
 import { resolveTimeZone } from "../utils/time.js";
 
 export type LlmProviderName =
@@ -56,6 +63,10 @@ export interface LlmConfig {
   endpoint?: string;
   model?: string;
   apiKey?: string;
+  extraHeaders?: Record<string, string>;
+  extraBody?: Record<string, unknown>;
+  actualModelContext?: ActualModelContext;
+  selectionError?: "model_selection_unavailable";
   enableThinking: boolean;
   thinkingBudget?: number;
   temperature: number;
@@ -72,6 +83,10 @@ export interface EmbeddingConfig {
   endpoint?: string;
   model?: string;
   apiKey?: string;
+  extraHeaders?: Record<string, string>;
+  extraBody?: Record<string, unknown>;
+  actualModelContext?: ActualModelContext;
+  selectionError?: "model_selection_unavailable";
   batchSize: number;
   timeoutMs: number;
   maxRetries: number;
@@ -598,52 +613,32 @@ function resolveRuntimeMemmyMemoryConfig(
   input: Record<string, unknown>,
   rootConfig: Record<string, unknown>
 ): Record<string, unknown> {
-  const profiles = isRecord(input.profiles) ? input.profiles : undefined;
-  let flattened = input;
-  if (profiles) {
-    const activeProfile = optionalMemoryProfileName(input.activeProfile);
-    if (!activeProfile) {
-      throw new Error("memmyMemory.activeProfile must be byok or account when memmyMemory.profiles is configured");
-    }
-
-    const profile = asRecord(profiles[activeProfile]);
-    if (!isRecord(profile)) {
-      throw new Error(`memmyMemory.profiles.${activeProfile} is required`);
-    }
-
-    const base = omitKeys(input, ["profiles", "summary", "evolution", "embedding", "userId"]);
-    flattened = deepMerge(base, profile);
-    flattened.roleRouting = {
-      summary: activeProfile === "account" ? "follow" : "fixed",
-      evolution: activeProfile === "account" ? "follow" : "fixed"
-    };
-    if (activeProfile === "account") {
-      flattened.embedding = { mode: "cloud" };
-    } else {
-      const legacyEmbedding = asRecord(flattened.embedding);
-      flattened.embedding = legacyEmbedding.provider === "local"
-        ? { ...legacyEmbedding, mode: "local" }
-        : {
-            mode: "custom",
-            custom: legacyEmbedding
-          };
-    }
+  if (Object.prototype.hasOwnProperty.call(input, "profiles")
+    || Object.prototype.hasOwnProperty.call(input, "activeProfile")) {
+    throw new Error("memmyMemory legacy profiles require the registered runtime config migration");
   }
 
-  const routing = normalizeRoleRouting(asRecord(flattened.roleRouting));
-  const summary = routing.summary === "follow"
-    ? resolveAgentDefaultLlm(rootConfig, DEFAULT_MEMMY_CONFIG.summary)
-    : asRecord(flattened.summary);
-  const evolution = routing.evolution === "follow"
-    ? resolveAgentDefaultLlm(rootConfig, DEFAULT_MEMMY_CONFIG.evolution)
-    : asRecord(flattened.evolution);
+  const routing = normalizeRoleRouting(asRecord(input.roleRouting));
+  const assignmentMode = runtimeAssignmentMode(rootConfig);
+  const hasCatalog = isRecord(rootConfig.modelAssignments);
+  if (!hasCatalog && hasLegacyMemoryModelConnection(input)) {
+    throw new Error("memmyMemory legacy model config requires the registered runtime config migration");
+  }
+  const summary = hasCatalog
+    ? resolveAssignedLlm(rootConfig, assignmentMode, "memory_summary", DEFAULT_MEMMY_CONFIG.summary)
+    : asRecord(input.summary);
+  const evolution = hasCatalog
+    ? resolveAssignedLlm(rootConfig, assignmentMode, "memory_evolution", DEFAULT_MEMMY_CONFIG.evolution)
+    : asRecord(input.evolution);
   return {
-    ...flattened,
+    ...input,
     roleRouting: routing,
     summary,
     evolution,
     evolutionSourceProvider: optionalString(evolution.sourceProvider),
-    embedding: resolveEmbeddingInput(flattened, rootConfig)
+    embedding: hasCatalog
+      ? resolveAssignedEmbedding(input, rootConfig, assignmentMode)
+      : asRecord(input.embedding)
   };
 }
 
@@ -668,6 +663,12 @@ function normalizeLlm(input: Record<string, unknown>, defaults: LlmConfig): LlmC
     endpoint: optionalString(input.endpoint),
     model: optionalString(input.model) ?? defaults.model,
     apiKey: optionalString(input.apiKey),
+    extraHeaders: stringRecord(input.extraHeaders),
+    extraBody: unknownRecord(input.extraBody),
+    actualModelContext: actualModelContext(input.actualModelContext),
+    selectionError: input.selectionError === "model_selection_unavailable"
+      ? input.selectionError
+      : undefined,
     enableThinking: booleanValue(input.enableThinking, defaults.enableThinking),
     temperature: numberValue(input.temperature, defaults.temperature),
     maxTokens: numberValue(input.maxTokens, defaults.maxTokens ?? 1200),
@@ -685,6 +686,12 @@ function normalizeEmbedding(input: Record<string, unknown>): EmbeddingConfig {
     endpoint: optionalString(input.endpoint),
     model: optionalString(input.model) ?? DEFAULT_MEMMY_CONFIG.embedding.model,
     apiKey: optionalString(input.apiKey),
+    extraHeaders: stringRecord(input.extraHeaders),
+    extraBody: unknownRecord(input.extraBody),
+    actualModelContext: actualModelContext(input.actualModelContext),
+    selectionError: input.selectionError === "model_selection_unavailable"
+      ? input.selectionError
+      : undefined,
     batchSize: numberValue(input.batchSize, DEFAULT_MEMMY_CONFIG.embedding.batchSize),
     timeoutMs: numberValue(input.timeoutMs, DEFAULT_MEMMY_CONFIG.embedding.timeoutMs),
     maxRetries: numberValue(input.maxRetries, DEFAULT_MEMMY_CONFIG.embedding.maxRetries),
@@ -702,58 +709,38 @@ function normalizeRoleRouting(
   };
 }
 
-function resolveAgentDefaultLlm(
+function resolveAssignedLlm(
   rootConfig: Record<string, unknown>,
+  mode: "account" | "byok" | null,
+  capability: "memory_summary" | "memory_evolution",
   defaults: LlmConfig
 ): Record<string, unknown> {
-  const agentDefaults = asRecord(asRecord(rootConfig.agents).defaults);
-  const presetName = optionalString(agentDefaults.modelPreset);
-  const preset = presetName && presetName !== "default"
-    ? asRecord(asRecord(rootConfig.modelPresets)[presetName])
-    : agentDefaults;
-  const model = optionalString(preset.model);
-  const providerName = resolvePresetProviderName(
-    optionalString(preset.provider),
-    model,
-    asRecord(rootConfig.providers)
-  );
-  if (!model || !providerName) {
-    return {
-      ...defaults,
-      provider: "",
-      sourceProvider: providerName ?? undefined,
-      model: model ?? ""
-    };
+  const resolved = resolveMemoryAssignment(rootConfig, mode, capability);
+  if (!resolved.ok || !llmProtocolSupported(resolved.context.protocol)) {
+    return unavailableLlm(defaults);
   }
-  const providerConfig = asRecord(asRecord(rootConfig.providers)[providerName]);
-  const runtimeProvider = memoryLlmProvider(providerName);
+  const runtimeProvider = memoryLlmProvider(resolved.context.provider);
   return {
     ...defaults,
     provider: runtimeProvider,
-    sourceProvider: providerName,
-    vendor: memoryLlmVendor(providerName, runtimeProvider),
-    endpoint: optionalString(providerConfig.apiBase)
-      ?? optionalString(providerConfig.baseUrl)
-      ?? defaults.endpoint,
-    model,
-    apiKey: optionalString(providerConfig.apiKey),
-    temperature: numberValue(preset.temperature, defaults.temperature),
-    maxTokens: numberValue(preset.maxTokens, defaults.maxTokens ?? 1200),
-    enableThinking: Boolean(optionalString(preset.reasoningEffort))
-      || booleanValue(preset.enableThinking, defaults.enableThinking)
+    sourceProvider: resolved.context.provider,
+    vendor: memoryLlmVendor(resolved.context.provider, runtimeProvider),
+    endpoint: resolved.provider.apiBase,
+    model: resolved.context.model,
+    apiKey: resolved.provider.apiKey,
+    extraHeaders: resolved.provider.extraHeaders,
+    extraBody: resolved.provider.extraBody,
+    actualModelContext: resolved.context
   };
 }
 
-function resolvePresetProviderName(
-  configured: string | undefined,
-  model: string | undefined,
-  providers: Record<string, unknown>
-): string | undefined {
-  if (configured && configured !== "auto") return configured;
-  const prefix = model?.split("/", 1)[0];
-  if (prefix && isRecord(providers[prefix])) return prefix;
-  const names = Object.keys(providers);
-  return names.length === 1 ? names[0] : undefined;
+function unavailableLlm(defaults: LlmConfig): Record<string, unknown> {
+  return {
+    ...defaults,
+    provider: "",
+    model: "",
+    selectionError: "model_selection_unavailable"
+  };
 }
 
 function memoryLlmProvider(provider: string): LlmProviderName {
@@ -785,71 +772,118 @@ function memoryLlmVendor(
     case "deepseek":
     case "zhipu":
     case "qwen":
+    case "dashscope":
     case "kimi":
+    case "moonshot":
     case "minimax":
     case "baidu":
+    case "qianfan":
     case "doubao":
-      return provider;
+    case "volcengine":
+      return ({
+        dashscope: "qwen",
+        moonshot: "kimi",
+        qianfan: "baidu",
+        volcengine: "doubao"
+      } as const)[provider as "dashscope" | "moonshot" | "qianfan" | "volcengine"]
+        ?? provider as LlmVendorName;
     default:
       return runtimeProvider === "openai_compatible" ? "openai_compatible" : "";
   }
 }
 
-function resolveEmbeddingInput(
+function resolveAssignedEmbedding(
   memory: Record<string, unknown>,
-  rootConfig: Record<string, unknown>
+  rootConfig: Record<string, unknown>,
+  mode: "account" | "byok" | null
 ): Record<string, unknown> {
   const embedding = asRecord(memory.embedding);
-  const mode = memoryEmbeddingMode(
+  const embeddingMode = memoryEmbeddingMode(
     embedding.mode,
     DEFAULT_MEMMY_CONFIG.embedding.mode
   );
-  if (mode === "local") {
+  const resolved = resolveMemoryAssignment(rootConfig, mode, "embedding");
+  if (!resolved.ok) {
+    if (embeddingMode !== "local") {
+      return {
+        ...embedding,
+        provider: "openai_compatible",
+        model: "",
+        selectionError: "model_selection_unavailable"
+      };
+    }
     return {
       ...embedding,
-      mode,
+      mode: embeddingMode,
       provider: "local",
       sourceProvider: "local"
     };
   }
-  if (mode === "custom") {
-    const custom = asRecord(embedding.custom);
+  if (!embeddingProtocolSupported(resolved.context.protocol)) {
     return {
       ...embedding,
-      ...custom,
-      mode,
-      sourceProvider: optionalString(custom.sourceProvider)
-        ?? optionalString(custom.vendor)
-        ?? optionalString(custom.provider),
-      provider: memoryEmbeddingProvider(optionalString(custom.provider))
+      provider: "openai_compatible",
+      model: "",
+      selectionError: "model_selection_unavailable"
     };
   }
-  const account = asRecord(asRecord(rootConfig.providers).memmy_account);
   return {
     ...embedding,
-    mode,
-    sourceProvider: "memmy_account",
+    mode: resolved.context.source === "account" ? "cloud" : "custom",
+    sourceProvider: resolved.context.provider,
     provider: "openai_compatible",
-    endpoint: optionalString(account.apiBase),
-    model: "embedding",
-    apiKey: optionalString(account.apiKey)
+    endpoint: resolved.provider.apiBase,
+    model: resolved.context.model,
+    apiKey: resolved.provider.apiKey,
+    extraHeaders: resolved.provider.extraHeaders,
+    extraBody: resolved.provider.extraBody,
+    actualModelContext: resolved.context
   };
 }
 
-function memoryEmbeddingProvider(value: string | undefined): EmbeddingProviderName {
-  switch (value) {
-    case "gemini":
-    case "google":
-      return "gemini";
-    case "cohere":
-    case "voyage":
-    case "mistral":
-      return value;
-    case "local":
-      return "local";
-    default:
-      return "openai_compatible";
-  }
+function resolveMemoryAssignment(
+  rootConfig: Record<string, unknown>,
+  mode: "account" | "byok" | null,
+  capability: ModelCapability
+): ModelSelectionResolution {
+  if (!mode) return { ok: false, code: "model_selection_unavailable" };
+  return resolveAssignedModel({
+    catalog: rootConfig as RuntimeModelCatalog,
+    mode,
+    activeAccountId: optionalString(asRecord(rootConfig.app).userId),
+    capability
+  });
+}
+
+function runtimeAssignmentMode(rootConfig: Record<string, unknown>): "account" | "byok" | null {
+  const mode = optionalString(asRecord(rootConfig.app).userMode);
+  return mode === "account" || mode === "byok" ? mode : null;
+}
+
+function llmProtocolSupported(protocol: ActualModelContext["protocol"]): boolean {
+  return protocol === "openai-chat-completions"
+    || protocol === "anthropic-messages"
+    || protocol === "gemini-generate-content"
+    || protocol === "memmy-account";
+}
+
+function embeddingProtocolSupported(protocol: ActualModelContext["protocol"]): boolean {
+  return protocol === "openai-embeddings" || protocol === "memmy-account";
+}
+
+function hasLegacyMemoryModelConnection(memory: Record<string, unknown>): boolean {
+  const connectionFields = ["provider", "endpoint", "apiBase", "baseUrl", "model", "modelId", "apiKey"];
+  if (connectionFields.some((field) => field in asRecord(memory.summary))) return true;
+  if (connectionFields.some((field) => field in asRecord(memory.evolution))) return true;
+  const embedding = asRecord(memory.embedding);
+  const mode = optionalString(embedding.mode);
+  const provider = optionalString(embedding.provider);
+  const remoteEmbeddingFields = ["endpoint", "apiBase", "baseUrl", "model", "modelId", "apiKey"];
+  return mode === "cloud"
+    || mode === "custom"
+    || isRecord(embedding.custom)
+    || (Boolean(provider) && provider !== "local")
+    || remoteEmbeddingFields.some((field) => field in embedding);
 }
 
 function normalizeAlgorithm(input: Record<string, unknown>): AlgorithmConfig {
@@ -1157,18 +1191,6 @@ function memoryEmbeddingMode(
     : fallback;
 }
 
-function memoryProfileName(value: unknown, fallback: MemoryProfileName): MemoryProfileName {
-  return optionalMemoryProfileName(value) ?? fallback;
-}
-
-function optionalMemoryProfileName(value: unknown): MemoryProfileName | undefined {
-  const profile = optionalString(value);
-  if (profile === "account" || profile === "byok") {
-    return profile;
-  }
-  return undefined;
-}
-
 function storageBackend(value: unknown, fallback: StorageBackendName): StorageBackendName {
   const backend = optionalString(value) as StorageBackendName | undefined;
   if (backend === "sqlite" || backend === "openmem-cloud-rest") {
@@ -1223,11 +1245,6 @@ function compactRecord(input: Record<string, unknown>): Record<string, unknown> 
   );
 }
 
-function omitKeys(input: Record<string, unknown>, keys: string[]): Record<string, unknown> {
-  const remove = new Set(keys);
-  return Object.fromEntries(Object.entries(input).filter(([key]) => !remove.has(key)));
-}
-
 function numberEnv(name: string): number | undefined {
   const value = process.env[name];
   if (!value) return undefined;
@@ -1245,6 +1262,23 @@ function booleanEnv(name: string): boolean | undefined {
 
 function optionalString(value: unknown): string | undefined {
   return typeof value === "string" ? expandEnvString(value) : undefined;
+}
+
+function stringRecord(value: unknown): Record<string, string> | undefined {
+  if (!isRecord(value)) return undefined;
+  const entries = Object.entries(value);
+  return entries.every((entry): entry is [string, string] => typeof entry[1] === "string")
+    ? Object.fromEntries(entries)
+    : undefined;
+}
+
+function unknownRecord(value: unknown): Record<string, unknown> | undefined {
+  return isRecord(value) ? { ...value } : undefined;
+}
+
+function actualModelContext(value: unknown): ActualModelContext | undefined {
+  if (!isRecord(value) || !Array.isArray(value.capabilities)) return undefined;
+  return value as unknown as ActualModelContext;
 }
 
 function optionalPathString(value: unknown): string | undefined {

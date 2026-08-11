@@ -17,12 +17,43 @@ import { CONTEXT_SAFETY_BUFFER_TOKENS } from "../../token-budget.js";
 import { CronService } from "../../cron/service.js";
 import { makeProvider } from "../../providers/factory.js";
 import {
+  committedSelectionFromMetadata,
+  modelSelectionWire,
+  persistedModelSelection,
   resolveModelSelection,
+  type ModelSelectionInput,
   type ResolvedModelSelection,
 } from "../../providers/model-catalog.js";
 import type { ProviderErrorCategory } from "../../providers/provider-error-classifier.js";
 
 type UserFacingModelErrorCategory = ProviderErrorCategory | "model_failed";
+type UserFacingModelError = {
+  category: UserFacingModelErrorCategory;
+  detail?: string;
+  presetId?: string;
+  source?: "account" | "byok";
+  provider?: string;
+  model?: string;
+  capability?: string;
+};
+
+function userFacingModelError(
+  category: UserFacingModelErrorCategory,
+  detail: string | null | undefined,
+  selection: ResolvedModelSelection | null | undefined,
+): UserFacingModelError {
+  return {
+    category,
+    ...(detail ? { detail } : {}),
+    ...(selection ? {
+      presetId: selection.presetId,
+      source: selection.source,
+      provider: selection.provider,
+      model: selection.model,
+      capability: selection.capability,
+    } : {}),
+  };
+}
 import { makeReloadingProviderSnapshotLoader, makeReloadingToolsSnapshotLoader } from "../../providers/snapshot-loader.js";
 import {
   readWebuiSessionBinding,
@@ -151,6 +182,7 @@ type GuiTranscriptMirrorLike = {
     latencyMs?: number | null,
     agentUi?: unknown,
     errorCategory?: ProviderErrorCategory | null,
+    modelError?: UserFacingModelError | null,
   ) => void;
   ended: (
     turn: GuiMirrorTurn,
@@ -290,10 +322,7 @@ type AgentLoopInit = {
   presetSnapshotLoader?: ((name: string) => any) | null;
   providerSignature?: any[] | string | null;
   runtimeModelPublisher?: ((model: string | null, modelPreset?: string | null) => void) | null;
-  modelSelectionResolver?: ((input: {
-    requestedPreset?: string | null;
-    sessionPreset?: string | null;
-  }) => ResolvedModelSelection | null) | null;
+  modelSelectionResolver?: ((input: ModelSelectionInput) => ResolvedModelSelection | null) | null;
   mcpServers?: Record<string, any>;
   cronService?: CronService;
   hooks?: AgentHook[];
@@ -305,6 +334,13 @@ type AgentLoopInit = {
 function truncateText(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
   return `${text.slice(0, maxChars)}\n... (truncated)`;
+}
+
+function mergedRuntimeRecord(
+  defaults: Record<string, any> | null | undefined,
+  overrides: Record<string, any> | null | undefined,
+): Record<string, any> {
+  return { ...(defaults ?? {}), ...(overrides ?? {}) };
 }
 
 function stripRuntimeContext(content: string): string {
@@ -637,10 +673,7 @@ export class AgentLoop {
   presetSnapshotLoader: ((name: string) => any) | null = null;
   runtimeModelPublisher: ((model: string | null, modelPreset?: string | null) => void) | null = null;
   private channelCapabilitiesResolver: ((channel: string) => { supportsStreaming: boolean } | null) | null = null;
-  private readonly modelSelectionResolver: ((input: {
-    requestedPreset?: string | null;
-    sessionPreset?: string | null;
-  }) => ResolvedModelSelection | null) | null;
+  private readonly modelSelectionResolver: ((input: ModelSelectionInput) => ResolvedModelSelection | null) | null;
   private activePresetValue: string | null = null;
   defaultSelectionSignature: any[] | null = null;
   mcpServers: Record<string, any>;
@@ -700,8 +733,11 @@ export class AgentLoop {
     const normalizedMaxMessages = requestedMaxMessages > 0 ? requestedMaxMessages : 120;
     this.maxMessages = normalizedMaxMessages;
     this.defaultModelPreset = new ModelPresetConfig({
+      endpoint: "default",
       model: this.model ?? this.provider?.getDefaultModel?.() ?? this.provider?.getDefaultModel?.() ?? defaults.model,
       provider: defaults.provider,
+      source: "byok",
+      capabilities: ["agent"],
       maxTokens: this.provider?.generation?.maxTokens ?? defaults.maxTokens,
       contextWindowTokens: this.contextWindowTokens,
       temperature: this.provider?.generation?.temperature ?? defaults.temperature,
@@ -819,7 +855,7 @@ export class AgentLoop {
     const selection = this.resolveTurnModelSelection({
       ...(modelPreset !== undefined ? { requestedPreset: modelPreset } : {}),
     });
-    if (!selection) throw new SessionWorkspaceError("model_unavailable");
+    if (!selection) throw new SessionWorkspaceError("model_selection_unavailable");
     return new LLMRuntime(selection.snapshot.provider, selection.snapshot.model);
   }
 
@@ -892,6 +928,7 @@ export class AgentLoop {
       timezone: this.context.timezone || this.config.agents.defaults.timezone || "UTC",
       runtimeState: this,
       messageSendCallback,
+      modelSelectionResolver: this.modelSelectionResolver,
     } as any);
   }
 
@@ -1710,10 +1747,7 @@ export class AgentLoop {
     };
   }
 
-  resolveTurnModelSelection(input: {
-    requestedPreset?: string | null;
-    sessionPreset?: string | null;
-  }): ResolvedModelSelection | null {
+  resolveTurnModelSelection(input: ModelSelectionInput): ResolvedModelSelection | null {
     if (this.modelSelectionResolver) {
       try {
         return this.modelSelectionResolver(input);
@@ -1731,14 +1765,14 @@ export class AgentLoop {
         try {
           selected = this.normalizedPresetName(input.requestedPreset);
         } catch {
-          selected = defaultPreset;
+          return null;
         }
       }
     } else if (input.sessionPreset) {
       try {
         selected = this.normalizedPresetName(input.sessionPreset);
       } catch {
-        selected = defaultPreset;
+        return null;
       }
     }
 
@@ -1761,10 +1795,39 @@ export class AgentLoop {
         })
         ?? "unknown",
       );
+      const preset = selected === "default"
+        ? this.defaultModelPreset
+        : this.modelPresets[selected];
+      const endpoint = this.config.providers[provider]?.endpoints[preset.endpoint];
       return {
         preset: selected,
+        presetId: selected,
         provider,
+        endpointId: preset.endpoint,
+        protocol: endpoint?.protocol ?? "openai-chat-completions",
         model: String(snapshot.model),
+        source: preset.source,
+        ownerAccountId: preset.ownerAccountId ?? null,
+        capability: "agent",
+        capabilities: Object.freeze([...preset.capabilities]),
+        providerConfig: Object.freeze({
+          provider,
+          endpointId: preset.endpoint,
+          protocol: endpoint?.protocol ?? "openai-chat-completions",
+          apiBase: endpoint?.apiBase ?? "",
+          ...(endpoint?.apiKey ?? this.config.providers[provider]?.apiKey
+            ? { apiKey: endpoint?.apiKey ?? this.config.providers[provider]?.apiKey ?? undefined }
+            : {}),
+          ownerAccountId: this.config.providers[provider]?.ownerAccountId ?? null,
+          extraHeaders: Object.freeze(mergedRuntimeRecord(
+            this.config.providers[provider]?.extraHeaders,
+            endpoint?.extraHeaders,
+          )),
+          extraBody: Object.freeze(mergedRuntimeRecord(
+            this.config.providers[provider]?.extraBody,
+            endpoint?.extraBody,
+          )),
+        }),
         snapshot: {
           provider: snapshot.provider,
           model: String(snapshot.model),
@@ -1775,6 +1838,16 @@ export class AgentLoop {
     } catch {
       return null;
     }
+  }
+
+  private persistedSessionSelection(session: Session | null): ModelSelectionInput {
+    const committedSelection = committedSelectionFromMetadata(session?.metadata);
+    if (committedSelection) return { committedSelection };
+    return {
+      sessionPreset: typeof session?.metadata?.modelPreset === "string"
+        ? session.metadata.modelPreset
+        : null,
+    };
   }
 
   /**
@@ -1789,6 +1862,7 @@ export class AgentLoop {
       throw new Error(`Unknown or unavailable model preset '${requestedPreset}'`);
     }
     session.metadata.modelPreset = selection.preset;
+    session.metadata.modelSelection = persistedModelSelection(selection);
     this.sessions.save(session, { fsync: true });
     this.guiTranscriptMirror?.sessionUpdated(session.key);
     return selection;
@@ -2116,6 +2190,7 @@ export class AgentLoop {
             model_preset: msg.metadata.model_preset,
             model_provider: msg.metadata.model_provider ?? null,
             model: msg.metadata.model ?? null,
+            model_selection: msg.metadata.model_selection ?? null,
           }
         : {}),
       ...extra,
@@ -2282,6 +2357,7 @@ export class AgentLoop {
             modelPreset: msg.metadata?.model_preset ?? null,
             modelProvider: msg.metadata?.model_provider ?? null,
             model: msg.metadata?.model ?? null,
+            modelSelection: msg.metadata?.model_selection ?? null,
           },
         }),
       );
@@ -2424,13 +2500,15 @@ export class AgentLoop {
       modelPreset,
       modelProvider,
       modelName,
+      modelSelection,
       modelError,
     }: {
       turnLatencyMs?: number;
       modelPreset?: string | null;
       modelProvider?: string | null;
       modelName?: string | null;
-      modelError?: { category: UserFacingModelErrorCategory; detail?: string } | null;
+      modelSelection?: ResolvedModelSelection | null;
+      modelError?: UserFacingModelError | null;
     } = {},
   ): void {
     let lastAssistantIdx: number | null = null;
@@ -2462,10 +2540,25 @@ export class AgentLoop {
         if (modelPreset) entry.model_preset = modelPreset;
         if (modelProvider) entry.model_provider = modelProvider;
         if (modelName) entry.model_name = modelName;
+        if (modelSelection) entry.model_selection = modelSelectionWire(modelSelection);
       }
       entry.timestamp ??= new Date().toISOString();
       session.messages.push(entry);
       if (role === "assistant") lastAssistantIdx = session.messages.length - 1;
+    }
+    if (modelError && lastAssistantIdx == null) {
+      const entry: Record<string, any> = {
+        role: "assistant",
+        content: modelError.detail ?? EMPTY_FINAL_RESPONSE_MESSAGE,
+        timestamp: new Date().toISOString(),
+        model_error: modelError,
+      };
+      if (modelPreset) entry.model_preset = modelPreset;
+      if (modelProvider) entry.model_provider = modelProvider;
+      if (modelName) entry.model_name = modelName;
+      if (modelSelection) entry.model_selection = modelSelectionWire(modelSelection);
+      session.messages.push(entry);
+      lastAssistantIdx = session.messages.length - 1;
     }
     if (turnLatencyMs != null && lastAssistantIdx != null) session.messages[lastAssistantIdx].latency_ms = Math.max(0, Math.floor(turnLatencyMs));
     if (modelError && lastAssistantIdx != null) session.messages[lastAssistantIdx].model_error = modelError;
@@ -2783,6 +2876,7 @@ export class AgentLoop {
         concurrentTools: true,
         injectionCallback: ({ limit = 3 } = {}) => this.drainPendingQueue(pendingQueue, limit, session?.key ?? sessionKey),
         internalTurnContext,
+        actualModelContext: modelSelection ? persistedModelSelection(modelSelection) : null,
         onMaxFinalizationStarting,
       }),
     );
@@ -2818,6 +2912,7 @@ export class AgentLoop {
       usage = null,
       goalId = null,
       goalOutcome = null,
+      modelSelection = null,
     }: {
       turnLatencyMs?: number | null;
       tools?: ToolRegistryInstance | null;
@@ -2827,6 +2922,7 @@ export class AgentLoop {
       usage?: Record<string, number> | null;
       goalId?: string | null;
       goalOutcome?: GoalStatus | null;
+      modelSelection?: ResolvedModelSelection | null;
     } = {},
   ): OutboundMessage | null {
     void allMessages;
@@ -2847,6 +2943,9 @@ export class AgentLoop {
         ...(turnLatencyMs != null ? { latencyMs: Math.trunc(turnLatencyMs) } : {}),
         ...(modelErrorCategory ? { modelErrorCategory } : {}),
         ...(modelErrorCategory && errorDetail ? { modelErrorDetail: errorDetail } : {}),
+        ...(modelErrorCategory && modelSelection ? {
+          modelErrorContext: userFacingModelError(modelErrorCategory, null, modelSelection)
+        } : {}),
         ...(usage ? { usage } : {}),
         ...(goalId && goalOutcome ? { goalId, goalOutcome } : {}),
       },
@@ -2867,12 +2966,9 @@ export class AgentLoop {
               ? msg.metadata.model_preset
               : null,
           }
-        : {}),
-      sessionPreset: typeof existingSession?.metadata?.modelPreset === "string"
-        ? existingSession.metadata.modelPreset
-        : null,
+        : this.persistedSessionSelection(existingSession)),
     });
-    if (!modelSelection) throw new SessionWorkspaceError("model_unavailable");
+    if (!modelSelection) throw new SessionWorkspaceError("model_selection_unavailable");
     ctx.modelSelection = modelSelection;
     ctx.consolidator = this.modelSelectionResolver
       ? this.consolidator.withProviderSnapshot(
@@ -2893,6 +2989,7 @@ export class AgentLoop {
             model_preset: modelSelection.preset,
             model_provider: modelSelection.provider,
             model: modelSelection.model,
+            model_selection: modelSelectionWire(modelSelection),
           }
         : { ...(msg.metadata ?? {}) },
       sessionKey: ctx.sessionKey,
@@ -2916,6 +3013,7 @@ export class AgentLoop {
       );
     }
     ctx.session.metadata.modelPreset = modelSelection.preset;
+    ctx.session.metadata.modelSelection = persistedModelSelection(modelSelection);
     const projectedBinding = this.guiTranscriptMirror?.prepareSession(
       msg,
       ctx.session,
@@ -3295,8 +3393,9 @@ export class AgentLoop {
       modelPreset: ctx.modelSelection?.preset,
       modelProvider: ctx.actualModelProvider ?? ctx.modelSelection?.provider,
       modelName: ctx.actualModel ?? ctx.modelSelection?.model,
+      modelSelection: ctx.modelSelection,
       modelError: ctx.stopReason === "error"
-        ? { category: ctx.errorCategory ?? "model_failed", ...(ctx.errorDetail ? { detail: ctx.errorDetail } : {}) }
+        ? userFacingModelError(ctx.errorCategory ?? "model_failed", ctx.errorDetail, ctx.modelSelection)
         : null,
     });
     this.clearPendingUserTurn(ctx.session!);
@@ -3337,6 +3436,9 @@ export class AgentLoop {
         ctx.turnLatencyMs,
         null,
         ctx.errorCategory,
+        ctx.stopReason === "error"
+          ? userFacingModelError(ctx.errorCategory ?? "model_failed", ctx.errorDetail, ctx.modelSelection)
+          : null,
       );
     }
     if (
@@ -3379,6 +3481,7 @@ export class AgentLoop {
       usage: ctx.usage,
       goalId: ctx.goalIdForTurn,
       goalOutcome: ctx.goalOutcome,
+      modelSelection: ctx.modelSelection,
     });
     return "ok";
   }
@@ -3422,12 +3525,9 @@ export class AgentLoop {
               ? msg.metadata.model_preset
               : null,
           }
-        : {}),
-      sessionPreset: typeof existingSession?.metadata?.modelPreset === "string"
-        ? existingSession.metadata.modelPreset
-        : null,
+        : this.persistedSessionSelection(existingSession)),
     });
-    if (!modelSelection) throw new SessionWorkspaceError("model_unavailable");
+    if (!modelSelection) throw new SessionWorkspaceError("model_selection_unavailable");
     const scopedConsolidator = this.modelSelectionResolver
       ? this.consolidator.withProviderSnapshot(
           modelSelection.snapshot.provider,
@@ -3447,6 +3547,7 @@ export class AgentLoop {
             model_preset: modelSelection.preset,
             model_provider: modelSelection.provider,
             model: modelSelection.model,
+            model_selection: modelSelectionWire(modelSelection),
           }
         : { ...(msg.metadata ?? {}) },
       sessionKey: key,
@@ -3459,6 +3560,7 @@ export class AgentLoop {
     });
     let session = existingSession ?? await this.getOrCreateSession(key);
     session.metadata.modelPreset = modelSelection.preset;
+    session.metadata.modelSelection = persistedModelSelection(modelSelection);
     const sessionBinding = this.resolveSessionWorkspace(
       msg,
       session,
@@ -3574,8 +3676,9 @@ export class AgentLoop {
       modelPreset: modelSelection.preset,
       modelProvider: actualModelProvider ?? modelSelection.provider,
       modelName: actualModel ?? modelSelection.model,
+      modelSelection,
       modelError: stopReason === "error"
-        ? { category: errorCategory ?? "model_failed", ...(rawFinalContent ? { detail: rawFinalContent } : {}) }
+        ? userFacingModelError(errorCategory ?? "model_failed", rawFinalContent, modelSelection)
         : null,
     });
     this.clearRuntimeCheckpoint(session);
@@ -3602,6 +3705,9 @@ export class AgentLoop {
     if (originMessageId) metadata.originMessageId = originMessageId;
     if (stopReason === "error") metadata.modelErrorCategory = errorCategory ?? "model_failed";
     if (stopReason === "error" && rawFinalContent) metadata.modelErrorDetail = rawFinalContent;
+    if (stopReason === "error") {
+      metadata.modelErrorContext = userFacingModelError(errorCategory ?? "model_failed", null, modelSelection);
+    }
     return new OutboundMessage({
       channel,
       chatId,

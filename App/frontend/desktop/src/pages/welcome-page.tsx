@@ -142,7 +142,10 @@ export function WelcomePage() {
     }
 
     // Definition for byok entry.
-    const byokEntry = resolveByokEntry({ onboarding: state.bootstrap?.onboarding });
+    const byokEntry = resolveByokEntry({
+      onboarding: state.bootstrap?.onboarding,
+      modelConfig: state.modelConfig
+    });
 
     track({ name: "byok_started", params: { user_mode: "byok" }, consentTier: "basic" });
     setModePersistenceFeedback(null);

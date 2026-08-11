@@ -3,6 +3,8 @@
 /** Contract for model config form values. */
 export interface ModelConfigFormValues {
   provider: string;
+  endpointId?: string;
+  protocol?: import("@memmy/local-api-contracts").ModelEndpointProtocol;
   endpoint: string;
   model: string;
   apiKey: string;

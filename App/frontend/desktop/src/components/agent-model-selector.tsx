@@ -1,16 +1,14 @@
 import { Settings2 } from "lucide-react";
-import { useEffect, useState } from "react";
 import type { ModelProviderConfig } from "../api/config-client.js";
 import { useTranslation } from "../i18n/use-translation.js";
-import { appActions } from "../state/app-actions.js";
+import { agentActions, appActions } from "../state/app-actions.js";
 import { useAppState } from "../state/app-state.js";
 import {
   getTaskModelCandidates,
-  resolveScopedModelSelection,
-  setScopedModelSelection,
+  createModelWorkspace,
+  resolveModelSelection,
   type ModelWorkspaceMode
 } from "../state/model-workspace.js";
-import { useModelWorkspace } from "../state/use-model-workspace.js";
 import {
   settingsTabHash
 } from "../pages/settings-nav.js";
@@ -24,92 +22,56 @@ export interface AgentModelSelectorProps {
   seedConfig?: ModelProviderConfig | null;
 }
 
-/** Frontend-only per-chat model picker. It never calls the runtime `/model`. */
+/** Per-chat catalog preset picker. Selection lives in Agent state, never browser storage. */
 export function AgentModelSelector(props: AgentModelSelectorProps) {
   const { t } = useTranslation();
-  const { dispatch } = useAppState();
-  const { workspace, commit } = useModelWorkspace(props.seedConfig);
-  const [saveFailed, setSaveFailed] = useState(false);
+  const { state, dispatch } = useAppState();
+  const workspace = createModelWorkspace(props.seedConfig ?? state.modelConfig);
   const candidates = getTaskModelCandidates(workspace, props.mode);
-  const scopedResolved = resolveScopedModelSelection(workspace, props.mode, props.scopeKey);
-  const resetDraftToLatest = props.scopeKey.startsWith("draft-")
-    && candidates.length > 0
-    && (
-      scopedResolved.reason === "unavailable"
-      || scopedResolved.reason === "mode_changed"
-      || scopedResolved.reason === "mode_preserved"
-    );
-  const resolved = resetDraftToLatest
-    ? {
-        candidate: candidates[0]!,
-        candidateId: candidates[0]!.id,
-        unavailable: false,
-        reason: "initial" as const
-      }
-    : scopedResolved;
+  const committedSelection = state.agent.committedModelSelectionByScope[props.scopeKey];
+  const selectedPreset = state.agent.pendingPresetByScope[props.scopeKey]
+    ?? committedSelection?.presetId
+    ?? null;
+  const resolved = resolveModelSelection(workspace, props.mode, selectedPreset);
   const hasNoModels = candidates.length === 0;
 
-  useEffect(() => {
-    if (
-      !resolved.candidateId
-      || (
-        resolved.reason !== "initial"
-        && resolved.reason !== "mode_preserved"
-        && resolved.reason !== "mode_changed"
-      )
-    ) {
-      return;
-    }
-    const saved = commit(setScopedModelSelection(
-      workspace,
-      props.mode,
-      props.scopeKey,
-      resolved.candidateId
-    ));
-    setSaveFailed(!saved);
-  }, [
-    commit,
-    props.mode,
-    props.scopeKey,
-    resolved.candidateId,
-    resolved.reason,
-    workspace
-  ]);
-
-  const options: SelectOption[] = hasNoModels
-    ? [{
-        value: "__no_models__",
-        label: t("home.modelSelector.emptyOption"),
-        disabled: true
-      }]
-    : candidates.map((candidate) => ({
+  const options: SelectOption[] = candidates.map((candidate) => ({
         value: candidate.id,
-        label: candidate.model,
-        selectedLabel: candidate.model,
+        label: candidate.source === "platform" ? t("home.modelSelector.platformAgent") : candidate.model,
+        selectedLabel: candidate.source === "platform" ? t("home.modelSelector.platformAgent") : candidate.model,
         groupLabel: candidate.source === "platform"
           ? t("home.modelSelector.platformGroup")
           : t("home.modelSelector.byokGroup"),
         icon: <ModelProviderIcon source={candidate.source} provider={candidate.provider} />
       }));
-  if (!hasNoModels && resolved.unavailable && resolved.candidateId) {
-    const unavailableModel = resolved.previousModel ?? t("home.modelSelector.unavailableOption");
+  if (resolved.unavailable && resolved.candidateId) {
+    const unavailableModel = committedSelection?.model ?? resolved.previousModel ?? t("home.modelSelector.unavailableOption");
     const unavailableOption: SelectOption = {
       value: resolved.candidateId,
       label: unavailableModel,
       selectedLabel: unavailableModel,
       groupLabel: t("home.modelSelector.byokGroup"),
-      icon: resolved.previousProvider
-        ? <ModelProviderIcon source="byok" provider={resolved.previousProvider} />
+      icon: committedSelection?.provider || resolved.previousProvider
+        ? <ModelProviderIcon
+            source={committedSelection?.source === "account" ? "platform" : "byok"}
+            provider={committedSelection?.provider ?? resolved.previousProvider!}
+          />
         : undefined,
       disabled: true
     };
     const firstCustomIndex = candidates.findIndex((candidate) => candidate.source === "byok");
     options.splice(firstCustomIndex >= 0 ? firstCustomIndex : options.length, 0, unavailableOption);
   }
+  if (!options.length) {
+    options.push({
+      value: "__no_models__",
+      label: t("home.modelSelector.emptyOption"),
+      disabled: true
+    });
+  }
 
   function selectModel(candidateId: string) {
-    const saved = commit(setScopedModelSelection(workspace, props.mode, props.scopeKey, candidateId));
-    setSaveFailed(!saved);
+    dispatch(agentActions.pendingModelPresetUpdated(props.scopeKey, candidateId));
   }
 
   function openCustomModelSettings() {
@@ -125,8 +87,8 @@ export function AgentModelSelector(props: AgentModelSelectorProps) {
       <Select
         label={t("home.modelSelector.label")}
         labelClassName="sr-only"
-        value={hasNoModels ? "" : resolved.candidateId ?? ""}
-        placeholder={hasNoModels
+        value={resolved.candidateId ?? ""}
+        placeholder={hasNoModels && !resolved.unavailable
           ? t("home.modelSelector.emptyState")
           : t("home.modelSelector.empty")}
         options={options}
@@ -151,11 +113,6 @@ export function AgentModelSelector(props: AgentModelSelectorProps) {
           </div>
         )}
       />
-      {saveFailed && (
-        <p className="agent-model-selector__error" role="alert">
-          {t("home.modelSelector.saveFailed")}
-        </p>
-      )}
     </div>
   );
 }

@@ -147,17 +147,28 @@ describe("AgentThreadMessages", () => {
     expect(byokHtml).toContain("Error: API returned empty choices.");
   });
 
-  it("shows login-expired copy for auth errors in account mode and keeps API-key copy for BYOK", () => {
-    const message = { id: "error", role: "assistant" as const, content: "Error calling LLM: 401 Unauthorized" };
+  it("uses the actual model source for auth copy instead of the global app mode", () => {
+    const accountMessage = {
+      id: "account-error",
+      role: "assistant" as const,
+      content: "Error calling LLM: 401 Unauthorized",
+      modelError: { category: "model_failed" as const, source: "account" as const }
+    };
+    const byokMessage = {
+      id: "byok-error",
+      role: "assistant" as const,
+      content: "Error calling LLM: 401 Unauthorized",
+      modelError: { category: "model_failed" as const, source: "byok" as const }
+    };
 
     const accountHtml = renderToString(
       <I18nProvider language="zh-CN">
-        <AgentThreadMessages chatScopeKey="chat-account-auth-error" messages={[message]} accountMode />
+        <AgentThreadMessages chatScopeKey="chat-account-auth-error" messages={[accountMessage]} />
       </I18nProvider>
     );
     const byokHtml = renderToString(
       <I18nProvider language="zh-CN">
-        <AgentThreadMessages chatScopeKey="chat-byok-auth-error" messages={[message]} />
+        <AgentThreadMessages chatScopeKey="chat-byok-auth-error" messages={[byokMessage]} />
       </I18nProvider>
     );
 

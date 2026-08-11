@@ -24,11 +24,15 @@ describe("ByokTokenUsageRepository", () => {
     }));
 
     const row = store.db
-      .prepare("SELECT kind, source, operation_id, input_tokens, metadata_json, usage_json FROM byok_token_usage_events WHERE id = ?")
+      .prepare("SELECT kind, source, operation_id, preset_id, provider, model, capability, input_tokens, metadata_json, usage_json FROM byok_token_usage_events WHERE id = ?")
       .get("event-1") as {
         kind: string;
         source: string;
         operation_id: string;
+        preset_id: string;
+        provider: string;
+        model: string;
+        capability: string;
         input_tokens: number;
         metadata_json: string;
         usage_json: string;
@@ -39,6 +43,10 @@ describe("ByokTokenUsageRepository", () => {
       kind: "agent_chat",
       source: "agent",
       operation_id: "turn-1",
+      preset_id: "byok-agent",
+      provider: "openai",
+      model: "gpt-4.1-mini",
+      capability: "agent",
       input_tokens: 10,
     });
     expect(JSON.parse(row?.metadata_json ?? "{}")).toMatchObject({
@@ -100,6 +108,10 @@ describe("ByokTokenUsageRepository", () => {
       id: "event-2",
       kind: "memory_summary",
       source: "memory",
+      presetId: "byok-summary",
+      provider: "anthropic",
+      model: "claude-sonnet-4",
+      capability: "memory_summary",
       operationId: "episode.summarize:event-2",
       inputTokens: 1,
       outputTokens: 2,
@@ -112,6 +124,10 @@ describe("ByokTokenUsageRepository", () => {
       id: "event-3",
       kind: "embedding",
       source: "memory",
+      presetId: "byok-embedding",
+      provider: "openai",
+      model: "text-embedding-3-small",
+      capability: "embedding",
       operationId: "embedding.document:event-3",
       inputTokens: 7,
       outputTokens: 0,
@@ -164,6 +180,54 @@ describe("ByokTokenUsageRepository", () => {
         updatedAt: "2026-06-11T12:00:00.000Z",
       },
     ]);
+    expect(summary.byModel).toEqual([
+      expect.objectContaining({
+        presetId: "byok-agent",
+        provider: "openai",
+        model: "gpt-4.1-mini",
+        capability: "agent",
+        totalTokens: 30,
+      }),
+      expect.objectContaining({
+        presetId: "byok-embedding",
+        provider: "openai",
+        model: "text-embedding-3-small",
+        capability: "embedding",
+        totalTokens: 7,
+      }),
+      expect.objectContaining({
+        presetId: "byok-summary",
+        provider: "anthropic",
+        model: "claude-sonnet-4",
+        capability: "memory_summary",
+        totalTokens: 3,
+      }),
+    ]);
+  });
+
+  it("keeps migrated events without model dimensions as historical unclassified usage", () => {
+    const store = createStore();
+    store.db.prepare(
+      `INSERT INTO byok_token_usage_events (
+        id, kind, source, operation_id, dedupe_key, input_tokens, output_tokens, total_tokens,
+        cached_input_tokens, cache_creation_input_tokens, metadata_json, usage_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      "legacy-event", "agent_chat", "agent", "legacy-turn", "agent_chat:agent:legacy-turn",
+      2, 3, 5, 0, 0, JSON.stringify({ provider: "legacy-guess" }), "{}", "2026-06-10T10:00:00.000Z"
+    );
+
+    const summary = store.repositories.byokTokenUsage.getSummary();
+    store.close();
+
+    expect(summary.byModel).toEqual([expect.objectContaining({
+      presetId: null,
+      provider: null,
+      model: null,
+      capability: null,
+      totalTokens: 5,
+    })]);
+    expect(summary.byProvider).toEqual([]);
   });
 });
 
@@ -178,6 +242,10 @@ function eventFixture(overrides: Partial<ByokTokenUsageEvent> = {}): ByokTokenUs
     kind: "agent_chat",
     source: "agent",
     operationId: "turn-1",
+    presetId: "byok-agent",
+    provider: "openai",
+    model: "gpt-4.1-mini",
+    capability: "agent",
     inputTokens: 10,
     outputTokens: 20,
     totalTokens: 30,

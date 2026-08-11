@@ -28,16 +28,12 @@ import {
   readCurrentRoute,
   readDeferredGuidanceStep,
   readLaunchModeOverride,
-  readTokenExhaustedDismissed,
-  shouldShowTokenExhaustedModal,
   writeCurrentRoute,
   writeDeferredGuidanceStep,
   writeGuidanceCompleted,
-  writeTokenExhaustedDismissed,
   type AppRoutePath,
   type DeferredGuidanceStep
 } from "./routes.js";
-import { emitTokenExhaustedApplyMoreRequest, writeTokenExhaustedApplyMoreRequest } from "./token-exhausted-apply-more.js";
 import { persistNickname } from "./nickname.js";
 import { useOptionalApiClients } from "./providers.js";
 import { useAppState } from "../state/app-state.js";
@@ -63,7 +59,6 @@ import { PetPage } from "../pages/pet-page.js";
 import { SettingsPage } from "../pages/settings-page.js";
 import { StartupScreen } from "../pages/startup-screen.js";
 import { TokenDetailPage } from "../pages/token-detail-page.js";
-import { TokenExhaustedModal } from "../pages/token-exhausted-modal.js";
 import { ToolsPage } from "../pages/tools-page.js";
 import { WelcomePage } from "../pages/welcome-page.js";
 
@@ -83,19 +78,8 @@ export function AppRouter(props: { onRetry: () => void }) {
     readWorkspaceGuidanceOverlay(typeof window === "undefined" ? undefined : window.sessionStorage)
   );
   const [deferredNickname, setDeferredNickname] = useState("");
-  const [hasDismissedTokenExhaustedModal, setHasDismissedTokenExhaustedModal] = useState(() =>
-    readTokenExhaustedDismissed(typeof window === "undefined" ? undefined : window.sessionStorage)
-  );
-  const dismissTokenExhaustedModal = useCallback(() => {
-    writeTokenExhaustedDismissed(typeof window === "undefined" ? undefined : window.sessionStorage);
-    setHasDismissedTokenExhaustedModal(true);
-  }, []);
   const [petGuideRequest, setPetGuideRequest] = useState<MainWindowActionRequest | null>(null);
   const isPetWindowContext = isPetWindow(state.navigation.currentPath);
-  const shouldShowTokenModal =
-    shouldShowTokenExhaustedModal(state.bootstrap) && !isPetWindowContext;
-  const tokenModalOpen = shouldShowTokenModal && !hasDismissedTokenExhaustedModal;
-  const showApplyMoreInTokenModal = state.bootstrap?.promotions?.applyMore ?? true;
   const windowDragRegion = !isPetWindowContext ? <WindowDragRegion /> : null;
 
   const completeMainWindowAction = useCallback(
@@ -281,34 +265,10 @@ export function AppRouter(props: { onRetry: () => void }) {
         />
       )}
       {petGuideRequest && <PetGuideModal onChoice={handlePetGuideChoice} />}
-      {tokenModalOpen && (
-        <TokenExhaustedModal
-          showApplyMore={showApplyMoreInTokenModal}
-          onApplyMore={() => {
-            const storage = typeof window === "undefined" ? undefined : window.sessionStorage;
-            writeTokenExhaustedApplyMoreRequest(storage);
-            dismissTokenExhaustedModal();
-            dispatch(appActions.navigate("/settings"));
-            emitTokenExhaustedApplyMoreRequest(typeof window === "undefined" ? undefined : window);
-            setTimeout(() => {
-              document.getElementById("token-usage")?.scrollIntoView({ behavior: "smooth", block: "start" });
-            }, 120);
-          }}
-          onLater={dismissTokenExhaustedModal}
-          onGoHandle={() => {
-            dismissTokenExhaustedModal();
-            dispatch(appActions.navigate("/settings"));
-            setTimeout(() => {
-              document.getElementById("model-config")?.scrollIntoView({ behavior: "smooth", block: "start" });
-            }, 120);
-          }}
-        />
-      )}
       <GlobalUpdateDialog
         suspended={
           isPetWindowContext
           || Boolean(petGuideRequest)
-          || tokenModalOpen
           || workspaceGuidanceStep === "product_tour"
           || workspaceGuidanceStep === "nickname"
         }

@@ -767,6 +767,26 @@ describe("desktop route table", () => {
     });
   });
 
+  it("欢迎页进 BYOK：已有本地 Agent 候选时直达主界面且不调用第三方", () => {
+    const decision = resolveByokEntry({
+      onboarding: {
+        ...baseBootstrap.onboarding,
+        completed: true,
+        currentStep: "completed",
+        completedAt: "2026-06-04T00:00:00.000Z"
+      },
+      modelConfig: {
+        catalog: {
+          modelAssignments: {
+            byok: { agent: { candidates: ["local-agent"] } }
+          }
+        }
+      }
+    });
+
+    expect(decision).toEqual({ onboardingPatch: undefined, nextRoute: "/main" });
+  });
+
   it("欢迎页进 BYOK：从未完成引导时写配置起点补丁并走完整引导", () => {
     const decision = resolveByokEntry({ onboarding: undefined });
 

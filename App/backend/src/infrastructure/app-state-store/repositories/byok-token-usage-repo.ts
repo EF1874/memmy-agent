@@ -1,5 +1,6 @@
 import type {
   ByokTokenUsageByKind,
+  ByokTokenUsageByModel,
   ByokTokenUsageByProvider,
   ByokTokenUsageEvent,
   ByokTokenUsageKind,
@@ -27,6 +28,14 @@ interface ByProviderKindRow extends ByKindRow {
   provider: string;
 }
 
+interface ByModelRow extends SummaryRow {
+  preset_id: string | null;
+  provider: string | null;
+  model: string | null;
+  capability: ByokTokenUsageByModel["capability"];
+  event_count: number | null;
+}
+
 export interface ByokTokenUsageRepository {
   recordEvent(event: ByokTokenUsageEvent): void;
   getSummary(): ByokTokenUsageSummary;
@@ -42,6 +51,10 @@ export function createByokTokenUsageRepository(db: DatabaseSync): ByokTokenUsage
           source,
           operation_id,
           dedupe_key,
+          preset_id,
+          provider,
+          model,
+          capability,
           input_tokens,
           output_tokens,
           total_tokens,
@@ -50,12 +63,16 @@ export function createByokTokenUsageRepository(db: DatabaseSync): ByokTokenUsage
           metadata_json,
           usage_json,
           created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(dedupe_key) DO UPDATE SET
           id = excluded.id,
           kind = excluded.kind,
           source = excluded.source,
           operation_id = excluded.operation_id,
+          preset_id = excluded.preset_id,
+          provider = excluded.provider,
+          model = excluded.model,
+          capability = excluded.capability,
           input_tokens = excluded.input_tokens,
           output_tokens = excluded.output_tokens,
           total_tokens = excluded.total_tokens,
@@ -70,6 +87,10 @@ export function createByokTokenUsageRepository(db: DatabaseSync): ByokTokenUsage
         event.source,
         event.operationId,
         dedupeKeyForEvent(event),
+        event.presetId ?? null,
+        event.provider ?? null,
+        event.model ?? null,
+        event.capability ?? null,
         event.inputTokens,
         event.outputTokens,
         event.totalTokens,
@@ -113,7 +134,7 @@ export function createByokTokenUsageRepository(db: DatabaseSync): ByokTokenUsage
       const providerRows = db
         .prepare(
           `SELECT
-            json_extract(metadata_json, '$.provider') AS provider,
+            provider,
             kind,
             COALESCE(SUM(input_tokens), 0) AS input_tokens,
             COALESCE(SUM(output_tokens), 0) AS output_tokens,
@@ -123,9 +144,28 @@ export function createByokTokenUsageRepository(db: DatabaseSync): ByokTokenUsage
             COUNT(*) AS event_count,
             MAX(created_at) AS updated_at
           FROM byok_token_usage_events
-          GROUP BY json_extract(metadata_json, '$.provider'), kind`
+          WHERE provider IS NOT NULL
+          GROUP BY provider, kind`
         )
         .all() as unknown as ByProviderKindRow[];
+      const modelRows = db
+        .prepare(
+          `SELECT
+            preset_id,
+            provider,
+            model,
+            capability,
+            COALESCE(SUM(input_tokens), 0) AS input_tokens,
+            COALESCE(SUM(output_tokens), 0) AS output_tokens,
+            COALESCE(SUM(total_tokens), 0) AS total_tokens,
+            COALESCE(SUM(cached_input_tokens), 0) AS cached_input_tokens,
+            COALESCE(SUM(cache_creation_input_tokens), 0) AS cache_creation_input_tokens,
+            COUNT(*) AS event_count,
+            MAX(created_at) AS updated_at
+          FROM byok_token_usage_events
+          GROUP BY preset_id, provider, model, capability`
+        )
+        .all() as unknown as ByModelRow[];
 
       return {
         inputTokens: numberValue(total.input_tokens),
@@ -136,9 +176,34 @@ export function createByokTokenUsageRepository(db: DatabaseSync): ByokTokenUsage
         updatedAt: total.updated_at,
         byKind: rows.sort(byKindOrder).map(toByKind),
         byProvider: toByProvider(providerRows),
+        byModel: modelRows.map(toByModel).sort(byModelOrder),
       };
     },
   };
+}
+
+function toByModel(row: ByModelRow): ByokTokenUsageByModel {
+  return {
+    presetId: row.preset_id,
+    provider: row.provider,
+    model: row.model,
+    capability: row.capability,
+    inputTokens: numberValue(row.input_tokens),
+    outputTokens: numberValue(row.output_tokens),
+    totalTokens: numberValue(row.total_tokens),
+    cachedInputTokens: numberValue(row.cached_input_tokens),
+    cacheCreationInputTokens: numberValue(row.cache_creation_input_tokens),
+    eventCount: numberValue(row.event_count),
+    updatedAt: row.updated_at,
+  };
+}
+
+function byModelOrder(left: ByokTokenUsageByModel, right: ByokTokenUsageByModel): number {
+  return right.totalTokens - left.totalTokens
+    || (left.provider ?? "").localeCompare(right.provider ?? "")
+    || (left.model ?? "").localeCompare(right.model ?? "")
+    || (left.capability ?? "").localeCompare(right.capability ?? "")
+    || (left.presetId ?? "").localeCompare(right.presetId ?? "");
 }
 
 function dedupeKeyForEvent(event: ByokTokenUsageEvent): string {

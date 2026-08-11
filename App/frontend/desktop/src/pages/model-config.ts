@@ -563,6 +563,8 @@ export function testModelConnection(input: TestModelConnectionInput): void {
   const key = createModelConfigValidationKey(input.values);
   const requestConfig = {
     provider: input.values.provider,
+    endpointId: input.values.endpointId,
+    protocol: input.values.protocol,
     endpoint: input.values.endpoint,
     model: input.values.model,
     apiKey: input.values.apiKey,
