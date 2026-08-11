@@ -4,9 +4,10 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
+import type { ByokTokenUsageSummary, TokenUsageDto } from "@memmy/local-api-contracts";
 import { appActions } from "../../state/app-actions.js";
 import { appReducer, createInitialAppState } from "../../state/app-reducer.js";
-import { SettingsPageView } from "../settings-page.js";
+import { SettingsPageView, UsageDetailView } from "../settings-page.js";
 import { mockBootstrap } from "./fixtures/bootstrap.js";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -117,7 +118,115 @@ describe("SettingsPage platform scene quota details", () => {
     expect(sceneGrid).toBeInstanceOf(HTMLElement);
     expect(sceneGrid?.className).toContain("platformQuotaList");
   });
+
+  it("shows BYOK usage by stable provider and model dimensions, including historical rows", () => {
+    const byokUsage: ByokTokenUsageSummary = {
+      inputTokens: 24,
+      outputTokens: 21,
+      totalTokens: 45,
+      cachedInputTokens: 3,
+      cacheCreationInputTokens: 0,
+      updatedAt: "2026-08-11T12:00:00.000Z",
+      byKind: [{
+        kind: "agent_chat",
+        inputTokens: 24,
+        outputTokens: 21,
+        totalTokens: 45,
+        cachedInputTokens: 3,
+        cacheCreationInputTokens: 0,
+        eventCount: 3,
+        updatedAt: "2026-08-11T12:00:00.000Z"
+      }],
+      byProvider: [],
+      byModel: [
+        byModel("preset-openai", "openai", "shared-model", "agent", 30),
+        byModel("preset-anthropic", "anthropic", "shared-model", "agent", 10),
+        byModel(null, null, null, null, 5)
+      ]
+    };
+
+    act(() => {
+      root.render(
+        <I18nProvider language="zh-CN">
+          <UsageDetailView
+            showPlatform
+            platformUsage={emptyPlatformUsage()}
+            byokUsage={byokUsage}
+            byokUsageStatus="ready"
+            workspaceMode="account"
+            onBack={vi.fn()}
+          />
+        </I18nProvider>
+      );
+    });
+
+    expect(container.textContent).toContain("平台赠送额度");
+    expect(container.textContent).toContain("按模型");
+    const modelRows = [...container.querySelectorAll('[data-testid="byok-model-usage-row"]')];
+    expect(modelRows.map((row) => row.textContent)).toEqual([
+      expect.stringContaining("shared-modelopenai · Agent 任务30Token"),
+      expect.stringContaining("shared-modelanthropic · Agent 任务10Token"),
+      expect.stringContaining("历史未分类升级前记录，无法可靠归属到具体模型5Token")
+    ]);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="zh-CN">
+          <UsageDetailView
+            showPlatform={false}
+            platformUsage={emptyPlatformUsage()}
+            byokUsage={byokUsage}
+            byokUsageStatus="ready"
+            workspaceMode="byok"
+            onBack={vi.fn()}
+          />
+        </I18nProvider>
+      );
+    });
+
+    expect(container.textContent).not.toContain("平台赠送额度");
+    expect(container.textContent).toContain("自定义 API Key 消耗");
+  });
 });
+
+function byModel(
+  presetId: string | null,
+  provider: string | null,
+  model: string | null,
+  capability: "agent" | null,
+  totalTokens: number
+): ByokTokenUsageSummary["byModel"][number] {
+  return {
+    presetId,
+    provider,
+    model,
+    capability,
+    inputTokens: totalTokens,
+    outputTokens: 0,
+    totalTokens,
+    cachedInputTokens: 0,
+    cacheCreationInputTokens: 0,
+    eventCount: 1,
+    updatedAt: "2026-08-11T12:00:00.000Z"
+  };
+}
+
+function emptyPlatformUsage(): TokenUsageDto {
+  return {
+    planName: "free",
+    totalTokens: 1,
+    usedTokens: 1,
+    remainingTokens: 0,
+    expiresAt: null,
+    lastSyncedAt: null,
+    sceneUsages: [{
+      scene: "agent_chat",
+      totalTokens: 1,
+      usedTokens: 1,
+      remainingTokens: 0
+    }]
+  };
+}
 
 function createMemoryStorage(): Storage {
   const values = new Map<string, string>();

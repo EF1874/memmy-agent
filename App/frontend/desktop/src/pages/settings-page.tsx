@@ -1,7 +1,7 @@
 /** Settings page for account, model, token usage, and desktop preferences. */
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type Dispatch, type ReactNode } from "react";
 import { Brain, Palette, Rocket, Settings2, Shield, User, Zap, ArrowRight, ArrowLeft, Bell, ExternalLink, FolderOpen, Gift, Info, KeyRound, LogOut, Wrench, Search, Eye, EyeOff, ChevronDown, ChevronUp, ChevronRight, Database, Loader2, CheckCircle2, XCircle, Check, AlertTriangle, Mic, Image as ImageIcon, Copy} from "lucide-react";
-import type { AccountInvitationView, AppSettingsDto, ByokTokenUsageByKind, ByokTokenUsageKind, ByokTokenUsageSummary, Language, PrivacySettingsDto, TokenQuotaEligibility, TokenSceneUsageDto, TokenUsageDto } from "@memmy/local-api-contracts";
+import type { AccountInvitationView, AppSettingsDto, ByokTokenUsageByKind, ByokTokenUsageByModel, ByokTokenUsageCapability, ByokTokenUsageKind, ByokTokenUsageSummary, Language, PrivacySettingsDto, TokenQuotaEligibility, TokenSceneUsageDto, TokenUsageDto } from "@memmy/local-api-contracts";
 import { useApiClients } from "../app/providers.js";
 import { copyInvitationCode } from "../app/invitation-analytics.js";
 import { resolveGiftTokenUsage } from "../app/routes.js";
@@ -26,13 +26,7 @@ import { useTranslation } from "../i18n/use-translation.js";
 import { appActions, type AppAction } from "../state/app-actions.js";
 import type { AppState } from "../state/app-reducer.js";
 import { useAppState } from "../state/app-state.js";
-import {
-  getModelCandidates,
-  getTaskModelCandidates,
-  prepareByokWorkspaceForAccountLogout,
-  type ModelWorkspaceMode
-} from "../state/model-workspace.js";
-import { useModelWorkspace } from "../state/use-model-workspace.js";
+import type { ModelWorkspaceMode } from "../state/model-workspace.js";
 import { AppFrame } from "./app-frame.js";
 import { ModelWorkspaceSection } from "./model-workspace-section.js";
 import {
@@ -173,7 +167,8 @@ const EMPTY_BYOK_TOKEN_USAGE: ByokTokenUsageSummary = {
   cacheCreationInputTokens: 0,
   updatedAt: null,
   byKind: [],
-  byProvider: []
+  byProvider: [],
+  byModel: []
 };
 
 // Display order for both panels. Platform Cloud scenes omit embedding; BYOK
@@ -328,7 +323,6 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   } = props;
   const { t, language } = useTranslation();
   const bootstrap = state.bootstrap;
-  const { workspace: modelWorkspace, commit: commitModelWorkspace } = useModelWorkspace(state.modelConfig);
   const [launchAtLogin, setLaunchAtLogin] = useState(false);
   const [closeAction, setCloseAction] = useState<CloseMainWindowAction>(() => {
     return readCloseMainWindowAction(typeof window === "undefined" ? undefined : window.localStorage);
@@ -910,59 +904,6 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   }
 
   /**
-   * Runs a real connection test for the primary model.
-   */
-  function testMainModelConnection() {
-    track({ name: "model_connection_tested", params: { page_path: "/settings" }, consentTier: "basic" });
-    testModelConnection({
-      configClient,
-      values: mainModelFormValues,
-      setValidation: setLlmValidation,
-      secretTarget: "primary",
-      onSuccess: persistSuccessfulMainModelConnection,
-      messages: createTestModelConnectionMessages(t)
-    });
-  }
-
-  /**
-   * Saves the primary model config immediately after a successful connection test.
-   *
-   * @param testedConfig The primary model config that passed the real connection test.
-   */
-  function persistSuccessfulMainModelConnection(testedConfig: {
-    provider: string;
-    endpoint: string;
-    model: string;
-    apiKey: string;
-    apiKeyMasked: string;
-    configured: boolean;
-  }) {
-    const successConfig = {
-      ...state.modelConfig,
-      provider: testedConfig.provider,
-      endpoint: testedConfig.endpoint,
-      model: testedConfig.model,
-      apiKey: testedConfig.apiKey,
-      apiKeyMasked: testedConfig.apiKey.trim() ? "" : apiKeyMasked,
-      configured: Boolean(testedConfig.endpoint.trim() && testedConfig.model.trim() && (testedConfig.apiKey.trim() || apiKeyMasked))
-    };
-
-    preserveSuccessfulTestHydrateRef.current = true;
-    void (configClient?.saveModelConfig(successConfig) ?? Promise.resolve(successConfig)).then((savedConfig) => {
-      dispatch(appActions.modelConfigUpdated(savedConfig));
-    }).catch((error) => {
-      preserveSuccessfulTestHydrateRef.current = false;
-      console.warn("save tested model config failed", error);
-      // Surface autosave failures so a successful connection test cannot mask an unpersisted configuration.
-      setLlmValidation({
-        status: "error",
-        message: t("apiKey.testSaveFailed"),
-        testedKey: null
-      });
-    });
-  }
-
-  /**
    * Runs a real model connection test.
    *
    * @param config The current model config.
@@ -1037,7 +978,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
 
   /**
    * Records that the user has acknowledged the impact of leaving optional models unconfigured,
-   * then continues saving the API config the user already filled in so the acknowledgment does not drop it.
+   * The retired inline model form can no longer trigger this modal; keep the close action inert for old render snapshots.
    */
   function closeOptionalModelMissingWarning() {
     if (optionalModelMissingWarning === "asr" || optionalModelMissingWarning === "both") {
@@ -1049,7 +990,6 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     }
 
     setOptionalModelMissingWarning(null);
-    persistApiConfig();
   }
 
   /**
@@ -1133,80 +1073,6 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     } finally {
       setFeedbackSubmitting(false);
     }
-  }
-
-  /**
-   * Saves the inline API Key configuration on the settings page.
-   *
-   * When optional models are missing and not yet acknowledged, shows the warning modal instead;
-   * the modal's confirm action resumes the save via {@link persistApiConfig}.
-   */
-  function handleSaveApiConfig() {
-    if (!canSaveApiConfig) {
-      return;
-    }
-
-    const nextWarning = resolveOptionalModelMissingWarning({
-      asrMissing: !isAsrUsable && !asrWarningAcknowledged,
-      imageGenMissing: !isImageGenUsable && !imageGenWarningAcknowledged
-    });
-    if (nextWarning) {
-      setOptionalModelMissingWarning(nextWarning);
-      return;
-    }
-
-    persistApiConfig();
-  }
-
-  /**
-   * Persists the filled API Key configuration and switches the app into BYOK mode.
-   */
-  function persistApiConfig() {
-    if (!canSaveApiConfig) {
-      return;
-    }
-
-    const nextConfig = {
-      provider: fromProtocol(protocol),
-      endpoint,
-      model: modelId,
-      apiKey,
-      apiKeyMasked: apiKey.trim() ? "" : apiKeyMasked,
-      configured: Boolean(endpoint.trim() && modelId.trim() && (apiKey.trim() || apiKeyMasked)),
-      memmyMemory: createMemmyMemoryProviderConfig(memoryModel, skillModel, primaryModelValues),
-      embedding: embeddingMode === "custom"
-        ? {
-            mode: "custom" as const,
-            endpoint: embEndpoint,
-            model: embModelId,
-            apiKey: embApiKey,
-            apiKeyMasked: embApiKey.trim() ? "" : embApiKeyMasked,
-            configured: Boolean(embEndpoint.trim() && embModelId.trim() && (embApiKey.trim() || embApiKeyMasked))
-          }
-        : embeddingMode === "local"
-          ? {
-              mode: "local" as const,
-              endpoint: "",
-              model: "",
-              apiKey: "",
-              apiKeyMasked: "",
-              configured: true
-            }
-          : undefined,
-      asr: isAsrUsable ? createAsrProviderConfig(asrModelId, asrEndpoint, asrApiKey, asrApiKeyMasked) : null,
-      imageGen: isImageGenUsable
-        ? createImageGenProviderConfig(imageGenProtocol, imageGenModel, imageGenEndpoint, imageGenApiKey, imageGenApiKeyMasked)
-        : null
-    };
-
-    void (configClient?.saveModelConfig(nextConfig) ?? Promise.resolve(nextConfig)).then((savedConfig) => {
-      dispatch(appActions.modelConfigUpdated(savedConfig));
-      setShowApiConfig(false);
-      track({ name: "model_config_saved", params: { page_path: "/settings" }, consentTier: "basic" });
-      if (!isByokMode) {
-        persistSettings({ userMode: "byok" });
-      }
-    });
   }
 
   /**
@@ -1312,15 +1178,10 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     setAccountBusy(true);
     setAccountError(null);
     try {
-      const preparedByok = prepareByokWorkspaceForAccountLogout(modelWorkspace);
       await (accountClient?.logout() ?? Promise.resolve({ ok: true as const }));
       track({ name: "account_logout", params: { page_path: "/settings" }, consentTier: "basic" });
       dispatch(appActions.accountCleared());
-      const canEnterByok = preparedByok.hasTaskModel
-        && (
-          preparedByok.workspace === modelWorkspace
-          || commitModelWorkspace(preparedByok.workspace)
-        );
+      const canEnterByok = Boolean(state.modelConfig.catalog?.modelAssignments.byok.agent.candidates.length);
       if (canEnterByok) {
         dispatch(appActions.settingsUpdated({ userMode: "byok" }));
         persistSettings({ userMode: "byok" });
@@ -1496,6 +1357,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
             mode={workspaceMode}
             seedConfig={state.modelConfig}
             configClient={configClient}
+            onConfigSaved={(saved) => dispatch(appActions.modelConfigUpdated(saved))}
             onFinishSetup={setupReturnRoute === "/onboarding"
               ? () => {
                   window.sessionStorage.removeItem(SETTINGS_ADD_MODEL_RETURN_STORAGE_KEY);
@@ -2006,71 +1868,40 @@ export interface UsageDetailViewProps {
  */
 export function UsageDetailView(props: UsageDetailViewProps) {
   const { t } = useTranslation();
-  const { workspace } = useModelWorkspace(props.seedConfig);
   const [selectedUsageModelId, setSelectedUsageModelId] = useState("all");
   // Neither panel invents rows. The platform grants quota per scene and does
   // not currently budget embedding at all, while own-key spend only exists for
   // scenes that have actually run, so both lists come straight from the
   // backend payload; TOKEN_USAGE_SCENES only fixes the display order.
   const platformScenes = orderByScene(props.platformUsage.sceneUsages, (usage) => usage.scene);
-  const workspaceMode = props.workspaceMode ?? "account";
   const byokUsageByKind = TOKEN_USAGE_SCENES.map((kind) => (
     props.byokUsage.byKind.find((usage) => usage.kind === kind) ?? emptyByokUsage(kind)
   ));
-  const byokTextModels = getModelCandidates(workspace, workspaceMode, "chat")
-    .filter((candidate) => candidate.source === "byok");
-  const byokTaskModels = getTaskModelCandidates(workspace, workspaceMode)
-    .filter((candidate) => candidate.source === "byok");
-  const byokEmbeddingModels = getModelCandidates(workspace, workspaceMode, "embedding")
-    .filter((candidate) => candidate.source === "byok");
-  const byokUsageModels = [...byokTextModels, ...byokEmbeddingModels].filter(
-    (candidate, index, items) => items.findIndex((item) => item.id === candidate.id) === index
-  );
+  const selectedUsageModelKey = selectedUsageModelId === "all"
+    || props.byokUsage.byModel.some((usage) => byokUsageModelKey(usage) === selectedUsageModelId)
+    ? selectedUsageModelId
+    : "all";
   const byokUsageModelOptions: SelectOption[] = [
     {
       value: "all",
       label: t("settings.token.allModels"),
       selectedLabel: t("settings.token.allModels")
     },
-    ...byokUsageModels.map((candidate) => ({
-      value: candidate.id,
-      label: `${candidate.provider} · ${candidate.model}`,
-      selectedLabel: candidate.model
+    ...props.byokUsage.byModel.map((usage) => ({
+      value: byokUsageModelKey(usage),
+      label: byokUsageModelLabel(usage, t),
+      selectedLabel: usage.model ?? t("settings.token.historicalUnclassified")
     }))
   ];
-  const displayedByokUsage = byokUsageByKind.map((usage) => {
-    if (selectedUsageModelId === "all") {
-      return { usage, breakdownUnavailable: false };
-    }
-    const models = usage.kind === "agent_chat"
-      ? byokTaskModels
-      : usage.kind === "embedding"
-        ? byokEmbeddingModels
-        : byokTextModels;
-    if (!models.some((model) => model.id === selectedUsageModelId)) {
-      return { usage: emptyByokUsage(usage.kind), breakdownUnavailable: false };
-    }
-    return models.length === 1
-      ? { usage, breakdownUnavailable: false }
-      : { usage: emptyByokUsage(usage.kind), breakdownUnavailable: true };
-  });
-  const selectedModelBreakdownUnavailable = selectedUsageModelId !== "all"
-    && displayedByokUsage.some((item) => item.breakdownUnavailable);
-  const displayedByokSummary = selectedUsageModelId === "all"
+  const displayedByokModels = selectedUsageModelKey === "all"
+    ? props.byokUsage.byModel
+    : props.byokUsage.byModel.filter((usage) => byokUsageModelKey(usage) === selectedUsageModelKey);
+  const displayedByokUsage = selectedUsageModelKey === "all"
+    ? byokUsageByKind
+    : summarizeByokModelsByKind(displayedByokModels);
+  const displayedByokSummary = selectedUsageModelKey === "all"
     ? props.byokUsage
-    : selectedModelBreakdownUnavailable
-      ? null
-      : displayedByokUsage.reduce((summary, item) => ({
-          ...summary,
-          inputTokens: summary.inputTokens + item.usage.inputTokens,
-          outputTokens: summary.outputTokens + item.usage.outputTokens,
-          totalTokens: summary.totalTokens + item.usage.totalTokens,
-          cachedInputTokens: summary.cachedInputTokens + item.usage.cachedInputTokens,
-          cacheCreationInputTokens: summary.cacheCreationInputTokens + item.usage.cacheCreationInputTokens
-        }), {
-          ...EMPTY_BYOK_TOKEN_USAGE,
-          byKind: []
-        });
+    : summarizeByokModels(displayedByokModels);
   const showPlatform = props.showPlatform && platformScenes.length > 0;
   // Sum the Cloud/Nacos scene budgets — same additive total the exhausted modal
   // uses — so the section heading mirrors the rows below it.
@@ -2154,14 +1985,14 @@ export function UsageDetailView(props: UsageDetailViewProps) {
                 <div>
                   <span>{t("settings.token.summaryLocalTotal")}</span>
                   <strong>
-                    {displayedByokSummary ? formatTokenSummary(displayedByokSummary.totalTokens) : "—"}
-                    {displayedByokSummary && <em>Token</em>}
+                    {formatTokenSummary(displayedByokSummary.totalTokens)}
+                    <em>Token</em>
                   </strong>
                 </div>
                 <Select
                   label={t("settings.token.filterByModel")}
                   labelClassName="sr-only"
-                  value={selectedUsageModelId}
+                  value={selectedUsageModelKey}
                   options={byokUsageModelOptions}
                   onValueChange={setSelectedUsageModelId}
                   className="select-control--compact select-control--subtle"
@@ -2171,32 +2002,44 @@ export function UsageDetailView(props: UsageDetailViewProps) {
               <div className={usageStyles.byokSummaryMetrics}>
                 <UsageSummaryMetric
                   label={t("settings.token.input")}
-                  value={displayedByokSummary?.inputTokens ?? null}
+                  value={displayedByokSummary.inputTokens}
                 />
                 <UsageSummaryMetric
                   label={t("settings.token.output")}
-                  value={displayedByokSummary?.outputTokens ?? null}
+                  value={displayedByokSummary.outputTokens}
                 />
                 <UsageSummaryMetric
                   label={t("settings.token.cacheHit")}
-                  value={displayedByokSummary?.cachedInputTokens ?? null}
+                  value={displayedByokSummary.cachedInputTokens}
                 />
               </div>
-              {selectedModelBreakdownUnavailable && (
+              {props.byokUsage.byModel.length === 0 && (
                 <p className={usageStyles.modelBreakdownNotice}>
                   {t("settings.token.modelBreakdownPending")}
                 </p>
+              )}
+              {displayedByokModels.length > 0 && (
+                <>
+                  <div className={usageStyles.byokPurposeTitle}>
+                    {t("settings.token.byModel")}
+                  </div>
+                  <div className={usageStyles.byokPurposeRows}>
+                    {displayedByokModels.map((usage) => (
+                      <ByokModelUsageRow key={byokUsageModelKey(usage)} usage={usage} />
+                    ))}
+                  </div>
+                </>
               )}
               <div className={usageStyles.byokPurposeTitle}>
                 {t("settings.token.byPurpose")}
               </div>
               <div className={usageStyles.byokPurposeRows}>
-                {displayedByokUsage.map((item) => (
+                {displayedByokUsage.map((usage) => (
                   <ByokUsageRow
-                    key={item.usage.kind}
-                    usage={item.usage}
+                    key={usage.kind}
+                    usage={usage}
                     showDesc={describeScenesInByok}
-                    breakdownUnavailable={item.breakdownUnavailable}
+                    breakdownUnavailable={false}
                   />
                 ))}
               </div>
@@ -2269,6 +2112,53 @@ function emptyByokUsage(kind: ByokTokenUsageKind): ByokTokenUsageByKind {
     eventCount: 0,
     updatedAt: null
   };
+}
+
+function byokUsageModelKey(usage: ByokTokenUsageByModel): string {
+  return JSON.stringify([usage.presetId, usage.provider, usage.model, usage.capability]);
+}
+
+function byokUsageModelLabel(usage: ByokTokenUsageByModel, t: SettingsTranslate): string {
+  if (!usage.provider || !usage.model || !usage.capability) {
+    return t("settings.token.historicalUnclassified");
+  }
+  return `${usage.provider} · ${usage.model} · ${usageSceneMeta(capabilityToUsageKind(usage.capability), t).label}`;
+}
+
+function capabilityToUsageKind(capability: ByokTokenUsageCapability): ByokTokenUsageKind {
+  return capability === "agent" ? "agent_chat" : capability;
+}
+
+function summarizeByokModels(models: readonly ByokTokenUsageByModel[]): ByokTokenUsageSummary {
+  return models.reduce((summary, usage) => ({
+    ...summary,
+    inputTokens: summary.inputTokens + usage.inputTokens,
+    outputTokens: summary.outputTokens + usage.outputTokens,
+    totalTokens: summary.totalTokens + usage.totalTokens,
+    cachedInputTokens: summary.cachedInputTokens + usage.cachedInputTokens,
+    cacheCreationInputTokens: summary.cacheCreationInputTokens + usage.cacheCreationInputTokens,
+    updatedAt: !summary.updatedAt || (usage.updatedAt && usage.updatedAt > summary.updatedAt)
+      ? usage.updatedAt
+      : summary.updatedAt,
+    byModel: [...summary.byModel, usage]
+  }), { ...EMPTY_BYOK_TOKEN_USAGE });
+}
+
+function summarizeByokModelsByKind(models: readonly ByokTokenUsageByModel[]): ByokTokenUsageByKind[] {
+  return TOKEN_USAGE_SCENES.map((kind) => models
+    .filter((usage) => usage.capability && capabilityToUsageKind(usage.capability) === kind)
+    .reduce((summary, usage) => ({
+      ...summary,
+      inputTokens: summary.inputTokens + usage.inputTokens,
+      outputTokens: summary.outputTokens + usage.outputTokens,
+      totalTokens: summary.totalTokens + usage.totalTokens,
+      cachedInputTokens: summary.cachedInputTokens + usage.cachedInputTokens,
+      cacheCreationInputTokens: summary.cacheCreationInputTokens + usage.cacheCreationInputTokens,
+      eventCount: summary.eventCount + usage.eventCount,
+      updatedAt: !summary.updatedAt || (usage.updatedAt && usage.updatedAt > summary.updatedAt)
+        ? usage.updatedAt
+        : summary.updatedAt
+    }), emptyByokUsage(kind)));
 }
 
 interface PlatformQuotaRowProps {
@@ -2347,6 +2237,27 @@ function ByokUsageRow(props: {
       <div className={usageStyles.byokUsageValue}>
         <strong>{props.breakdownUnavailable ? "—" : formatCompactTokenCount(props.usage.totalTokens)}</strong>
         {!props.breakdownUnavailable && <em>Token</em>}
+      </div>
+    </article>
+  );
+}
+
+function ByokModelUsageRow(props: { usage: ByokTokenUsageByModel }) {
+  const { t } = useTranslation();
+  const classified = Boolean(props.usage.provider && props.usage.model && props.usage.capability);
+  const purpose = props.usage.capability
+    ? usageSceneMeta(capabilityToUsageKind(props.usage.capability), t).label
+    : t("settings.token.historicalUnclassifiedHint");
+
+  return (
+    <article className={usageStyles.byokUsageRow} data-testid="byok-model-usage-row">
+      <div className={usageStyles.compactScene}>
+        <h3>{classified ? props.usage.model : t("settings.token.historicalUnclassified")}</h3>
+        <p>{classified ? `${props.usage.provider} · ${purpose}` : purpose}</p>
+      </div>
+      <div className={usageStyles.byokUsageValue}>
+        <strong>{formatCompactTokenCount(props.usage.totalTokens)}</strong>
+        <em>Token</em>
       </div>
     </article>
   );

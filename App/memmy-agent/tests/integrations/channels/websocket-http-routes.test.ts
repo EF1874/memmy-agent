@@ -19,7 +19,8 @@ const childProcessMocks = vi.hoisted(() => ({
   spawnSync: vi.fn((_command?: string, _args?: string[]) => ({ status: 0, stderr: "" })),
 }));
 
-vi.mock("node:child_process", () => ({
+vi.mock("node:child_process", async (importOriginal: () => Promise<typeof import("node:child_process")>) => ({
+  ...await importOriginal(),
   execFile: childProcessMocks.execFile,
   spawn: childProcessMocks.spawn,
   spawnSync: childProcessMocks.spawnSync,
@@ -204,6 +205,40 @@ describe("WebSocket HTTP route helpers", () => {
       if (args[0] === "diff") return callback?.(null, "+changed\n", "");
       return callback?.(new Error("unexpected git command"), "", "unexpected git command");
     });
+  }
+
+  function configImageModel(root: string): void {
+    const configPath = path.join(root, "config.yaml");
+    fs.writeFileSync(configPath, [
+      "app:",
+      "  userMode: byok",
+      "providers:",
+      "  openai:",
+      "    apiKey: sk-route-secret",
+      "    endpoints:",
+      "      image:",
+      "        apiBase: https://api.openai.com/v1",
+      "        protocol: openai-images",
+      "modelPresets:",
+      "  image:",
+      "    provider: openai",
+      "    endpoint: image",
+      "    model: gpt-image-2",
+      "    source: byok",
+      "    capabilities: [image_generation]",
+      "modelAssignments:",
+      "  byok:",
+      "    agent: { candidates: [], default: null }",
+      "    memorySummary: null",
+      "    memoryEvolution: null",
+      "    embedding: null",
+      "    asr: null",
+      "    imageGeneration: image",
+      "  account:",
+      "    agent: { candidates: [], default: null }",
+      "",
+    ].join("\n"), "utf8");
+    process.env.MEMMY_CONFIG = configPath;
   }
 
   const localConnection = { remoteAddress: "127.0.0.1" };
@@ -622,38 +657,33 @@ describe("WebSocket HTTP route helpers", () => {
     expect(((await tools.json()) as any).last_action.message).toBe("tools:docs MCP config reloaded.");
   });
 
-  it("serves image generation settings routes with independent tool config", async () => {
+  it("serves image generation tool settings without accepting retired catalog fields", async () => {
     const root = tmpRoot();
-    process.env.MEMMY_CONFIG = path.join(root, "config.yaml");
+    configImageModel(root);
     const channel = makeChannel({ sessionManager: seedSession(root) });
     const port = await startChannel(channel);
     const headers = await authHeaders(port);
 
     const params = new URLSearchParams({
-      provider: "openai",
       enabled: "true",
-      model: "gpt-image-2",
-      apiKey: "sk-route-secret",
-      apiBase: "https://api.openai.com/v1",
-      maxImagesPerTurn: "24",
-      extraBody: JSON.stringify({ quality: "low" }),
+      max_images_per_turn: "24",
     });
     const updated = await fetch(`http://127.0.0.1:${port}/api/settings/image-generation/update?${params}`, { headers });
 
-    expect(updated.status).toBe(200);
-    const body = (await updated.json()) as Record<string, any>;
-    expect(body.image_generation.provider_configured).toBe(true);
-    expect(body.image_generation.api_key_hint).toBe("sk-r....cret");
+    const updatedText = await updated.text();
+    expect(updated.status, updatedText).toBe(200);
+    const body = JSON.parse(updatedText) as Record<string, any>;
     expect(body.image_generation.max_images_per_turn).toBe(24);
-    expect(JSON.stringify(body)).not.toContain("sk-route-secret");
     expect(loadConfig(process.env.MEMMY_CONFIG).tools.imageGeneration).toMatchObject({
-      provider: "openai",
-      model: "gpt-image-2",
-      apiKey: "sk-route-secret",
-      apiBase: "https://api.openai.com/v1",
+      enabled: true,
       maxImagesPerTurn: 24,
-      extraBody: { quality: "low" },
     });
+
+    const retired = await fetch(
+      `http://127.0.0.1:${port}/api/settings/image-generation/update?provider=openai&model=gpt-image-2`,
+      { headers },
+    );
+    expect(retired.status).toBe(400);
 
     const unlimited = await fetch(
       `http://127.0.0.1:${port}/api/settings/image-generation/update?max_images_per_turn=null`,
@@ -667,16 +697,14 @@ describe("WebSocket HTTP route helpers", () => {
     expect(settings.status).toBe(200);
     const settingsBody = (await settings.json()) as Record<string, any>;
     expect(settingsBody.image_generation.max_images_per_turn).toBeNull();
-    expect(settingsBody.image_generation.providers.map((row: any) => row.name)).not.toEqual(
-      expect.arrayContaining(["doubao", "baidu", "qwen"]),
-    );
+    expect(settingsBody.image_generation).not.toHaveProperty("providers");
 
     const rejected = await fetch(
       `http://127.0.0.1:${port}/api/settings/image-generation/update?apiKey=sk-after&unexpected=value`,
       { headers },
     );
     expect(rejected.status).toBe(400);
-    expect(loadConfig(process.env.MEMMY_CONFIG).tools.imageGeneration.apiKey).toBe("sk-route-secret");
+    expect(loadConfig(process.env.MEMMY_CONFIG).tools.imageGeneration.toObject()).not.toHaveProperty("apiKey");
   });
 
   it("lists only websocket sessions on the WebUI sessions route", async () => {
@@ -1225,16 +1253,16 @@ describe("WebSocket HTTP route helpers", () => {
     expect(responseJson(response).model_name).toBe("live/model");
   });
 
-  it("falls back to config model name when runtime returns empty", () => {
+  it("does not infer a global model name when runtime returns empty", () => {
     const root = tmpRoot();
     configModel(root, "from-disk");
     const channel = makeChannel({ runtimeModelName: () => "   " });
     const response = (channel as any).handleBootstrap(localConnection, noHeaders);
     expect(response.status).toBe(200);
-    expect(responseJson(response).model_name).toBe("from-disk");
+    expect(responseJson(response).model_name).toBeNull();
   });
 
-  it("falls back to config model name when runtime resolver throws", () => {
+  it("does not infer a global model name when runtime resolver throws", () => {
     const root = tmpRoot();
     configModel(root, "from-disk");
     const channel = makeChannel({
@@ -1244,7 +1272,7 @@ describe("WebSocket HTTP route helpers", () => {
     });
     const response = (channel as any).handleBootstrap(localConnection, noHeaders);
     expect(response.status).toBe(200);
-    expect(responseJson(response).model_name).toBe("from-disk");
+    expect(responseJson(response).model_name).toBeNull();
   });
 
   it("rejects bootstrap with the wrong issue secret", () => {

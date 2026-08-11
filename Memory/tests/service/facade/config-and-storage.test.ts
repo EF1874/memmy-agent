@@ -218,10 +218,10 @@ describe("MemoryService / facade / config and storage", () => {
           routing: "follow"
         },
         embedding: {
-          provider: "openai_compatible",
-          model: "embedding",
+          provider: "local",
+          model: "capturing-test-embedding",
           configured: true,
-          remote: true,
+          remote: false,
           mode: "cloud"
         }
       }

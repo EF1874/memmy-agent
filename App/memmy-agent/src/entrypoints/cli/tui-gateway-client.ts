@@ -1,5 +1,11 @@
 import crypto from "node:crypto";
 import WebSocket, { type RawData } from "ws";
+import {
+  ModelCapabilitySchema,
+  ModelEndpointProtocolSchema,
+  type ModelCapability,
+  type ModelEndpointProtocol,
+} from "@memmy/local-api-contracts";
 import type { Config } from "../../config/schema.js";
 import { parseTurnSource, type TurnSource } from "../../core/runtime-messages/events.js";
 import { toGuiChatId } from "../frontend-bridge/gui-session-projection.js";
@@ -28,6 +34,17 @@ export type TuiGatewayMessage = {
   turnId: string | null;
 };
 
+export type TuiModelSelection = Readonly<{
+  presetId: string;
+  provider: string;
+  endpointId: string;
+  protocol: ModelEndpointProtocol;
+  model: string;
+  source: "account" | "byok";
+  ownerAccountId: string | null;
+  capabilities: readonly ModelCapability[];
+}>;
+
 export type TuiGatewayState = {
   connection: TuiGatewayConnectionStatus;
   attached: boolean;
@@ -41,6 +58,7 @@ export type TuiGatewayState = {
   messages: TuiGatewayMessage[];
   goalState: Record<string, unknown> | null;
   modelName: string | null;
+  modelSelection: TuiModelSelection | null;
   toolNames: string[];
   notice: string;
 };
@@ -91,6 +109,7 @@ type BootstrapResponse = {
   ws_path: string;
   expires_in: number;
   model_name: string | null;
+  model_selection: TuiModelSelection | null;
   tool_names: string[];
 };
 
@@ -196,10 +215,41 @@ function parseBootstrap(value: unknown): BootstrapResponse | null {
     ws_path: wsPath,
     expires_in: value.expires_in,
     model_name: stringValue(value.model_name),
+    model_selection: parseModelSelection(value.model_selection),
     tool_names: Array.isArray(value.tool_names)
       ? value.tool_names.filter((item): item is string => typeof item === "string")
       : [],
   };
+}
+
+function parseModelSelection(value: unknown): TuiModelSelection | null {
+  if (!isRecord(value)) return null;
+  const presetId = stringValue(value.preset_id);
+  const provider = stringValue(value.provider);
+  const endpointId = stringValue(value.endpoint_id);
+  const model = stringValue(value.model);
+  const protocol = ModelEndpointProtocolSchema.safeParse(value.protocol);
+  const capabilities = Array.isArray(value.capabilities)
+    ? value.capabilities.map((capability) => ModelCapabilitySchema.safeParse(capability))
+    : [];
+  if (
+    !presetId || !provider || !endpointId || !model || !protocol.success
+    || (value.source !== "account" && value.source !== "byok")
+    || (value.owner_account_id !== null && typeof value.owner_account_id !== "string")
+    || capabilities.length === 0 || capabilities.some((capability) => !capability.success)
+  ) return null;
+  return Object.freeze({
+    presetId,
+    provider,
+    endpointId,
+    protocol: protocol.data,
+    model,
+    source: value.source,
+    ownerAccountId: value.owner_account_id,
+    capabilities: Object.freeze(capabilities.flatMap((capability) => (
+      capability.success ? [capability.data] : []
+    ))),
+  });
 }
 
 function parseQueueItem(value: unknown): TuiGatewayQueueItem | null {
@@ -287,6 +337,7 @@ export class TuiGatewayClient {
   private readonly requestTimeoutMs: number;
   private readonly listeners = new Set<(state: TuiGatewayState) => void>();
   private readonly pendingSubmissions = new Map<string, PendingSubmission>();
+  private readonly acceptedModelUpdateRequests = new Set<string>();
   private readonly queuedContents = new Map<string, string>();
   private readonly historyBuffers = new Map<number, GatewayEvent[]>();
   private socket: TuiWebSocket | null = null;
@@ -310,6 +361,7 @@ export class TuiGatewayClient {
     messages: [],
     goalState: null,
     modelName: null,
+    modelSelection: null,
     toolNames: [],
     notice: "connecting",
   };
@@ -362,6 +414,7 @@ export class TuiGatewayClient {
       this.rejectSubmissionWaiters(attempt, error);
     }
     this.pendingSubmissions.clear();
+    this.acceptedModelUpdateRequests.clear();
     this.patch({
       connection: "closed",
       attached: false,
@@ -448,7 +501,11 @@ export class TuiGatewayClient {
     try {
       const bootstrap = await this.bootstrap();
       if (this.closed || generation !== this.generation) return;
-      this.patch({ modelName: bootstrap.model_name, toolNames: bootstrap.tool_names });
+      this.patch({
+        modelName: bootstrap.model_name,
+        modelSelection: bootstrap.model_selection,
+        toolNames: bootstrap.tool_names,
+      });
       const url = new URL(bootstrap.ws_path, this.baseUrl);
       url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
       url.searchParams.set("token", bootstrap.token);
@@ -528,7 +585,11 @@ export class TuiGatewayClient {
     }
     if (event.chat_id && event.chat_id !== this.chatId) return;
     if (event.event === "attached") {
-      this.patch({ attached: true, notice: "loading Session" });
+      this.patch({
+        attached: true,
+        modelSelection: parseModelSelection(event.model_selection) ?? this.state.modelSelection,
+        notice: "loading Session",
+      });
       this.historyBuffers.set(generation, []);
       void this.hydrateHistory(generation, apiToken);
       return;
@@ -598,10 +659,23 @@ export class TuiGatewayClient {
     }
     if (event.event === "message_accepted") {
       const id = stringValue(event.client_request_id);
+      const attempt = id ? this.pendingSubmissions.get(id) : null;
+      const selection = attempt ? parseModelSelection(event.model_selection) : null;
+      if (selection) this.patch({ modelSelection: selection, modelName: selection.model });
+      if (id && attempt?.content.trim().match(/^\/model\s+\S+$/i)) {
+        this.acceptedModelUpdateRequests.add(id);
+      }
       if (id && !this.state.queueItems.some((item) => item.clientRequestId === id)) {
         this.promoteSubmission(id, stringValue(event.turn_id));
       }
       this.resolveSubmission(id, "accepted");
+      return;
+    }
+    if (event.event === "runtime_model_updated") {
+      const id = stringValue(event.client_request_id);
+      if (!id || !this.acceptedModelUpdateRequests.delete(id)) return;
+      const selection = parseModelSelection(event.model_selection);
+      if (selection) this.patch({ modelSelection: selection, modelName: selection.model });
       return;
     }
     if (event.event === "goal_state") {
@@ -956,6 +1030,7 @@ export class TuiGatewayClient {
     this.historyBuffers.delete(generation);
     if (this.closed) return;
     for (const attempt of this.pendingSubmissions.values()) attempt.sentGeneration = null;
+    this.acceptedModelUpdateRequests.clear();
     this.patch({
       connection: "reconnecting",
       attached: false,

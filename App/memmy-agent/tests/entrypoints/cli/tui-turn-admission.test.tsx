@@ -30,6 +30,9 @@ describe("Ink TUI Turn admission", () => {
     expect(source).not.toContain("cancelActiveTasks");
     expect(source).toContain("gateway.subscribe(setGatewayState)");
     expect(source).toContain("gateway.close()");
+    expect(source).toContain("gatewayState.modelSelection");
+    expect(source).toContain("modelSelectionLabel(gatewayState.modelSelection)");
+    expect(source).not.toContain("config.agents.defaults.modelPreset");
   });
 
   it("keeps the draft until the Gateway acknowledges Queue or Steer", () => {

@@ -18,19 +18,32 @@ function fixture(): { root: string; configPath: string } {
 
 function writeConfig(configPath: string, model: string): void {
   fs.writeFileSync(configPath, YAML.stringify({
+    app: { userMode: "byok" },
     agents: { defaults: { modelPreset: "work" } },
     providers: {
       openai: {
-        apiBase: "https://api.example.com/v1",
-        apiKey: "sk-test"
-      }
+        apiKey: "sk-test",
+        endpoints: {
+          chat: {
+            apiBase: "https://api.example.com/v1",
+            protocol: "openai-chat-completions",
+          },
+        },
+      },
     },
     modelPresets: {
       work: {
         provider: "openai",
-        model
-      }
-    }
+        endpoint: "chat",
+        model,
+        source: "byok",
+        capabilities: ["agent"],
+      },
+    },
+    modelAssignments: {
+      byok: { agent: { candidates: ["work"], default: "work" } },
+      account: {},
+    },
   }));
 }
 
@@ -80,6 +93,21 @@ describe("ModelCatalogWatcher", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 450));
     expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("publishes assignment and mode changes even when Provider definitions are unchanged", async () => {
+    const { configPath } = fixture();
+    const onChange = vi.fn();
+    const watcher = new ModelCatalogWatcher(configPath, onChange);
+    watchers.push(watcher);
+
+    const parsed = YAML.parse(fs.readFileSync(configPath, "utf8"));
+    parsed.modelAssignments.byok.agent = { candidates: [], default: null };
+    fs.writeFileSync(configPath, YAML.stringify(parsed));
+    (watcher as any).schedule();
+
+    await waitFor(() => onChange.mock.calls.length === 1);
+    expect(onChange.mock.calls[0]?.[0]).toBe("ready");
   });
 
   it("publishes an invalid state after transient-read retries are exhausted", async () => {

@@ -1,209 +1,182 @@
 import { describe, expect, it } from "vitest";
-import { Config, ModelPresetConfig } from "../../src/config/schema.js";
-import { DEFAULT_MAX_TOKENS } from "../../src/token-budget.js";
+import { Config, ModelEndpointConfig, ModelPresetConfig, ProviderConfig } from "../../src/config/schema.js";
 
-describe("model presets", () => {
-  it("resolves defaults when no preset is active", () => {
-    const config = new Config();
-    const resolved = config.resolvePreset();
-
-    expect(config.agents.defaults.contextWindowTokens).toBe(200_000);
-    expect(config.agents.defaults.maxTokens).toBe(DEFAULT_MAX_TOKENS);
-    expect(resolved.model).toBe(config.agents.defaults.model);
-    expect(resolved.provider).toBe(config.agents.defaults.provider);
-    expect(resolved.maxTokens).toBe(config.agents.defaults.maxTokens);
-    expect(resolved.contextWindowTokens).toBe(config.agents.defaults.contextWindowTokens);
-    expect(resolved.temperature).toBe(config.agents.defaults.temperature);
-    expect(resolved.reasoningEffort).toBe(config.agents.defaults.reasoningEffort);
-  });
-
-  it("uses the default context window for implicit named presets", () => {
-    const preset = new ModelPresetConfig({ model: "openai/gpt-4.1" });
-
-    expect(preset.contextWindowTokens).toBe(200_000);
-    expect(preset.maxTokens).toBe(DEFAULT_MAX_TOKENS);
-  });
-
-  it("accepts exact OpenAI apiType values only", () => {
-    const config = Config.fromObject({ providers: { openai: { apiKey: "sk-test", apiType: "responses" } } });
-    expect(config.providers.openai.apiType).toBe("responses");
-
-    expect(() => Config.fromObject({ providers: { openai: { apiKey: "sk-test", apiType: "response" } } })).toThrow();
-  });
-
-  it("accepts chatCompletions apiType values", () => {
-    const config = Config.fromObject({ providers: { openai: { apiKey: "sk-test", apiType: "chatCompletions" } } });
-
-    expect(config.providers.openai.apiType).toBe("chatCompletions");
-    expect(config.toObject().providers.openai.apiType).toBe("chatCompletions");
-  });
-
-  it("normalizes legacy provider config keys and apiType values", () => {
-    const config = Config.fromObject({
-      providers: {
-        openai: {
-          api_key: "sk-test",
-          api_base: "https://example.test/v1",
-          api_type: "chat_completions",
-          extra_headers: { "x-test": "yes" },
-          extra_body: { seed: 1 },
-        },
-      },
-    });
-
-    expect(config.providers.openai.apiKey).toBe("sk-test");
-    expect(config.providers.openai.apiBase).toBe("https://example.test/v1");
-    expect(config.providers.openai.apiType).toBe("chatCompletions");
-    expect(config.providers.openai.extraHeaders).toEqual({ "x-test": "yes" });
-    expect(config.providers.openai.extraBody).toEqual({ seed: 1 });
-    expect(config.toObject().providers.openai).toMatchObject({
+const currentCatalog = () => ({
+  providers: {
+    openai: {
       apiKey: "sk-test",
-      apiBase: "https://example.test/v1",
-      apiType: "chatCompletions",
-    });
-  });
+      futureProviderField: "keep",
+      endpoints: {
+        chat: {
+          apiBase: "https://api.example.test/v1",
+          protocol: "openai-chat-completions",
+          futureEndpointField: "keep",
+        },
+        embedding: {
+          apiBase: "https://api.example.test/v1",
+          protocol: "openai-embeddings",
+        },
+      },
+    },
+  },
+  modelPresets: {
+    chat: {
+      endpoint: "chat",
+      model: "gpt-5",
+      provider: "openai",
+      source: "byok",
+      capabilities: ["agent", "memory_summary", "memory_evolution"],
+      futurePresetField: "keep",
+    },
+    embedding: {
+      endpoint: "embedding",
+      model: "text-embedding-3-small",
+      provider: "openai",
+      source: "byok",
+      capabilities: ["embedding"],
+    },
+  },
+  modelAssignments: {
+    byok: {
+      agent: { candidates: ["chat"], default: "chat" },
+      memorySummary: "chat",
+      memoryEvolution: "chat",
+      embedding: "embedding",
+      asr: null,
+      imageGeneration: null,
+    },
+    account: {
+      agent: { candidates: ["chat"], default: "chat" },
+      memorySummary: null,
+      memoryEvolution: null,
+      embedding: null,
+      asr: null,
+      imageGeneration: null,
+    },
+  },
+});
 
-  it("limits non-auto apiType values to OpenAI", () => {
-    expect(() =>
-      Config.fromObject({ providers: { custom: { apiBase: "https://example.test/v1", apiType: "responses" } } }),
-    ).toThrow(/providers\.custom\.apiType is only supported/);
-    expect(() =>
-      Config.fromObject({ providers: { custom: { apiBase: "https://example.test/v1", apiType: "chatCompletions" } } }),
-    ).toThrow(/providers\.custom\.apiType is only supported/);
-    expect(() =>
-      Config.fromObject({ providers: { deepseek: { apiKey: "sk-test", apiType: "chatCompletions" } } }),
-    ).toThrow(/providers\.deepseek\.apiType is only supported/);
-  });
-
-  it("resolves configured defaults without presets", () => {
-    const config = Config.fromObject({
-      agents: {
-        defaults: {
-          model: "openai/gpt-4.1",
-          provider: "openai",
-          maxTokens: 4096,
-          contextWindowTokens: 128_000,
-          temperature: 0.2,
-          reasoningEffort: "low",
+describe("current model catalog schema", () => {
+  it("round-trips endpoints, preset contracts, assignments, and nested future fields", () => {
+    const saved = Config.fromObject(currentCatalog()).toObject();
+    expect(saved.providers.openai).toMatchObject({
+      apiKey: "sk-test",
+      futureProviderField: "keep",
+      endpoints: {
+        chat: {
+          apiBase: "https://api.example.test/v1",
+          protocol: "openai-chat-completions",
+          futureEndpointField: "keep",
         },
       },
     });
-
-    const resolved = config.resolvePreset();
-    expect(config.agents.defaults.modelPreset).toBeNull();
-    expect(config.modelPresets).toEqual({});
-    expect(resolved.model).toBe("openai/gpt-4.1");
-    expect(resolved.provider).toBe("openai");
-    expect(resolved.maxTokens).toBe(4096);
-    expect(resolved.contextWindowTokens).toBe(128_000);
-    expect(resolved.temperature).toBe(0.2);
-    expect(resolved.reasoningEffort).toBe("low");
-  });
-
-  it("resolves the active named preset", () => {
-    const config = Config.fromObject({
-      modelPresets: {
-        fast: {
-          model: "openai/gpt-4.1",
-          provider: "openai",
-          maxTokens: 4096,
-          contextWindowTokens: 32_768,
-          temperature: 0.5,
-          reasoningEffort: "low",
-        },
-      },
-      agents: { defaults: { modelPreset: "fast" } },
+    expect(saved.modelPresets.chat).toMatchObject({
+      endpoint: "chat",
+      provider: "openai",
+      source: "byok",
+      capabilities: ["agent", "memory_summary", "memory_evolution"],
+      futurePresetField: "keep",
     });
-
-    const resolved = config.resolvePreset();
-    expect(resolved.model).toBe("openai/gpt-4.1");
-    expect(resolved.provider).toBe("openai");
-    expect(resolved.maxTokens).toBe(4096);
-    expect(resolved.contextWindowTokens).toBe(32_768);
-    expect(resolved.temperature).toBe(0.5);
-    expect(resolved.reasoningEffort).toBe("low");
+    expect(saved.modelAssignments).toEqual(currentCatalog().modelAssignments);
+    expect(JSON.stringify(saved.modelPresets)).not.toContain("label");
   });
 
-  it("resolves default from agents.defaults even when a named preset is active", () => {
+  it("resolves a current named preset without changing its identity", () => {
     const config = Config.fromObject({
-      agents: { defaults: { model: "openai/gpt-4.1", provider: "openai", modelPreset: "fast" } },
-      modelPresets: { fast: { model: "openai/gpt-4.1-mini", provider: "openai" } },
+      ...currentCatalog(),
+      agents: { defaults: { modelPreset: "chat" } },
     });
-
-    expect(config.resolvePreset().model).toBe("openai/gpt-4.1-mini");
-    expect(config.resolvePreset("default").model).toBe("openai/gpt-4.1");
-  });
-
-  it("accepts camel-case modelPresets root key", () => {
-    const config = Config.fromObject({ modelPresets: { fast: { model: "openai/gpt-4.1", provider: "openai" } } });
-
-    expect(config.modelPresets.fast.model).toBe("openai/gpt-4.1");
-    expect(config.modelPresets.fast.provider).toBe("openai");
-  });
-
-  it("can resolve a named preset without activating it", () => {
-    const config = Config.fromObject({
-      modelPresets: {
-        fast: { model: "openai/gpt-4.1", provider: "openai" },
-        deep: { model: "anthropic/claude-opus-4-5", provider: "anthropic" },
-      },
-      agents: { defaults: { modelPreset: "fast" } },
+    expect(config.resolvePreset()).toMatchObject({
+      endpoint: "chat",
+      provider: "openai",
+      model: "gpt-5",
+      source: "byok",
     });
-
-    const resolved = config.resolvePreset("deep");
-    expect(resolved.model).toBe("anthropic/claude-opus-4-5");
-    expect(resolved.provider).toBe("anthropic");
+    expect(config.getProviderName(null, { preset: config.resolvePreset() })).toBe("openai");
   });
 
-  it("rejects unknown active presets", () => {
-    expect(() => Config.fromObject({ agents: { defaults: { modelPreset: "unknown" } } })).toThrow(
-      /modelPreset 'unknown' not found in modelPresets/,
-    );
-  });
-
-  it("accepts explicit default modelPreset name", () => {
-    const config = Config.fromObject({ agents: { defaults: { model: "openai/gpt-4.1", modelPreset: "default" } } });
-
-    expect(config.resolvePreset().model).toBe("openai/gpt-4.1");
-  });
-
-  it("rejects reserved default preset names", () => {
-    expect(() => Config.fromObject({ modelPresets: { default: { model: "custom-model" } } })).toThrow(
-      /modelPreset name 'default' is reserved/,
-    );
-  });
-
-  it("rejects unknown named presets", () => {
-    expect(() => new Config().resolvePreset("missing")).toThrow(/modelPreset 'missing' not found/);
-  });
-
-  it("matches provider using the active preset model", () => {
-    const config = Config.fromObject({
-      providers: { openai: { apiKey: "sk-test" } },
-      modelPresets: { fast: { model: "openai/gpt-4.1", provider: "openai" } },
-      agents: { defaults: { modelPreset: "fast" } },
+  it("derives the temporary Provider compatibility projection from a chat endpoint", () => {
+    const provider = new ProviderConfig({
+      endpoints: { chat: { apiBase: "https://api.example.test/v1", protocol: "openai-responses" } },
     });
-
-    expect(config.getProviderName()).toBe("openai");
+    expect(provider.apiBase).toBe("https://api.example.test/v1");
+    expect(provider.apiType).toBe("responses");
   });
 
-  it("matches provider using a forced preset provider", () => {
-    const config = Config.fromObject({
-      providers: { anthropic: { apiKey: "sk-test" } },
-      modelPresets: { fast: { model: "anthropic/claude-opus-4-5", provider: "anthropic" } },
-      agents: { defaults: { modelPreset: "fast" } },
-    });
-
-    expect(config.getProviderName()).toBe("anthropic");
+  it("rejects legacy Provider fields and aliases instead of normalizing them at load", () => {
+    for (const value of [
+      { api_key: "secret" },
+      { api_base: "https://example.test" },
+      { apiType: "responses" },
+      { extra_headers: { test: "yes" } },
+    ]) {
+      expect(() => new ProviderConfig(value)).toThrow(/current contract does not accept legacy field/);
+    }
+    for (const provider of ["openai_compatible", "google", "qwen", "kimi", "baidu", "doubao"]) {
+      expect(() => Config.fromObject({ providers: { [provider]: {} } })).toThrow(/canonical Provider ID/);
+    }
   });
 
-  it("routes forced Novita model-api models to Novita defaults", () => {
-    const config = Config.fromObject({
-      providers: { novita: { apiKey: "sk-test" } },
-      agents: { defaults: { model: "deepseek-v4-pro", provider: "novita" } },
-    });
+  it("requires current endpoint fields and a supported protocol", () => {
+    expect(() => new ModelEndpointConfig({ protocol: "openai-chat-completions" })).toThrow(/apiBase/);
+    expect(() => new ModelEndpointConfig({ apiBase: "https://example.test", protocol: "chat_completions" })).toThrow(/protocol/);
+  });
 
-    expect(config.getProviderName()).toBe("novita");
-    expect(config.getApiBase()).toBe("https://api.novita.ai/openai");
+  it("requires endpoint/source/capabilities and never accepts a preset label", () => {
+    expect(() => new ModelPresetConfig({ model: "gpt-5", provider: "openai" })).toThrow();
+    const preset = new ModelPresetConfig({
+      label: "must disappear",
+      endpoint: "chat",
+      model: "gpt-5",
+      provider: "openai",
+      source: "byok",
+      capabilities: ["agent"],
+    });
+    expect(preset.toObject()).not.toHaveProperty("label");
+  });
+
+  it("rejects a capability that the referenced endpoint protocol cannot execute", () => {
+    const data = currentCatalog();
+    data.modelPresets.chat.capabilities = ["embedding"] as any;
+    expect(() => Config.fromObject(data)).toThrow(/incompatible/);
+  });
+
+  it("keeps BYOK assignments source-isolated and validates capability", () => {
+    const accountPreset = {
+      endpoint: "platform",
+      model: "agent_chat",
+      provider: "memmy_account",
+      source: "account",
+      ownerAccountId: "owner-a",
+      capabilities: ["agent"],
+    };
+    const data: any = currentCatalog();
+    data.providers.memmy_account = {
+      apiKey: "token",
+      ownerAccountId: "owner-a",
+      endpoints: { platform: { apiBase: "https://cloud.example/v1", protocol: "memmy-account" } },
+    };
+    data.modelPresets.platform = accountPreset;
+    data.modelAssignments.byok.agent = { candidates: ["platform"], default: "platform" };
+    expect(() => Config.fromObject(data)).toThrow(/may only reference BYOK/);
+
+    data.modelAssignments.byok.agent = { candidates: ["embedding"], default: "embedding" };
+    expect(() => Config.fromObject(data)).toThrow(/lacks capability agent/);
+  });
+
+  it("validates account owner and permits owner-bound dormant platform references", () => {
+    const data: any = currentCatalog();
+    data.modelAssignments.account = {
+      ownerAccountId: "owner-a",
+      agent: { candidates: ["missing-platform-preset"], default: "missing-platform-preset" },
+      memorySummary: null,
+      memoryEvolution: null,
+      embedding: null,
+      asr: null,
+      imageGeneration: null,
+    };
+    expect(() => Config.fromObject(data)).not.toThrow();
+    delete data.modelAssignments.account.ownerAccountId;
+    expect(() => Config.fromObject(data)).toThrow(/missing preset/);
   });
 });

@@ -12,6 +12,9 @@ import {
 } from "../../../src/entrypoints/cli/commands.js";
 
 const originalDataDir = process.env.MEMMY_AGENT_DATA_DIR;
+const originalConfig = process.env.MEMMY_CONFIG;
+const originalHome = process.env.HOME;
+const originalUserProfile = process.env.USERPROFILE;
 const roots: string[] = [];
 
 function makeLoop(): {
@@ -23,6 +26,7 @@ function makeLoop(): {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-terminal-target-"));
   roots.push(root);
   process.env.MEMMY_AGENT_DATA_DIR = root;
+  process.env.MEMMY_CONFIG = path.join(root, "config.yaml");
   const workspace = path.join(root, "workspace");
   fs.mkdirSync(workspace, { recursive: true });
   const loop = new AgentLoop({
@@ -58,6 +62,12 @@ function makeLoop(): {
 afterEach(() => {
   if (originalDataDir == null) delete process.env.MEMMY_AGENT_DATA_DIR;
   else process.env.MEMMY_AGENT_DATA_DIR = originalDataDir;
+  if (originalConfig == null) delete process.env.MEMMY_CONFIG;
+  else process.env.MEMMY_CONFIG = originalConfig;
+  if (originalHome == null) delete process.env.HOME;
+  else process.env.HOME = originalHome;
+  if (originalUserProfile == null) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = originalUserProfile;
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
   vi.restoreAllMocks();
 });
@@ -109,6 +119,28 @@ describe("terminal target resolution", () => {
       cwd: fs.realpathSync(projectPath),
     });
     expect(resolveTerminalTarget(dependencies, { sessionId: first.sessionId })).toEqual(first);
+  });
+
+  it("expands Windows project paths with USERPROFILE when HOME is unavailable", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-terminal-target-home-"));
+    roots.push(root);
+    process.env.MEMMY_AGENT_DATA_DIR = root;
+    const workspace = path.join(root, "workspace");
+    fs.mkdirSync(workspace, { recursive: true });
+    const dependencies = {
+      sessions: { get: vi.fn(() => null), save: vi.fn() } as any,
+      projectStore: new ProjectStore(),
+      workspace,
+      hasUsableDefaultModel: () => true,
+    } satisfies TerminalTargetDependencies;
+    const projectPath = path.join(root, "profile-project");
+    fs.mkdirSync(projectPath, { recursive: true });
+    delete process.env.HOME;
+    process.env.USERPROFILE = root;
+
+    const target = resolveTerminalTarget(dependencies, { project: "~\\profile-project" });
+
+    expect(target.cwd).toBe(fs.realpathSync(projectPath));
   });
 
   it("does not expose non-cli projected sessions through session listing", () => {

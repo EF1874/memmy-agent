@@ -1,12 +1,20 @@
-/** Frontend-only multi-provider model workspace and scoped model selections. */
-import type { ModelProviderConfig } from "../api/config-client.js";
+/** Pure view-model helpers for the canonical model catalog returned by the local API. */
+import type {
+  CatalogEndpointInput,
+  CatalogProviderId,
+  ModelAssignment,
+  ModelCapability as CatalogCapability,
+  ModelConfigInput,
+  ModelConfigView,
+  ModelEndpointProtocol,
+  TextModelItemView
+} from "@memmy/local-api-contracts";
+import { CLIENT_PRESET_ID_PREFIX, type ModelProviderConfig } from "../api/config-client.js";
 
 export const MODEL_WORKSPACE_STORAGE_KEY = "memmy-model-workspace-v1";
-export const MODEL_WORKSPACE_EVENT = "memmy:model-workspace-changed";
-export const MODEL_WORKSPACE_VERSION = 1;
 
 export type ModelWorkspaceMode = "account" | "byok";
-export type ModelCapability = "chat" | "embedding" | "asr" | "image";
+export type ModelCapability = "chat" | "memorySummary" | "memoryEvolution" | "embedding" | "asr" | "image";
 export type ModelAssignmentKind = "memorySummary" | "memoryEvolution" | "embedding" | "asr" | "image";
 export type ModelWorkspaceMutationError =
   | "duplicate_provider"
@@ -15,51 +23,38 @@ export type ModelWorkspaceMutationError =
   | "invalid_model"
   | "connection_not_found";
 
-export interface PlatformModel {
-  id: string;
-  provider: "memmy-platform";
-  model: string;
-  displayName: string;
-  capability: ModelCapability;
-}
-
 export interface ModelConnection {
   id: string;
   provider: string;
+  endpointId: string;
   endpoint: string;
-  /** Persisted display value only. Plaintext keys remain transient form state. */
+  protocol: ModelEndpointProtocol;
   apiKeyMasked: string;
-  /** Optional output-token cap applied to requests using this connection. */
-  maxTokens?: number;
-  /** Optional local daily token budget for this connection. */
-  dailyTokenLimit?: number;
   models: string[];
-  modelCapabilities?: Record<string, ModelCapability>;
-  /** False after a failed connection test; invalid connections leave candidate lists. */
-  available?: boolean;
+  modelEntries: ModelConnectionModel[];
+  modelCapabilities: Record<string, ModelCapability>;
+  presetIds: Record<string, string>;
+  available: boolean;
+  accountManaged: boolean;
+}
+
+export interface ModelConnectionModel {
+  presetId: string;
+  model: string;
+  capability: ModelCapability;
+  capabilities: CatalogCapability[];
 }
 
 export interface ModelWorkspaceSpace {
   connections: ModelConnection[];
   assignments: Partial<Record<ModelAssignmentKind, string>>;
-  /** Explicit Agent candidate subset. Undefined preserves legacy "all text models" behavior. */
-  taskCandidateIds?: string[];
-}
-
-export interface ScopedModelSelection {
-  mode: ModelWorkspaceMode;
-  candidateId: string;
-  /** Stable model identity used to preserve a conversation across spaces. */
-  model?: string;
-  /** Provider retained so a deleted custom model can keep its original logo. */
-  provider?: string;
+  taskCandidateIds: string[];
+  defaultTaskCandidateId: string | null;
 }
 
 export interface ModelWorkspace {
-  version: typeof MODEL_WORKSPACE_VERSION;
-  platformModels: PlatformModel[];
+  catalog: ModelConfigView;
   spaces: Record<ModelWorkspaceMode, ModelWorkspaceSpace>;
-  selectionsByScope: Record<string, ScopedModelSelection>;
 }
 
 export interface ModelCandidate {
@@ -69,18 +64,27 @@ export interface ModelCandidate {
   model: string;
   displayName: string;
   connectionId: string | null;
+  endpointId: string;
   capability: ModelCapability;
+  capabilities: CatalogCapability[];
+  available: boolean;
 }
 
 export interface ModelConnectionInput {
   id?: string;
   provider: string;
+  endpointId?: string;
   endpoint: string;
+  protocol?: ModelEndpointProtocol;
   apiKey?: string;
   apiKeyMasked?: string;
-  maxTokens?: number;
-  dailyTokenLimit?: number;
   models: string[];
+  modelEntries?: Array<{
+    presetId?: string;
+    model: string;
+    capability: ModelCapability;
+    capabilities?: ModelCapability[];
+  }>;
   modelCapabilities?: Record<string, ModelCapability>;
 }
 
@@ -89,13 +93,25 @@ export interface ModelWorkspaceMutationResult {
   error: ModelWorkspaceMutationError | null;
 }
 
+export interface ByokPresetInput {
+  provider: string;
+  endpointId?: string;
+  endpoint: string;
+  protocol: ModelEndpointProtocol;
+  apiKey?: string;
+  apiKeyMasked?: string;
+  model: string;
+  capabilities: CatalogCapability[];
+  presetId?: string;
+}
+
 export interface ResolvedModelSelection {
   candidate: ModelCandidate | null;
   candidateId: string | null;
   unavailable: boolean;
+  reason: "saved" | "initial" | "unavailable" | "empty";
   previousModel?: string | null;
   previousProvider?: string | null;
-  reason: "saved" | "initial" | "mode_preserved" | "mode_changed" | "unavailable" | "empty";
 }
 
 export interface WorkspaceUsageTotals {
@@ -111,867 +127,737 @@ export interface WorkspaceUsageRow extends WorkspaceUsageTotals {
   breakdownAvailable: boolean;
 }
 
-export interface AccountLogoutByokPreparation {
-  workspace: ModelWorkspace;
-  hasTaskModel: boolean;
+const EMPTY_ASSIGNMENT: Omit<ModelAssignment, "ownerAccountId"> = {
+  agent: { candidates: [], default: null },
+  memorySummary: null,
+  memoryEvolution: null,
+  embedding: null,
+  asr: null,
+  imageGeneration: null
+};
+
+/** Returns the catalog embedded in app state, or an inert pre-bootstrap catalog. */
+export function catalogFromConfig(config?: ModelProviderConfig | null): ModelConfigView {
+  return config?.catalog ?? emptyCatalog();
 }
 
-interface EventTargetLike {
-  addEventListener(type: string, listener: EventListener): void;
-  removeEventListener(type: string, listener: EventListener): void;
-  dispatchEvent(event: Event): boolean;
-}
-
-const PLATFORM_MODELS: PlatformModel[] = [
-  {
-    id: "platform:memmy-platform:agent_chat",
-    provider: "memmy-platform",
-    model: "agent_chat",
-    displayName: "Memmy Platform",
-    capability: "chat"
-  },
-  {
-    id: "platform:memmy-platform:embedding",
-    provider: "memmy-platform",
-    model: "embedding",
-    displayName: "Memmy Platform",
-    capability: "embedding"
-  },
-  {
-    id: "platform:memmy-platform:asr",
-    provider: "memmy-platform",
-    model: "asr",
-    displayName: "Memmy Platform",
-    capability: "asr"
-  }
-];
-
-/**
- * Creates a workspace seed. Existing single-provider config is reused as the
- * first local BYOK connection. Account BYOK starts empty because legacy config
- * must never be copied into an account space.
- */
-export function createModelWorkspaceSeed(saved?: ModelProviderConfig | null): ModelWorkspace {
-  const localConnections = connectionsFromLegacyConfig(saved);
-  const localCandidates = candidatesFromConnections("byok", localConnections, null);
-  const accountCandidates = PLATFORM_MODELS.map(platformModelCandidate);
-
+/** Builds the UI workspace directly from the server catalog. No legacy or browser state is imported. */
+export function createModelWorkspace(config?: ModelProviderConfig | ModelConfigView | null): ModelWorkspace {
+  const catalog = isCatalogView(config) ? config : catalogFromConfig(config);
   return {
-    version: MODEL_WORKSPACE_VERSION,
-    platformModels: PLATFORM_MODELS.map((model) => ({ ...model })),
+    catalog,
     spaces: {
-      account: {
-        connections: [],
-        assignments: createDefaultAssignments(accountCandidates, "account")
-      },
-      byok: {
-        connections: localConnections,
-        assignments: createLegacyAssignments(saved, localCandidates)
-      }
-    },
-    selectionsByScope: {}
-  };
-}
-
-/** Reads and validates persisted workspace data, falling back to a fresh seed. */
-export function readModelWorkspace(
-  storage: Pick<Storage, "getItem"> | undefined,
-  saved?: ModelProviderConfig | null
-): ModelWorkspace {
-  if (!storage) return createModelWorkspaceSeed(saved);
-  try {
-    const raw = storage.getItem(MODEL_WORKSPACE_STORAGE_KEY);
-    if (!raw) return createModelWorkspaceSeed(saved);
-    return parseModelWorkspace(JSON.parse(raw)) ?? createModelWorkspaceSeed(saved);
-  } catch {
-    return createModelWorkspaceSeed(saved);
-  }
-}
-
-/** Writes the complete workspace atomically and reports quota/security failures. */
-export function writeModelWorkspace(
-  storage: Pick<Storage, "setItem"> | undefined,
-  workspace: ModelWorkspace
-): boolean {
-  if (!storage) return false;
-  try {
-    storage.setItem(MODEL_WORKSPACE_STORAGE_KEY, JSON.stringify(workspace));
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** Persists and notifies same-window subscribers (native storage events do not). */
-export function persistModelWorkspace(
-  storage: Pick<Storage, "setItem"> | undefined,
-  workspace: ModelWorkspace,
-  eventTarget: EventTargetLike | undefined = browserEventTarget()
-): boolean {
-  const saved = writeModelWorkspace(storage, workspace);
-  if (saved && eventTarget) {
-    eventTarget.dispatchEvent(new Event(MODEL_WORKSPACE_EVENT));
-  }
-  return saved;
-}
-
-/** Subscribes to both same-window writes and cross-window localStorage updates. */
-export function subscribeModelWorkspace(
-  listener: () => void,
-  eventTarget: EventTargetLike | undefined = browserEventTarget()
-): () => void {
-  if (!eventTarget) return () => undefined;
-  const onWorkspaceEvent: EventListener = () => listener();
-  const onStorage: EventListener = (event) => {
-    if (!(event instanceof StorageEvent) || event.key === MODEL_WORKSPACE_STORAGE_KEY) {
-      listener();
+      account: createSpace(catalog, "account"),
+      byok: createSpace(catalog, "byok")
     }
   };
-  eventTarget.addEventListener(MODEL_WORKSPACE_EVENT, onWorkspaceEvent);
-  eventTarget.addEventListener("storage", onStorage);
-  return () => {
-    eventTarget.removeEventListener(MODEL_WORKSPACE_EVENT, onWorkspaceEvent);
-    eventTarget.removeEventListener("storage", onStorage);
+}
+
+/** Removes the obsolete cache after a successful catalog read. */
+export function clearLegacyModelWorkspace(storage?: Pick<Storage, "removeItem">): void {
+  try {
+    storage?.removeItem(MODEL_WORKSPACE_STORAGE_KEY);
+  } catch {
+    // A denied browser storage area must not make a successful API read fail.
+  }
+}
+
+/** Converts a view-model mutation back to the PUT DTO while retaining every catalog field. */
+export function modelConfigInput(workspace: ModelWorkspace): ModelConfigInput {
+  return modelConfigInputFromView(workspace.catalog);
+}
+
+export function modelConfigInputFromView(view: ModelConfigView): ModelConfigInput {
+  return {
+    configRevision: view.configRevision,
+    providers: view.providers.filter((provider) => provider.editable && !provider.accountManaged).map((provider) => ({
+      provider: provider.provider,
+      ...(provider.apiKey ? { apiKey: provider.apiKey } : {}),
+      ...(provider.ownerAccountId ? { ownerAccountId: provider.ownerAccountId } : {}),
+      endpoints: provider.endpoints.map(endpointInput),
+      models: provider.models.map((model) => ({
+        presetId: model.presetId,
+        endpointId: model.endpointId,
+        model: model.model,
+        source: model.source,
+        ...(model.ownerAccountId ? { ownerAccountId: model.ownerAccountId } : {}),
+        capabilities: [...model.capabilities]
+      }))
+    })),
+    modelAssignments: cloneAssignments(view.modelAssignments)
   };
 }
 
-/** Returns candidates in product order, filtered to one model capability. */
+/** Adds or patches exactly one BYOK endpoint/preset and leaves all other catalog data untouched. */
+export function upsertByokPreset(
+  workspace: ModelWorkspace,
+  input: ByokPresetInput
+): { workspace: ModelWorkspace; presetId: string; endpointId: string } {
+  const providerId = normalizeProvider(input.provider);
+  const apiBase = input.endpoint.trim().replace(/\/+$/, "");
+  const model = input.model.trim();
+  if (!providerId || !isHttpUrl(apiBase) || !model || !input.capabilities.length) {
+    throw new Error("invalid catalog preset");
+  }
+  if (!input.capabilities.every((capability) => protocolSupportsCatalog(input.protocol, capability))) {
+    throw new Error("endpoint protocol does not support preset capabilities");
+  }
+  const next = cloneCatalog(workspace.catalog);
+  let provider = next.providers.find((item) => item.provider === providerId && !item.accountManaged);
+  if (!provider) {
+    provider = {
+      provider: providerId,
+      configured: Boolean(input.apiKey),
+      hasApiKey: Boolean(input.apiKey),
+      apiKeyMasked: input.apiKey ? maskApiKey(input.apiKey) : "",
+      apiKey: "",
+      endpoints: [],
+      accountManaged: false,
+      editable: true,
+      models: []
+    };
+    next.providers.push(provider);
+  }
+  let endpoint = provider.endpoints.find((item) => (
+    input.endpointId
+      ? item.endpointId === input.endpointId
+      : item.apiBase.replace(/\/+$/, "") === apiBase
+        && item.protocol === input.protocol
+        && endpointAuthMatches(item, input)
+  ));
+  if (endpoint && input.endpointId && (
+    endpoint.apiBase.replace(/\/+$/, "") !== apiBase
+    || endpoint.protocol !== input.protocol
+    || (input.apiKeyMasked && !input.apiKey && endpoint.apiKeyMasked !== input.apiKeyMasked)
+  )) {
+    throw new Error("explicit endpoint identity does not match model configuration");
+  }
+  if (!endpoint) {
+    if (input.endpointId) throw new Error("explicit endpoint identity was not found");
+    if (input.apiKeyMasked && !input.apiKey) {
+      throw new Error("masked endpoint credentials require an explicit endpoint ID");
+    }
+    endpoint = {
+      endpointId: newId("endpoint"),
+      apiBase,
+      protocol: input.protocol,
+      hasApiKey: Boolean(input.apiKey),
+      apiKeyMasked: input.apiKey ? maskApiKey(input.apiKey) : input.apiKeyMasked ?? "",
+      apiKey: input.apiKey ?? ""
+    };
+    provider.endpoints.push(endpoint);
+  } else if (input.apiKey) {
+    endpoint.apiKey = input.apiKey;
+    endpoint.apiKeyMasked = maskApiKey(input.apiKey);
+    endpoint.hasApiKey = true;
+  }
+  const existing = provider.models.find((item) => (
+    item.source === "byok"
+    && item.endpointId === endpoint!.endpointId
+    && item.model === model
+  ));
+  const presetId = existing?.presetId ?? input.presetId ?? newClientPresetId();
+  const preset = {
+    presetId,
+    provider: providerId,
+    endpointId: endpoint.endpointId,
+    protocol: input.protocol,
+    model,
+    source: "byok" as const,
+    capabilities: unique([...(existing?.capabilities ?? []), ...input.capabilities]) as CatalogCapability[],
+    available: true
+  };
+  if (existing) Object.assign(existing, preset);
+  else provider.models.push(preset);
+  refreshEffectiveCandidates(next);
+  return { workspace: createModelWorkspace(next), presetId, endpointId: endpoint.endpointId };
+}
+
+/** Assigns one preset in one mode without touching the other mode. */
+export function assignCatalogPreset(
+  workspace: ModelWorkspace,
+  mode: ModelWorkspaceMode,
+  capability: CatalogCapability,
+  presetId: string
+): ModelWorkspace {
+  const candidate = visiblePresets(workspace.catalog, mode)
+    .find((item) => item.presetId === presetId && item.capabilities.includes(capability));
+  if (!candidate) return workspace;
+  const next = cloneCatalog(workspace.catalog);
+  const assignment = next.modelAssignments[mode];
+  if (capability === "agent") {
+    assignment.agent.candidates = unique([...assignment.agent.candidates, presetId]);
+    assignment.agent.default = presetId;
+  } else if (capability === "memory_summary") assignment.memorySummary = presetId;
+  else if (capability === "memory_evolution") assignment.memoryEvolution = presetId;
+  else if (capability === "embedding") assignment.embedding = presetId;
+  else if (capability === "asr") assignment.asr = presetId;
+  else assignment.imageGeneration = presetId;
+  return createModelWorkspace(next);
+}
+
+/** Resolves the endpoint identity currently assigned to a catalog capability. */
+export function assignedCatalogEndpointId(
+  workspace: ModelWorkspace,
+  mode: ModelWorkspaceMode,
+  capability: CatalogCapability
+): string | undefined {
+  const assignment = workspace.catalog.modelAssignments[mode];
+  const presetId = capability === "agent"
+    ? assignment.agent.default ?? assignment.agent.candidates[0]
+    : capability === "memory_summary"
+      ? assignment.memorySummary
+      : capability === "memory_evolution"
+        ? assignment.memoryEvolution
+        : capability === "embedding"
+          ? assignment.embedding
+          : capability === "asr"
+            ? assignment.asr
+            : assignment.imageGeneration;
+  if (!presetId) return undefined;
+  return workspace.catalog.providers.flatMap((provider) => provider.models)
+    .find((preset) => preset.presetId === presetId)?.endpointId;
+}
+
 export function getModelCandidates(
   workspace: ModelWorkspace,
   mode: ModelWorkspaceMode,
   capability: ModelCapability = "chat"
 ): ModelCandidate[] {
-  const byokCandidates = candidatesFromConnections(mode, workspace.spaces[mode].connections, capability);
-  if (mode === "byok") return byokCandidates;
-  return [
-    ...workspace.platformModels
-      .filter((model) => model.capability === capability)
-      .map(platformModelCandidate),
-    ...byokCandidates
-  ];
+  const required = toCatalogCapability(capability);
+  return visiblePresets(workspace.catalog, mode)
+    .filter((preset) => preset.capabilities.includes(required))
+    .map((preset) => candidateFromPreset(workspace.catalog, preset, capability));
 }
 
-/** Returns the explicit Agent candidate subset, or all text models for legacy workspaces. */
-export function getTaskModelCandidates(
-  workspace: ModelWorkspace,
-  mode: ModelWorkspaceMode
-): ModelCandidate[] {
-  const textCandidates = getModelCandidates(workspace, mode, "chat");
-  const selectedIds = workspace.spaces[mode].taskCandidateIds;
-  if (!selectedIds) return textCandidates;
-  const selected = new Set(selectedIds);
-  return textCandidates.filter((candidate) => selected.has(candidate.id));
+export function getTaskModelCandidates(workspace: ModelWorkspace, mode: ModelWorkspaceMode): ModelCandidate[] {
+  const candidates = getModelCandidates(workspace, mode, "chat");
+  const order = workspace.catalog.modelAssignments[mode].agent.candidates;
+  const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
+  return order.map((id) => byId.get(id)).filter((candidate): candidate is ModelCandidate => Boolean(candidate));
 }
 
-/**
- * Prepares the machine-local BYOK space before leaving account mode.
- * Legacy account-space connections are merged into the local space so logout
- * can stay on the current page without losing configured task models.
- */
-export function prepareByokWorkspaceForAccountLogout(
-  workspace: ModelWorkspace
-): AccountLogoutByokPreparation {
-  const localConnections = workspace.spaces.byok.connections;
-  const accountConnections = workspace.spaces.account.connections;
-  const mergedConnections = [...localConnections];
-
-  for (const accountConnection of accountConnections) {
-    const index = mergedConnections.findIndex(
-      (connection) => normalizeProvider(connection.provider) === normalizeProvider(accountConnection.provider)
-    );
-    if (index >= 0) {
-      mergedConnections[index] = accountConnection;
-    } else {
-      mergedConnections.push(accountConnection);
-    }
-  }
-
-  const hasTaskModel = mergedConnections.some((connection) => (
-    connection.models.some((model) => (connection.modelCapabilities?.[model] ?? "chat") === "chat")
-  ));
-  if (!hasTaskModel || accountConnections.length === 0) {
-    return { workspace, hasTaskModel };
-  }
-
-  return {
-    hasTaskModel: true,
-    workspace: {
-      ...workspace,
-      spaces: {
-        ...workspace.spaces,
-        byok: {
-          ...workspace.spaces.byok,
-          connections: mergedConnections,
-          taskCandidateIds: undefined
-        }
-      }
-    }
-  };
-}
-
-/** Replaces the Agent candidate subset while preserving product order. */
-export function setTaskModelCandidates(
+export function resolveModelSelection(
   workspace: ModelWorkspace,
   mode: ModelWorkspaceMode,
-  candidateIds: readonly string[]
-): ModelWorkspace {
-  const available = getModelCandidates(workspace, mode, "chat");
-  const requested = new Set(candidateIds);
-  const taskCandidateIds = available
-    .filter((candidate) => requested.has(candidate.id))
-    .map((candidate) => candidate.id);
-  if (taskCandidateIds.length === 0) return workspace;
-  return {
-    ...workspace,
-    spaces: {
-      ...workspace.spaces,
-      [mode]: {
-        ...workspace.spaces[mode],
-        taskCandidateIds
-      }
-    }
-  };
+  selectedPresetId?: string | null
+): ResolvedModelSelection {
+  const candidates = getTaskModelCandidates(workspace, mode);
+  if (!candidates.length) {
+    return selectedPresetId
+      ? { candidate: null, candidateId: selectedPresetId, unavailable: true, reason: "unavailable" }
+      : { candidate: null, candidateId: null, unavailable: false, reason: "empty" };
+  }
+  const candidateId = selectedPresetId ?? workspace.catalog.modelAssignments[mode].agent.default;
+  if (!candidateId) {
+    return { candidate: candidates[0]!, candidateId: candidates[0]!.id, unavailable: false, reason: "initial" };
+  }
+  const candidate = candidates.find((item) => item.id === candidateId) ?? null;
+  return candidate
+    ? { candidate, candidateId, unavailable: !candidate.available, reason: "saved" }
+    : { candidate: null, candidateId, unavailable: true, reason: "unavailable" };
 }
 
-/** Adds or edits a connection while enforcing one provider per model space. */
 export function upsertModelConnection(
   workspace: ModelWorkspace,
   mode: ModelWorkspaceMode,
   input: ModelConnectionInput
 ): ModelWorkspaceMutationResult {
-  const provider = normalizeProvider(input.provider);
-  const endpoint = input.endpoint.trim();
-  const models = uniqueNames(input.models);
-  const existing = input.id
-    ? workspace.spaces[mode].connections.find((connection) => connection.id === input.id)
-    : undefined;
-  if (!provider || !endpoint || models.length === 0 || (!existing && !input.apiKey?.trim() && !input.apiKeyMasked?.trim())) {
+  const providerId = normalizeProvider(input.provider);
+  const endpoint = input.endpoint.trim().replace(/\/+$/, "");
+  const entries: Array<{ presetId?: string; model: string; capabilities: ModelCapability[]; capabilitiesExplicit: boolean }> = input.modelEntries?.length
+    ? input.modelEntries.map((entry) => ({
+        ...(entry.presetId ? { presetId: entry.presetId } : {}),
+        model: entry.model.trim(),
+        capabilities: unique(entry.capabilities?.length ? entry.capabilities : [entry.capability]),
+        capabilitiesExplicit: Boolean(entry.capabilities?.length),
+      })).filter((entry) => Boolean(entry.model))
+    : input.models.map((model) => ({
+        model: model.trim(),
+        capabilities: [modelCapability(input, model)],
+        capabilitiesExplicit: false,
+      })).filter((entry) => Boolean(entry.model));
+  const models = entries.map((entry) => entry.model);
+  if (!providerId || !isHttpUrl(endpoint) || !models.length) {
     return { workspace, error: "invalid_connection" };
   }
-  const duplicate = workspace.spaces[mode].connections.some(
-    (connection) => connection.id !== input.id && normalizeProvider(connection.provider) === provider
-  );
-  if (duplicate) return { workspace, error: "duplicate_provider" };
+  if (new Set(entries.map((entry) => entry.model.toLowerCase())).size !== entries.length) {
+    return { workspace, error: "duplicate_model" };
+  }
 
-  const apiKeyMasked = input.apiKey?.trim()
-    ? maskApiKey(input.apiKey)
-    : input.apiKeyMasked?.trim() || existing?.apiKeyMasked || "";
-  const connection: ModelConnection = {
-    id: existing?.id ?? input.id ?? createConnectionId(provider),
-    provider,
-    endpoint,
-    apiKeyMasked,
-    maxTokens: normalizeOptionalTokenLimit(input.maxTokens),
-    dailyTokenLimit: normalizeOptionalTokenLimit(input.dailyTokenLimit),
-    models,
-    modelCapabilities: Object.fromEntries(models.map((model) => [
+  const next = cloneCatalog(workspace.catalog);
+  const existingConnection = input.id
+    ? workspace.spaces[mode].connections.find((connection) => connection.id === input.id)
+    : undefined;
+  let endpointId = existingConnection?.endpointId ?? input.endpointId ?? newId("endpoint");
+  if (
+    existingConnection
+    && existingConnection.provider !== providerId
+    && next.providers.some((item) => (
+      item.provider === providerId
+      && item.endpoints.some((candidate) => candidate.endpointId === endpointId)
+    ))
+  ) {
+    endpointId = newId("endpoint");
+  }
+  const protocol = input.protocol ?? protocolFor(providerId, entries[0]!.capabilities[0]!);
+  if (!protocolSupports(protocol, entries.flatMap((entry) => entry.capabilities))) {
+    return { workspace, error: "invalid_model" };
+  }
+
+  const previousEndpointId = existingConnection?.endpointId;
+  const previousProvider = existingConnection
+    ? next.providers.find((item) => item.provider === existingConnection.provider && !item.accountManaged)
+    : undefined;
+  if (previousProvider && previousEndpointId) {
+    previousProvider.endpoints = previousProvider.endpoints.filter((item) => item.endpointId !== previousEndpointId);
+    previousProvider.models = previousProvider.models.filter((item) => item.endpointId !== previousEndpointId);
+    if (previousProvider.provider !== providerId && (!previousProvider.endpoints.length || !previousProvider.models.length)) {
+      next.providers = next.providers.filter((item) => item !== previousProvider);
+    }
+  }
+
+  let provider = next.providers.find((item) => item.provider === providerId && !item.accountManaged);
+  if (!provider) {
+    provider = {
+      provider: providerId,
+      configured: Boolean(input.apiKey),
+      hasApiKey: Boolean(input.apiKey),
+      apiKeyMasked: input.apiKey ? maskApiKey(input.apiKey) : input.apiKeyMasked ?? "",
+      apiKey: "",
+      endpoints: [],
+      accountManaged: false,
+      editable: true,
+      models: []
+    };
+    next.providers.push(provider);
+  }
+
+  provider.endpoints.push({
+    endpointId,
+    apiBase: endpoint,
+    protocol,
+    hasApiKey: Boolean(input.apiKey || input.apiKeyMasked),
+    apiKeyMasked: input.apiKey ? maskApiKey(input.apiKey) : input.apiKeyMasked ?? "",
+    apiKey: input.apiKey ?? ""
+  });
+  provider.models.push(...entries.map((entry, index) => {
+    const model = entry.model;
+    const previousPreset = existingConnection
+      ? (entry.presetId ? nextPresetById(workspace.catalog, entry.presetId) : null)
+        ?? nextPresetByModelAndCapability(workspace.catalog, existingConnection.endpointId, model, entry.capabilities[0]!)
+        ?? nextPresetByModel(workspace.catalog, existingConnection.endpointId, existingConnection.models[index] ?? "")
+      : null;
+    const selectedCapability = entry.capabilities[0]!;
+    const capabilities = entry.capabilitiesExplicit
+      ? unique(entry.capabilities.map(toCatalogCapability))
+      : previousPreset && fromCapabilities(previousPreset.capabilities) === selectedCapability
+        ? [...previousPreset.capabilities]
+        : [toCatalogCapability(selectedCapability)];
+    return {
+      presetId: previousPreset?.presetId ?? newClientPresetId(),
+      provider: providerId,
+      endpointId,
+      protocol,
       model,
-      input.modelCapabilities?.[model] ?? existing?.modelCapabilities?.[model] ?? "chat"
-    ])),
-    available: input.apiKey?.trim() ? true : existing?.available ?? true
-  };
-  const connections = existing
-    ? workspace.spaces[mode].connections.map((item) => item.id === connection.id ? connection : item)
-    : [...workspace.spaces[mode].connections, connection];
-  return {
-    workspace: replaceSpaceConnections(workspace, mode, connections),
-    error: null
-  };
+      source: "byok" as const,
+      capabilities,
+      available: true
+    };
+  }));
+
+  const nextPresetIds = provider.models.filter((item) => item.endpointId === endpointId).map((item) => item.presetId);
+  const nextAgentPresetIds = provider.models
+    .filter((item) => item.endpointId === endpointId && item.capabilities.includes("agent"))
+    .map((item) => item.presetId);
+  const previousPresetIds = existingConnection
+    ? existingConnection.modelEntries.map((entry) => entry.presetId)
+    : [];
+  const assignment = next.modelAssignments[mode];
+  assignment.agent.candidates = replaceIds(assignment.agent.candidates, previousPresetIds, nextAgentPresetIds);
+  if (!assignment.agent.candidates.length) assignment.agent.candidates = [...nextAgentPresetIds];
+  if (!assignment.agent.default || previousPresetIds.includes(assignment.agent.default)) {
+    assignment.agent.default = nextPresetIds.find((id) => presetHasCapability(next, id, "agent")) ?? assignment.agent.default;
+  }
+  refreshEffectiveCandidates(next);
+  return { workspace: createModelWorkspace(next), error: null };
 }
 
-/** Removes one provider connection; scoped selections intentionally remain stale. */
 export function deleteModelConnection(
   workspace: ModelWorkspace,
   mode: ModelWorkspaceMode,
   connectionId: string
 ): ModelWorkspaceMutationResult {
-  const connections = workspace.spaces[mode].connections;
-  if (!connections.some((connection) => connection.id === connectionId)) {
-    return { workspace, error: "connection_not_found" };
+  const connection = workspace.spaces[mode].connections.find((item) => item.id === connectionId);
+  if (!connection || connection.accountManaged) return { workspace, error: "connection_not_found" };
+  const next = cloneCatalog(workspace.catalog);
+  const provider = next.providers.find((item) => item.provider === connection.provider && !item.accountManaged);
+  if (!provider) return { workspace, error: "connection_not_found" };
+  const removedIds = provider.models.filter((item) => item.endpointId === connection.endpointId).map((item) => item.presetId);
+  const otherMode = mode === "account" ? "byok" : "account";
+  if (removedIds.some((presetId) => assignmentReferences(next.modelAssignments[otherMode], presetId))) {
+    return { workspace, error: "invalid_connection" };
   }
-  return {
-    workspace: replaceSpaceConnections(
-      workspace,
-      mode,
-      connections.filter((connection) => connection.id !== connectionId)
-    ),
-    error: null
-  };
+  provider.endpoints = provider.endpoints.filter((item) => item.endpointId !== connection.endpointId);
+  provider.models = provider.models.filter((item) => item.endpointId !== connection.endpointId);
+  if (!provider.endpoints.length || !provider.models.length) {
+    next.providers = next.providers.filter((item) => item !== provider);
+  }
+  clearAssignmentReferences(next.modelAssignments[mode], removedIds);
+  refreshEffectiveCandidates(next);
+  return { workspace: createModelWorkspace(next), error: null };
 }
 
-/** Adds one model name below an existing provider connection. */
-export function addConnectionModel(
+export function setModelConnectionAvailability(
+  workspace: ModelWorkspace,
+  _mode: ModelWorkspaceMode,
+  connectionId: string,
+  available: boolean
+): ModelWorkspace {
+  const next = cloneCatalog(workspace.catalog);
+  for (const provider of next.providers) {
+    for (const model of provider.models) {
+      if (`${provider.provider}:${model.endpointId}` === connectionId) model.available = available;
+    }
+  }
+  refreshEffectiveCandidates(next);
+  return createModelWorkspace(next);
+}
+
+export function setTaskModelCandidates(
   workspace: ModelWorkspace,
   mode: ModelWorkspaceMode,
-  connectionId: string,
-  modelName: string,
-  capability: ModelCapability = "chat"
-): ModelWorkspaceMutationResult {
-  const model = modelName.trim();
-  if (!model) return { workspace, error: "invalid_model" };
-  const connection = workspace.spaces[mode].connections.find((item) => item.id === connectionId);
-  if (!connection) return { workspace, error: "connection_not_found" };
-  if (connection.models.some((item) => item.toLocaleLowerCase() === model.toLocaleLowerCase())) {
-    return { workspace, error: "duplicate_model" };
+  candidateIds: string[]
+): ModelWorkspace {
+  const next = cloneCatalog(workspace.catalog);
+  const allowed = new Set(getModelCandidates(workspace, mode, "chat").map((candidate) => candidate.id));
+  const selected = unique(candidateIds.filter((id) => allowed.has(id)));
+  next.modelAssignments[mode].agent.candidates = selected;
+  if (!selected.includes(next.modelAssignments[mode].agent.default ?? "")) {
+    next.modelAssignments[mode].agent.default = selected[0] ?? null;
   }
-  return updateConnectionModels(
-    workspace,
-    mode,
-    connectionId,
-    [...connection.models, model],
-    { ...connection.modelCapabilities, [model]: capability }
-  );
+  return createModelWorkspace(next);
 }
 
-/** Removes a model name; deleting the final name leaves an editable empty card. */
-export function deleteConnectionModel(
+export function setDefaultTaskModel(
   workspace: ModelWorkspace,
   mode: ModelWorkspaceMode,
-  connectionId: string,
-  modelName: string
-): ModelWorkspaceMutationResult {
-  const connection = workspace.spaces[mode].connections.find((item) => item.id === connectionId);
-  if (!connection) return { workspace, error: "connection_not_found" };
-  return updateConnectionModels(
-    workspace,
-    mode,
-    connectionId,
-    connection.models.filter((model) => model !== modelName),
-    Object.fromEntries(
-      Object.entries(connection.modelCapabilities ?? {}).filter(([model]) => model !== modelName)
-    )
-  );
+  candidateId: string
+): ModelWorkspace {
+  const next = cloneCatalog(workspace.catalog);
+  if (next.modelAssignments[mode].agent.candidates.includes(candidateId)) {
+    next.modelAssignments[mode].agent.default = candidateId;
+  }
+  return createModelWorkspace(next);
 }
 
-/** Updates one independent memory/specialty-model assignment. */
 export function setModelAssignment(
   workspace: ModelWorkspace,
   mode: ModelWorkspaceMode,
   kind: ModelAssignmentKind,
   candidateId: string
 ): ModelWorkspace {
-  return {
-    ...workspace,
-    spaces: {
-      ...workspace.spaces,
-      [mode]: {
-        ...workspace.spaces[mode],
-        assignments: {
-          ...workspace.spaces[mode].assignments,
-          [kind]: candidateId
-        }
-      }
-    }
-  };
+  const capability = assignmentCapability(kind);
+  const allowed = new Set(getModelCandidates(workspace, mode, capability).map((candidate) => candidate.id));
+  if (!allowed.has(candidateId)) return workspace;
+  const next = cloneCatalog(workspace.catalog);
+  const key = kind === "image" ? "imageGeneration" : kind;
+  next.modelAssignments[mode][key] = candidateId;
+  return createModelWorkspace(next);
 }
 
-/** Marks a tested connection available or unavailable for every selector. */
-export function setModelConnectionAvailability(
-  workspace: ModelWorkspace,
-  mode: ModelWorkspaceMode,
-  connectionId: string,
-  available: boolean
-): ModelWorkspace {
-  return replaceSpaceConnections(
-    workspace,
-    mode,
-    workspace.spaces[mode].connections.map((connection) => (
-      connection.id === connectionId ? { ...connection, available } : connection
-    ))
-  );
-}
-
-/** Saves a selection under the existing agent chat/draft scope key. */
-export function setScopedModelSelection(
-  workspace: ModelWorkspace,
-  mode: ModelWorkspaceMode,
-  scopeKey: string,
-  candidateId: string
-): ModelWorkspace {
-  const candidate = getTaskModelCandidates(workspace, mode)
-    .find((item) => item.id === candidateId);
-  return {
-    ...workspace,
-    selectionsByScope: {
-      ...workspace.selectionsByScope,
-      [scopeKey]: {
-        mode,
-        candidateId,
-        ...(candidate?.model ? { model: candidate.model } : {}),
-        ...(candidate?.provider ? { provider: candidate.provider } : {})
-      }
-    }
-  };
-}
-
-/** Moves a draft selection to the newly created chat without touching others. */
-export function transferScopedModelSelection(
-  workspace: ModelWorkspace,
-  fromScopeKey: string,
-  toScopeKey: string
-): ModelWorkspace {
-  const selection = workspace.selectionsByScope[fromScopeKey];
-  if (!selection || fromScopeKey === toScopeKey) return workspace;
-  const selectionsByScope = { ...workspace.selectionsByScope };
-  delete selectionsByScope[fromScopeKey];
-  selectionsByScope[toScopeKey] = selection;
-  return { ...workspace, selectionsByScope };
-}
-
-/** Copies a draft selection into a new chat while preserving the new-task preference. */
-export function copyScopedModelSelection(
-  workspace: ModelWorkspace,
-  fromScopeKey: string,
-  toScopeKey: string
-): ModelWorkspace {
-  const selection = workspace.selectionsByScope[fromScopeKey];
-  if (!selection || fromScopeKey === toScopeKey) return workspace;
-  return {
-    ...workspace,
-    selectionsByScope: {
-      ...workspace.selectionsByScope,
-      [toScopeKey]: selection
-    }
-  };
-}
-
-/**
- * Resolves one chat selection. A missing saved candidate stays unavailable
- * while alternatives exist; a completely empty space resolves to empty.
- * Switching account/BYOK preserves the model ID when possible, otherwise it
- * falls back to the new space's first item.
- */
-export function resolveScopedModelSelection(
-  workspace: ModelWorkspace,
-  mode: ModelWorkspaceMode,
-  scopeKey: string
-): ResolvedModelSelection {
-  const candidates = getTaskModelCandidates(workspace, mode);
-  const saved = workspace.selectionsByScope[scopeKey];
-  if (candidates.length === 0) {
-    return {
-      candidate: null,
-      candidateId: null,
-      unavailable: false,
-      reason: "empty"
-    };
-  }
-  if (!saved) {
-    return { candidate: candidates[0]!, candidateId: candidates[0]!.id, unavailable: false, reason: "initial" };
-  }
-  if (saved.mode !== mode) {
-    const previousModel = saved.model
-      ?? getTaskModelCandidates(workspace, saved.mode)
-        .find((candidate) => candidate.id === saved.candidateId)?.model
-      ?? modelNameFromCandidateId(saved.candidateId);
-    const preserved = previousModel
-      ? candidates.find((candidate) => candidate.model === previousModel)
-      : undefined;
-    if (preserved) {
-      return {
-        candidate: preserved,
-        candidateId: preserved.id,
-        unavailable: false,
-        previousModel,
-        reason: "mode_preserved"
-      };
-    }
-    return {
-      candidate: candidates[0]!,
-      candidateId: candidates[0]!.id,
-      unavailable: false,
-      previousModel,
-      reason: "mode_changed"
-    };
-  }
-  const candidate = candidates.find((item) => item.id === saved.candidateId) ?? null;
-  if (!candidate) {
-    return {
-      candidate: null,
-      candidateId: saved.candidateId,
-      unavailable: true,
-      previousModel: saved.model ?? modelNameFromCandidateId(saved.candidateId),
-      previousProvider: saved.provider ?? providerFromUnavailableSelection(workspace, mode, saved.candidateId),
-      reason: "unavailable"
-    };
-  }
-  return { candidate, candidateId: candidate.id, unavailable: false, reason: "saved" };
-}
-
-/**
- * UI adapter for P1 usage. A single model can safely own the aggregate total;
- * with multiple models the current backend cannot attribute usage, so rows are
- * rendered without invented figures until the per-model contract is available.
- */
-export function buildWorkspaceUsageRows(
-  workspace: ModelWorkspace,
-  mode: ModelWorkspaceMode,
-  totals: WorkspaceUsageTotals
-): WorkspaceUsageRow[] {
-  const candidates = candidatesFromConnections(mode, workspace.spaces[mode].connections, null);
-  if (candidates.length === 0) return [];
-  const breakdownAvailable = candidates.length === 1;
-  return candidates.map((candidate, index) => ({
-    id: candidate.id,
-    provider: candidate.provider,
-    model: candidate.model,
-    inputTokens: breakdownAvailable && index === 0 ? totals.inputTokens : 0,
-    outputTokens: breakdownAvailable && index === 0 ? totals.outputTokens : 0,
-    totalTokens: breakdownAvailable && index === 0 ? totals.totalTokens : 0,
-    breakdownAvailable
-  }));
-}
-
-/** Creates a consistently masked key without exposing the original in UI. */
 export function maskApiKey(apiKey: string): string {
   const normalized = apiKey.trim();
   if (!normalized) return "";
   return `••••••••${normalized.slice(-4)}`;
 }
 
-export function modelCandidateId(mode: ModelWorkspaceMode, connectionId: string, model: string): string {
-  return `${mode}:connection:${connectionId}:model:${encodeURIComponent(model)}`;
-}
-
-function modelNameFromCandidateId(candidateId: string): string | null {
-  const marker = ":model:";
-  const markerIndex = candidateId.lastIndexOf(marker);
-  if (markerIndex < 0) return null;
-  try {
-    return decodeURIComponent(candidateId.slice(markerIndex + marker.length)) || null;
-  } catch {
-    return null;
-  }
-}
-
-function providerFromUnavailableSelection(
+export function buildWorkspaceUsageRows(
   workspace: ModelWorkspace,
   mode: ModelWorkspaceMode,
-  candidateId: string
-): string | null {
-  const connectionId = connectionIdFromCandidateId(candidateId);
-  if (!connectionId) return null;
-  return workspace.spaces[mode].connections.find((connection) => connection.id === connectionId)?.provider ?? null;
+  usage: WorkspaceUsageTotals
+): WorkspaceUsageRow[] {
+  const candidates = getModelCandidates(workspace, mode).filter((candidate) => candidate.source === "byok");
+  const attributable = candidates.length === 1;
+  return candidates.map((candidate) => ({
+    id: candidate.id,
+    provider: candidate.provider,
+    model: candidate.model,
+    inputTokens: attributable ? usage.inputTokens : 0,
+    outputTokens: attributable ? usage.outputTokens : 0,
+    totalTokens: attributable ? usage.totalTokens : 0,
+    breakdownAvailable: attributable
+  }));
 }
 
-function connectionIdFromCandidateId(candidateId: string): string | null {
-  const prefix = ":connection:";
-  const suffix = ":model:";
-  const prefixIndex = candidateId.indexOf(prefix);
-  const suffixIndex = candidateId.lastIndexOf(suffix);
-  if (prefixIndex < 0 || suffixIndex <= prefixIndex + prefix.length) return null;
-  return candidateId.slice(prefixIndex + prefix.length, suffixIndex) || null;
-}
-
-function browserEventTarget(): EventTargetLike | undefined {
-  return typeof window === "undefined" ? undefined : window;
-}
-
-function connectionsFromLegacyConfig(saved?: ModelProviderConfig | null): ModelConnection[] {
-  if (!saved?.configured || !saved.provider?.trim() || !saved.endpoint?.trim() || !saved.model?.trim()) return [];
-  const legacyConfigs: Array<{
-    capability: ModelCapability;
-    config: {
-      provider: string;
-      endpoint: string;
-      model: string;
-      apiKey: string;
-      apiKeyMasked: string;
-      configured: boolean;
-    } | null | undefined;
-  }> = [
-    { config: saved, capability: "chat" as const },
-    { config: saved.memmyMemory?.summary, capability: "chat" as const },
-    { config: saved.memmyMemory?.evolution, capability: "chat" as const },
-    {
-      config: saved.embedding?.configured ? { ...saved.embedding, provider: "openai" } : null,
-      capability: "embedding" as const
+function createSpace(catalog: ModelConfigView, mode: ModelWorkspaceMode): ModelWorkspaceSpace {
+  const candidates = visiblePresets(catalog, mode);
+  const visibleIds = new Set(candidates.map((preset) => preset.presetId));
+  const connections = catalog.providers.flatMap((provider): ModelConnection[] => provider.endpoints.flatMap((endpoint): ModelConnection[] => {
+    const models = provider.models.filter((model) => (
+      model.endpointId === endpoint.endpointId
+      && visibleIds.has(model.presetId)
+    ));
+    if (!models.length || provider.accountManaged) return [];
+    const id = `${provider.provider}:${endpoint.endpointId}`;
+    return [{
+      id,
+      provider: provider.provider,
+      endpointId: endpoint.endpointId,
+      endpoint: endpoint.apiBase,
+      protocol: endpoint.protocol,
+      apiKeyMasked: endpoint.apiKeyMasked || provider.apiKeyMasked,
+      models: models.map((model) => model.model),
+      modelEntries: models.map((model) => ({
+        presetId: model.presetId,
+        model: model.model,
+        capability: fromCapabilities(model.capabilities),
+        capabilities: [...model.capabilities]
+      })),
+      modelCapabilities: Object.fromEntries(models.map((model) => [model.model, fromCapabilities(model.capabilities)])),
+      presetIds: Object.fromEntries(models.map((model) => [model.model, model.presetId])),
+      available: models.some((model) => model.available),
+      accountManaged: provider.accountManaged
+    }];
+  }));
+  const assignment = catalog.modelAssignments[mode];
+  return {
+    connections,
+    assignments: {
+      memorySummary: assignment.memorySummary ?? undefined,
+      memoryEvolution: assignment.memoryEvolution ?? undefined,
+      embedding: assignment.embedding ?? undefined,
+      asr: assignment.asr ?? undefined,
+      image: assignment.imageGeneration ?? undefined
     },
-    { config: saved.asr, capability: "asr" as const },
-    { config: saved.imageGen, capability: "image" as const }
-  ];
-  const connections: ModelConnection[] = [];
-  for (const { config, capability } of legacyConfigs) {
-    if (
-      !config?.configured
-      || !config.provider?.trim()
-      || !config.endpoint?.trim()
-      || !config.model?.trim()
-    ) {
-      continue;
-    }
-    const provider = normalizeProvider(config.provider);
-    const existingIndex = connections.findIndex((connection) => connection.provider === provider);
-    if (existingIndex >= 0) {
-      const existing = connections[existingIndex]!;
-      connections[existingIndex] = {
-        ...existing,
-        models: uniqueNames([...existing.models, config.model]),
-        modelCapabilities: {
-          ...existing.modelCapabilities,
-          [config.model]: existing.modelCapabilities?.[config.model] ?? capability
-        }
-      };
-      continue;
-    }
-    connections.push({
-      id: `local-seed-${provider}`,
-      provider,
-      endpoint: config.endpoint.trim(),
-      apiKeyMasked: config.apiKeyMasked?.trim() || maskApiKey(config.apiKey ?? ""),
-      models: [config.model.trim()],
-      modelCapabilities: { [config.model.trim()]: capability },
-      available: true
-    });
+    taskCandidateIds: [...assignment.agent.candidates],
+    defaultTaskCandidateId: assignment.agent.default
+  };
+}
+
+function candidateFromPreset(catalog: ModelConfigView, preset: TextModelItemView, capability: ModelCapability): ModelCandidate {
+  const provider = catalog.providers.find((item) => item.provider === preset.provider);
+  return {
+    id: preset.presetId,
+    source: preset.source === "account" ? "platform" : "byok",
+    provider: preset.provider,
+    model: preset.model,
+    displayName: preset.model,
+    connectionId: preset.source === "account" ? null : `${preset.provider}:${preset.endpointId}`,
+    endpointId: preset.endpointId,
+    capability,
+    capabilities: [...preset.capabilities],
+    available: preset.available && Boolean(provider)
+  };
+}
+
+function endpointInput(endpoint: ModelConfigView["providers"][number]["endpoints"][number]): CatalogEndpointInput {
+  return {
+    endpointId: endpoint.endpointId,
+    apiBase: endpoint.apiBase,
+    protocol: endpoint.protocol,
+    ...(endpoint.apiKey ? { apiKey: endpoint.apiKey } : {})
+  };
+}
+
+function emptyCatalog(): ModelConfigView {
+  return {
+    configRevision: "unavailable",
+    providers: [],
+    modelAssignments: { byok: cloneAssignment(EMPTY_ASSIGNMENT), account: cloneAssignment(EMPTY_ASSIGNMENT) },
+    effectiveCandidates: { byok: [], account: [] },
+    configured: false,
+    updatedAt: new Date(0).toISOString()
+  };
+}
+
+function isCatalogView(value: unknown): value is ModelConfigView {
+  return Boolean(value && typeof value === "object" && "effectiveCandidates" in value && "modelAssignments" in value);
+}
+
+function cloneCatalog(catalog: ModelConfigView): ModelConfigView {
+  return structuredClone(catalog);
+}
+
+function cloneAssignments(assignments: ModelConfigView["modelAssignments"]): ModelConfigView["modelAssignments"] {
+  return { byok: cloneAssignment(assignments.byok), account: cloneAssignment(assignments.account) };
+}
+
+function cloneAssignment<T extends Omit<ModelAssignment, "ownerAccountId"> | ModelAssignment>(assignment: T): T {
+  return { ...assignment, agent: { candidates: [...assignment.agent.candidates], default: assignment.agent.default } };
+}
+
+function normalizeProvider(provider: string): CatalogProviderId | null {
+  const normalized = provider.trim().toLowerCase();
+  const aliases: Record<string, CatalogProviderId> = { qwen: "dashscope", kimi: "moonshot", baidu: "qianfan", doubao: "volcengine" };
+  const candidate = aliases[normalized] ?? normalized;
+  return ["openai", "anthropic", "gemini", "deepseek", "zhipu", "dashscope", "moonshot", "minimax", "qianfan", "volcengine", "memmy_account"].includes(candidate)
+    ? candidate as CatalogProviderId
+    : null;
+}
+
+function protocolFor(provider: CatalogProviderId, capability: ModelCapability): ModelEndpointProtocol {
+  if (capability === "embedding") return "openai-embeddings";
+  if (capability === "asr") return "dashscope-input-audio-chat";
+  if (capability === "image") return provider === "dashscope" ? "dashscope-multimodal-generation" : "openai-images";
+  if (provider === "anthropic") return "anthropic-messages";
+  if (provider === "gemini") return "gemini-generate-content";
+  if (provider === "memmy_account") return "memmy-account";
+  return "openai-chat-completions";
+}
+
+function protocolSupports(protocol: ModelEndpointProtocol, capabilities: ModelCapability[]): boolean {
+  return capabilities.every((capability) => protocolSupportsCatalog(protocol, toCatalogCapability(capability)));
+}
+
+function protocolSupportsCatalog(protocol: ModelEndpointProtocol, capability: CatalogCapability): boolean {
+  if (capability === "agent" || capability === "memory_summary" || capability === "memory_evolution") {
+    return protocolForCapability(protocol) === "chat";
   }
-  return connections;
+  if (capability === "image_generation") return protocolForCapability(protocol) === "image";
+  return protocolForCapability(protocol) === capability;
 }
 
-function createLegacyAssignments(
-  saved: ModelProviderConfig | null | undefined,
-  candidates: ModelCandidate[]
-): Partial<Record<ModelAssignmentKind, string>> {
-  const byModel = (
-    model: string | null | undefined,
-    capability: ModelCapability
-  ) => candidates.find((candidate) => candidate.model === model && candidate.capability === capability)?.id;
-  const firstChat = candidates.find((candidate) => candidate.capability === "chat")?.id;
-  const firstAsr = candidates.find((candidate) => candidate.capability === "asr")?.id;
-  const firstImage = candidates.find((candidate) => candidate.capability === "image")?.id;
-  return {
-    memorySummary: byModel(saved?.memmyMemory?.summary?.model, "chat") ?? firstChat,
-    memoryEvolution: byModel(saved?.memmyMemory?.evolution?.model, "chat") ?? firstChat,
-    embedding: byModel(saved?.embedding?.model, "embedding") ?? "builtin:local-embedding",
-    asr: byModel(saved?.asr?.model, "asr") ?? firstAsr,
-    image: byModel(saved?.imageGen?.model, "image") ?? firstImage
-  };
+function protocolForCapability(protocol: ModelEndpointProtocol): ModelCapability {
+  if (protocol === "openai-embeddings") return "embedding";
+  if (protocol === "dashscope-input-audio-chat") return "asr";
+  if (protocol === "openai-images" || protocol === "dashscope-multimodal-generation") return "image";
+  return "chat";
 }
 
-function createDefaultAssignments(
-  candidates: ModelCandidate[],
-  mode: ModelWorkspaceMode
-): Partial<Record<ModelAssignmentKind, string>> {
-  const firstChat = candidates.find((candidate) => candidate.capability === "chat")?.id;
-  const firstEmbedding = candidates.find((candidate) => candidate.capability === "embedding")?.id;
-  const firstAsr = candidates.find((candidate) => candidate.capability === "asr")?.id;
-  const firstImage = candidates.find((candidate) => candidate.capability === "image")?.id;
-  return {
-    memorySummary: firstChat,
-    memoryEvolution: firstChat,
-    embedding: firstEmbedding ?? (mode === "account" ? "platform:memmy-platform:embedding" : "builtin:local-embedding"),
-    asr: firstAsr,
-    image: firstImage
-  };
+function modelCapability(input: ModelConnectionInput, model: string): ModelCapability {
+  return input.modelCapabilities?.[model] ?? "chat";
 }
 
-function candidatesFromConnections(
-  mode: ModelWorkspaceMode,
-  connections: readonly ModelConnection[],
-  capability: ModelCapability | null
-): ModelCandidate[] {
-  return connections.flatMap((connection) => connection.available === false ? [] : connection.models
-    .filter((model) => capability === null || modelCapability(connection, model) === capability)
-    .map((model) => ({
-    id: modelCandidateId(mode, connection.id, model),
-    source: "byok" as const,
-    provider: connection.provider,
-    model,
-    displayName: model,
-    connectionId: connection.id,
-    capability: modelCapability(connection, model)
-  })));
+function toCatalogCapability(capability: ModelCapability): CatalogCapability {
+  if (capability === "chat") return "agent";
+  if (capability === "memorySummary") return "memory_summary";
+  if (capability === "memoryEvolution") return "memory_evolution";
+  if (capability === "image") return "image_generation";
+  return capability;
 }
 
-function platformModelCandidate(model: PlatformModel): ModelCandidate {
-  return {
-    id: model.id,
-    source: "platform",
-    provider: model.provider,
-    model: model.model,
-    displayName: model.displayName,
-    connectionId: null,
-    capability: model.capability
-  };
+function fromCapabilities(capabilities: CatalogCapability[]): ModelCapability {
+  if (capabilities.includes("agent")) return "chat";
+  if (capabilities.includes("memory_summary")) return "memorySummary";
+  if (capabilities.includes("memory_evolution")) return "memoryEvolution";
+  if (capabilities.includes("embedding")) return "embedding";
+  if (capabilities.includes("asr")) return "asr";
+  return "image";
 }
 
-function replaceSpaceConnections(
-  workspace: ModelWorkspace,
-  mode: ModelWorkspaceMode,
-  connections: ModelConnection[]
-): ModelWorkspace {
-  return {
-    ...workspace,
-    spaces: {
-      ...workspace.spaces,
-      [mode]: {
-        ...workspace.spaces[mode],
-        connections
-      }
-    }
-  };
+function assignmentCapability(kind: ModelAssignmentKind): ModelCapability {
+  if (kind === "memorySummary") return "memorySummary";
+  if (kind === "memoryEvolution") return "memoryEvolution";
+  if (kind === "embedding") return "embedding";
+  if (kind === "asr") return "asr";
+  if (kind === "image") return "image";
+  return "chat";
 }
 
-function updateConnectionModels(
-  workspace: ModelWorkspace,
-  mode: ModelWorkspaceMode,
-  connectionId: string,
-  models: string[],
-  modelCapabilities?: Record<string, ModelCapability>
-): ModelWorkspaceMutationResult {
-  return {
-    workspace: replaceSpaceConnections(
-      workspace,
-      mode,
-      workspace.spaces[mode].connections.map((connection) => (
-        connection.id === connectionId
-          ? {
-              ...connection,
-              models,
-              modelCapabilities: modelCapabilities ?? Object.fromEntries(
-                models.map((model) => [model, modelCapability(connection, model)])
-              )
-            }
-          : connection
-      ))
-    ),
-    error: null
-  };
+function nextPresetByModel(catalog: ModelConfigView, endpointId: string, model: string): TextModelItemView | null {
+  return catalog.providers.flatMap((provider) => provider.models)
+    .find((preset) => preset.endpointId === endpointId && preset.model === model) ?? null;
 }
 
-function uniqueNames(names: readonly string[]): string[] {
-  const seen = new Set<string>();
-  const result: string[] = [];
-  for (const name of names) {
-    const normalized = name.trim();
-    const key = normalized.toLocaleLowerCase();
-    if (!normalized || seen.has(key)) continue;
-    seen.add(key);
-    result.push(normalized);
+function nextPresetByModelAndCapability(
+  catalog: ModelConfigView,
+  endpointId: string,
+  model: string,
+  capability: ModelCapability
+): TextModelItemView | null {
+  return catalog.providers.flatMap((provider) => provider.models)
+    .find((preset) => (
+      preset.endpointId === endpointId
+      && preset.model === model
+      && fromCapabilities(preset.capabilities) === capability
+    )) ?? null;
+}
+
+function nextPresetById(catalog: ModelConfigView, presetId: string): TextModelItemView | null {
+  return catalog.providers.flatMap((provider) => provider.models)
+    .find((preset) => preset.presetId === presetId) ?? null;
+}
+
+function replaceIds(current: string[], oldIds: string[], nextIds: string[]): string[] {
+  const old = new Set(oldIds);
+  const kept = current.filter((id) => !old.has(id));
+  return unique([...kept, ...nextIds]);
+}
+
+function clearAssignmentReferences(assignment: ModelAssignment, removedIds: string[]): void {
+  const removed = new Set(removedIds);
+  assignment.agent.candidates = assignment.agent.candidates.filter((id) => !removed.has(id));
+  if (assignment.agent.default && removed.has(assignment.agent.default)) assignment.agent.default = assignment.agent.candidates[0] ?? null;
+  for (const key of ["memorySummary", "memoryEvolution", "embedding", "asr", "imageGeneration"] as const) {
+    if (assignment[key] && removed.has(assignment[key]!)) assignment[key] = null;
   }
-  return result;
 }
 
-function normalizeProvider(provider: string): string {
-  const normalized = provider.trim().toLocaleLowerCase();
-  if (normalized === "openai_compatible") return "openai";
-  if (normalized === "google") return "gemini";
-  if (normalized === "kimi") return "moonshot";
-  if (normalized === "aliyun") return "qwen";
-  return normalized;
+function assignmentReferences(assignment: ModelAssignment, presetId: string): boolean {
+  return assignment.agent.candidates.includes(presetId)
+    || assignment.agent.default === presetId
+    || assignment.memorySummary === presetId
+    || assignment.memoryEvolution === presetId
+    || assignment.embedding === presetId
+    || assignment.asr === presetId
+    || assignment.imageGeneration === presetId;
 }
 
-function normalizeOptionalTokenLimit(value: number | undefined): number | undefined {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
-    ? value
-    : undefined;
+function refreshEffectiveCandidates(catalog: ModelConfigView): void {
+  const presets = catalog.providers.flatMap((provider) => provider.models);
+  const byId = new Map(presets.map((preset) => [preset.presetId, preset]));
+  catalog.effectiveCandidates.byok = catalog.modelAssignments.byok.agent.candidates
+    .map((presetId) => byId.get(presetId))
+    .filter((preset): preset is TextModelItemView => Boolean(preset));
+  catalog.effectiveCandidates.account = catalog.modelAssignments.account.agent.candidates
+    .map((presetId) => byId.get(presetId))
+    .filter((preset): preset is TextModelItemView => Boolean(preset));
+  catalog.configured = catalog.modelAssignments.byok.agent.candidates.length > 0
+    || catalog.modelAssignments.account.agent.candidates.length > 0;
 }
 
-function createConnectionId(provider: string): string {
-  const suffix = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  return `${provider}-${suffix}`;
+function visiblePresets(catalog: ModelConfigView, mode: ModelWorkspaceMode): TextModelItemView[] {
+  const ownerAccountId = catalog.modelAssignments.account.ownerAccountId;
+  return catalog.providers.flatMap((provider) => provider.models).filter((preset) => {
+    if (preset.source === "byok") return true;
+    return mode === "account"
+      && Boolean(ownerAccountId)
+      && preset.ownerAccountId === ownerAccountId;
+  });
 }
 
-function parseModelWorkspace(value: unknown): ModelWorkspace | null {
-  if (!isRecord(value) || value.version !== MODEL_WORKSPACE_VERSION) return null;
-  if (!Array.isArray(value.platformModels) || !isRecord(value.spaces) || !isRecord(value.selectionsByScope)) return null;
-  const account = parseSpace(value.spaces.account);
-  const byok = parseSpace(value.spaces.byok);
-  if (!account || !byok) return null;
-  const platformModels = PLATFORM_MODELS.map((model) => ({ ...model }));
-  const selectionsByScope = Object.fromEntries(
-    Object.entries(value.selectionsByScope).filter((entry): entry is [string, ScopedModelSelection] => (
-      isScopedSelection(entry[1])
-    ))
-  );
-  return {
-    version: MODEL_WORKSPACE_VERSION,
-    platformModels,
-    spaces: { account, byok },
-    selectionsByScope
-  };
+function presetHasCapability(catalog: ModelConfigView, presetId: string, capability: CatalogCapability): boolean {
+  return catalog.providers.some((provider) => provider.models.some((preset) => preset.presetId === presetId && preset.capabilities.includes(capability)));
 }
 
-function parseSpace(value: unknown): ModelWorkspaceSpace | null {
-  if (!isRecord(value) || !Array.isArray(value.connections) || !isRecord(value.assignments)) return null;
-  return {
-    connections: value.connections.filter(isModelConnection).map((connection) => ({
-      id: connection.id,
-      provider: connection.provider,
-      endpoint: connection.endpoint,
-      apiKeyMasked: connection.apiKeyMasked,
-      maxTokens: connection.maxTokens,
-      dailyTokenLimit: connection.dailyTokenLimit,
-      models: uniqueNames(connection.models),
-      modelCapabilities: Object.fromEntries(
-        uniqueNames(connection.models).map((model) => [
-          model,
-          modelCapability(connection, model)
-        ])
-      ),
-      available: connection.available
-    })),
-    assignments: Object.fromEntries(
-      Object.entries(value.assignments).filter((entry): entry is [ModelAssignmentKind, string] => (
-        isAssignmentKind(entry[0]) && typeof entry[1] === "string"
-      ))
-    ),
-    taskCandidateIds: Array.isArray(value.taskCandidateIds)
-      ? value.taskCandidateIds.filter((candidateId): candidateId is string => typeof candidateId === "string")
-      : undefined
-  };
+function isHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
-function modelCapability(connection: ModelConnection, model: string): ModelCapability {
-  return connection.modelCapabilities?.[model] ?? "chat";
+function newId(prefix: string): string {
+  return globalThis.crypto?.randomUUID?.() ?? `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function isModelCapability(value: unknown): value is ModelCapability {
-  return value === "chat" || value === "embedding" || value === "asr" || value === "image";
+function unique<T extends string>(values: T[]): T[] {
+  return [...new Set(values)];
 }
 
-function isModelConnection(value: unknown): value is ModelConnection {
-  return isRecord(value)
-    && typeof value.id === "string"
-    && typeof value.provider === "string"
-    && typeof value.endpoint === "string"
-    && typeof value.apiKeyMasked === "string"
-    && isOptionalTokenLimit(value.maxTokens)
-    && isOptionalTokenLimit(value.dailyTokenLimit)
-    && Array.isArray(value.models)
-    && value.models.every((model) => typeof model === "string")
-    && (
-      value.modelCapabilities === undefined
-      || (
-        isRecord(value.modelCapabilities)
-        && Object.values(value.modelCapabilities).every(isModelCapability)
-      )
-    );
+function endpointAuthMatches(
+  endpoint: ModelConfigView["providers"][number]["endpoints"][number],
+  input: Pick<ByokPresetInput, "apiKey" | "apiKeyMasked">
+): boolean {
+  if (input.apiKey) return endpoint.apiKey === input.apiKey;
+  if (input.apiKeyMasked) return false;
+  return !endpoint.hasApiKey && !endpoint.apiKey && !endpoint.apiKeyMasked;
 }
 
-function isOptionalTokenLimit(value: unknown): value is number | undefined {
-  return value === undefined || (
-    typeof value === "number"
-    && Number.isSafeInteger(value)
-    && value > 0
-  );
-}
-
-function isScopedSelection(value: unknown): value is ScopedModelSelection {
-  return isRecord(value)
-    && (value.mode === "account" || value.mode === "byok")
-    && typeof value.candidateId === "string";
-}
-
-function isAssignmentKind(value: string): value is ModelAssignmentKind {
-  return value === "memorySummary"
-    || value === "memoryEvolution"
-    || value === "embedding"
-    || value === "asr"
-    || value === "image";
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+function newClientPresetId(): string {
+  const suffix = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return `${CLIENT_PRESET_ID_PREFIX}${suffix}`;
 }

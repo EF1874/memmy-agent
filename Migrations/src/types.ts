@@ -1,4 +1,11 @@
+import type { RuntimeConfigLockHandle } from "./runtime-config-lock.js";
+
 export type MigrationScope = "agent-workspace" | "runtime-config" | "session-dag";
+export type MigrationTargetName =
+  | "agentWorkspace"
+  | "runtimeConfigFile"
+  | "sessionDagDir"
+  | "appDatabaseFile";
 
 export type MigrationLoggerFields = Record<string, string | number>;
 
@@ -12,6 +19,7 @@ export type MigrationResult = {
   scanned: number;
   changed: number;
   ignored: number;
+  deferred?: boolean;
 };
 
 export type AgentWorkspaceMigrationContext = {
@@ -19,6 +27,8 @@ export type AgentWorkspaceMigrationContext = {
   sessionsDir: string;
   runtimeConfigFile: string;
   sessionDagDir: string;
+  appDatabaseFile?: string;
+  runtimeConfigLock?: RuntimeConfigLockHandle;
   logger: MigrationLogger;
 };
 
@@ -27,6 +37,7 @@ export type MigrationDefinition = {
   introducedIn: string;
   scope: MigrationScope;
   description: string;
+  requiredTargets?: readonly MigrationTargetName[];
   up(context: AgentWorkspaceMigrationContext): Promise<MigrationResult>;
 };
 
@@ -34,6 +45,7 @@ export type MigrationErrorCode =
   | "migration_definition_invalid"
   | "migration_target_unavailable"
   | "migration_lock_timeout"
+  | "migration_lock_reentrant"
   | "migration_state_invalid"
   | "migration_config_invalid"
   | "migration_source_changed"
@@ -63,12 +75,15 @@ export class MigrationError extends Error {
   }
 }
 
+export type RunMigrationTargets = {
+  agentWorkspace: string;
+  runtimeConfigFile: string;
+  sessionDagDir: string;
+  appDatabaseFile?: string;
+};
+
 export type RunMigrationsOptions = {
-  targets: {
-    agentWorkspace: string;
-    runtimeConfigFile: string;
-    sessionDagDir: string;
-  };
+  targets: RunMigrationTargets;
   logger: MigrationLogger;
 };
 
@@ -81,5 +96,6 @@ export type AppliedMigrationSummary = {
 export type RunMigrationsResult = {
   applied: AppliedMigrationSummary[];
   skipped: string[];
+  deferred: string[];
   results: MigrationResult;
 };

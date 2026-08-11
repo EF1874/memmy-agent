@@ -175,6 +175,11 @@ export function shouldExitPetLaunchForRoute(input: PetLaunchGuardInput): boolean
 
 /** Checks should show token exhausted modal. */
 export function shouldShowTokenExhaustedModal(bootstrap: AppBootstrapResponse | null | undefined): boolean {
+  return isAccountTokenQuotaExhausted(bootstrap);
+}
+
+/** Returns whether the latest platform quota snapshot blocks an account-sourced model call. */
+export function isAccountTokenQuotaExhausted(bootstrap: AppBootstrapResponse | null | undefined): boolean {
   return Boolean(
     bootstrap
     && bootstrap.app.userMode === "account"
@@ -210,6 +215,13 @@ export function resolveByokModelCompletion(input: ResolveByokModelCompletionInpu
 /** Contract for resolve byok entry input. */
 export interface ResolveByokEntryInput {
   onboarding: OnboardingStateDto | undefined;
+  modelConfig?: {
+    catalog?: {
+      modelAssignments: {
+        byok: { agent: { candidates: string[] } };
+      };
+    };
+  } | null;
 }
 
 /** Contract for resolve byok entry result. */
@@ -223,7 +235,9 @@ export function resolveByokEntry(input: ResolveByokEntryInput): ResolveByokEntry
   if (input.onboarding?.completed) {
     return {
       onboardingPatch: undefined,
-      nextRoute: "/api-key"
+      nextRoute: input.modelConfig?.catalog?.modelAssignments.byok.agent.candidates.length
+        ? "/main"
+        : "/api-key"
     };
   }
 

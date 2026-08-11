@@ -522,12 +522,25 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
     return -1;
   }
 
-  function modelError(value: any): { category: "quota_exhausted" | "model_failed"; detail?: string } | null {
+  function modelError(value: any): {
+    category: "quota_exhausted" | "model_failed";
+    detail?: string;
+    presetId?: string;
+    source?: "account" | "byok";
+    provider?: string;
+    model?: string;
+    capability?: string;
+  } | null {
     if (!value || typeof value !== "object" || Array.isArray(value)) return null;
     return value.category === "quota_exhausted" || value.category === "model_failed"
       ? {
           category: value.category,
-          ...(typeof value.detail === "string" ? { detail: value.detail } : {})
+          ...(typeof value.detail === "string" ? { detail: value.detail } : {}),
+          ...(typeof value.presetId === "string" ? { presetId: value.presetId } : {}),
+          ...(value.source === "account" || value.source === "byok" ? { source: value.source } : {}),
+          ...(typeof value.provider === "string" ? { provider: value.provider } : {}),
+          ...(typeof value.model === "string" ? { model: value.model } : {}),
+          ...(typeof value.capability === "string" ? { capability: value.capability } : {}),
         }
       : null;
   }

@@ -108,27 +108,42 @@ describe("mcp presets api", () => {
     expect(loadConfig().tools.mcpServers.browserbase.url).toContain("browserbaseApiKey=bb_live_secret");
   });
 
-  it("preserves image generation profiles when enabling a preset", () => {
+  it("preserves current image catalog and unknown nested fields when enabling a preset", () => {
     useConfig();
     saveConfig(new Config({
+      providers: {
+        openai: {
+          apiKey: "sk-byok",
+          futureProviderField: "keep-provider",
+          endpoints: {
+            image: {
+              apiBase: "https://api.openai.com/v1",
+              protocol: "openai-images",
+              futureEndpointField: "keep-endpoint",
+            },
+          },
+        },
+      },
+      modelPresets: {
+        image: {
+          provider: "openai",
+          endpoint: "image",
+          model: "gpt-image-1",
+          source: "byok",
+          capabilities: ["image_generation"],
+          futurePresetField: "keep-preset",
+        },
+      },
+      modelAssignments: {
+        byok: {
+          agent: { candidates: [], default: null },
+          imageGeneration: "image",
+        },
+      },
       tools: {
         imageGeneration: {
           enabled: true,
-          activeProfile: "account",
-          profiles: {
-            account: {
-              provider: "memmy_account",
-              model: "image_gen",
-              apiKey: "cloud-login-uuid",
-              apiBase: "https://cloud.example.com/api/agentExternal/v1",
-            },
-            byok: {
-              provider: "openai",
-              model: "gpt-image-1",
-              apiKey: "sk-byok",
-              apiBase: "https://api.openai.com/v1",
-            },
-          },
+          defaultImageSize: "2K",
         },
       },
     }));
@@ -138,18 +153,12 @@ describe("mcp presets api", () => {
       browserbase_api_key: ["bb_live_secret"],
     });
 
-    const imageGeneration = loadConfig().tools.imageGeneration;
-    expect(imageGeneration.activeProfile).toBe("account");
-    expect(imageGeneration.profiles.account?.toObject()).toMatchObject({
-      provider: "memmy_account",
-      model: "image_gen",
-      apiKey: "cloud-login-uuid",
-    });
-    expect(imageGeneration.profiles.byok?.toObject()).toMatchObject({
-      provider: "openai",
-      model: "gpt-image-1",
-      apiKey: "sk-byok",
-    });
+    const saved = loadConfig();
+    expect(saved.tools.imageGeneration.toObject()).toMatchObject({ enabled: true, defaultImageSize: "2K" });
+    expect(saved.modelAssignments.byok.imageGeneration).toBe("image");
+    expect(saved.providers.openai.toObject()).toMatchObject({ futureProviderField: "keep-provider" });
+    expect(saved.providers.openai.endpoints.image.toObject()).toMatchObject({ futureEndpointField: "keep-endpoint" });
+    expect(saved.modelPresets.image.toObject()).toMatchObject({ futurePresetField: "keep-preset" });
   });
 
   it("preserves session DAG and compaction config when enabling a preset", () => {

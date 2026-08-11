@@ -1,18 +1,19 @@
-import { runMigrations } from "@memmy/migrations";
-import fs from "node:fs";
+import { resolveMigrationTargets, runMigrations } from "@memmy/migrations";
+import { homedir } from "node:os";
 import path from "node:path";
-import YAML from "yaml";
 import { getConfigPath, setConfigPath } from "../../config/loader.js";
-import { sessionDagRoot } from "../../session-dag/paths.js";
 
 export const MIGRATIONS_READY_CONFIG_ENV = "MEMMY_MIGRATIONS_READY_CONFIG";
 export const MIGRATIONS_READY_WORKSPACE_ENV = "MEMMY_MIGRATIONS_READY_WORKSPACE";
 export const MIGRATIONS_READY_SESSION_DAG_ENV = "MEMMY_MIGRATIONS_READY_SESSION_DAG";
+export const MIGRATIONS_READY_APP_DATABASE_ENV = "MEMMY_MIGRATIONS_READY_APP_DATABASE";
+export const APP_DATABASE_ENV = "MEMMY_APP_DATABASE";
 
 export interface StartupMigrationTarget {
   runtimeConfigFile: string;
   agentWorkspace: string;
   sessionDagDir: string;
+  appDatabaseFile?: string;
 }
 
 export interface StartupMigrationPreparation {
@@ -23,6 +24,7 @@ export interface StartupMigrationPreparation {
 type StartupMigrationInput = {
   config?: string | null;
   workspace?: string | null;
+  appDatabase?: string | null;
 };
 
 const migrationLogger = {
@@ -35,31 +37,13 @@ const migrationLogger = {
 };
 
 function expandHome(value: string, env: NodeJS.ProcessEnv): string {
-  if (value !== "~" && !value.startsWith("~/")) return value;
-  const home = env.HOME;
-  return home ? path.join(home, value.slice(2)) : value;
-}
-
-function configuredWorkspace(configPath: string): string | null {
-  if (!fs.existsSync(configPath)) return null;
-  try {
-    const parsed = YAML.parse(fs.readFileSync(configPath, "utf8"));
-    const configured = parsed?.agents?.defaults?.workspace;
-    return typeof configured === "string" && configured.trim() ? configured : null;
-  } catch {
-    // The migration runner reports malformed YAML using its stable error type.
-    return null;
-  }
+  if (value !== "~" && !value.startsWith("~/") && !value.startsWith("~\\")) return value;
+  const home = env.HOME ?? env.USERPROFILE ?? homedir();
+  return value === "~" ? home : path.join(home, value.slice(2));
 }
 
 function normalizeConfigPath(value: string, env: NodeJS.ProcessEnv): string {
   return path.normalize(path.resolve(expandHome(value, env)));
-}
-
-function canonicalWorkspacePath(value: string, env: NodeJS.ProcessEnv): string {
-  const resolved = path.normalize(path.resolve(expandHome(value, env)));
-  fs.mkdirSync(resolved, { recursive: true });
-  return fs.realpathSync(resolved);
 }
 
 export function resolveStartupMigrationTarget(
@@ -71,15 +55,13 @@ export function resolveStartupMigrationTarget(
     env,
   );
   if (input.config) setConfigPath(runtimeConfigFile);
-  const workspace = input.workspace
-    ?? env.MEMMY_AGENT_WORKSPACE
-    ?? configuredWorkspace(runtimeConfigFile);
-  const agentWorkspace = canonicalWorkspacePath(
-    workspace ?? "~/.memmy/workspace",
+  return resolveMigrationTargets({
+    runtimeConfigFile,
+    agentWorkspaceOverride: input.workspace ?? env.MEMMY_AGENT_WORKSPACE,
+    sessionDagDirOverride: env.MEMMY_AGENT_SESSION_DAG_DIR,
+    appDatabaseFile: input.appDatabase ?? env[APP_DATABASE_ENV],
     env,
-  );
-  const sessionDagDir = path.normalize(path.resolve(sessionDagRoot(env)));
-  return { runtimeConfigFile, agentWorkspace, sessionDagDir };
+  });
 }
 
 function preparedTargetMatches(
@@ -89,11 +71,14 @@ function preparedTargetMatches(
   const preparedConfig = env[MIGRATIONS_READY_CONFIG_ENV];
   const preparedWorkspace = env[MIGRATIONS_READY_WORKSPACE_ENV];
   const preparedSessionDag = env[MIGRATIONS_READY_SESSION_DAG_ENV];
+  const preparedAppDatabase = env[MIGRATIONS_READY_APP_DATABASE_ENV];
   if (!preparedConfig || !preparedWorkspace || !preparedSessionDag) return false;
   try {
     return normalizeConfigPath(preparedConfig, env) === target.runtimeConfigFile
-      && canonicalWorkspacePath(preparedWorkspace, env) === target.agentWorkspace
-      && path.normalize(path.resolve(preparedSessionDag)) === target.sessionDagDir;
+      && normalizeConfigPath(preparedWorkspace, env) === target.agentWorkspace
+      && path.normalize(path.resolve(preparedSessionDag)) === target.sessionDagDir
+      && (preparedAppDatabase ? normalizeConfigPath(preparedAppDatabase, env) : undefined)
+        === target.appDatabaseFile;
   } catch {
     return false;
   }

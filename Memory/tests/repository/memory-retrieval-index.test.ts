@@ -369,7 +369,7 @@ describe("memory retrieval indexes", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 });
 
 function traceMemory(

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
+import { mutateRuntimeConfig } from "@memmy/migrations";
+import { closeSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { createStorageBackend } from "../storage/backend.js";
 import { loadMemmyConfig } from "../config/index.js";
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
@@ -61,7 +61,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
                 : { allowAnonymous: true }
         });
         if (configPath) {
-            writeCurrentEndpoint(configPath, url);
+            await writeCurrentEndpoint(configPath, url);
         }
 
         logger.info("service.listening", {
@@ -234,22 +234,15 @@ function numberEnv(name: string): number | undefined {
     return parsePort(value);
 }
 
-function writeCurrentEndpoint(configPath: string, endpoint: string): void {
+export async function writeCurrentEndpoint(configPath: string, endpoint: string): Promise<void> {
     try {
-        const root = existsSync(configPath)
-            ? mutableRecord(parseYaml(readFileSync(configPath, "utf8")))
-            : {};
-        const memmyMemory = mutableRecord(root.memmyMemory);
-        const storage = mutableRecord(memmyMemory.storage);
-        if (storage.endpoint === endpoint) {
-            return;
-        }
-        storage.endpoint = endpoint;
-        memmyMemory.storage = storage;
-        root.memmyMemory = memmyMemory;
-        mkdirSync(dirname(configPath), { recursive: true });
-        const content = stringifyYaml(root);
-        writeFileSync(configPath, content.endsWith("\n") ? content : `${content}\n`, "utf8");
+        await mutateRuntimeConfig(configPath, (root) => {
+            const memmyMemory = mutableRecord(root.memmyMemory);
+            const storage = mutableRecord(memmyMemory.storage);
+            storage.endpoint = endpoint;
+            memmyMemory.storage = storage;
+            root.memmyMemory = memmyMemory;
+        });
     } catch (error) {
         logger.warn("config.endpoint_write_failed", {
             configPath,

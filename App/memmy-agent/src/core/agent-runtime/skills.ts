@@ -1,9 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import which from "which";
 import YAML from "yaml";
 
-export const BUILTIN_SKILLS_DIR = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "..", "skills");
+export const BUILTIN_SKILLS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "skills");
 export const SKILL_FRONTMATTER_RE = /^---\s*\r?\n([\s\S]*?)\r?\n---\s*\r?\n?/;
 
 export type SkillEntry = { name: string; path: string; source: string };

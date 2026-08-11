@@ -1,11 +1,13 @@
 import { Command } from "commander";
-import { withRuntimeConfigWriteLock } from "@memmy/migrations";
+import { mutateRuntimeConfig, mutateRuntimeConfigSync } from "@memmy/migrations";
 import fs from "node:fs";
 import http from "node:http";
 import { AsyncLocalStorage } from "node:async_hooks";
 import crypto from "node:crypto";
+import { homedir } from "node:os";
 import { Readable } from "node:stream";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import YAML from "yaml";
 import { MessageBus } from "../../core/runtime-messages/queue.js";
 import { InboundMessage, OutboundMessage } from "../../core/runtime-messages/events.js";
@@ -29,10 +31,7 @@ import {
 } from "../openai-like-api/server.js";
 import { ChannelManager } from "../../integrations/channels/manager.js";
 import { discoverAll, discoverChannelNames } from "../../integrations/channels/registry.js";
-import {
-  WebSocketChannel,
-  publishRuntimeModelUpdate,
-} from "../../integrations/channels/websocket.js";
+import { WebSocketChannel } from "../../integrations/channels/websocket.js";
 import { createByokTokenUsageRecorder } from "../../integrations/byok-token-usage/index.js";
 import {
   loadConfig,
@@ -75,6 +74,8 @@ import {
 } from "./onboard.js";
 import { StreamRenderer, ThinkingSpinner } from "./stream.js";
 import { prepareStartupMigrations } from "./startup-migrations.js";
+
+const CLI_TEMPLATES_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../templates");
 
 export const app = new Command("memmy")
   .option("-s, --session <sessionId>", "Resume an existing cli:* terminal session")
@@ -187,34 +188,47 @@ export function mergeMissingDefaults(existing: any, defaults: any): any {
 
 export async function onboardPlugins(configPath: string): Promise<void> {
   if (!fs.existsSync(configPath)) return;
-  await withRuntimeConfigWriteLock(configPath, async () => {
-    const raw = fs.readFileSync(configPath, "utf8");
-    let data: any = {};
-    try {
-      data = YAML.parse(raw || "{}");
-    } catch {
-      data = {};
-    }
+  await mutateRuntimeConfig(configPath, (data) => {
     const channels = (data.channels ??= {});
+    if (!channels || typeof channels !== "object" || Array.isArray(channels)) {
+      throw new Error("channels must be an object");
+    }
     for (const [name, cls] of Object.entries(discoverAll())) {
       const defaults = (cls as any).defaultConfig?.() ?? { enabled: false };
-      channels[name] = name in channels ? mergeMissingDefaults(channels[name], defaults) : defaults;
+      (channels as Record<string, unknown>)[name] = name in channels
+        ? mergeMissingDefaults((channels as Record<string, unknown>)[name], defaults)
+        : defaults;
     }
-    fs.mkdirSync(path.dirname(configPath), { recursive: true });
-    fs.writeFileSync(configPath, YAML.stringify(data), "utf8");
   });
 }
 
 export function modelDisplay(config: Config): [string, string] {
-  const resolved = config.resolvePreset();
-  const name = config.agents.defaults.modelPreset;
-  return [resolved.model, name ? ` (preset: ${name})` : ""];
+  const accountMode = config.app.userMode === "account";
+  const assignment = accountMode ? config.modelAssignments.account : config.modelAssignments.byok;
+  const name = assignment.agent.default;
+  const preset = name ? config.modelPresets[name] : null;
+  const activeOwner = typeof config.app.userId === "string" ? config.app.userId.trim() : "";
+  const available = Boolean(
+    preset
+    && preset.capabilities.includes("agent")
+    && (accountMode
+      ? preset.source === "byok" || (
+          preset.source === "account"
+          && Boolean(activeOwner)
+          && preset.ownerAccountId === activeOwner
+          && assignment.ownerAccountId === activeOwner
+        )
+      : preset.source === "byok" && !preset.ownerAccountId),
+  );
+  return available && preset
+    ? [preset.source === "account" ? "General text" : preset.model, ` (preset: ${name})`]
+    : ["(none configured)", ""];
 }
 
 export function syncRuntimeWorkspaceTemplates(config: Config): string {
   const workspacePath = getWorkspacePath(config.agents.defaults.workspace);
   fs.mkdirSync(workspacePath, { recursive: true });
-  syncWorkspaceTemplates(workspacePath, undefined, {
+  syncWorkspaceTemplates(workspacePath, CLI_TEMPLATES_DIR, {
     fileMemoryEnabled: config.fileMemory.enabled,
   });
   return workspacePath;
@@ -331,9 +345,7 @@ export function resolveTerminalTarget(
     if (existing) {
       binding = readWebuiSessionBinding(existing);
     } else if (project) {
-      const rawPath = project === "~" || project.startsWith("~/")
-        ? path.join(process.env.HOME ?? "", project.slice(2))
-        : project;
+      const rawPath = expandHomePath(project);
       const absolute = path.resolve(invocationCwd, rawPath);
       const registered = projectStore.resolveOrRegisterExisting(absolute, (resolvedProject) => {
         const resolvedBinding = {
@@ -375,6 +387,12 @@ export function resolveTerminalTarget(
     projectName,
     cwd: binding.cwd,
   };
+}
+
+function expandHomePath(value: string, env: NodeJS.ProcessEnv = process.env): string {
+  if (value !== "~" && !value.startsWith("~/") && !value.startsWith("~\\")) return value;
+  const home = env.HOME ?? env.USERPROFILE ?? homedir();
+  return value === "~" ? home : path.join(home, value.slice(2));
 }
 
 export function listTerminalSessions(): Array<{
@@ -517,9 +535,10 @@ export async function main(argv: string[] = process.argv): Promise<void> {
     const opts = actionCommand.optsWithGlobals() as {
       config?: string;
       workspace?: string;
+      appDatabase?: string;
     };
     await prepareStartupMigrations(
-      { config: opts.config, workspace: opts.workspace },
+      { config: opts.config, workspace: opts.workspace, appDatabase: opts.appDatabase },
       process.env,
       { force: actionCommand.name() === "migrate" },
     );
@@ -529,6 +548,7 @@ export async function main(argv: string[] = process.argv): Promise<void> {
     .command("migrate", { hidden: true })
     .option("-w, --workspace <dir>", "Workspace directory")
     .option("-c, --config <path>", "Path to config file")
+    .option("--app-database <path>", "Desktop app database path")
     .action(() => {
       console.log("Migrations ready.");
     });
@@ -696,7 +716,7 @@ export async function onboard({
     ) {
       loaded = new Config();
       if (workspace) loaded.agents.defaults.workspace = workspace;
-      saveConfig(loaded, configPath);
+      replaceRuntimeConfig(configPath, loaded);
       console.log(`Config reset to defaults at ${configPath}`);
     } else {
       loaded = loadConfig(configPath);
@@ -721,9 +741,7 @@ export async function onboard({
       return loaded;
     }
     validateModelCatalogForSave(loaded);
-    await withRuntimeConfigWriteLock(configPath, async () => {
-      saveConfig(loaded, configPath);
-    });
+    saveConfig(loaded, configPath);
     console.log(`Config saved at ${configPath}`);
   } else if (!fs.existsSync(configPath)) {
     saveConfig(loaded, configPath);
@@ -731,7 +749,7 @@ export async function onboard({
   await onboardPlugins(configPath);
   const workspacePath = getWorkspacePath(loaded.agents.defaults.workspace);
   fs.mkdirSync(workspacePath, { recursive: true });
-  syncWorkspaceTemplates(workspacePath, undefined, {
+  syncWorkspaceTemplates(workspacePath, CLI_TEMPLATES_DIR, {
     fileMemoryEnabled: loaded.fileMemory.enabled,
   });
   console.log(`memmy is ready`);
@@ -756,12 +774,35 @@ export function setConfigValue(
       if (!next) throw new Error("app.userId must be a non-empty string");
       loaded.app.userId = next;
       loaded.memmyMemory.userId = next;
-      saveConfig(loaded, configPath);
+      mutateRuntimeConfigSync(configPath, (raw) => {
+        const app = mutableConfigRecord(raw.app, "app");
+        const memmyMemory = mutableConfigRecord(raw.memmyMemory, "memmyMemory");
+        app.userId = next;
+        memmyMemory.userId = next;
+        raw.app = app;
+        raw.memmyMemory = memmyMemory;
+      });
       return { config: loaded, configPath, key: "app.userId", value: next };
     }
     default:
       throw new Error(`unsupported config key: ${key}`);
   }
+}
+
+function replaceRuntimeConfig(configPath: string, config: Config): void {
+  const replacement = config.toObject();
+  mutateRuntimeConfigSync(configPath, (raw) => {
+    for (const key of Object.keys(raw)) delete raw[key];
+    Object.assign(raw, replacement);
+  });
+}
+
+function mutableConfigRecord(value: unknown, pathName: string): Record<string, unknown> {
+  if (value === undefined || value === null) return {};
+  if (typeof value === "object" && !Array.isArray(value)) {
+    return { ...(value as Record<string, unknown>) };
+  }
+  throw new Error(`${pathName} must be an object`);
 }
 
 async function requestFromIncoming(
@@ -1044,9 +1085,6 @@ export async function gateway({
   const loop = AgentLoop.fromConfig(loaded, bus, {
     cronService: cron,
     projectStore,
-    runtimeModelPublisher: (model, preset) => {
-      if (model) publishRuntimeModelUpdate(bus, model, preset);
-    },
   });
   if (loop.sessions instanceof SessionManager) {
     loop.guiTranscriptMirror = new GuiTranscriptMirror(loop.sessions, canonicalWorkspace);

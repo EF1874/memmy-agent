@@ -26,16 +26,33 @@ describe("local app route inventory", () => {
           configRevision: "revision-before-save",
           providers: [{
             provider: "openai",
-            apiBase: "https://api.example.com/v1",
-            models: [{ presetName: "work-gpt", model: "gpt-4.1-mini" }]
+            endpoints: [{
+              endpointId: "primary",
+              apiBase: "https://api.example.com/v1",
+              protocol: "openai-chat-completions"
+            }],
+            models: [{
+              presetId: "work-gpt",
+              endpointId: "primary",
+              model: "gpt-4.1-mini",
+              source: "byok",
+              capabilities: ["agent"]
+            }]
           }],
-          defaultModelPreset: "work-gpt"
+          modelAssignments: modelAssignments()
         }
       },
       {
         method: "POST",
         url: "/api/app/model-config/test",
-        payload: { provider: "openai_compatible", baseUrl: "https://api.example.com/v1", modelId: "gpt-4.1-mini", apiKey: "sk-test" }
+        payload: {
+          provider: "openai_compatible",
+          endpointId: "primary",
+          protocol: "openai-chat-completions",
+          apiBase: "https://api.example.com/v1",
+          modelId: "gpt-4.1-mini",
+          apiKey: "sk-test"
+        }
       },
       { method: "PATCH", url: "/api/app/privacy", payload: { localOnlyMode: true } },
       { method: "PATCH", url: "/api/app/onboarding", payload: { currentStep: "completed" } },
@@ -221,7 +238,7 @@ function createServer(): FastifyInstance {
         return {
           text: "你好",
           modelId: "qwen3-asr-flash",
-          provider: "aliyun",
+          provider: "dashscope",
           source: "byok",
           transcribedAt: "2026-06-15T10:00:00.000Z"
         };
@@ -300,40 +317,61 @@ function createPermissionManager(): PermissionManager {
 }
 
 function modelConfigView(overrides: Record<string, unknown> = {}) {
+  const model = {
+    presetId: "work-gpt",
+    provider: "openai",
+    endpointId: "primary",
+    protocol: "openai-chat-completions",
+    model: "gpt-4.1-mini",
+    source: "byok",
+    capabilities: ["agent"],
+    available: true
+  };
   return {
     configRevision: overrides.configRevision ?? "revision-before-save",
     providers: [{
       provider: "openai",
-      apiBase: "https://api.example.com/v1",
-      apiType: "auto",
       configured: true,
       hasApiKey: false,
       apiKeyMasked: "",
+      apiKey: "",
       accountManaged: false,
       editable: true,
-      models: [{
-        presetName: "work-gpt",
-        model: "gpt-4.1-mini",
-        isDefault: true,
-        available: true
-      }]
+      endpoints: [{
+        endpointId: "primary",
+        apiBase: "https://api.example.com/v1",
+        protocol: "openai-chat-completions",
+        hasApiKey: false,
+        apiKeyMasked: "",
+        apiKey: ""
+      }],
+      models: [model]
     }],
-    defaultModelPreset: "work-gpt",
+    modelAssignments: modelAssignments(),
+    effectiveCandidates: { byok: [model], account: [] },
     configured: true,
-    embedding: overrides.embedding ?? localEmbeddingView(),
-    asr: overrides.asr ?? asrView(),
-    imageGen: overrides.imageGen ?? null,
-    memmyMemory: {
-      summary: {
-        mode: "follow",
-        fixed: null
-      },
-      evolution: {
-        mode: "follow",
-        fixed: null
-      }
-    },
     updatedAt: "2026-06-02T10:00:00.000Z"
+  };
+}
+
+function modelAssignments() {
+  return {
+    byok: {
+      agent: { candidates: ["work-gpt"], default: "work-gpt" },
+      memorySummary: null,
+      memoryEvolution: null,
+      embedding: null,
+      asr: null,
+      imageGeneration: null
+    },
+    account: {
+      agent: { candidates: [], default: null },
+      memorySummary: null,
+      memoryEvolution: null,
+      embedding: null,
+      asr: null,
+      imageGeneration: null
+    }
   };
 }
 

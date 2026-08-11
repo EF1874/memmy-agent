@@ -308,6 +308,7 @@ async function boot(): Promise<void> {
     await startPackagedRendererServerIfNeeded();
     runtimeServices = await startManagedRuntimeServices({
       appPath: app.getAppPath(),
+      appDatabaseFile: join(app.getPath("userData"), "app.sqlite"),
       resourcesPath: process.resourcesPath,
       logDirectory: app.getPath("logs"),
       logLevel: getCurrentLogLevel(),

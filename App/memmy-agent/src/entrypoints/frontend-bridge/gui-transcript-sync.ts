@@ -245,6 +245,15 @@ export class GuiTranscriptMirror {
     latencyMs: number | null = null,
     agentUi: unknown = null,
     errorCategory: ProviderErrorCategory | null = null,
+    modelError: {
+      category: ProviderErrorCategory | "model_failed";
+      detail?: string;
+      presetId?: string;
+      source?: "account" | "byok";
+      provider?: string;
+      model?: string;
+      capability?: string;
+    } | null = null,
   ): void {
     this.appendTurn(turn, {
       event: "message",
@@ -254,8 +263,8 @@ export class GuiTranscriptMirror {
       turn_id: turn.turnId,
       ...(latencyMs == null ? {} : { latency_ms: latencyMs }),
       ...(agentUi != null ? { agent_ui: agentUi } : {}),
-      ...(errorCategory === "quota_exhausted"
-        ? { model_error: { category: errorCategory } }
+      ...(modelError || errorCategory === "quota_exhausted"
+        ? { model_error: modelError ?? { category: errorCategory } }
         : {}),
     });
   }

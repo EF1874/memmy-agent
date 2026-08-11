@@ -18,6 +18,28 @@ const bootstrap = {
   model_name: "gpt-4.1"
 };
 
+const modelSelectionWire = {
+  preset_id: "desktop-openai-gpt-5",
+  provider: "openai",
+  endpoint_id: "chat",
+  protocol: "openai-chat-completions",
+  model: "gpt-5",
+  source: "byok",
+  owner_account_id: null,
+  capabilities: ["agent"]
+};
+
+const modelSelection = {
+  presetId: "desktop-openai-gpt-5",
+  provider: "openai",
+  endpointId: "chat",
+  protocol: "openai-chat-completions",
+  model: "gpt-5",
+  source: "byok",
+  ownerAccountId: null,
+  capabilities: ["agent"]
+};
+
 const sidebarState: MemmyAgentSidebarState = {
   schema_version: 1,
   pinned_keys: [],
@@ -179,7 +201,8 @@ describe("memmy-agent client", () => {
               updatedAt: "2026-06-06T08:00:00.000Z",
               run_started_at: 1780732800,
               projectId: null,
-              cwd: "/Users/yuan/.memmy/workspace"
+              cwd: "/Users/yuan/.memmy/workspace",
+              model_selection: modelSelectionWire
             }
           ]
         });
@@ -195,7 +218,9 @@ describe("memmy-agent client", () => {
       webSocketFactory: () => new FakeSocket("ws://unused")
     });
 
-    await expect(client.listSessions()).resolves.toHaveLength(1);
+    await expect(client.listSessions()).resolves.toEqual([
+      expect.objectContaining({ model_selection: modelSelection })
+    ]);
     await expect(client.bootstrap()).resolves.toEqual(bootstrap);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
@@ -720,12 +745,14 @@ describe("memmy-agent client", () => {
       event: "attached",
       chat_id: "chat-new",
       client_request_id: newChatRequestId,
-      model_preset: "desktop-openai-gpt-5"
+      model_preset: "desktop-openai-gpt-5",
+      model_selection: modelSelectionWire
     });
 
     await expect(newChat).resolves.toEqual({
       chatId: "chat-new",
-      modelPreset: "desktop-openai-gpt-5"
+      modelPreset: "desktop-openai-gpt-5",
+      modelSelection
     });
     expect(events).toEqual([
       { event: "ready", chat_id: "chat-1", client_id: "frontend-test", connection_generation: 1 },
@@ -734,6 +761,7 @@ describe("memmy-agent client", () => {
         chat_id: "chat-new",
         client_request_id: newChatRequestId,
         model_preset: "desktop-openai-gpt-5",
+        model_selection: modelSelectionWire,
         connection_generation: 1
       }
     ]);
@@ -843,12 +871,14 @@ describe("memmy-agent client", () => {
       event: "attached",
       chat_id: "server-chat",
       client_request_id: request.client_request_id,
-      model_preset: "desktop-openai-gpt-5"
+      model_preset: "desktop-openai-gpt-5",
+      model_selection: modelSelectionWire
     });
 
     await expect(pending).resolves.toEqual({
       chatId: "server-chat",
-      modelPreset: "desktop-openai-gpt-5"
+      modelPreset: "desktop-openai-gpt-5",
+      modelSelection
     });
   });
 
@@ -874,11 +904,13 @@ describe("memmy-agent client", () => {
       event: "attached",
       chat_id: "server-chat",
       client_request_id: request.client_request_id,
-      model_preset: "desktop-openai-gpt-5"
+      model_preset: "desktop-openai-gpt-5",
+      model_selection: modelSelectionWire
     });
     await expect(pending).resolves.toEqual({
       chatId: "server-chat",
-      modelPreset: "desktop-openai-gpt-5"
+      modelPreset: "desktop-openai-gpt-5",
+      modelSelection
     });
   });
 
@@ -908,11 +940,13 @@ describe("memmy-agent client", () => {
       event: "attached",
       chat_id: "server-chat",
       client_request_id: request.client_request_id,
-      model_preset: "desktop-openai-gpt-5"
+      model_preset: "desktop-openai-gpt-5",
+      model_selection: modelSelectionWire
     });
     await expect(second).resolves.toEqual({
       chatId: "server-chat",
-      modelPreset: "desktop-openai-gpt-5"
+      modelPreset: "desktop-openai-gpt-5",
+      modelSelection
     });
   });
 
@@ -944,11 +978,13 @@ describe("memmy-agent client", () => {
       event: "attached",
       chat_id: "server-chat",
       client_request_id: request.client_request_id,
-      model_preset: "desktop-openai-gpt-5"
+      model_preset: "desktop-openai-gpt-5",
+      model_selection: modelSelectionWire
     });
     await expect(second).resolves.toEqual({
       chatId: "server-chat",
-      modelPreset: "desktop-openai-gpt-5"
+      modelPreset: "desktop-openai-gpt-5",
+      modelSelection
     });
     connection.close();
   });

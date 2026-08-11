@@ -256,7 +256,7 @@ export class MemoryService {
     this.modelTasks = new MemoryModelTaskRouter(() => this.resolveModelTaskContext());
     this.llm = this.modelTasks.client("summary");
     this.skillLlm = this.modelTasks.client("evolution");
-    this.embedder = options.embedder ?? createEmbedder(this.config.embedding);
+    this.embedder = this.modelTasks.embedder();
     const workerHandlerOwner = this;
     this.workerHandlers = createWorkerJobHandlers({
       repos: this.repos,
@@ -575,10 +575,13 @@ export class MemoryService {
           ? this.options.llm
           : createConfiguredMemoryLlm(taskConfig, "memory_evolution")
       );
+    const embedding = this.options.embedder ?? createEmbedder(taskConfig.embedding);
+    freezeModelSelectionConfig(taskConfig);
     return {
       config: taskConfig,
       summary,
-      evolution
+      evolution,
+      embedding
     };
   }
 
@@ -662,9 +665,6 @@ export class MemoryService {
     const reloadedAt = nowIso();
 
     this.config = nextConfig;
-    if (stableStringify(previousConfig.embedding) !== stableStringify(nextConfig.embedding)) {
-      this.embedder = createEmbedder(nextConfig.embedding);
-    }
     if (!requiresRestart && request.restartFailedProcessing !== false) {
       this.restartFailedProcessing(reloadedAt);
     }
@@ -2392,6 +2392,18 @@ function errorMessageFromUnknown(value: unknown): string | undefined {
 
 function cloneMemmyConfig(config: MemmyConfig): MemmyConfig {
   return structuredClone(config);
+}
+
+function freezeModelSelectionConfig(config: MemmyConfig): void {
+  for (const model of [config.summary, config.evolution, config.embedding]) {
+    if (model.actualModelContext) {
+      Object.freeze(model.actualModelContext.capabilities);
+      Object.freeze(model.actualModelContext);
+    }
+    if (model.extraHeaders) Object.freeze(model.extraHeaders);
+    if (model.extraBody) Object.freeze(model.extraBody);
+    Object.freeze(model);
+  }
 }
 
 function memoryConfigLogFields(config: MemmyConfig): Record<string, unknown> {

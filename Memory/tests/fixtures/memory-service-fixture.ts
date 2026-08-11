@@ -28,6 +28,7 @@ export function createMemoryServiceFixture(): {
   };
 } {
   const roots: string[] = [];
+  const databases: MemoryDb[] = [];
 
   function createTestRoot(prefix = "mindock-memory-"): string {
     const root = mkdtempSync(join(tmpdir(), prefix));
@@ -59,6 +60,7 @@ export function createMemoryServiceFixture(): {
     const db = new MemoryDb({
       path: join(root, "memory.sqlite")
     });
+    databases.push(db);
     return {
       root,
       db,
@@ -74,8 +76,13 @@ export function createMemoryServiceFixture(): {
   }
 
   function cleanup(): void {
+    for (const database of databases.splice(0)) {
+      if (database.db.open) {
+        database.close();
+      }
+    }
     for (const root of roots.splice(0)) {
-      rmSync(root, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   }
 

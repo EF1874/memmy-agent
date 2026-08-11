@@ -7,6 +7,7 @@
  */
 import type {
   MemmyAgentMediaAttachment,
+  MemmyAgentModelSelection,
   MemmyAgentModelError,
   MemmyAgentProject,
   MemmyAgentRunStatusSnapshot,
@@ -25,7 +26,8 @@ import type {
 import {
   chatIdToSessionKey,
   isAgentGoalState,
-  isAgentGoalStatus
+  isAgentGoalStatus,
+  parseMemmyAgentModelSelection
 } from "../api/memmy-agent-client.js";
 import type { PendingAttachment } from "./agent-composer-state.js";
 import {
@@ -176,8 +178,13 @@ export interface AgentState {
   modelName: string | null;
   modelPresets: ChatModelPreset[];
   defaultModelPreset: string | null;
-  committedPresetByScope: Record<string, string | null>;
+  committedModelSelectionByScope: Record<string, MemmyAgentModelSelection | null>;
   pendingPresetByScope: Partial<Record<string, string | null>>;
+  pendingModelCommitByRequestId: Record<string, {
+    scopeKey: string;
+    chatId: string | null;
+    presetId: string | null;
+  }>;
   chatViewVisible: boolean;
   currentChatId: string | null;
   currentSessionKey: string | null;
@@ -247,7 +254,8 @@ export type AgentAction =
   | { type: "agent/modelCatalogLoaded"; presets: ChatModelPreset[]; defaultPreset: string | null }
   | { type: "agent/pendingModelPresetUpdated"; scopeKey: string; preset: string | null }
   | { type: "agent/pendingModelPresetCleared"; scopeKey: string }
-  | { type: "agent/modelSelectionCommitted"; scopeKey: string; chatId: string; preset: string }
+  | { type: "agent/modelSelectionRequestStarted"; scopeKey: string; chatId: string | null; clientRequestId: string; presetId: string | null }
+  | { type: "agent/modelSelectionRequestCancelled"; clientRequestId: string }
   | { type: "agent/connectionConnecting" }
   | { type: "agent/connectionFailed"; message: string }
   | { type: "agent/connectionDisposed" }
@@ -330,8 +338,9 @@ export const initialAgentState: AgentState = {
   modelName: null,
   modelPresets: [],
   defaultModelPreset: null,
-  committedPresetByScope: {},
+  committedModelSelectionByScope: {},
   pendingPresetByScope: {},
+  pendingModelCommitByRequestId: {},
   chatViewVisible: false,
   currentChatId: null,
   currentSessionKey: null,
@@ -415,18 +424,26 @@ export function agentReducer(state: AgentState, action: AgentAction): AgentState
           action.scopeKey
         )
       };
-    case "agent/modelSelectionCommitted": {
-      const pendingPresetByScope = { ...state.pendingPresetByScope };
-      delete pendingPresetByScope[action.scopeKey];
+    case "agent/modelSelectionRequestStarted":
       return {
         ...state,
-        committedPresetByScope: {
-          ...state.committedPresetByScope,
-          [action.chatId]: action.preset
-        },
-        pendingPresetByScope
+        pendingModelCommitByRequestId: {
+          ...state.pendingModelCommitByRequestId,
+          [action.clientRequestId]: {
+            scopeKey: action.scopeKey,
+            chatId: action.chatId,
+            presetId: action.presetId
+          }
+        }
       };
-    }
+    case "agent/modelSelectionRequestCancelled":
+      return {
+        ...state,
+        pendingModelCommitByRequestId: clearChatMapValue(
+          state.pendingModelCommitByRequestId,
+          action.clientRequestId
+        )
+      };
     case "agent/connectionConnecting":
       return { ...state, connectionStatus: "connecting", connectionError: null };
     case "agent/connectionFailed":
@@ -675,7 +692,7 @@ function isBackgroundOperationError(error: AgentOperationError): boolean {
 
 function operationErrorFromEvent(event: MemmyAgentWsEvent, source: AgentOperationErrorSource): AgentOperationError {
   const generation = event.connection_generation ?? 0;
-  const message = event.detail ?? "memmy-agent error";
+  const message = event.reason ?? event.detail ?? "memmy-agent error";
   const createdAt = Date.now();
   agentWsOperationErrorCounter += 1;
   return {
@@ -1493,12 +1510,10 @@ function completeSessionsLoad(state: AgentState, sessions: MemmyAgentSessionSumm
   }
 
   const canonicalChatIds = new Set(sessions.map((session) => sessionKeyToChatId(session.key)));
-  const committedPresetByScope = { ...state.committedPresetByScope };
+  const committedModelSelectionByScope = { ...state.committedModelSelectionByScope };
   for (const session of sessions) {
     const chatId = sessionKeyToChatId(session.key);
-    committedPresetByScope[chatId] = typeof session.model_preset === "string"
-      ? session.model_preset
-      : null;
+    committedModelSelectionByScope[chatId] = session.model_selection ?? null;
   }
   const optimisticTasksByChatId = pruneOptimisticTasks(state.optimisticTasksByChatId, canonicalChatIds);
   const queuedMessagesByChatId = pruneChatMap(
@@ -1532,7 +1547,7 @@ function completeSessionsLoad(state: AgentState, sessions: MemmyAgentSessionSumm
   const nextState = {
     ...state,
     sessions,
-    committedPresetByScope,
+    committedModelSelectionByScope,
     optimisticTasksByChatId,
     queuedMessagesByChatId,
     queueRevisionByChatId,
@@ -1572,27 +1587,20 @@ function reconcileModelCatalog(
       delete pendingPresetByScope[scopeKey];
     }
   }
-  const committedPresetByScope = { ...state.committedPresetByScope };
-  for (const [scopeKey, preset] of Object.entries(committedPresetByScope)) {
-    if (preset !== null && !availableNames.has(preset)) {
-      committedPresetByScope[scopeKey] = null;
-    }
-  }
   return {
     ...state,
     modelPresets: presets,
     defaultModelPreset: defaultPreset && availableNames.has(defaultPreset)
       ? defaultPreset
       : null,
-    pendingPresetByScope,
-    committedPresetByScope
+    pendingPresetByScope
   };
 }
 
 export function selectedModelPresetForScope(
   state: Pick<
     AgentState,
-    "modelPresets" | "defaultModelPreset" | "pendingPresetByScope" | "committedPresetByScope"
+    "modelPresets" | "defaultModelPreset" | "pendingPresetByScope" | "committedModelSelectionByScope"
   >,
   scopeKey: string
 ): string | null {
@@ -1606,8 +1614,8 @@ export function selectedModelPresetForScope(
     if (pending && availableNames.has(pending)) return pending;
     if (pending === null) return state.defaultModelPreset;
   }
-  const committed = state.committedPresetByScope[scopeKey];
-  if (committed && availableNames.has(committed)) return committed;
+  const committed = state.committedModelSelectionByScope[scopeKey];
+  if (committed) return committed.presetId;
   return state.defaultModelPreset;
 }
 
@@ -2048,6 +2056,16 @@ function clearChatMapValue<T>(values: Record<string, T>, chatId: string): Record
   return next;
 }
 
+function clearPendingModelCommit(state: AgentState, clientRequestId: string): AgentState {
+  const pendingModelCommitByRequestId = clearChatMapValue(
+    state.pendingModelCommitByRequestId,
+    clientRequestId
+  );
+  return pendingModelCommitByRequestId === state.pendingModelCommitByRequestId
+    ? state
+    : { ...state, pendingModelCommitByRequestId };
+}
+
 function setSuppressAssistantStreamUntilTurnEnd(state: AgentState, chatId: string, enabled: boolean): AgentState {
   if (!enabled) {
     return clearSuppressAssistantStreamUntilTurnEnd(state, chatId);
@@ -2477,8 +2495,9 @@ function reduceWsEvent(state: AgentState, event: MemmyAgentWsEvent): AgentState 
       });
     }
     case "message_queue_removed":
-      return event.chat_id && event.client_request_id
-        ? applyQueueIncrement(
+      if (!event.chat_id || !event.client_request_id) return state;
+      return clearPendingModelCommit(
+        applyQueueIncrement(
             state,
             event,
             (currentState) => removeQueuedMessageFromChat(
@@ -2486,8 +2505,9 @@ function reduceWsEvent(state: AgentState, event: MemmyAgentWsEvent): AgentState 
               event.chat_id!,
               event.client_request_id!
             ).state
-          )
-        : state;
+          ),
+        event.client_request_id
+      );
     case "message_queue_snapshot":
       return applyQueueSnapshot(state, event);
     case "queue_remove_result": {
@@ -2507,11 +2527,17 @@ function reduceWsEvent(state: AgentState, event: MemmyAgentWsEvent): AgentState 
       if (revision !== null && (currentRevision === undefined || revision > currentRevision)) {
         nextState = markQueueDesynced(nextState, event.chat_id, revision);
       }
-      return nextState;
+      return event.outcome === "removed"
+        ? clearPendingModelCommit(nextState, event.client_request_id)
+        : nextState;
     }
     case "error": {
       const rejectedQueue = rejectQueuedMessage(state, event);
-      if (rejectedQueue) return rejectedQueue;
+      if (rejectedQueue) {
+        return event.client_request_id
+          ? clearPendingModelCommit(rejectedQueue, event.client_request_id)
+          : rejectedQueue;
+      }
       if (event.detail === "image_rejected" || event.detail === "attachment_rejected") {
         return handleMediaRejected(state, event);
       }
@@ -2521,7 +2547,10 @@ function reduceWsEvent(state: AgentState, event: MemmyAgentWsEvent): AgentState 
       if (event.detail === "stop_failed") {
         return handleStopFailed(state, event);
       }
-      return setOperationError(state, "chat", operationErrorFromEvent(event, "gateway-command"));
+      const errored = setOperationError(state, "chat", operationErrorFromEvent(event, "gateway-command"));
+      return event.client_request_id
+        ? clearPendingModelCommit(errored, event.client_request_id)
+        : errored;
     }
     case "transport_error":
       if (event.detail === "message_too_big") {
@@ -2582,20 +2611,33 @@ function reduceWsEvent(state: AgentState, event: MemmyAgentWsEvent): AgentState 
     case "session_updated":
       return event.chat_id ? markSessionUpdated(state, event.chat_id, event.scope) : state;
     case "message_accepted":
-      if (!event.chat_id || typeof event.model_preset !== "string") return state;
-      return {
-        ...state,
-        committedPresetByScope: {
-          ...state.committedPresetByScope,
-          [event.chat_id]: event.model_preset
-        },
-        pendingPresetByScope: clearChatMapValue(
-          state.pendingPresetByScope,
-          event.chat_id
-        )
-      };
+      if (!event.chat_id || !event.client_request_id) return state;
+      {
+        const pending = state.pendingModelCommitByRequestId[event.client_request_id];
+        const selection = parseMemmyAgentModelSelection(event.model_selection);
+        if (
+          !pending
+          || !selection
+          || (pending.chatId !== null && pending.chatId !== event.chat_id)
+          || (pending.presetId !== null && pending.presetId !== selection.presetId)
+        ) return state;
+        const pendingModelCommitByRequestId = { ...state.pendingModelCommitByRequestId };
+        delete pendingModelCommitByRequestId[event.client_request_id];
+        return {
+          ...state,
+          committedModelSelectionByScope: {
+            ...state.committedModelSelectionByScope,
+            [event.chat_id]: selection
+          },
+          pendingPresetByScope: clearChatMapValue(
+            state.pendingPresetByScope,
+            pending.scopeKey
+          ),
+          pendingModelCommitByRequestId
+        };
+      }
     case "runtime_model_updated":
-      return typeof event.model_name === "string" ? { ...state, modelName: event.model_name } : state;
+      return state;
     default:
       return state;
   }

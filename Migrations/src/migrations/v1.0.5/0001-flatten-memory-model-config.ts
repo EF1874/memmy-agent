@@ -1,8 +1,7 @@
-import { randomUUID } from "node:crypto";
-import { constants as fsConstants, type BigIntStats } from "node:fs";
-import fs from "node:fs/promises";
-import path from "node:path";
-import YAML from "yaml";
+import {
+  mutateRuntimeConfig,
+  mutateRuntimeConfigLockHeld,
+} from "../../runtime-config-writer.js";
 import {
   MigrationError,
   type AgentWorkspaceMigrationContext,
@@ -61,25 +60,6 @@ function configError(message: string, cause?: unknown): MigrationError {
     scope: "runtime-config",
     cause,
   });
-}
-
-function ioError(filePath: string, cause: unknown): MigrationError {
-  return new MigrationError("migration_io_failed", `Migration I/O failed for ${filePath}`, {
-    migrationId: MIGRATION_ID,
-    scope: "runtime-config",
-    cause,
-  });
-}
-
-function sourceChangedError(filePath: string): MigrationError {
-  return new MigrationError(
-    "migration_source_changed",
-    `Runtime config changed while it was being migrated: ${filePath}`,
-    {
-      migrationId: MIGRATION_ID,
-      scope: "runtime-config",
-    },
-  );
 }
 
 function optionalObject(parent: JsonObject, key: string, fieldPath: string): JsonObject | null {
@@ -451,104 +431,40 @@ function migrateConfig(config: JsonObject): { changed: boolean; config: JsonObje
   return { changed: true, config: migrated };
 }
 
-function sameFingerprint(left: BigIntStats, right: BigIntStats): boolean {
-  return (
-    left.isFile() &&
-    right.isFile() &&
-    left.dev === right.dev &&
-    left.ino === right.ino &&
-    left.size === right.size &&
-    left.mtimeNs === right.mtimeNs
-  );
-}
-
-async function fsyncDirectory(directory: string): Promise<void> {
-  if (process.platform === "win32") return;
-  const handle = await fs.open(directory, fsConstants.O_RDONLY);
-  try {
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-}
-
-async function commitConfig(
-  configPath: string,
-  source: string,
-  initial: BigIntStats,
-  config: JsonObject,
-  hooks: MigrationHooks,
-): Promise<void> {
-  const directory = path.dirname(configPath);
-  const tempPath = path.join(
-    directory,
-    `.${path.basename(configPath)}.v1.0.5-0001.${process.pid}.${randomUUID()}.tmp`,
-  );
-  let handle = null;
-  try {
-    handle = await fs.open(
-      tempPath,
-      fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY,
-      Number(initial.mode & 0o777n),
-    );
-    await handle.writeFile(YAML.stringify(config, { lineWidth: 0 }), "utf8");
-    await handle.sync();
-    await handle.close();
-    handle = null;
-
-    await hooks.beforeCommit?.(configPath);
-    const [currentSource, current] = await Promise.all([
-      fs.readFile(configPath, "utf8"),
-      fs.lstat(configPath, { bigint: true }),
-    ]);
-    if (currentSource !== source || !sameFingerprint(initial, current)) {
-      throw sourceChangedError(configPath);
-    }
-
-    await fs.rename(tempPath, configPath);
-    await fsyncDirectory(directory);
-  } catch (error) {
-    if (error instanceof MigrationError) throw error;
-    throw ioError(configPath, error);
-  } finally {
-    await handle?.close().catch(() => undefined);
-    await fs.unlink(tempPath).catch(() => undefined);
-  }
-}
-
 async function migrateRuntimeConfig(
   context: AgentWorkspaceMigrationContext,
   hooks: MigrationHooks = {},
 ): Promise<MigrationResult> {
-  const configPath = context.runtimeConfigFile;
-  let source: string;
-  let initial: BigIntStats;
+  const mutator = (config: JsonObject): boolean => {
+    const result = migrateConfig(config);
+    if (!result.changed) return false;
+    for (const key of Object.keys(config)) delete config[key];
+    Object.assign(config, result.config);
+    return true;
+  };
+  const options = {
+    createIfMissing: false as const,
+    beforeCommit: hooks.beforeCommit,
+  };
+  let result;
   try {
-    [source, initial] = await Promise.all([
-      fs.readFile(configPath, "utf8"),
-      fs.lstat(configPath, { bigint: true }),
-    ]);
+    result = context.runtimeConfigLock
+      ? await mutateRuntimeConfigLockHeld(context.runtimeConfigLock, mutator, options)
+      : await mutateRuntimeConfig(context.runtimeConfigFile, mutator, options);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return { scanned: 0, changed: 0, ignored: 1 };
+    if (error instanceof MigrationError && error.migrationId === null) {
+      throw new MigrationError(error.code, error.message, {
+        migrationId: MIGRATION_ID,
+        scope: "runtime-config",
+        cause: error.cause,
+      });
     }
-    throw ioError(configPath, error);
+    throw error;
   }
-  if (!initial.isFile()) throw configError(`Runtime config is not a regular file: ${configPath}`);
-  if (!source.trim()) return { scanned: 1, changed: 0, ignored: 1 };
-
-  let parsed: unknown;
-  try {
-    parsed = YAML.parse(source);
-  } catch (error) {
-    throw configError(`Runtime config is not valid YAML: ${configPath}`, error);
-  }
-  if (!isObject(parsed)) throw configError("Runtime config root must be an object");
-
-  const result = migrateConfig(parsed);
-  if (!result.changed) return { scanned: 1, changed: 0, ignored: 1 };
-  await commitConfig(configPath, source, initial, result.config, hooks);
-  return { scanned: 1, changed: 1, ignored: 0 };
+  if (!result.sourceExists) return { scanned: 0, changed: 0, ignored: 1 };
+  return result.changed
+    ? { scanned: 1, changed: 1, ignored: 0 }
+    : { scanned: 1, changed: 0, ignored: 1 };
 }
 
 export const flattenMemoryModelConfigV105: MigrationDefinition = {

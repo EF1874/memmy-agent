@@ -322,4 +322,152 @@ describe("AgentLoop concurrent chat turns", () => {
     expect(readGoalState(loop.sessions.getOrCreate(keys[0]).metadata)?.tokensUsed).toBe(11);
     expect(readGoalState(loop.sessions.getOrCreate(keys[1]).metadata)?.tokensUsed).toBe(22);
   });
+
+  it("keeps different Provider snapshots, retries, usage, ACKs, and session metadata isolated", async () => {
+    const providers = {
+      "preset-a": { spec: { name: "provider-a" }, generation: { maxTokens: 256 } },
+      "preset-b": { spec: { name: "provider-b" }, generation: { maxTokens: 512 } },
+    } as const;
+    const selections = Object.fromEntries(Object.entries(providers).map(([presetId, provider]) => [
+      presetId,
+      {
+        preset: presetId,
+        presetId,
+        provider: provider.spec.name,
+        endpointId: "chat",
+        protocol: "openai-chat-completions",
+        model: `model-${presetId.at(-1)}`,
+        source: "byok",
+        ownerAccountId: null,
+        capability: "agent",
+        capabilities: ["agent"],
+        snapshot: {
+          provider,
+          model: `model-${presetId.at(-1)}`,
+          contextWindowTokens: 200_000,
+          signature: [presetId],
+        },
+      },
+    ])) as Record<string, any>;
+    const workspace = tmpRoot();
+    const loop = new AgentLoop({
+      bus: new MessageBus(),
+      config: new Config({ memmyMemory: { enabled: false } }),
+      provider: providers["preset-a"],
+      workspace,
+      modelSelectionResolver: ({ requestedPreset }) => requestedPreset
+        ? selections[requestedPreset] ?? null
+        : selections["preset-a"],
+    });
+    const started: string[] = [];
+    let releaseBoth!: () => void;
+    const bothStarted = new Promise<void>((resolve) => {
+      releaseBoth = resolve;
+    });
+    loop.runner.run = vi.fn(async (spec: any) => {
+      started.push(spec.sessionKey);
+      if (started.length === 2) releaseBoth();
+      await bothStarted;
+      await spec.retryWaitCallback?.(`retry:${spec.provider.spec.name}`);
+      const totalTokens = spec.provider.spec.name === "provider-a" ? 11 : 22;
+      if (spec.provider.spec.name === "provider-b") {
+        return {
+          ...runResult(),
+          finalContent: "failure:provider-b",
+          content: "failure:provider-b",
+          stopReason: "error",
+          finishReason: "error",
+          error: "failure:provider-b",
+          usage: { total_tokens: totalTokens, prompt_tokens: totalTokens - 1, completion_tokens: 1 },
+          response: {
+            usage: { total_tokens: totalTokens },
+            finishReason: "error",
+            errorCategory: "model_failed",
+          },
+        } as any;
+      }
+      return {
+        ...runResult(),
+        finalContent: `done:${spec.model}`,
+        usage: { total_tokens: totalTokens, prompt_tokens: totalTokens - 1, completion_tokens: 1 },
+        response: { usage: { total_tokens: totalTokens }, finishReason: "stop" },
+      } as any;
+    });
+    for (const suffix of ["a", "b"]) {
+      loop.sessions.reserveWebuiSessionBinding(`websocket:provider-${suffix}`, {
+        projectId: null,
+        cwd: workspace,
+      });
+    }
+
+    const turnResults = await Promise.all(["a", "b"].map((suffix) => loop.processMessage(new InboundMessage({
+      channel: "websocket",
+      senderId: "user",
+      chatId: `provider-${suffix}`,
+      content: `run ${suffix}`,
+      metadata: {
+        webui: true,
+        webuiProjectId: null,
+        webuiWorkspaceCwd: workspace,
+        client_request_id: `${suffix === "a" ? "aaaaaaaa" : "bbbbbbbb"}-bbbb-4bbb-8bbb-bbbbbbbbbbbb`,
+        model_preset: `preset-${suffix}`,
+      },
+    }))));
+
+    expect(new Set((loop.runner.run as any).mock.calls.map(([spec]: any[]) => (
+      `${spec.provider.spec.name}:${spec.model}`
+    )))).toEqual(new Set(["provider-a:model-a", "provider-b:model-b"]));
+    expect(loop.lastUsageBySession.get("websocket:provider-a")).toMatchObject({ total_tokens: 11 });
+    expect(loop.lastUsageBySession.get("websocket:provider-b")).toMatchObject({ total_tokens: 22 });
+    for (const suffix of ["a", "b"] as const) {
+      expect(loop.sessions.get(`websocket:provider-${suffix}`)?.metadata.modelSelection).toMatchObject({
+        presetId: `preset-${suffix}`,
+        provider: `provider-${suffix}`,
+        model: `model-${suffix}`,
+      });
+    }
+    const outbound: any[] = [];
+    while (loop.bus.outboundSize) outbound.push(await loop.bus.consumeOutbound());
+    for (const suffix of ["a", "b"] as const) {
+      expect(outbound).toContainEqual(expect.objectContaining({
+        chatId: `provider-${suffix}`,
+        metadata: expect.objectContaining({
+          webuiMessageAccepted: true,
+          modelSelection: expect.objectContaining({ preset_id: `preset-${suffix}` }),
+        }),
+      }));
+      expect(outbound).toContainEqual(expect.objectContaining({
+        chatId: `provider-${suffix}`,
+        content: `retry:provider-${suffix}`,
+        metadata: expect.objectContaining({
+          model_selection: expect.objectContaining({ preset_id: `preset-${suffix}` }),
+        }),
+      }));
+    }
+    expect(turnResults[0]?.metadata).not.toHaveProperty("modelErrorCategory");
+    expect(turnResults[1]).toMatchObject({
+      chatId: "provider-b",
+      metadata: {
+        model_preset: "preset-b",
+        modelErrorCategory: "model_failed",
+        modelErrorDetail: "failure:provider-b",
+        modelErrorContext: {
+          presetId: "preset-b",
+          source: "byok",
+          provider: "provider-b",
+          model: "model-b",
+          capability: "agent",
+        },
+      },
+    });
+    expect(loop.sessions.get("websocket:provider-b")?.messages.filter((message) => message.model_error).at(-1)?.model_error).toEqual({
+      category: "model_failed",
+      detail: "failure:provider-b",
+      presetId: "preset-b",
+      source: "byok",
+      provider: "provider-b",
+      model: "model-b",
+      capability: "agent",
+    });
+  });
 });

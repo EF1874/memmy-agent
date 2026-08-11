@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import { INSTALLATION_SCAN_SCOPE_UUID } from "../../installation-scan-scope.js";
 import { LOCAL_BYOK_ACCOUNT_UUID } from "../account-context.js";
-import { createAppStateStore, runMigrations } from "../index.js";
+import { createAppStateStore, runMigrations, type AppStateStore } from "../index.js";
 import { captureLegacyAppState } from "../legacy-state-migration.js";
 import { createSqliteSecretStore } from "../secret-store.js";
 
@@ -17,6 +17,93 @@ afterEach(() => {
     tempDir = undefined;
   }
 });
+
+function readHistoricalModelConfig(store: AppStateStore): Record<string, unknown> {
+  const row = store.db.prepare(
+    "SELECT * FROM account_model_config WHERE uuid = ?"
+  ).get(LOCAL_BYOK_ACCOUNT_UUID) as Record<string, unknown> | undefined;
+  if (!row) throw new Error("historical local BYOK model row is missing");
+  const secret = (ref: unknown) => typeof ref === "string" ? store.secretStore.get(ref) : null;
+  const primaryKey = secret(row.api_key_ref);
+  const embeddingKey = secret(row.embedding_api_key_ref);
+  const memoryKey = secret(row.memory_api_key_ref) ?? primaryKey;
+  const skillKey = secret(row.skill_api_key_ref) ?? primaryKey;
+  const asrKey = secret(row.asr_api_key_ref);
+  const imageKey = secret(row.image_api_key_ref);
+  const masked = (value: string | null) => value ? "••••" : "";
+  return {
+    provider: row.provider,
+    baseUrl: row.base_url,
+    modelId: row.model_id,
+    hasApiKey: Boolean(primaryKey),
+    apiKeyMasked: masked(primaryKey),
+    embedding: row.embedding_mode === "custom"
+      ? {
+          mode: "custom",
+          baseUrl: row.embedding_base_url,
+          modelId: row.embedding_model_id,
+          hasApiKey: Boolean(embeddingKey),
+          apiKeyMasked: masked(embeddingKey)
+        }
+      : { mode: "local", baseUrl: null, modelId: null, hasApiKey: false, apiKeyMasked: "" },
+    memmyMemory: {
+      summary: {
+        provider: row.memory_provider ?? row.provider,
+        baseUrl: row.memory_base_url ?? row.base_url,
+        modelId: row.memory_model_id ?? row.model_id,
+        hasApiKey: Boolean(memoryKey),
+        apiKeyMasked: masked(memoryKey)
+      },
+      evolution: {
+        provider: row.skill_provider ?? row.provider,
+        baseUrl: row.skill_base_url ?? row.base_url,
+        modelId: row.skill_model_id ?? row.model_id,
+        hasApiKey: Boolean(skillKey),
+        apiKeyMasked: masked(skillKey)
+      }
+    },
+    asr: {
+      provider: row.asr_provider,
+      baseUrl: row.asr_base_url,
+      modelId: row.asr_model_id,
+      hasApiKey: Boolean(asrKey),
+      apiKeyMasked: masked(asrKey)
+    },
+    imageGen: row.image_provider && row.image_base_url && row.image_model_id
+      ? {
+          provider: row.image_provider,
+          baseUrl: row.image_base_url,
+          modelId: row.image_model_id,
+          hasApiKey: Boolean(imageKey),
+          apiKeyMasked: masked(imageKey)
+        }
+      : null,
+    updatedAt: row.updated_at
+  };
+}
+
+function readHistoricalModelSecret(
+  store: AppStateStore,
+  target: "primary" | "embedding"
+): string | null {
+  const column = target === "primary" ? "api_key_ref" : "embedding_api_key_ref";
+  const row = store.db.prepare(
+    `SELECT ${column} AS ref FROM account_model_config WHERE uuid = ?`
+  ).get(LOCAL_BYOK_ACCOUNT_UUID) as { ref?: string | null } | undefined;
+  return row?.ref ? store.secretStore.get(row.ref) : null;
+}
+
+function ensureHistoricalModelRow(db: DatabaseSync): void {
+  const now = new Date().toISOString();
+  db.prepare(
+    "INSERT OR IGNORE INTO cloud_accounts (uuid, created_at, updated_at) VALUES (?, ?, ?)"
+  ).run(LOCAL_BYOK_ACCOUNT_UUID, now, now);
+  db.prepare(
+    `INSERT OR IGNORE INTO account_model_config (
+       uuid, provider, base_url, model_id, embedding_mode, created_at, updated_at
+     ) VALUES (?, 'openai_compatible', 'https://api.openai.com/v1', '', 'local', ?, ?)`
+  ).run(LOCAL_BYOK_ACCOUNT_UUID, now, now);
+}
 
 describe("app state store migrations", () => {
   it("creates initial tables and seed rows idempotently", () => {
@@ -42,8 +129,8 @@ describe("app state store migrations", () => {
     expect(settings.userMode).toBe("unset");
     expect(settings.menuBarIconEnabled).toBe(true);
     expect(agentSources).toEqual([]);
-    expect(firstMigrationCount).toBe(29);
-    expect(secondMigrationCount).toBe(29);
+    expect(firstMigrationCount).toBe(30);
+    expect(secondMigrationCount).toBe(30);
   });
 
   it("preserves the authenticated account when upgrading the legacy 0007 database", () => {
@@ -296,7 +383,7 @@ describe("app state store migrations", () => {
     const upgradedSettings = upgradedStore.repositories.bootstrap.getAppSettings();
     const upgradedOnboarding = upgradedStore.repositories.bootstrap.getOnboardingState();
     const upgradedPrivacy = upgradedStore.repositories.bootstrap.getPrivacySettings();
-    const upgradedModel = upgradedStore.repositories.modelConfig.get();
+    const upgradedModel = readHistoricalModelConfig(upgradedStore);
     const upgradedActiveUuid = upgradedStore.db
       .prepare("SELECT active_uuid FROM app_settings WHERE id = 'default'")
       .get() as { active_uuid: string | null };
@@ -338,10 +425,10 @@ describe("app state store migrations", () => {
         hasApiKey: true
       }
     });
-    expect(upgradedStore.repositories.modelConfig.getTestApiKey?.("primary")).toBe(
+    expect(readHistoricalModelSecret(upgradedStore, "primary")).toBe(
       "primary-fixture-value"
     );
-    expect(upgradedStore.repositories.modelConfig.getTestApiKey?.("embedding")).toBe(
+    expect(readHistoricalModelSecret(upgradedStore, "embedding")).toBe(
       "embedding-fixture-value"
     );
     expect(upgradedModelRow).toEqual({
@@ -373,16 +460,16 @@ describe("app state store migrations", () => {
       allowMemoryImprovementUpload: true,
       localOnlyMode: true
     });
-    expect(reopenedStore.repositories.modelConfig.get()).toMatchObject({
+    expect(readHistoricalModelConfig(reopenedStore)).toMatchObject({
       provider: "deepseek",
       modelId: "deepseek-chat",
       hasApiKey: true,
       embedding: { mode: "custom", modelId: "legacy-embedding", hasApiKey: true }
     });
-    expect(reopenedStore.repositories.modelConfig.getTestApiKey?.("primary")).toBe(
+    expect(readHistoricalModelSecret(reopenedStore, "primary")).toBe(
       "primary-fixture-value"
     );
-    expect(reopenedStore.repositories.modelConfig.getTestApiKey?.("embedding")).toBe(
+    expect(readHistoricalModelSecret(reopenedStore, "embedding")).toBe(
       "embedding-fixture-value"
     );
     reopenedStore.close();
@@ -433,7 +520,7 @@ describe("app state store migrations", () => {
       allowMemoryImprovementUpload: true,
       localOnlyMode: true
     });
-    expect(upgradedStore.repositories.modelConfig.get()).toMatchObject({
+    expect(readHistoricalModelConfig(upgradedStore)).toMatchObject({
       provider: "deepseek",
       baseUrl: "https://legacy-logged-out.example/v1",
       modelId: "deepseek-chat"
@@ -742,7 +829,7 @@ describe("app state store migrations", () => {
     const upgradedSettings = upgradedStore.repositories.bootstrap.getAppSettings();
     const upgradedOnboarding = upgradedStore.repositories.bootstrap.getOnboardingState();
     const upgradedPrivacy = upgradedStore.repositories.bootstrap.getPrivacySettings();
-    const upgradedModel = upgradedStore.repositories.modelConfig.get();
+    const upgradedModel = readHistoricalModelConfig(upgradedStore);
     const upgradedActiveUuid = upgradedStore.db
       .prepare("SELECT active_uuid FROM app_settings WHERE id = 'default'")
       .get() as { active_uuid: string | null };
@@ -784,10 +871,10 @@ describe("app state store migrations", () => {
         hasApiKey: true
       }
     });
-    expect(upgradedStore.repositories.modelConfig.getTestApiKey?.("primary")).toBe(
+    expect(readHistoricalModelSecret(upgradedStore, "primary")).toBe(
       "primary-fixture-value"
     );
-    expect(upgradedStore.repositories.modelConfig.getTestApiKey?.("embedding")).toBe(
+    expect(readHistoricalModelSecret(upgradedStore, "embedding")).toBe(
       "embedding-fixture-value"
     );
     expect(upgradedModelRow).toEqual({
@@ -819,16 +906,16 @@ describe("app state store migrations", () => {
       allowMemoryImprovementUpload: true,
       localOnlyMode: true
     });
-    expect(reopenedStore.repositories.modelConfig.get()).toMatchObject({
+    expect(readHistoricalModelConfig(reopenedStore)).toMatchObject({
       provider: "deepseek",
       modelId: "deepseek-chat",
       hasApiKey: true,
       embedding: { mode: "custom", modelId: "legacy-embedding", hasApiKey: true }
     });
-    expect(reopenedStore.repositories.modelConfig.getTestApiKey?.("primary")).toBe(
+    expect(readHistoricalModelSecret(reopenedStore, "primary")).toBe(
       "primary-fixture-value"
     );
-    expect(reopenedStore.repositories.modelConfig.getTestApiKey?.("embedding")).toBe(
+    expect(readHistoricalModelSecret(reopenedStore, "embedding")).toBe(
       "embedding-fixture-value"
     );
     reopenedStore.close();
@@ -879,7 +966,7 @@ describe("app state store migrations", () => {
       allowMemoryImprovementUpload: true,
       localOnlyMode: true
     });
-    expect(upgradedStore.repositories.modelConfig.get()).toMatchObject({
+    expect(readHistoricalModelConfig(upgradedStore)).toMatchObject({
       provider: "deepseek",
       baseUrl: "https://legacy-logged-out.example/v1",
       modelId: "deepseek-chat"
@@ -1188,7 +1275,7 @@ describe("app state store migrations", () => {
     const upgradedSettings = upgradedStore.repositories.bootstrap.getAppSettings();
     const upgradedOnboarding = upgradedStore.repositories.bootstrap.getOnboardingState();
     const upgradedPrivacy = upgradedStore.repositories.bootstrap.getPrivacySettings();
-    const upgradedModel = upgradedStore.repositories.modelConfig.get();
+    const upgradedModel = readHistoricalModelConfig(upgradedStore);
     const upgradedActiveUuid = upgradedStore.db
       .prepare("SELECT active_uuid FROM app_settings WHERE id = 'default'")
       .get() as { active_uuid: string | null };
@@ -1230,10 +1317,10 @@ describe("app state store migrations", () => {
         hasApiKey: true
       }
     });
-    expect(upgradedStore.repositories.modelConfig.getTestApiKey?.("primary")).toBe(
+    expect(readHistoricalModelSecret(upgradedStore, "primary")).toBe(
       "primary-fixture-value"
     );
-    expect(upgradedStore.repositories.modelConfig.getTestApiKey?.("embedding")).toBe(
+    expect(readHistoricalModelSecret(upgradedStore, "embedding")).toBe(
       "embedding-fixture-value"
     );
     expect(upgradedModelRow).toEqual({
@@ -1265,16 +1352,16 @@ describe("app state store migrations", () => {
       allowMemoryImprovementUpload: true,
       localOnlyMode: true
     });
-    expect(reopenedStore.repositories.modelConfig.get()).toMatchObject({
+    expect(readHistoricalModelConfig(reopenedStore)).toMatchObject({
       provider: "deepseek",
       modelId: "deepseek-chat",
       hasApiKey: true,
       embedding: { mode: "custom", modelId: "legacy-embedding", hasApiKey: true }
     });
-    expect(reopenedStore.repositories.modelConfig.getTestApiKey?.("primary")).toBe(
+    expect(readHistoricalModelSecret(reopenedStore, "primary")).toBe(
       "primary-fixture-value"
     );
-    expect(reopenedStore.repositories.modelConfig.getTestApiKey?.("embedding")).toBe(
+    expect(readHistoricalModelSecret(reopenedStore, "embedding")).toBe(
       "embedding-fixture-value"
     );
     reopenedStore.close();
@@ -1325,7 +1412,7 @@ describe("app state store migrations", () => {
       allowMemoryImprovementUpload: true,
       localOnlyMode: true
     });
-    expect(upgradedStore.repositories.modelConfig.get()).toMatchObject({
+    expect(readHistoricalModelConfig(upgradedStore)).toMatchObject({
       provider: "deepseek",
       baseUrl: "https://legacy-logged-out.example/v1",
       modelId: "deepseek-chat"
@@ -1792,11 +1879,16 @@ describe("app state store migrations", () => {
       "cache_creation_input_tokens",
       "metadata_json",
       "usage_json",
-      "created_at"
+      "created_at",
+      "preset_id",
+      "provider",
+      "model",
+      "capability"
     ]);
     expect(byokTokenUsageIndexes).toEqual(expect.arrayContaining([
       "idx_byok_token_usage_events_created",
       "idx_byok_token_usage_events_kind_created",
+      "idx_byok_token_usage_events_model",
       "idx_byok_token_usage_events_source_created"
     ]));
     expect(idempotencyColumns).toContain("uuid");
@@ -1848,7 +1940,7 @@ describe("app state store migrations", () => {
     const currentRef = "legacy:model-api-key";
     const targetRef = `account:${uuid}:model-api-key`;
 
-    initialStore.repositories.modelConfig.get();
+    ensureHistoricalModelRow(initialStore.db);
     initialStore.secretStore.set(currentRef, "sk-current-secret", { uuid, purpose: "model_api_key" });
     initialStore.secretStore.set(targetRef, "sk-stale-secret", { uuid, purpose: "model_api_key" });
     initialStore.db.prepare("UPDATE account_model_config SET api_key_ref = ? WHERE uuid = ?").run(currentRef, uuid);

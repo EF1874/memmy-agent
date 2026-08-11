@@ -117,6 +117,7 @@ describe("AgentRuntimeBridge", () => {
     expect(lifecycleBlock).toContain("return;");
     expect(lifecycleBlock).toContain("dispatch(agentActions.wsEventReceived(event));");
     expect(source).toContain("event.chat_id !== subscribedChatRef.current");
+    expect(source).not.toContain("nextConnection.onRuntimeModelUpdate");
   });
 
   it("refreshes the chat catalog and settings model config from the same config change event", () => {

@@ -1,4 +1,8 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import type {
+  ModelSelectionInput,
+  ResolvedModelSelection,
+} from "../../../providers/model-catalog.js";
 
 export class RequestContext {
   channel?: string | null;
@@ -43,6 +47,7 @@ export class ToolContext extends RequestContext {
   fileStateStore?: any;
   messageSendCallback?: any;
   providerSnapshotLoader?: (() => any) | null;
+  modelSelectionResolver?: ((input: ModelSelectionInput) => ResolvedModelSelection | null) | null;
   execSessionManager?: any;
   browserSessionManager?: any;
   goalRuntime?: any;
@@ -56,6 +61,7 @@ export class ToolContext extends RequestContext {
     this.cronService = init.cronService;
     this.fileStateStore = init.fileStateStore;
     this.providerSnapshotLoader = init.providerSnapshotLoader ?? null;
+    this.modelSelectionResolver = init.modelSelectionResolver ?? null;
     this.execSessionManager = init.execSessionManager;
     this.browserSessionManager = init.browserSessionManager;
     this.goalRuntime = init.goalRuntime;

@@ -3,11 +3,6 @@ import type { DatabaseSync } from "node:sqlite";
 
 export const LOCAL_BYOK_ACCOUNT_UUID = "local-byok-onboarding";
 
-export interface EnsureAccountDefaultsOptions {
-  /** Copy legacy model config. */
-  copyLegacyModelConfig?: boolean;
-}
-
 /** Reads get active account uuid. */
 export function getActiveAccountUuid(db: DatabaseSync): string | null {
   try {
@@ -41,37 +36,10 @@ export function ensureLocalByokAccount(db: DatabaseSync): string {
   return LOCAL_BYOK_ACCOUNT_UUID;
 }
 
-/** Validates ensure local byok model config defaults. */
-export function ensureLocalByokModelConfigDefaults(db: DatabaseSync): string {
-  const uuid = ensureLocalByokAccount(db);
-  const now = new Date().toISOString();
-  db.prepare(
-    `INSERT OR IGNORE INTO account_model_config (
-      uuid,
-      provider,
-      base_url,
-      model_id,
-      embedding_mode,
-      created_at,
-      updated_at
-    ) VALUES (
-      ?,
-      'openai_compatible',
-      'https://api.openai.com/v1',
-      '',
-      'local',
-      ?,
-      ?
-    )`
-  ).run(uuid, now, now);
-  return uuid;
-}
-
 /** Validates ensure account defaults. */
 export function ensureAccountDefaults(
   db: DatabaseSync,
-  uuid: string,
-  options: EnsureAccountDefaultsOptions = {}
+  uuid: string
 ): void {
   const now = new Date().toISOString();
   db.prepare(
@@ -94,64 +62,4 @@ export function ensureAccountDefaults(
      ) VALUES (?, 0, 0, 0, '[]', ?, ?)`
   ).run(uuid, now, now);
 
-  if (options.copyLegacyModelConfig) {
-    copyLegacyModelConfig(db, uuid);
-    return;
-  }
-
-  db.prepare(
-    `INSERT OR IGNORE INTO account_model_config (
-      uuid,
-      provider,
-      base_url,
-      model_id,
-      embedding_mode,
-      created_at,
-      updated_at
-    ) VALUES (
-      ?,
-      'openai_compatible',
-      'https://api.openai.com/v1',
-      'gpt-4.1-mini',
-      'local',
-      ?,
-      ?
-    )`
-  ).run(uuid, now, now);
-}
-
-/** Handles copy legacy model config. */
-function copyLegacyModelConfig(db: DatabaseSync, uuid: string): void {
-  db.prepare(
-    `INSERT OR IGNORE INTO account_model_config (
-      uuid,
-      provider,
-      base_url,
-      model_id,
-      api_key_ref,
-      CASE embedding_mode
-        WHEN 'separate' THEN 'custom'
-        ELSE 'local'
-      END,
-      embedding_base_url,
-      embedding_model_id,
-      embedding_api_key_ref,
-      created_at,
-      updated_at
-    )
-    SELECT
-      ?,
-      provider,
-      base_url,
-      model_id,
-      api_key_ref,
-      embedding_mode,
-      embedding_base_url,
-      embedding_model_id,
-      embedding_api_key_ref,
-      created_at,
-      updated_at
-    FROM model_config
-    WHERE id = 'default'`
-  ).run(uuid);
 }
