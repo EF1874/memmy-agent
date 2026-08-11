@@ -43,6 +43,7 @@ const GENERATED_REPORT_ALIAS_CLOSE = "</report>";
 const GENERATED_TASK_CONTEXT_ALIAS_OPEN = "<taskContext>";
 const GENERATED_TASK_CONTEXT_ALIAS_CLOSE = "</taskContext>";
 const GENERATED_REPORT_OPEN_MARKERS = [GENERATED_REPORT_OPEN, GENERATED_REPORT_ALIAS_OPEN] as const;
+const GENERATED_REPORT_CLOSE_MARKERS = [GENERATED_REPORT_CLOSE, GENERATED_REPORT_ALIAS_CLOSE] as const;
 const GENERATED_NAKED_JSON_OPEN = "\n{";
 const GENERATED_JSON_FENCE_OPEN = "\n```json";
 
@@ -902,15 +903,10 @@ function parseGeneratedFirstReport(
 
   const reportOpen = findGeneratedReportOpen(normalized);
   const reportContentStart = reportOpen ? reportOpen.index + reportOpen.marker.length : 0;
-  const reportCloseMarker = reportOpen?.marker === GENERATED_REPORT_ALIAS_OPEN
-    ? GENERATED_REPORT_ALIAS_CLOSE
-    : GENERATED_REPORT_CLOSE;
-  const reportClose = reportOpen
-    ? findFirstGeneratedMarker(normalized, [reportCloseMarker], reportContentStart)
-    : null;
+  const reportClose = findFirstGeneratedMarker(normalized, GENERATED_REPORT_CLOSE_MARKERS, reportContentStart);
   const contextSection = findGeneratedTaskContext(
     normalized,
-    reportClose ? reportClose.index + reportClose.marker.length : null
+    reportClose ? reportClose.index + reportClose.marker.length : reportContentStart
   );
   const reportEnd = [reportClose?.index ?? -1, contextSection?.start ?? -1]
     .filter((index) => index >= reportContentStart)
@@ -938,21 +934,18 @@ function findGeneratedReportOpen(output: string): { index: number; marker: strin
 
 function findGeneratedTaskContext(
   output: string,
-  aliasSearchStart: number | null
+  aliasSearchStart: number
 ): { start: number; taskContext: OnboardingTaskContextSummary | null } | null {
   const canonical = findFirstGeneratedMarker(output, [GENERATED_TASK_CONTEXT_OPEN]);
-  const alias = aliasSearchStart === null
-    ? null
-    : findFirstGeneratedMarker(output, [GENERATED_TASK_CONTEXT_ALIAS_OPEN], aliasSearchStart);
-  const taggedStart = !canonical || (alias && alias.index < canonical.index) ? alias : canonical;
-  if (taggedStart) {
-    const contentStart = taggedStart.index + taggedStart.marker.length;
-    const closeMarker = taggedStart.marker === GENERATED_TASK_CONTEXT_ALIAS_OPEN
-      ? GENERATED_TASK_CONTEXT_ALIAS_CLOSE
-      : GENERATED_TASK_CONTEXT_CLOSE;
-    const taggedEnd = findFirstGeneratedMarker(output, [closeMarker], contentStart);
+  const alias = findGeneratedTaskContextAlias(output, aliasSearchStart);
+  if (alias && (!canonical || alias.start < canonical.index)) {
+    return alias;
+  }
+  if (canonical) {
+    const contentStart = canonical.index + canonical.marker.length;
+    const taggedEnd = findFirstGeneratedMarker(output, [GENERATED_TASK_CONTEXT_CLOSE], contentStart);
     return {
-      start: taggedStart.index,
+      start: canonical.index,
       taskContext: parseGeneratedTaskContext(output.slice(contentStart, taggedEnd?.index ?? output.length))
     };
   }
@@ -973,6 +966,26 @@ function findGeneratedTaskContext(
     if (taskContext) {
       return { start, taskContext };
     }
+  }
+  return null;
+}
+
+function findGeneratedTaskContextAlias(
+  output: string,
+  start: number
+): { start: number; taskContext: OnboardingTaskContextSummary } | null {
+  let taggedStart = output.indexOf(GENERATED_TASK_CONTEXT_ALIAS_OPEN, start);
+  while (taggedStart >= 0) {
+    const contentStart = taggedStart + GENERATED_TASK_CONTEXT_ALIAS_OPEN.length;
+    const taggedEnd = output.indexOf(GENERATED_TASK_CONTEXT_ALIAS_CLOSE, contentStart);
+    const taskContext = parseGeneratedTaskContext(output.slice(
+      contentStart,
+      taggedEnd >= 0 ? taggedEnd : output.length
+    ));
+    if (taskContext) {
+      return { start: taggedStart, taskContext };
+    }
+    taggedStart = output.indexOf(GENERATED_TASK_CONTEXT_ALIAS_OPEN, contentStart);
   }
   return null;
 }
@@ -1149,7 +1162,6 @@ function renderFallbackTrajectory(input: {
 class FirstReportStreamParser {
   private mode: "prefix" | "report" | "hidden" | "plain" = "prefix";
   private buffer = "";
-  private reportCloseMarker: string = GENERATED_REPORT_CLOSE;
 
   push(delta: string): string[] {
     if (this.mode === "hidden") {
@@ -1166,26 +1178,23 @@ class FirstReportStreamParser {
         this.mode = "plain";
         return this.drainVisibleText([
           GENERATED_TASK_CONTEXT_OPEN,
-          GENERATED_REPORT_CLOSE,
+          ...GENERATED_REPORT_CLOSE_MARKERS,
           GENERATED_JSON_FENCE_OPEN,
           GENERATED_NAKED_JSON_OPEN
         ]);
       }
       this.mode = "report";
-      this.reportCloseMarker = reportOpen === GENERATED_REPORT_ALIAS_OPEN
-        ? GENERATED_REPORT_ALIAS_CLOSE
-        : GENERATED_REPORT_CLOSE;
       this.buffer = candidate.slice(reportOpen.length);
     }
     return this.mode === "plain"
       ? this.drainVisibleText([
           GENERATED_TASK_CONTEXT_OPEN,
-          GENERATED_REPORT_CLOSE,
+          ...GENERATED_REPORT_CLOSE_MARKERS,
           GENERATED_JSON_FENCE_OPEN,
           GENERATED_NAKED_JSON_OPEN
         ])
       : this.drainVisibleText([
-          this.reportCloseMarker,
+          ...GENERATED_REPORT_CLOSE_MARKERS,
           GENERATED_TASK_CONTEXT_OPEN,
           GENERATED_JSON_FENCE_OPEN,
           GENERATED_NAKED_JSON_OPEN
@@ -1196,10 +1205,16 @@ class FirstReportStreamParser {
     if (this.mode === "prefix" || this.mode === "report" || this.mode === "plain") {
       const remainder = this.buffer;
       this.buffer = "";
+      const aliasBoundary = findGeneratedTaskContextAliasBoundary(remainder);
+      if (aliasBoundary) {
+        const report = remainder.slice(0, aliasBoundary.index);
+        return report ? [report] : [];
+      }
       const internalMarkers = [
         ...(this.mode === "prefix" ? GENERATED_REPORT_OPEN_MARKERS : []),
-        this.mode === "report" ? this.reportCloseMarker : GENERATED_REPORT_CLOSE,
+        ...GENERATED_REPORT_CLOSE_MARKERS,
         GENERATED_TASK_CONTEXT_OPEN,
+        GENERATED_TASK_CONTEXT_ALIAS_OPEN,
         GENERATED_JSON_FENCE_OPEN,
         GENERATED_NAKED_JSON_OPEN
       ];
@@ -1211,17 +1226,47 @@ class FirstReportStreamParser {
 
   private drainVisibleText(delimiters: readonly string[]): string[] {
     const delimiter = findFirstGeneratedMarker(this.buffer, delimiters);
-    if (delimiter) {
-      const report = this.buffer.slice(0, delimiter.index);
+    const aliasBoundary = findGeneratedTaskContextAliasBoundary(this.buffer);
+    const boundary = [
+      delimiter ? { index: delimiter.index, pending: false } : null,
+      aliasBoundary
+    ]
+      .filter((item): item is { index: number; pending: boolean } => Boolean(item))
+      .sort((left, right) => left.index - right.index)[0];
+    if (boundary && !boundary.pending) {
+      const report = this.buffer.slice(0, boundary.index);
       this.buffer = "";
       this.mode = "hidden";
       return report ? [report] : [];
     }
-    const retainedChars = Math.max(...delimiters.map((delimiter) => matchingDelimiterSuffixLength(this.buffer, delimiter)));
+    if (boundary) {
+      const report = this.buffer.slice(0, boundary.index);
+      this.buffer = this.buffer.slice(boundary.index);
+      return report ? [report] : [];
+    }
+    const retainedMarkers = [...delimiters, GENERATED_TASK_CONTEXT_ALIAS_OPEN];
+    const retainedChars = Math.max(...retainedMarkers.map((marker) => matchingDelimiterSuffixLength(this.buffer, marker)));
     const report = this.buffer.slice(0, this.buffer.length - retainedChars);
     this.buffer = this.buffer.slice(this.buffer.length - retainedChars);
     return report ? [report] : [];
   }
+}
+
+function findGeneratedTaskContextAliasBoundary(
+  value: string
+): { index: number; pending: boolean } | null {
+  let index = value.indexOf(GENERATED_TASK_CONTEXT_ALIAS_OPEN);
+  while (index >= 0) {
+    const content = value.slice(index + GENERATED_TASK_CONTEXT_ALIAS_OPEN.length).trimStart();
+    if (content.startsWith("{") || content.startsWith("```json")) {
+      return { index, pending: false };
+    }
+    if (!content || "```json".startsWith(content)) {
+      return { index, pending: true };
+    }
+    index = value.indexOf(GENERATED_TASK_CONTEXT_ALIAS_OPEN, index + GENERATED_TASK_CONTEXT_ALIAS_OPEN.length);
+  }
+  return null;
 }
 
 function matchingDelimiterSuffixLength(value: string, delimiter: string): number {
@@ -1619,28 +1664,22 @@ function inferLocale(queries: readonly OnboardingSampledQuery[]): "zh-CN" | "en-
 
 function inferPreferredResponseLanguage(queries: readonly OnboardingSampledQuery[]): "zh-CN" | "en-US" | null {
   let chineseCount = 0;
-  let englishCount = 0;
+  let classifiedCount = 0;
 
   for (const query of queries.slice(0, 90)) {
     const language = classifyQueryLanguage(query.text);
     if (language === "zh-CN") {
       chineseCount += 1;
-    } else if (language === "en-US") {
-      englishCount += 1;
+    }
+    if (language) {
+      classifiedCount += 1;
     }
   }
 
-  const total = chineseCount + englishCount;
-  if (total === 0) {
+  if (classifiedCount === 0) {
     return null;
   }
-  if (chineseCount / total >= 0.55) {
-    return "zh-CN";
-  }
-  if (englishCount / total >= 0.55) {
-    return "en-US";
-  }
-  return null;
+  return chineseCount / classifiedCount >= 0.2 ? "zh-CN" : "en-US";
 }
 
 function classifyQueryLanguage(text: string): "zh-CN" | "en-US" | null {

@@ -603,6 +603,92 @@ describe("onboarding insight service", () => {
     }));
   });
 
+  it("keeps simplified task context hidden when the report closing tag is missing", async () => {
+    const write = vi.fn(async () => undefined);
+    const taskContext = {
+      topic: "Memmy 初见报告",
+      userGoal: "隐藏内部任务上下文。",
+      latestRequest: "兼容缺失的简化报告闭合标签。",
+      status: "active",
+      currentState: "报告正文已经生成。",
+      agentActions: ["生成了初见报告。"],
+      verifiedResults: [],
+      unresolvedItems: ["报告闭合标签缺失。"],
+      continuationPoint: "继续修复解析器。",
+      trajectorySummary: "简化报告标签未闭合，内部任务上下文仍不能显示给用户。"
+    };
+    const service = createOnboardingInsightService({
+      samplers: [sampler("codex", "Codex", [query("codex", "1", "生成我的初见报告")])],
+      reportGenerator: {
+        async generateReport() {
+          throw new Error("generateReport not used");
+        },
+        async *streamReport() {
+          yield "<report>Hi，报告正文。<task";
+          yield `Context>${JSON.stringify(taskContext)}</taskContext>`;
+        }
+      },
+      memoryWriter: { write },
+      now: () => 100
+    });
+
+    const events = await collectStreamEvents(service.streamReport({ locale: "zh-CN" }));
+    const visibleText = events
+      .filter((event): event is { type: "chunk"; delta: string } =>
+        Boolean(event && typeof event === "object" && (event as { type?: unknown }).type === "chunk"))
+      .map((event) => event.delta)
+      .join("");
+    const done = events.find((event) =>
+      event && typeof event === "object" && (event as { type?: unknown }).type === "done"
+    ) as { response: { reportMarkdown: string } } | undefined;
+
+    expect(visibleText).toBe("Hi，报告正文。");
+    expect(visibleText).not.toContain("taskContext");
+    expect(visibleText).not.toContain("trajectorySummary");
+    expect(done?.response.reportMarkdown).toBe("Hi，报告正文。");
+    expect(write).toHaveBeenCalledWith(expect.objectContaining({
+      reportMarkdown: "Hi，报告正文。",
+      taskContext
+    }));
+  });
+
+  it.each(["</memmy_report>", "</report>"])(
+    "removes an orphan report closing marker: %s",
+    async (closingMarker) => {
+      const reportText = "Hi，报告正文。";
+      const rawOutput = `${reportText}${closingMarker}`;
+      const service = createOnboardingInsightService({
+        samplers: [sampler("codex", "Codex", [query("codex", "1", "生成我的初见报告")])],
+        reportGenerator: {
+          async generateReport() {
+            return rawOutput;
+          },
+          async *streamReport() {
+            yield reportText;
+            yield closingMarker.slice(0, 5);
+            yield closingMarker.slice(5);
+          }
+        },
+        now: () => 100
+      });
+
+      const report = await service.generateReport({ locale: "zh-CN" });
+      const events = await collectStreamEvents(service.streamReport({ locale: "zh-CN" }));
+      const visibleText = events
+        .filter((event): event is { type: "chunk"; delta: string } =>
+          Boolean(event && typeof event === "object" && (event as { type?: unknown }).type === "chunk"))
+        .map((event) => event.delta)
+        .join("");
+      const done = events.find((event) =>
+        event && typeof event === "object" && (event as { type?: unknown }).type === "done"
+      ) as { response: { reportMarkdown: string } } | undefined;
+
+      expect(report.reportMarkdown).toBe(reportText);
+      expect(visibleText).toBe(reportText);
+      expect(done?.response.reportMarkdown).toBe(reportText);
+    }
+  );
+
   it("preserves simplified tag names when they are part of ordinary report text", async () => {
     const reportText = "Hi。最近修复了 `<report>` 与 `<taskContext>` 标签泄漏。";
     const service = createOnboardingInsightService({
@@ -1109,6 +1195,51 @@ describe("onboarding insight service", () => {
       reportLanguage: "zh-CN",
       latestWorkspacePath: "/Users/test/Memmy"
     });
+  });
+
+  it.each([
+    {
+      name: "uses Chinese at the twenty-percent boundary",
+      appLocale: "en-US",
+      expectedLocale: "zh-CN",
+      texts: [
+        "请帮我检查这个页面并修复报告显示问题",
+        "Please verify the latest backend integration test results.",
+        "Keep the implementation concise and avoid unnecessary fallback logic.",
+        "Review the current pull request before merging the changes.",
+        "Update the report output and confirm the final behavior."
+      ]
+    },
+    {
+      name: "uses English below the twenty-percent boundary",
+      appLocale: "zh-CN",
+      expectedLocale: "en-US",
+      texts: [
+        "请帮我检查这个页面并修复报告显示问题",
+        "Please verify the latest backend integration test results.",
+        "Keep the implementation concise and avoid unnecessary fallback logic.",
+        "Review the current pull request before merging the changes.",
+        "Update the report output and confirm the final behavior.",
+        "Run the complete test suite and summarize every failure."
+      ]
+    }
+  ] as const)("$name", async ({ appLocale, expectedLocale, texts }) => {
+    const service = createOnboardingInsightService({
+      samplers: [
+        sampler("codex", "Codex", texts.map((text, index) => query("codex", String(index + 1), text)))
+      ],
+      reportGenerator: {
+        async generateReport(input) {
+          return input.locale;
+        }
+      },
+      now: () => 100
+    });
+
+    const report = await service.generateReport({ locale: appLocale });
+
+    expect(report.reportMarkdown).toBe(expectedLocale);
+    expect(report.diagnostics.reportLanguage).toBe(expectedLocale);
   });
 
   it("uses the scanned response-language preference instead of the App locale for generation and storage", async () => {
