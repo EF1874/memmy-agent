@@ -37,11 +37,11 @@
 
 Get Memmy from [Official Website](https://memmy.bot/) or [GitHub Release](https://github.com/MemTensor/memmy-agent/releases).
 
-Sign up to get free tokens. Model routing is automatic — start exploring the full Memory + Agent Runtime with zero config.
 
 > [!TIP]
-> **Trial credits:** 
-> **Registration grants Agent task trial tokens; the current amount and usage are shown in the app.**
+> Sign up to get free tokens. Start exploring the full Memory + Agent Runtime with zero config.<br>
+> **Trial credits:** <br>
+> **Registration grants Agent task trial tokens; the current amount and usage are shown in the app.**<br>
 > Once the trial credits run out, you can switch to BYOK and use your own model API.
 
 ## What Is Memmy?
@@ -57,6 +57,11 @@ With a unified memory layer shared across Cursor, Claude Code, Codex, 
 It distills your knowledge, preferences, and project experience into personal memory, and share the same context across every Agents.
 
 Available as a desktop app, CLI, and API. You can use the same long-term memory whatever the ways you like to use. **Build it once, use it everywhere.**
+
+
+
+https://github.com/user-attachments/assets/a4ec7f6c-b79f-4e7b-bf40-38346c828bcf
+
 
 ###  Cross-Agent Memory Layer
 
@@ -275,6 +280,8 @@ The point of open source is to let good ideas flow, and we hope Me
 ## Contributors
 
 Thanks to every contributor who makes Memmy better ❤️
+<br>
+<br>
 <a href="https://github.com/MemTensor/memmy-agent/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=MemTensor/memmy-agent" />
 </a>

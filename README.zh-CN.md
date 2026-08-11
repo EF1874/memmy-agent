@@ -32,14 +32,14 @@
 </div>
 
 
-## 🚀 开始体验 Memmy
+## 🚀 直接体验 Memmy
 
 点击进入[官网下载](https://memmy.cn/)或者 [GitHub Release](https://github.com/MemTensor/memmy-agent/releases) 下载。
 
 > [!TIP]
-> 注册 Memmy 后，即可获得免费 AI 使用额度，系统会自动进行模型调度，帮助你体验完整的 Memory + Agent Runtime。
-> **体验额度：** 
-> 注册赠送 Agent 任务体验 Token，当前额度和使用情况以应用内显示为准
+> 注册 Memmy 后，即可获得免费 Token，体验完整的 Memory + Agent Runtime。<br>
+> **体验额度：** <br>
+> 注册赠送 Agent 任务体验 Token，当前额度和使用情况以应用内显示为准。<br>
 > 当体验额度用尽后，可切换至 BYOK 模式，使用自己的模型 API。
 
 ## 什么是 Memmy？
@@ -51,6 +51,12 @@
 它将你的知识、偏好和项目经验沉淀为个人记忆，并让不同 Agent 共享同一份上下文。
 
 提供桌面应用、CLI 和 API，让你以不同方式使用同一套长期记忆。一次积累，多处使用。
+
+
+
+https://github.com/user-attachments/assets/f12473e5-3250-4e8b-b2da-e57d7b785baf
+
+
 
 ### 🧠 跨 Agent 记忆层
 
@@ -269,6 +275,8 @@ Memmy 站在一群优秀的开源项目肩上，我们对此心怀感激。
 ## 贡献者
 
 感谢每一位让 Memmy 变得更好的贡献者 ❤️
+<br>
+<br>
 <a href="https://github.com/MemTensor/memmy-agent/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=MemTensor/memmy-agent" />
 </a>
