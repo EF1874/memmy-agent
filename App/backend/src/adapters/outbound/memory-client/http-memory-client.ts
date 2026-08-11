@@ -64,6 +64,7 @@ export function createHttpMemoryClient(
       query?: Readonly<Record<string, unknown>>;
       signal?: AbortSignal;
       timeoutMs?: number;
+      maxRetries?: number;
       context?: MemoryRequestContext;
     } = {}
   ): Promise<Output> {
@@ -105,7 +106,7 @@ export function createHttpMemoryClient(
         );
       },
       {
-        maxRetries: config.maxRetries,
+        maxRetries: requestOptions.maxRetries ?? config.maxRetries,
         baseDelayMs: 100,
         factor: 3,
         jitter: 0.2,
@@ -207,11 +208,11 @@ export function createHttpMemoryClient(
     },
 
     async panelOverview(context) {
-      return request("GET", "panelOverview", PanelOverviewOutputSchema, { context });
+      return request("GET", "panelOverview", PanelOverviewOutputSchema, { context, maxRetries: 0 });
     },
 
     async panelAnalysis(context) {
-      return request("GET", "panelAnalysis", PanelAnalysisOutputSchema, { context });
+      return request("GET", "panelAnalysis", PanelAnalysisOutputSchema, { context, maxRetries: 0 });
     },
 
     async panelItems(input, context) {

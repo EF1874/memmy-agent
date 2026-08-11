@@ -131,6 +131,20 @@ export interface MemoryRow {
   deletedAt?: IsoTime | null;
 }
 
+/** Narrow projection used by aggregate read models without loading memory payloads or vectors. */
+export interface MemoryStatsRow {
+  conversationId?: string;
+  sessionId?: string;
+  agentId?: string;
+  appId?: string;
+  status: MemoryStatus;
+  memoryLayer: MemoryLayer;
+  createdAt: IsoTime;
+  updatedAt: IsoTime;
+  infoSource?: unknown;
+  internalSource?: unknown;
+}
+
 export interface MemoryFilter {
   userId?: string;
   sessionId?: string;

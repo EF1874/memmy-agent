@@ -47,7 +47,8 @@ import {
 export type { ScanProgress } from "../adapters/outbound/agent-source/types.js";
 
 const SCAN_MESSAGE_YIELD_INTERVAL = 100;
-const IMPORT_WORKER_BATCH_SIZE = 4;
+const IMPORT_WORKER_BATCH_SIZE = 20;
+const IMPORT_PROCESSING_COHORT_SIZE = 100;
 const IMPORT_WORKER_TIMEOUT_MS = 600_000;
 const IMPORT_PROGRESS_POLL_INTERVAL_MS = 250;
 const INITIAL_GLOBAL_MEMORY_LIMIT = 1_000;
@@ -984,73 +985,75 @@ async function processPendingImportSummaries(
 ): Promise<ProcessingFailure[]> {
   scanOptions.signal?.throwIfAborted();
   const ownedMemoryIds = [...new Set(memoryIds)];
-  await options.memoryClient.enqueueImportSummaries(ownedMemoryIds);
-  const pendingMemoryIds = new Set(ownedMemoryIds);
   const failures: ProcessingFailure[] = [];
   const progressSourceId = scanOptions.progressSourceId ?? "all";
-  let indexed = 0;
-  let lastProgressAt = Date.now();
   emitProgress(scanOptions, {
     sourceId: progressSourceId,
     phase: "summarize",
     current: 0,
-    total: pendingMemoryIds.size,
+    total: ownedMemoryIds.length,
     message: "Summarizing and indexing latest memories"
   });
 
-  while (pendingMemoryIds.size > 0) {
-    scanOptions.signal?.throwIfAborted();
-    const result = await options.memoryClient.runWorker({
-      limit: IMPORT_WORKER_BATCH_SIZE,
-      priorityCohortOnly: true,
-      signal: scanOptions.signal,
-      timeoutMs: IMPORT_WORKER_TIMEOUT_MS
-    });
+  let completedMemoryCount = 0;
+  for (let offset = 0; offset < ownedMemoryIds.length; offset += IMPORT_PROCESSING_COHORT_SIZE) {
+    const cohort = ownedMemoryIds.slice(offset, offset + IMPORT_PROCESSING_COHORT_SIZE);
+    await options.memoryClient.enqueueImportSummaries(cohort);
+    const pendingMemoryIds = new Set(cohort);
+    let lastProgressAt = Date.now();
 
-    const refreshed = await options.memoryClient.getMemoryProcessingStatus([...pendingMemoryIds]);
-    const processingByMemoryId = new Map(refreshed.items.map((item) => [item.memoryId, item]));
-    const activeMemoryIds = new Set(refreshed.items
-      .filter((item) => item.state === "summary_pending" || item.state === "summarizing" ||
-        item.state === "embedding_pending" || item.state === "embedding")
-      .map((item) => item.memoryId));
-    const previousPending = pendingMemoryIds.size;
-    for (const memoryId of pendingMemoryIds) {
-      if (activeMemoryIds.has(memoryId)) continue;
-      const processing = processingByMemoryId.get(memoryId);
-      if (!processing) {
-        failures.push({ memoryId, reason: "Memory processing state is missing" });
-      } else if (processing.state === "failed") {
-        failures.push({
-          memoryId,
-          reason: processing.errorMessage || "Memory processing failed"
-        });
-      }
-      if (!activeMemoryIds.has(memoryId)) {
+    while (pendingMemoryIds.size > 0) {
+      scanOptions.signal?.throwIfAborted();
+      const targets = [...pendingMemoryIds];
+      const result = await options.memoryClient.runWorker({
+        limit: IMPORT_WORKER_BATCH_SIZE,
+        targetMemoryIds: targets,
+        priorityCohortOnly: true,
+        signal: scanOptions.signal,
+        timeoutMs: IMPORT_WORKER_TIMEOUT_MS
+      });
+
+      const refreshed = await options.memoryClient.getMemoryProcessingStatus(targets);
+      const processingByMemoryId = new Map(refreshed.items.map((item) => [item.memoryId, item]));
+      const activeMemoryIds = new Set(refreshed.items
+        .filter((item) => item.state === "summary_pending" || item.state === "summarizing" ||
+          item.state === "embedding_pending" || item.state === "embedding")
+        .map((item) => item.memoryId));
+      const previousPending = pendingMemoryIds.size;
+      for (const memoryId of pendingMemoryIds) {
+        if (activeMemoryIds.has(memoryId)) continue;
+        const processing = processingByMemoryId.get(memoryId);
+        if (!processing) {
+          failures.push({ memoryId, reason: "Memory processing state is missing" });
+        } else if (processing.state === "failed") {
+          failures.push({
+            memoryId,
+            reason: processing.errorMessage || "Memory processing failed"
+          });
+        }
         pendingMemoryIds.delete(memoryId);
       }
-    }
-    indexed = ownedMemoryIds.length - pendingMemoryIds.size;
-    if (pendingMemoryIds.size < previousPending) {
-      lastProgressAt = Date.now();
-    }
-    emitProgress(scanOptions, {
-      sourceId: progressSourceId,
-      phase: "summarize",
-      current: indexed,
-      total: ownedMemoryIds.length,
-      message: "Summarizing and indexing latest memories"
-    });
+      if (pendingMemoryIds.size < previousPending) {
+        lastProgressAt = Date.now();
+      }
+      emitProgress(scanOptions, {
+        sourceId: progressSourceId,
+        phase: "summarize",
+        current: completedMemoryCount + cohort.length - pendingMemoryIds.size,
+        total: ownedMemoryIds.length,
+        message: "Summarizing and indexing latest memories"
+      });
 
-    if (pendingMemoryIds.size === 0) {
-      break;
+      if (pendingMemoryIds.size === 0) break;
+      if (Date.now() - lastProgressAt >= IMPORT_WORKER_TIMEOUT_MS) {
+        throw new Error(`Timed out waiting for ${pendingMemoryIds.size} imported memories to finish indexing`);
+      }
+      if (result.leased === 0 && result.embeddingRetries.leased === 0) {
+        await waitForWorkerProgress(IMPORT_PROGRESS_POLL_INTERVAL_MS, undefined, { signal: scanOptions.signal });
+      }
+      await yieldToEventLoop();
     }
-    if (Date.now() - lastProgressAt >= IMPORT_WORKER_TIMEOUT_MS) {
-      throw new Error(`Timed out waiting for ${pendingMemoryIds.size} imported memories to finish indexing`);
-    }
-    if (result.leased === 0 && result.embeddingRetries.leased === 0) {
-      await waitForWorkerProgress(IMPORT_PROGRESS_POLL_INTERVAL_MS, undefined, { signal: scanOptions.signal });
-    }
-    await yieldToEventLoop();
+    completedMemoryCount += cohort.length;
   }
   return failures;
 }

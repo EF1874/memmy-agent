@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { type MemoryRow } from "../../../src/index.js";
 import { updateTraceSummary } from "../../../src/service/embedding/embedding-job-processor.js";
 import { changeLogToPanelChange } from "../../../src/service/read-model/panel-read.js";
@@ -481,6 +481,25 @@ describe("MemoryService / read model / panel", () => {
     expect(workerSources).toContain("codex");
     expect(workerSources).not.toContain("worker.l2_induction.v7");
 
+    db.close();
+  });
+
+  it("builds overview statistics without reading memory payloads or vectors", () => {
+    const { db, service } = createTestService();
+    service.addMemory({
+      content: "Overview should use a narrow aggregate projection.",
+      layer: "L1",
+      source: "codex"
+    });
+    const prepare = vi.spyOn(db.db, "prepare");
+
+    const summary = service.panelOverviewSummary();
+
+    expect(summary.counts.memories).toBe(1);
+    const sql = prepare.mock.calls.map(([statement]) => String(statement)).join("\n");
+    expect(sql).not.toContain("SELECT *\n         FROM memories");
+    expect(sql).not.toContain("FROM memory_vector_entries");
+    expect(sql).not.toContain("FROM memory_vec_");
     db.close();
   });
 

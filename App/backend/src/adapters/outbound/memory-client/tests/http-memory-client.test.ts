@@ -225,6 +225,20 @@ describe("HttpMemoryClient", () => {
     expect(calls).toBe(3);
   });
 
+  it("does not repeat expensive panel reads after a 5xx response", async () => {
+    let calls = 0;
+    const baseUrl = await startServer(async (_request, response) => {
+      calls += 1;
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end("{}");
+    });
+    const client = createHttpMemoryClient({ baseUrl, token: "", timeoutMs: 500, maxRetries: 3 });
+
+    await expect(client.panelOverview()).rejects.toMatchObject({ code: "memory_layer_unavailable" });
+    await expect(client.panelAnalysis()).rejects.toMatchObject({ code: "memory_layer_unavailable" });
+    expect(calls).toBe(2);
+  });
+
   it("throws memory_layer_unavailable when 5xx retries are exhausted", async () => {
     let calls = 0;
     const baseUrl = await startServer(async (_request, response) => {
