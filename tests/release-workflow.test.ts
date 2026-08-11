@@ -14,6 +14,27 @@ const draftJob = draftWorkflow.jobs.release;
 const draftSteps = draftJob.steps as Array<Record<string, unknown>>;
 const draftScript = (name: string) =>
   String(draftSteps.find((step) => step.name === name)?.run ?? "");
+const heredocBodies = (script: string, marker: string) => {
+  const lines = script.split(/\r?\n/);
+  const bodies: string[] = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!lines[index].includes(`<<'${marker}'`)) continue;
+
+    const body: string[] = [];
+    let cursor = index + 1;
+    for (; cursor < lines.length; cursor += 1) {
+      if (lines[cursor] === marker) break;
+      body.push(lines[cursor]);
+    }
+
+    expect(cursor, `unterminated heredoc ${marker}`).toBeLessThan(lines.length);
+    bodies.push(body.join("\n"));
+    index = cursor;
+  }
+
+  return bodies;
+};
 const packagingConfigs = [
   "electron-builder.yml",
   "electron-builder.unsigned.yml",
@@ -96,6 +117,29 @@ describe("GitHub Draft Release v2 workflow", () => {
       });
 
       expect(result.status, `${String(step.name)}\n${result.stderr}`).toBe(0);
+    }
+  });
+
+  it("keeps embedded Node heredocs syntactically valid", () => {
+    const tempDir = mkdtempSync(resolve(tmpdir(), "memmy-release-workflow-node-"));
+    const nodeHeredocs = draftSteps.flatMap((step) =>
+      heredocBodies(String(step.run ?? ""), "NODE").map((body, index) => ({
+        body,
+        name: `${String(step.name)} heredoc ${index + 1}`,
+      })),
+    );
+
+    expect(nodeHeredocs.length).toBeGreaterThan(0);
+
+    for (const [index, heredoc] of nodeHeredocs.entries()) {
+      const scriptPath = resolve(tempDir, `node-heredoc-${index}.cjs`);
+      writeFileSync(scriptPath, heredoc.body);
+      const result = spawnSync("node", ["--check", scriptPath], {
+        cwd: repoRoot,
+        encoding: "utf8",
+      });
+
+      expect(result.status, `${heredoc.name}\n${result.stderr}`).toBe(0);
     }
   });
 
@@ -298,6 +342,8 @@ describe("GitHub Draft Release v2 workflow", () => {
       "${{ steps.release.outputs.create_draft != 'true' }}",
     );
     expect(preflight).toContain("No tag, Release, assets, or external publication was created.");
+    expect(preflight).toContain("Smoke only validates the target commit and version metadata.");
+    expect(preflight).toContain("run full preflight before creating a Draft Release.");
     expect(preflight).toContain("Set create_draft=true only when intentionally creating a Draft Release.");
   });
 });

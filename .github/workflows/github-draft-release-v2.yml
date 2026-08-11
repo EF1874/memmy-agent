@@ -789,5 +789,8 @@ jobs:
             echo "- Target SHA: $TARGET_SHA"
             echo "- Level: $PREFLIGHT_LEVEL"
             echo "- No tag, Release, assets, or external publication was created."
+            if [[ "$PREFLIGHT_LEVEL" == "smoke" ]]; then
+              echo "- Smoke only validates the target commit and version metadata. It intentionally skips duplicate tag/Release, installer, release notes, and evidence checks; run full preflight before creating a Draft Release."
+            fi
             echo "- Set create_draft=true only when intentionally creating a Draft Release."
           } >> "$GITHUB_STEP_SUMMARY"
