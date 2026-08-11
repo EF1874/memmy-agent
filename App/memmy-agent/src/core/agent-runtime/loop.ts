@@ -51,7 +51,13 @@ import { LLMRuntime } from "../../utils/llm-runtime.js";
 import { withProgressCapabilities } from "../../utils/progress-events.js";
 import { EMPTY_FINAL_RESPONSE_MESSAGE } from "../../utils/runtime.js";
 import { AgentRunner, AgentRunSpec, type AgentInternalTurnContext } from "./runner.js";
-import { GoalRuntime, GoalRuntimeError, type GoalTurnInboxEntry } from "./goal-runtime.js";
+import {
+  GoalRuntime,
+  GoalRuntimeError,
+  WEBUI_QUEUE_STEER_TRANSFERS_KEY,
+  type GoalTurnInboxEntry,
+  type WebuiQueueSteerTransferRecord,
+} from "./goal-runtime.js";
 import { resolveToolResultMaxChars, SESSION_TOOL_RESULT_MAX_CHARS_BY_NAME } from "./tool-result-budget.js";
 import { AgentProgressHook } from "./progress-hook.js";
 import { createTurnCancellationBoundary, type TurnCancellationBoundary } from "./turn-cancellation-boundary.js";
@@ -476,6 +482,9 @@ export type QueueMessageDescriptor = {
   queuedAt: string;
   sessionKey: string;
   source: TurnSource;
+  queueSurface: "chat_composer" | null;
+  turnAdmission?: "steer";
+  turnId?: string;
 };
 
 export type QueueSnapshotDescriptor = {
@@ -487,6 +496,13 @@ export type QueueSnapshotDescriptor = {
 export type RemoveQueuedMessageResult = {
   outcome: "removed" | "already_dequeued" | "missing";
   revision: number;
+};
+
+export type SteerQueuedMessageResult = {
+  outcome: "steered" | "not_steerable" | "already_dequeued" | "missing";
+  revision: number;
+  turnId?: string;
+  descriptor?: QueueMessageDescriptor;
 };
 
 export type StopExpectedTurnResult = "stopped" | "already_finished" | "not_owned";
@@ -516,6 +532,15 @@ type TurnSlot = {
   announcedToWebui: boolean;
   dispatchTask: CancelableDispatchTask | null;
   announcementGate: TurnSlotAnnouncementGate | null;
+};
+
+type QueueSteerAdmission = {
+  turnId: string;
+  revision: number;
+  descriptor: QueueMessageDescriptor;
+  message: InboundMessage;
+  store: "slot" | "goal";
+  phase: "pending" | "consumed";
 };
 
 function createTurnSlotAnnouncementGate(): TurnSlotAnnouncementGate {
@@ -628,6 +653,7 @@ export class AgentLoop {
   sessionLocks: Map<string, AsyncMutex>;
   queueMutationLocks: Map<string, AsyncMutex>;
   queueRevisionBySession: Map<string, number>;
+  queueSteerAdmissionsBySession: Map<string, Map<string, QueueSteerAdmission>>;
   lastQueuedAtBySession: Map<string, number>;
   running: boolean;
   currentIterationValue = 0;
@@ -663,6 +689,7 @@ export class AgentLoop {
     this.sessionLocks = new Map();
     this.queueMutationLocks = new Map();
     this.queueRevisionBySession = new Map();
+    this.queueSteerAdmissionsBySession = new Map();
     this.lastQueuedAtBySession = new Map();
     this.running = false;
     this.providerSnapshotLoader = init.providerSnapshotLoader ?? null;
@@ -1447,6 +1474,57 @@ export class AgentLoop {
     }
   }
 
+  private async recoverQueueSteerTransfers(): Promise<void> {
+    for (const session of this.sessions.listSessionRecords()) {
+      const transfers = this.goalRuntime.queueSteerTransfers(session.key)
+        .sort((left, right) => (
+          left.descriptor.queuedAt.localeCompare(right.descriptor.queuedAt)
+          || left.clientRequestId.localeCompare(right.clientRequestId)
+        ));
+      for (const transfer of transfers) {
+        const persisted = session.messages.some((message) => (
+          message?.role === "user"
+          && message?.client_request_id === transfer.clientRequestId
+          && firstString(message?.turn_id, message?.turnId) === transfer.expectedTurnId
+        ));
+        if (persisted) {
+          await this.goalRuntime.completeQueueSteerTransfer(
+            session.key,
+            transfer.clientRequestId,
+          );
+          continue;
+        }
+        let recovered: InboundMessage | null = null;
+        let revision = this.queueRevision(session.key);
+        await this.queueMutationLockFor(session.key).runExclusive(async () => {
+          const queuedAt = this.nextQueuedAt(session.key);
+          recovered = this.recoveredQueueMessage(transfer, queuedAt);
+          if (transfer.store === "goal") {
+            await this.goalRuntime.restoreGoalQueueSteerTransfer(
+              session.key,
+              transfer.clientRequestId,
+              queuedAt,
+            );
+          } else {
+            this.scheduleRecoveredQueueSlot(session.key, recovered);
+          }
+          revision = this.advanceQueueRevision(session.key);
+        });
+        if (recovered) {
+          await this.publishWebuiMessageQueued(recovered, {
+            visible: true,
+            revision,
+          });
+          const recoveredSlot = (this.turnSlots.get(session.key) ?? []).find((slot) => (
+            slot.root.metadata?.client_request_id === transfer.clientRequestId
+            && slot.root.metadata?.webui_queue_steer_origin !== true
+          ));
+          recoveredSlot?.announcementGate?.open();
+        }
+      }
+    }
+  }
+
   replayTokenBudget(modelSelection: ResolvedModelSelection | null = null): number {
     const contextWindowTokens = modelSelection?.snapshot.contextWindowTokens
       ?? this.contextWindowTokens;
@@ -1506,6 +1584,157 @@ export class AgentLoop {
     const next = Math.max(Date.now(), previous + 1);
     this.lastQueuedAtBySession.set(sessionKey, next);
     return new Date(next).toISOString();
+  }
+
+  private queueSteerAdmissionsFor(sessionKey: string): Map<string, QueueSteerAdmission> {
+    let admissions = this.queueSteerAdmissionsBySession.get(sessionKey);
+    if (!admissions) {
+      admissions = new Map();
+      this.queueSteerAdmissionsBySession.set(sessionKey, admissions);
+    }
+    return admissions;
+  }
+
+  private queueSteerTransferFromMessage(
+    sessionKey: string,
+    message: InboundMessage,
+    descriptor: QueueMessageDescriptor,
+    expectedTurnId: string,
+    store: "slot" | "goal",
+  ): WebuiQueueSteerTransferRecord {
+    return {
+      clientRequestId: descriptor.clientRequestId,
+      expectedTurnId,
+      store,
+      descriptor: structuredClone(descriptor),
+      messageFields: {
+        channel: message.channel,
+        chatId: message.chatId,
+        senderId: message.senderId,
+        content: message.content,
+        media: [...message.media],
+        metadata: structuredClone(message.metadata ?? {}),
+        timestamp: message.timestamp.toISOString(),
+        sessionKey,
+        turnSource: sharedTurnSource(message),
+      },
+    };
+  }
+
+  private messageFromQueueSteerTransfer(
+    transfer: WebuiQueueSteerTransferRecord,
+    turnId: string,
+  ): InboundMessage {
+    const fields = transfer.messageFields;
+    return new InboundMessage({
+      channel: fields.channel,
+      chatId: fields.chatId,
+      senderId: fields.senderId,
+      content: fields.content,
+      media: [...fields.media],
+      metadata: {
+        ...structuredClone(fields.metadata),
+        ...turnMetadata(turnId),
+        webui_queue_steer_origin: true,
+        webui_queue_steer_recovery: {
+          client_request_id: transfer.clientRequestId,
+          content: transfer.descriptor.content,
+          media: [...transfer.descriptor.media],
+          source: { ...transfer.descriptor.source },
+          queue_surface: transfer.descriptor.queueSurface,
+          turn_id: turnId,
+        },
+      },
+      timestamp: new Date(fields.timestamp),
+      sessionKeyOverride: fields.sessionKey,
+      turnAdmission: "steer",
+      expectedTurnId: turnId,
+      turnSource: fields.turnSource,
+    });
+  }
+
+  private removeQueuedSlotTask(sessionKey: string, slot: TurnSlot): void {
+    slot.acceptingSteer = false;
+    slot.state = "closed";
+    slot.announcementGate?.open();
+    this.removeTurnSlot(sessionKey, slot);
+    const task = slot.dispatchTask;
+    if (!task) return;
+    const tasks = this.activeTasks.get(sessionKey) ?? [];
+    const remaining = tasks.filter((candidate) => candidate !== task);
+    if (remaining.length) this.activeTasks.set(sessionKey, remaining);
+    else this.activeTasks.delete(sessionKey);
+    task.cancel();
+  }
+
+  private clearQueueSteerTransferMetadata(session: Session, clientRequestId: string): void {
+    const transfers = this.goalRuntime.queueSteerTransfers(session.key)
+      .filter((item) => item.clientRequestId !== clientRequestId);
+    if (transfers.length) session.metadata[WEBUI_QUEUE_STEER_TRANSFERS_KEY] = transfers;
+    else delete session.metadata[WEBUI_QUEUE_STEER_TRANSFERS_KEY];
+  }
+
+  private recoveredQueueMessage(
+    transfer: WebuiQueueSteerTransferRecord,
+    queuedAt: string,
+  ): InboundMessage {
+    const fields = transfer.messageFields;
+    const metadata: Record<string, any> = {
+      ...structuredClone(fields.metadata),
+      queued_at: queuedAt,
+    };
+    delete metadata.turn_id;
+    delete metadata.turnId;
+    delete metadata.webui_queue_dequeued;
+    delete metadata.webui_queue_steer_origin;
+    delete metadata.webui_queue_steer_recovery;
+    return new InboundMessage({
+      channel: fields.channel,
+      chatId: fields.chatId,
+      senderId: fields.senderId,
+      content: fields.content,
+      media: [...fields.media],
+      metadata,
+      timestamp: new Date(),
+      sessionKeyOverride: fields.sessionKey,
+      turnAdmission: "queue",
+      turnSource: fields.turnSource,
+    });
+  }
+
+  private scheduleRecoveredQueueSlot(
+    sessionKey: string,
+    root: InboundMessage,
+  ): TurnSlot {
+    const owner = Symbol("queue-steer-recovery-owner");
+    const route = `${root.channel}\0${String(root.chatId)}`;
+    const slot = this.createTurnSlot(root, route, owner);
+    slot.announcementGate = createTurnSlotAnnouncementGate();
+    slot.announcedToWebui = true;
+    const slots = this.turnSlots.get(sessionKey) ?? [];
+    slots.push(slot);
+    this.turnSlots.set(sessionKey, slots);
+    const task = makeCancelableDispatchTask(
+      async (isCancelled, signal) => {
+        await slot.announcementGate!.promise;
+        if (isCancelled()) return;
+        await this.dispatchSlot(sessionKey, slot, isCancelled, signal);
+      },
+    );
+    slot.dispatchTask = task;
+    const active = this.activeTasks.get(sessionKey) ?? [];
+    active.push(task);
+    this.activeTasks.set(sessionKey, active);
+    task
+      .finally(() => {
+        const current = this.activeTasks.get(sessionKey) ?? [];
+        const remaining = current.filter((item) => item !== task);
+        if (remaining.length) this.activeTasks.set(sessionKey, remaining);
+        else this.activeTasks.delete(sessionKey);
+        void this.dispatchNextGoalWork(sessionKey);
+      })
+      .catch(() => undefined);
+    return slot;
   }
 
   private normalizeSharedInboundMessage(message: InboundMessage): InboundMessage {
@@ -1588,6 +1817,14 @@ export class AgentLoop {
         else add(started, descriptor);
       }
 
+      for (const admission of this.queueSteerAdmissionsBySession.get(sessionKey)?.values() ?? []) {
+        add(started, {
+          ...admission.descriptor,
+          turnAdmission: "steer",
+          turnId: admission.turnId,
+        });
+      }
+
       for (const clientRequestId of started.keys()) queued.delete(clientRequestId);
       const ordered = (items: Iterable<QueueMessageDescriptor>) => [...items].sort((left, right) => (
         left.queuedAt.localeCompare(right.queuedAt)
@@ -1611,6 +1848,12 @@ export class AgentLoop {
   ): Promise<RemoveQueuedMessageResult> {
     let removedInbox = false;
     const result = await this.queueMutationLockFor(sessionKey).runExclusive(async () => {
+      if (this.queueSteerAdmissionsBySession.get(sessionKey)?.has(clientRequestId)) {
+        return {
+          outcome: "already_dequeued" as const,
+          revision: this.queueRevision(sessionKey),
+        };
+      }
       const slot = (this.turnSlots.get(sessionKey) ?? []).find((candidate) => (
         candidate.root.metadata?.client_request_id === clientRequestId
         && isSharedQueueMessage(candidate.root)
@@ -1667,6 +1910,153 @@ export class AgentLoop {
     clientRequestId: string,
   ): Promise<RemoveQueuedMessageResult> {
     return this.removeQueuedMessage(sessionKey, clientRequestId);
+  }
+
+  async steerQueuedWebuiMessage(
+    sessionKey: string,
+    clientRequestId: string,
+    expectedTurnId: string,
+  ): Promise<SteerQueuedMessageResult> {
+    const result = await this.queueMutationLockFor(sessionKey).runExclusive(async () => {
+      const revision = this.queueRevision(sessionKey);
+      if (this.queueSteerAdmissionsBySession.get(sessionKey)?.has(clientRequestId)) {
+        return { outcome: "already_dequeued" as const, revision };
+      }
+      const slots = this.turnSlots.get(sessionKey) ?? [];
+      const activeSlot = slots.find((slot) => (
+        slot.turnId === expectedTurnId
+        && slot.state === "running"
+        && slot.acceptingSteer
+        && sharedTurnSource(slot.root)?.kind === "gui"
+        && sharedTurnSource(slot.root)?.channel === "websocket"
+      ));
+      if (!activeSlot) return { outcome: "not_steerable" as const, revision };
+
+      const queuedSlot = slots.find((slot) => (
+        slot.root.metadata?.client_request_id === clientRequestId
+        && isSharedQueueMessage(slot.root)
+      ));
+      if (queuedSlot) {
+        if (queuedSlot.state !== "queued" || !queuedSlot.announcedToWebui) {
+          return { outcome: "already_dequeued" as const, revision };
+        }
+        const rawDescriptor = this.queueDescriptorFromMessage(queuedSlot.root);
+        const descriptor = rawDescriptor ? { ...rawDescriptor, sessionKey } : null;
+        const source = sharedTurnSource(queuedSlot.root);
+        if (
+          !descriptor
+          || descriptor.queueSurface !== WEBUI_CHAT_COMPOSER_QUEUE_SURFACE
+          || source?.kind !== "gui"
+          || source.channel !== "websocket"
+          || queuedSlot.route !== activeSlot.route
+          || queuedSlot.root.content.trimStart().startsWith("/")
+        ) {
+          return { outcome: "not_steerable" as const, revision };
+        }
+        const session = this.sessions.get(sessionKey);
+        if (!session) return { outcome: "not_steerable" as const, revision };
+        const transfers = this.goalRuntime.queueSteerTransfers(sessionKey);
+        const transfer = this.queueSteerTransferFromMessage(
+          sessionKey,
+          queuedSlot.root,
+          descriptor,
+          expectedTurnId,
+          "slot",
+        );
+        session.metadata[WEBUI_QUEUE_STEER_TRANSFERS_KEY] = [
+          ...transfers.filter((item) => item.clientRequestId !== clientRequestId),
+          transfer,
+        ];
+        this.sessions.save(session, { fsync: true });
+
+        const steer = this.messageFromQueueSteerTransfer(transfer, expectedTurnId);
+        activeSlot.pendingSteer.put(steer);
+        this.removeQueuedSlotTask(sessionKey, queuedSlot);
+        const nextRevision = this.advanceQueueRevision(sessionKey);
+        this.queueSteerAdmissionsFor(sessionKey).set(clientRequestId, {
+          turnId: expectedTurnId,
+          revision: nextRevision,
+          descriptor,
+          message: steer,
+          store: "slot",
+          phase: "pending",
+        });
+        return {
+          outcome: "steered" as const,
+          revision: nextRevision,
+          turnId: expectedTurnId,
+          descriptor: {
+            ...descriptor,
+            turnAdmission: "steer" as const,
+            turnId: expectedTurnId,
+          },
+        };
+      }
+
+      const inboxEntry = this.goalRuntime.inbox(sessionKey).find((entry) => (
+        entry.id === clientRequestId
+      ));
+      if (inboxEntry?.turnId !== null && inboxEntry) {
+        return { outcome: "already_dequeued" as const, revision };
+      }
+      const goalResult = await this.goalRuntime.beginQueueSteerTransfer(
+        sessionKey,
+        clientRequestId,
+        expectedTurnId,
+        WEBUI_CHAT_COMPOSER_QUEUE_SURFACE,
+        {
+          channel: activeSlot.root.channel,
+          chatId: activeSlot.root.chatId,
+        },
+      ).catch((error) => {
+        if (error instanceof GoalRuntimeError && error.code === "goal_not_found") {
+          return { outcome: "missing" as const };
+        }
+        throw error;
+      });
+      if (goalResult.outcome === "reserved") {
+        return { outcome: "already_dequeued" as const, revision };
+      }
+      if (goalResult.outcome !== "transferred" || !goalResult.transfer) {
+        const session = this.sessions.get(sessionKey);
+        const accepted = session?.messages.some((message) => (
+          message?.role === "user"
+          && message?.client_request_id === clientRequestId
+        ));
+        return {
+          outcome: accepted
+            ? "already_dequeued" as const
+            : goalResult.outcome === "not_steerable"
+              ? "not_steerable" as const
+              : "missing" as const,
+          revision,
+        };
+      }
+      const descriptor = goalResult.transfer.descriptor as QueueMessageDescriptor;
+      const steer = this.messageFromQueueSteerTransfer(goalResult.transfer, expectedTurnId);
+      activeSlot.pendingSteer.put(steer);
+      const nextRevision = this.advanceQueueRevision(sessionKey);
+      this.queueSteerAdmissionsFor(sessionKey).set(clientRequestId, {
+        turnId: expectedTurnId,
+        revision: nextRevision,
+        descriptor,
+        message: steer,
+        store: "goal",
+        phase: "pending",
+      });
+      return {
+        outcome: "steered" as const,
+        revision: nextRevision,
+        turnId: expectedTurnId,
+        descriptor: {
+          ...descriptor,
+          turnAdmission: "steer" as const,
+          turnId: expectedTurnId,
+        },
+      };
+    });
+
+    return result;
   }
 
   isSessionGoalActive(sessionKey: string): boolean {
@@ -1955,16 +2345,34 @@ export class AgentLoop {
     if (media.length) [content, media] = await extractDocuments(content, media);
     const hasText = typeof content === "string" && content.trim().length > 0;
     if (!hasText && !media.length) return null;
+    const clientRequestId = typeof msg.metadata?.client_request_id === "string"
+      ? msg.metadata.client_request_id
+      : null;
+    const queueSteerOrigin = msg.metadata?.webui_queue_steer_origin === true
+      && clientRequestId !== null;
+    if (queueSteerOrigin) {
+      const admission = this.queueSteerAdmissionsBySession
+        .get(this.effectiveSessionKey(msg))
+        ?.get(clientRequestId);
+      if (admission?.phase === "pending") admission.phase = "consumed";
+    }
     return {
       role: "user",
       content: this.context.buildUserContent(content, media),
-      ...(typeof msg.metadata?.client_request_id === "string"
-        ? { client_request_id: msg.metadata.client_request_id }
+      ...(clientRequestId
+        ? { client_request_id: clientRequestId }
+        : {}),
+      ...(queueSteerOrigin && typeof msg.metadata?.webui_request_digest === "string"
+        ? { webui_request_digest: msg.metadata.webui_request_digest }
         : {}),
       ...(firstString(msg.metadata?.turn_id, msg.metadata?.turnId)
         ? { turn_id: firstString(msg.metadata?.turn_id, msg.metadata?.turnId) }
         : {}),
       ...(sharedTurnSource(msg) ? { turn_source: sharedTurnSource(msg) } : {}),
+      ...(queueSteerOrigin ? { webui_queue_steer_origin: true } : {}),
+      ...(queueSteerOrigin && msg.metadata?.webui_queue_steer_recovery
+        ? { webui_queue_steer_recovery: structuredClone(msg.metadata.webui_queue_steer_recovery) }
+        : {}),
     };
   }
 
@@ -2096,6 +2504,12 @@ export class AgentLoop {
     const mediaPaths = (msg.media ?? []).filter((item) => typeof item === "string" && item);
     const hasText = typeof msg.content === "string" && msg.content.trim().length > 0;
     if (!hasText && !mediaPaths.length) return false;
+    if (
+      typeof msg.metadata?.client_request_id === "string"
+      && msg.metadata?.webui_queue_steer_origin !== true
+    ) {
+      this.clearQueueSteerTransferMetadata(session, msg.metadata.client_request_id);
+    }
     const metadataExtra = {
       ...(mediaPaths.length ? { media: [...mediaPaths] } : {}),
       ...mcpSessionExtra(msg.metadata),
@@ -2157,6 +2571,9 @@ export class AgentLoop {
       queuedAt,
       sessionKey: msg.sessionKey,
       source,
+      queueSurface: msg.metadata?.webui_queue_surface === WEBUI_CHAT_COMPOSER_QUEUE_SURFACE
+        ? WEBUI_CHAT_COMPOSER_QUEUE_SURFACE
+        : null,
     };
   }
 
@@ -2174,6 +2591,9 @@ export class AgentLoop {
       queuedAt,
       sessionKey,
       source,
+      queueSurface: entry.metadata.webui_queue_surface === WEBUI_CHAT_COMPOSER_QUEUE_SURFACE
+        ? WEBUI_CHAT_COMPOSER_QUEUE_SURFACE
+        : null,
     };
   }
 
@@ -2220,6 +2640,8 @@ export class AgentLoop {
           clientRequestId: descriptor.clientRequestId,
           webuiQueueItem: descriptor,
           queueRevision: revision,
+          ...(descriptor.turnAdmission ? { turnAdmission: descriptor.turnAdmission } : {}),
+          ...(descriptor.turnId ? { turnId: descriptor.turnId } : {}),
         },
       }),
     );
@@ -2246,7 +2668,11 @@ export class AgentLoop {
     );
   }
 
-  async publishWebuiMessageSteered(msg: InboundMessage, turnId: string): Promise<void> {
+  async publishWebuiMessageSteered(
+    msg: InboundMessage,
+    turnId: string,
+    { queueOrigin = false }: { queueOrigin?: boolean } = {},
+  ): Promise<void> {
     const clientRequestId = msg.metadata?.client_request_id;
     if (msg.channel !== "websocket" || typeof clientRequestId !== "string") return;
     await this.bus.publishOutbound(
@@ -2261,6 +2687,7 @@ export class AgentLoop {
           turnId,
           steeredContent: msg.content,
           steeredMedia: [...msg.media],
+          ...(queueOrigin ? { queueOrigin: true } : {}),
           ...(sharedTurnSource(msg) ? { turnSource: sharedTurnSource(msg) } : {}),
         },
       }),
@@ -2279,6 +2706,12 @@ export class AgentLoop {
             webuiMessageAccepted: true,
             webuiRequestSessionKey: slot?.root.sessionKey ?? msg.sessionKey,
             clientRequestId,
+            ...(firstString(msg.metadata?.turn_id, msg.metadata?.turnId)
+              ? { turnId: firstString(msg.metadata?.turn_id, msg.metadata?.turnId) }
+              : {}),
+            ...(msg.metadata?.webui_queue_steer_recovery
+              ? { queueSteerRecovery: msg.metadata.webui_queue_steer_recovery }
+              : {}),
             modelPreset: msg.metadata?.model_preset ?? null,
             modelProvider: msg.metadata?.model_provider ?? null,
             model: msg.metadata?.model ?? null,
@@ -2436,6 +2869,7 @@ export class AgentLoop {
     let lastAssistantIdx: number | null = null;
     for (const message of messages.slice(skip)) {
       const entry = { ...message };
+      delete entry.webui_queue_steer_origin;
       const role = entry.role;
       let content = entry.content;
       if (role === "assistant" && !content && !entry.tool_calls?.length) continue;
@@ -3868,6 +4302,24 @@ export class AgentLoop {
     }
   }
 
+  private discardQueueSteerResiduals(
+    sessionKey: string,
+    turnId: string,
+    queue: AsyncQueue<InboundMessage>,
+  ): void {
+    for (const message of this.drainInboundQueue(queue)) {
+      const clientRequestId = message.metadata?.client_request_id;
+      const admission = typeof clientRequestId === "string"
+        ? this.queueSteerAdmissionsBySession.get(sessionKey)?.get(clientRequestId)
+        : null;
+      if (
+        message.metadata?.webui_queue_steer_origin === true
+        && admission?.turnId === turnId
+      ) continue;
+      queue.put(message);
+    }
+  }
+
   private async cleanupOwnedSlots(
     sessionKey: string,
     owner: symbol,
@@ -3906,6 +4358,73 @@ export class AgentLoop {
       } catch {
         // Cleanup must not hide the dispatch result.
       }
+    }
+  }
+
+  private async finalizeQueueSteerAdmissions(
+    sessionKey: string,
+    turnId: string,
+  ): Promise<void> {
+    const accepted: QueueSteerAdmission[] = [];
+    const requeued: Array<{
+      message: InboundMessage;
+      revision: number;
+      store: "slot" | "goal";
+    }> = [];
+    await this.queueMutationLockFor(sessionKey).runExclusive(async () => {
+      const admissions = this.queueSteerAdmissionsBySession.get(sessionKey);
+      if (!admissions) return;
+      const session = this.sessions.get(sessionKey);
+      for (const [clientRequestId, admission] of admissions) {
+        if (admission.turnId !== turnId) continue;
+        const persisted = session?.messages.some((message) => (
+          message?.role === "user"
+          && message?.client_request_id === clientRequestId
+          && firstString(message?.turn_id, message?.turnId) === turnId
+        ));
+        if (persisted) {
+          await this.goalRuntime.completeQueueSteerTransfer(sessionKey, clientRequestId);
+          admissions.delete(clientRequestId);
+          accepted.push(admission);
+          continue;
+        }
+
+        const queuedAt = this.nextQueuedAt(sessionKey);
+        const transfer = this.goalRuntime.queueSteerTransfers(sessionKey)
+          .find((item) => item.clientRequestId === clientRequestId);
+        if (!transfer) {
+          admissions.delete(clientRequestId);
+          continue;
+        }
+        const message = this.recoveredQueueMessage(transfer, queuedAt);
+        if (admission.store === "goal") {
+          await this.goalRuntime.restoreGoalQueueSteerTransfer(
+            sessionKey,
+            clientRequestId,
+            queuedAt,
+          );
+        } else {
+          this.scheduleRecoveredQueueSlot(sessionKey, message);
+        }
+        admissions.delete(clientRequestId);
+        requeued.push({
+          message,
+          revision: this.advanceQueueRevision(sessionKey),
+          store: admission.store,
+        });
+      }
+      if (!admissions.size) this.queueSteerAdmissionsBySession.delete(sessionKey);
+    });
+
+    for (const admission of accepted) {
+      await this.publishWebuiMessageAccepted(admission.message);
+    }
+    for (const item of requeued) {
+      await this.publishWebuiMessageQueued(item.message, {
+        visible: true,
+        revision: item.revision,
+      });
+      if (item.store === "goal") void this.dispatchNextGoalWork(sessionKey);
     }
   }
 
@@ -4107,6 +4626,8 @@ export class AgentLoop {
         slot.acceptingSteer = false;
         slot.state = "settling";
       }
+      this.discardQueueSteerResiduals(sessionKey, turnId, pending);
+      await this.finalizeQueueSteerAdmissions(sessionKey, turnId);
       if (didPublishRunning) {
         await finishWebuiTurn({
           bus: this.bus,
@@ -4223,6 +4744,7 @@ export class AgentLoop {
     this.running = true;
     await this.initializeRuntimeTools();
     if (!this.running) return;
+    await this.recoverQueueSteerTransfers();
     await this.recoverGoalWork();
     while (this.running) {
       const inbound = this.bus.inbound.getNowait();

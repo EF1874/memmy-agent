@@ -397,6 +397,18 @@ export const agentActions = {
     return { type: "agent/queueItemRemoveFailed", chatId, clientRequestId, error };
   },
 
+  queueItemSteerStarted(chatId: string, clientRequestId: string): AppAction {
+    return { type: "agent/queueItemSteerStarted", chatId, clientRequestId };
+  },
+
+  queueItemSteerReset(chatId: string, clientRequestId: string): AppAction {
+    return { type: "agent/queueItemSteerReset", chatId, clientRequestId };
+  },
+
+  queueItemSteerFailed(chatId: string, clientRequestId: string, error: AgentOperationError): AppAction {
+    return { type: "agent/queueItemSteerFailed", chatId, clientRequestId, error };
+  },
+
   composerDraftUpdated(scopeKey: string, value: string): AppAction {
     return { type: "agent/composerDraftUpdated", scopeKey, value };
   },

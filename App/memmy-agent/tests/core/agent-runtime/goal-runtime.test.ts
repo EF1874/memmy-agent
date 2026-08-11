@@ -611,6 +611,64 @@ describe("GoalRuntime control and inbox arbitration", () => {
     expect(runtime.inbox(SESSION_KEY)).toHaveLength(1);
   });
 
+  it("journals, restores, and re-transfers one eligible Goal inbox queue item", async () => {
+    const { runtime, root } = createRuntime();
+    await createGoal(runtime);
+    const clientRequestId = "12121212-1212-4212-8212-121212121212";
+    await runtime.enqueueUserMessage(SESSION_KEY, new InboundMessage({
+      channel: "websocket",
+      chatId: ROUTE.chatId,
+      senderId: "user",
+      content: "adjust the active goal turn",
+      metadata: {
+        client_request_id: clientRequestId,
+        webui_request_digest: "goal-steer-digest",
+        webui_queue_surface: "chat_composer",
+        webui: true,
+        queued_at: "2026-08-10T12:00:00.000Z",
+        turn_source: { kind: "gui", channel: "websocket" },
+      },
+      sessionKeyOverride: SESSION_KEY,
+      turnSource: { kind: "gui", channel: "websocket" },
+    }));
+
+    await expect(runtime.beginQueueSteerTransfer(
+      SESSION_KEY,
+      clientRequestId,
+      "turn-active",
+      "chat_composer",
+      ROUTE,
+    )).resolves.toMatchObject({
+      outcome: "transferred",
+      transfer: {
+        clientRequestId,
+        expectedTurnId: "turn-active",
+        store: "goal",
+      },
+    });
+    expect(runtime.inbox(SESSION_KEY)).toEqual([]);
+    expect(new SessionManager(root).get(SESSION_KEY)?.metadata.webui_queue_steer_transfers)
+      .toEqual([expect.objectContaining({ clientRequestId, expectedTurnId: "turn-active" })]);
+
+    await expect(runtime.restoreGoalQueueSteerTransfer(
+      SESSION_KEY,
+      clientRequestId,
+      "2026-08-10T12:00:01.000Z",
+    )).resolves.toMatchObject({ id: clientRequestId, turnId: null });
+    await expect(runtime.beginQueueSteerTransfer(
+      SESSION_KEY,
+      clientRequestId,
+      "turn-next",
+      "chat_composer",
+      ROUTE,
+    )).resolves.toMatchObject({
+      outcome: "transferred",
+      transfer: { expectedTurnId: "turn-next" },
+    });
+    await runtime.completeQueueSteerTransfer(SESSION_KEY, clientRequestId);
+    expect(runtime.queueSteerTransfers(SESSION_KEY)).toEqual([]);
+  });
+
   it("rejects missing WebUI dedupe fields and drops unsupported metadata", () => {
     expect(() => sanitizeGoalInboxMetadata("websocket", { webui: true }))
       .toThrowError(expect.objectContaining({ code: "goal_inbox_metadata_invalid" }));

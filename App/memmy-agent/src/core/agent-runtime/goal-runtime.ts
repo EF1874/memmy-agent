@@ -42,6 +42,40 @@ export type GoalTurnInboxEntry = {
   receivedAt: string;
 };
 
+export const WEBUI_QUEUE_STEER_TRANSFERS_KEY = "webui_queue_steer_transfers";
+
+export type WebuiQueueSteerTransferRecord = {
+  clientRequestId: string;
+  expectedTurnId: string;
+  store: "slot" | "goal";
+  descriptor: {
+    clientRequestId: string;
+    content: string;
+    media: string[];
+    queuedAt: string;
+    sessionKey: string;
+    source: { kind: "gui" | "tui" | "im"; channel: string };
+    queueSurface: "chat_composer" | null;
+  };
+  messageFields: {
+    channel: string;
+    chatId: string;
+    senderId: string;
+    content: string;
+    media: string[];
+    metadata: Record<string, JsonValue>;
+    timestamp: string;
+    sessionKey: string;
+    turnSource: { kind: "gui" | "tui" | "im"; channel: string } | null;
+  };
+};
+
+export type BeginGoalQueueSteerTransferResult = {
+  outcome: "transferred" | "not_steerable" | "reserved" | "missing";
+  entry?: GoalTurnInboxEntry;
+  transfer?: WebuiQueueSteerTransferRecord;
+};
+
 export type GoalTurnLease = {
   goalId: string;
   turnId: string;
@@ -177,6 +211,26 @@ function normalizeTokenBudget(value: unknown): number | null {
 function normalizeUsageValue(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return 0;
   return Math.floor(value);
+}
+
+function parseQueueSteerTransfers(value: unknown): WebuiQueueSteerTransferRecord[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const record = item as Record<string, any>;
+    const descriptor = record.descriptor;
+    const messageFields = record.messageFields;
+    if (
+      typeof record.clientRequestId !== "string"
+      || typeof record.expectedTurnId !== "string"
+      || (record.store !== "slot" && record.store !== "goal")
+      || !descriptor
+      || typeof descriptor !== "object"
+      || !messageFields
+      || typeof messageFields !== "object"
+    ) return [];
+    return [structuredClone(record) as WebuiQueueSteerTransferRecord];
+  });
 }
 
 function isClearablePausedGoal(current: GoalState, snapshot: GoalState): boolean {
@@ -853,6 +907,137 @@ export class GoalRuntime {
 
   inbox(sessionKey: string): GoalTurnInboxEntry[] {
     return parseInbox(this.sessions.get(sessionKey)?.metadata?.[GOAL_TURN_INBOX_KEY]);
+  }
+
+  queueSteerTransfers(sessionKey: string): WebuiQueueSteerTransferRecord[] {
+    return parseQueueSteerTransfers(
+      this.sessions.get(sessionKey)?.metadata?.[WEBUI_QUEUE_STEER_TRANSFERS_KEY],
+    );
+  }
+
+  async beginQueueSteerTransfer(
+    sessionKey: string,
+    clientRequestId: string,
+    expectedTurnId: string,
+    requiredQueueSurface: "chat_composer",
+    route: { channel: string; chatId: string },
+  ): Promise<BeginGoalQueueSteerTransferResult> {
+    return this.mutate<BeginGoalQueueSteerTransferResult>(sessionKey, (session) => {
+      const transfers = parseQueueSteerTransfers(
+        session.metadata[WEBUI_QUEUE_STEER_TRANSFERS_KEY],
+      );
+      const existingTransfer = transfers.some(
+        (item) => item.clientRequestId === clientRequestId,
+      );
+      const inbox = parseInbox(session.metadata[GOAL_TURN_INBOX_KEY]);
+      const index = inbox.findIndex((entry) => entry.id === clientRequestId);
+      if (index < 0) {
+        return {
+          value: { outcome: existingTransfer ? "reserved" as const : "missing" as const },
+        };
+      }
+      const entry = inbox[index]!;
+      if (entry.turnId !== null) return { value: { outcome: "reserved" as const } };
+      const source = parseTurnSource(entry.metadata.turn_source);
+      if (
+        source?.kind !== "gui"
+        || source.channel !== "websocket"
+        || entry.channel !== route.channel
+        || entry.chatId !== route.chatId
+        || entry.metadata.webui_queue_surface !== requiredQueueSurface
+        || entry.content.trimStart().startsWith("/")
+      ) {
+        return { value: { outcome: "not_steerable" as const } };
+      }
+      const transfer: WebuiQueueSteerTransferRecord = {
+        clientRequestId,
+        expectedTurnId,
+        store: "goal",
+        descriptor: {
+          clientRequestId,
+          content: entry.content,
+          media: [...entry.media],
+          queuedAt: String(entry.metadata.queued_at ?? entry.receivedAt),
+          sessionKey,
+          source,
+          queueSurface: requiredQueueSurface,
+        },
+        messageFields: {
+          channel: entry.channel,
+          chatId: entry.chatId,
+          senderId: entry.senderId,
+          content: entry.content,
+          media: [...entry.media],
+          metadata: structuredClone(entry.metadata),
+          timestamp: entry.receivedAt,
+          sessionKey,
+          turnSource: source,
+        },
+      };
+      session.metadata[GOAL_TURN_INBOX_KEY] = inbox.filter(
+        (_, itemIndex) => itemIndex !== index,
+      );
+      session.metadata[WEBUI_QUEUE_STEER_TRANSFERS_KEY] = [
+        ...transfers.filter((item) => item.clientRequestId !== clientRequestId),
+        transfer,
+      ];
+      return {
+        value: {
+          outcome: "transferred" as const,
+          entry,
+          transfer,
+        },
+      };
+    });
+  }
+
+  async restoreGoalQueueSteerTransfer(
+    sessionKey: string,
+    clientRequestId: string,
+    queuedAt: string,
+  ): Promise<GoalTurnInboxEntry | null> {
+    return this.mutate(sessionKey, (session) => {
+      const transfers = parseQueueSteerTransfers(
+        session.metadata[WEBUI_QUEUE_STEER_TRANSFERS_KEY],
+      );
+      const transfer = transfers.find((item) => (
+        item.clientRequestId === clientRequestId && item.store === "goal"
+      ));
+      if (!transfer) return { value: null };
+      const inbox = parseInbox(session.metadata[GOAL_TURN_INBOX_KEY]);
+      const existing = inbox.find((entry) => entry.id === clientRequestId);
+      if (existing) return { value: existing };
+      const entry: GoalTurnInboxEntry = {
+        id: clientRequestId,
+        turnId: null,
+        channel: transfer.messageFields.channel,
+        chatId: transfer.messageFields.chatId,
+        senderId: transfer.messageFields.senderId,
+        content: transfer.messageFields.content,
+        media: [...transfer.messageFields.media],
+        metadata: {
+          ...structuredClone(transfer.messageFields.metadata),
+          queued_at: queuedAt,
+        },
+        receivedAt: new Date().toISOString(),
+      };
+      session.metadata[GOAL_TURN_INBOX_KEY] = [...inbox, entry];
+      return { value: entry };
+    });
+  }
+
+  async completeQueueSteerTransfer(
+    sessionKey: string,
+    clientRequestId: string,
+  ): Promise<void> {
+    await this.mutate(sessionKey, (session) => {
+      const transfers = parseQueueSteerTransfers(
+        session.metadata[WEBUI_QUEUE_STEER_TRANSFERS_KEY],
+      ).filter((item) => item.clientRequestId !== clientRequestId);
+      if (transfers.length) session.metadata[WEBUI_QUEUE_STEER_TRANSFERS_KEY] = transfers;
+      else delete session.metadata[WEBUI_QUEUE_STEER_TRANSFERS_KEY];
+      return { value: undefined };
+    });
   }
 
   async removeUnreservedInboxEntry(

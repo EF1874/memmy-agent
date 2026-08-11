@@ -1473,6 +1473,73 @@ function isGoalStatus(value: unknown): boolean {
     || value === "completed";
 }
 
+function queueSteerRecoveryIdentity(message: Dict): { clientRequestId: string; turnId: string } | null {
+  if (!isDict(message.webui_queue_steer_recovery)) return null;
+  const clientRequestId = stringValue(message.webui_queue_steer_recovery.client_request_id)
+    ?? stringValue(message.client_request_id);
+  const turnId = stringValue(message.webui_queue_steer_recovery.turn_id)
+    ?? stringValue(message.turn_id)
+    ?? stringValue(message.turnId);
+  return clientRequestId && turnId ? { clientRequestId, turnId } : null;
+}
+
+function queueSteerUiIdentity(message: Dict): { clientRequestId: string; turnId: string } | null {
+  if (message.role !== "user") return null;
+  const clientRequestId = stringValue(message.client_request_id)
+    ?? stringValue(message.clientRequestId);
+  const turnId = stringValue(message.turnId) ?? stringValue(message.turn_id);
+  return clientRequestId && turnId ? { clientRequestId, turnId } : null;
+}
+
+function queueSteerIdentityKey(clientRequestId: string, turnId: string): string {
+  return `${clientRequestId}\0${turnId}`;
+}
+
+function orderQueueSteerUsersBeforeFinalAnswers(messages: Dict[], sessionMessages: Dict[] | null | undefined): Dict[] {
+  const recoveryOrder = new Map<string, number>();
+  const turnOrder: string[] = [];
+  for (const message of sessionMessages ?? []) {
+    const identity = queueSteerRecoveryIdentity(message);
+    if (!identity) continue;
+    const key = queueSteerIdentityKey(identity.clientRequestId, identity.turnId);
+    if (recoveryOrder.has(key)) continue;
+    recoveryOrder.set(key, recoveryOrder.size);
+    if (!turnOrder.includes(identity.turnId)) turnOrder.push(identity.turnId);
+  }
+  if (!recoveryOrder.size) return messages;
+
+  let ordered = [...messages];
+  for (const turnId of turnOrder) {
+    const finalAnswer = [...ordered].reverse().find((message) => (
+      message.role === "assistant"
+      && stringValue(message.turnId) === turnId
+      && message.kind !== "trace"
+      && message.kind !== "narration"
+      && message.kind !== "context_compaction"
+    ));
+    if (!finalAnswer) continue;
+    const answerIndex = ordered.indexOf(finalAnswer);
+    const steerUsers = ordered.filter((message) => {
+      const identity = queueSteerUiIdentity(message);
+      return identity?.turnId === turnId
+        && recoveryOrder.has(queueSteerIdentityKey(identity.clientRequestId, identity.turnId));
+    });
+    if (!steerUsers.length || steerUsers.every((message) => ordered.indexOf(message) < answerIndex)) {
+      continue;
+    }
+    steerUsers.sort((left, right) => {
+      const leftIdentity = queueSteerUiIdentity(left)!;
+      const rightIdentity = queueSteerUiIdentity(right)!;
+      return recoveryOrder.get(queueSteerIdentityKey(leftIdentity.clientRequestId, leftIdentity.turnId))!
+        - recoveryOrder.get(queueSteerIdentityKey(rightIdentity.clientRequestId, rightIdentity.turnId))!;
+    });
+    const steerSet = new Set(steerUsers);
+    ordered = ordered.filter((message) => !steerSet.has(message));
+    ordered.splice(ordered.indexOf(finalAnswer), 0, ...steerUsers);
+  }
+  return ordered;
+}
+
 export function buildWebuiThreadResponse(sessionKey: string, messages: any[]): Dict;
 export function buildWebuiThreadResponse(sessionKey: string, options?: BuildWebuiThreadResponseOptions | null): Dict | null;
 export function buildWebuiThreadResponse(sessionKey: string, messagesOrOptions: any[] | BuildWebuiThreadResponseOptions | null = null): Dict | null {
@@ -1484,18 +1551,21 @@ export function buildWebuiThreadResponse(sessionKey: string, messagesOrOptions: 
   const lines = surfaceAwareTranscriptLines(allLines, surface);
   const turnState = lastTranscriptTurnState(lines);
   const lastTurnId = stringValue(turnState.last_turn_id);
+  const messages = replayTranscriptToUiMessages(lines, {
+    ...options,
+    sessionMessages: surface === "tui"
+      ? (options.sessionMessages ?? []).filter(
+          (message) => parseTurnSource(message.turn_source)?.kind === "tui",
+        )
+      : options.sessionMessages,
+  });
   return {
     schemaVersion: WEBUI_TRANSCRIPT_SCHEMA_VERSION,
     sessionKey,
     ...turnState,
     ...lastTranscriptGoalOutcome(lines, lastTurnId),
-    messages: replayTranscriptToUiMessages(lines, {
-      ...options,
-      sessionMessages: surface === "tui"
-        ? (options.sessionMessages ?? []).filter(
-            (message) => parseTurnSource(message.turn_source)?.kind === "tui",
-          )
-        : options.sessionMessages,
-    }),
+    messages: surface === "gui"
+      ? orderQueueSteerUsersBeforeFinalAnswers(messages, options.sessionMessages)
+      : messages,
   };
 }

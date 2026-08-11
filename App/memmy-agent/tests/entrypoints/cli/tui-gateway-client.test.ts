@@ -324,6 +324,36 @@ describe("TuiGatewayClient", () => {
       expect.objectContaining({ role: "user", text: "queued TUI question" }),
     ]);
 
+    const guiQueueId = "33333333-3333-4333-8333-333333333333";
+    const guiQueuedItem = {
+      client_request_id: guiQueueId,
+      text: "GUI-only adjustment",
+      queued_at: "2026-08-09T12:00:01.000Z",
+      source: { kind: "gui", channel: "websocket" },
+      queue_surface: "chat_composer",
+    };
+    socket.message({
+      event: "message_queued",
+      chat_id: client.chatId,
+      client_request_id: guiQueueId,
+      revision: 3,
+      item: guiQueuedItem,
+    });
+    expect(client.snapshot().queueItems.map((item) => item.text)).toEqual(["GUI-only adjustment"]);
+    socket.message({
+      event: "message_dequeued",
+      chat_id: client.chatId,
+      client_request_id: guiQueueId,
+      revision: 4,
+      item: { ...guiQueuedItem, turn_admission: "steer", turn_id: "turn-gui" },
+      turn_admission: "steer",
+      turn_id: "turn-gui",
+    });
+    expect(client.snapshot().queueItems).toEqual([]);
+    expect(client.snapshot().messages).toEqual([
+      expect.objectContaining({ role: "user", text: "queued TUI question" }),
+    ]);
+
     socket.message({
       event: "run_status",
       chat_id: client.chatId,

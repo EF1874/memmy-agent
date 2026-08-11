@@ -893,12 +893,14 @@ describe("memmy-agent client", () => {
       chat_id: "chat-1",
       status: "running",
       started_at: 1_234,
-      turn_id: "turn-1"
+      turn_id: "turn-1",
+      source: { kind: "gui", channel: "websocket" }
     });
     await expect(pending).resolves.toEqual({
       status: "running",
       startedAt: 1_234,
       turnId: "turn-1",
+      source: { kind: "gui", channel: "websocket" },
       connectionGeneration: 1
     });
   });
@@ -1745,6 +1747,79 @@ describe("memmy-agent client", () => {
       revision: 8
     });
     await expect(removal).resolves.toEqual({ outcome: "already_dequeued", revision: 8 });
+  });
+
+  it("sends one queue-steer control and terminates the original queued attempt", async () => {
+    const sockets: FakeSocket[] = [];
+    const client = createMemmyAgentClient({
+      baseUrl: "https://agent.local:18980",
+      clientId: "frontend-test",
+      fetchFn: vi.fn(async () => json(bootstrap)) as typeof fetch,
+      webSocketFactory: (url) => {
+        const socket = new FakeSocket(url);
+        sockets.push(socket);
+        return socket;
+      }
+    });
+    const connection = await connectReady(client, sockets);
+    const clientRequestId = "56565656-5656-4656-8656-565656565656";
+    const turnId = "78787878-7878-4878-8878-787878787878";
+    const submission = connection.submitMessage({
+      chatId: "chat-steer",
+      content: "adjust active turn",
+      clientRequestId
+    }, 1);
+    sockets[0]!.emit({
+      event: "message_queued",
+      chat_id: "chat-steer",
+      client_request_id: clientRequestId,
+      item: {
+        client_request_id: clientRequestId,
+        text: "adjust active turn",
+        media_urls: [],
+        queued_at: "2026-08-10T12:00:00.000Z",
+        queue_surface: "chat_composer"
+      }
+    });
+    await expect(submission).resolves.toEqual({ status: "queued" });
+
+    const steer = connection.steerQueuedMessage(
+      "chat-steer",
+      clientRequestId,
+      turnId,
+      1
+    );
+    const frame = JSON.parse(sockets[0]!.sent.at(-1)!);
+    expect(frame).toMatchObject({
+      type: "queue_steer",
+      chat_id: "chat-steer",
+      client_request_id: clientRequestId,
+      expected_turn_id: turnId
+    });
+    sockets[0]!.emit({
+      event: "message_dequeued",
+      chat_id: "chat-steer",
+      client_request_id: clientRequestId,
+      turn_admission: "steer",
+      turn_id: turnId
+    });
+    expect((connection as unknown as { pendingMessageAttempts: Map<string, unknown> })
+      .pendingMessageAttempts.size).toBe(0);
+    sockets[0]!.emit({
+      event: "queue_steer_result",
+      chat_id: "chat-steer",
+      request_id: frame.request_id,
+      client_request_id: clientRequestId,
+      ok: true,
+      outcome: "steered",
+      revision: 2,
+      turn_id: turnId
+    });
+    await expect(steer).resolves.toEqual({
+      outcome: "steered",
+      revision: 2,
+      turnId
+    });
   });
 
   it("reconfirms queued messages across reconnects without exhausting retries", async () => {

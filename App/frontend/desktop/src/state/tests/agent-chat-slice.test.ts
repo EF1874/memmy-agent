@@ -149,6 +149,130 @@ describe("agent chat slice", () => {
       .toEqual({ kind: "gui", channel: "websocket" });
   });
 
+  it("promotes a queue-origin steer once and removes the temporary user on requeue", () => {
+    const item = {
+      ...queuedWire("queue-steer", "补充约束", "2026-08-10T12:00:00.000Z"),
+      queue_surface: "chat_composer" as const
+    };
+    let state = agentReducer(initialAgentState, {
+      type: "agent/wsEvent",
+      event: {
+        event: "run_status",
+        chat_id: "chat-1",
+        status: "running",
+        started_at: 1_780_732_800,
+        turn_id: "turn-steer",
+        source: { kind: "gui", channel: "websocket" }
+      }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message_queued",
+        chat_id: "chat-1",
+        client_request_id: "queue-steer",
+        item
+      }
+    });
+    state = agentReducer(state, {
+      type: "agent/queueItemSteerStarted",
+      chatId: "chat-1",
+      clientRequestId: "queue-steer"
+    });
+    expect(state.queuedMessagesByChatId["chat-1"]?.[0]).toMatchObject({
+      queueSurface: "chat_composer",
+      status: "steering"
+    });
+    state = agentReducer(state, {
+      type: "agent/queueItemSteerReset",
+      chatId: "chat-1",
+      clientRequestId: "queue-steer"
+    });
+    expect(state.queuedMessagesByChatId["chat-1"]?.[0]?.status).toBe("queued");
+    state = agentReducer(state, {
+      type: "agent/queueItemSteerStarted",
+      chatId: "chat-1",
+      clientRequestId: "queue-steer"
+    });
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message_dequeued",
+        chat_id: "chat-1",
+        client_request_id: "queue-steer",
+        turn_admission: "steer",
+        turn_id: "turn-steer",
+        item: {
+          ...item,
+          turn_admission: "steer",
+          turn_id: "turn-steer"
+        }
+      }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message_steered",
+        chat_id: "chat-1",
+        client_request_id: "queue-steer",
+        turn_id: "turn-steer"
+      }
+    });
+    expect(state.queuedMessagesByChatId["chat-1"]).toBeUndefined();
+    expect(state.messagesByChatId["chat-1"]).toEqual([
+      expect.objectContaining({
+        role: "user",
+        content: "补充约束",
+        clientRequestId: "queue-steer",
+        turnId: "turn-steer",
+        queueSteerPending: true
+      })
+    ]);
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message_queued",
+        chat_id: "chat-1",
+        client_request_id: "queue-steer",
+        item: { ...item, queued_at: "2026-08-10T12:00:01.000Z" }
+      }
+    });
+    expect(state.messagesByChatId["chat-1"]).toEqual([]);
+    expect(state.queuedMessagesByChatId["chat-1"]?.[0]).toMatchObject({
+      clientRequestId: "queue-steer",
+      status: "queued"
+    });
+  });
+
+  it("tracks active Turn source without guessing GUI for legacy snapshots", () => {
+    let state = agentReducer(initialAgentState, {
+      type: "agent/wsEvent",
+      event: {
+        event: "run_status_snapshot",
+        chat_id: "chat-1",
+        status: "running",
+        started_at: 1_780_732_800,
+        turn_id: "turn-source"
+      }
+    });
+    expect(state.activeTurnSourceByChatId["chat-1"]).toBeNull();
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "run_status",
+        chat_id: "chat-1",
+        status: "running",
+        started_at: 1_780_732_801,
+        turn_id: "turn-source",
+        source: { kind: "gui", channel: "websocket" }
+      }
+    });
+    expect(state.activeTurnSourceByChatId["chat-1"])
+      .toEqual({ kind: "gui", channel: "websocket" });
+  });
+
   it("applies consecutive queue revisions, ignores duplicates, and requests snapshot reconciliation on gaps", () => {
     let state = agentReducer(initialAgentState, {
       type: "agent/wsEvent",

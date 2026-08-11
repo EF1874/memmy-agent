@@ -161,6 +161,13 @@ describe("HomePage", () => {
     expect(agentStatusText("error", null, (key) => key)).toBe("home.agent.failed");
   });
 
+  it("shows the specific queue steer failure messages", () => {
+    expect(agentErrorText("home.queue.steerFailed", (key) => key))
+      .toBe("home.queue.steerFailed");
+    expect(agentErrorText("home.queue.steerUnavailable", (key) => key))
+      .toBe("home.queue.steerUnavailable");
+  });
+
   it("recovers slash commands after the initial command snapshot fails", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
     const loadSlashCommandsBlock = source.slice(
@@ -1266,6 +1273,19 @@ describe("HomePage", () => {
     expect(source).toContain("updateAgentComposerOverlayHeight(panel, composer, measuredHeight)");
     expect(source).toContain('if (typeof ResizeObserver !== "undefined") return;');
     expect(source).toContain("currentQueuedMessages.length");
+  });
+
+  it("requests a queue snapshot after every unsuccessful queue steer", () => {
+    const source = readFileSync(homePageSourcePath, "utf8");
+    const steerBlock = source.slice(
+      source.indexOf("async function steerQueuedMessage"),
+      source.indexOf("  function selectDraftTarget")
+    );
+
+    expect(steerBlock.match(/connection\.requestQueueSnapshot\(chatId, readyGeneration\);/g))
+      .toHaveLength(2);
+    expect(steerBlock).toContain('if (result.outcome === "already_dequeued")');
+    expect(steerBlock).toContain("agentActions.queueItemSteerReset(chatId, clientRequestId)");
   });
 
   it("writes the measured composer height and ignores sub-pixel-equivalent changes", () => {
