@@ -11,7 +11,7 @@ import {
 } from "../../../src/core/agent-runtime/goal-runtime.js";
 import { InboundMessage } from "../../../src/core/runtime-messages/events.js";
 import { MessageBus } from "../../../src/core/runtime-messages/queue.js";
-import { SessionManager } from "../../../src/core/session/manager.js";
+import { Session, SessionManager } from "../../../src/core/session/manager.js";
 
 const SESSION_KEY = "websocket:goal-runtime";
 const ROUTE = { channel: "websocket", chatId: "goal-runtime" } as const;
@@ -57,6 +57,18 @@ async function expectGoalError(promise: Promise<unknown>, code: string): Promise
 }
 
 describe("GoalRuntime state transitions", () => {
+  it("captures the workspace baseline before persisting a new Goal", async () => {
+    const captureWorkspaceBaseline = vi.fn((session: Session, goalId: string) => {
+      session.metadata.workspaceBaselineGoalId = goalId;
+    });
+    const { runtime, sessions } = createRuntime({ captureWorkspaceBaseline });
+
+    const goal = await createGoal(runtime);
+
+    expect(captureWorkspaceBaseline).toHaveBeenCalledTimes(1);
+    expect(sessions.get(SESSION_KEY)?.metadata.workspaceBaselineGoalId).toBe(goal.goalId);
+  });
+
   it("enforces lifecycle transitions and goal identity", async () => {
     const { runtime } = createRuntime();
     const created = await createGoal(runtime);

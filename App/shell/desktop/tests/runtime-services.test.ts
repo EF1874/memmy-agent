@@ -11,7 +11,10 @@ import {
   AgentGatewaySupervisor,
   preparePackagedBrowser,
   preparePackagedRuntimeConfig,
+  resolveDevelopmentRuntimeExecutable,
+  resolveDevelopmentRuntimeEntryPaths,
   resolvePackagedRuntimeMigrationTargets,
+  resolveRuntimeEntryPaths,
   runPackagedMigrationCommand,
   restartExternalMemoryService,
   spawnNodeService,
@@ -20,7 +23,7 @@ import {
   type ManagedChild,
   type PackagedRuntimeConfig,
   type RuntimeEntryPaths,
-  type StartPackagedRuntimeServicesOptions
+  type StartManagedRuntimeServicesOptions
 } from "../src/main/runtime-services.js";
 
 const tempRoots: string[] = [];
@@ -45,6 +48,43 @@ function recordValue(parent: ConfigRecord, key: string): ConfigRecord {
   }
   throw new Error(`Expected ${key} to be an object`);
 }
+
+describe("managed desktop runtime entries", () => {
+  it("uses source build outputs when Electron runs from the development main directory", () => {
+    const repoRoot = resolve("fixtures/memmy-repo");
+    const mainDirectory = join(repoRoot, "App", "shell", "desktop", "dist", "main");
+
+    expect(resolveDevelopmentRuntimeEntryPaths(mainDirectory)).toEqual({
+      memoryEntry: join(repoRoot, "Memory", "dist", "src", "server", "index.js"),
+      agentEntry: join(repoRoot, "App", "memmy-agent", "dist", "main.js")
+    });
+  });
+
+  it("uses explicitly supplied entries instead of packaged artifact paths", () => {
+    const runtimeEntries: RuntimeEntryPaths = {
+      memoryEntry: "/repo/Memory/dist/src/server/index.js",
+      agentEntry: "/repo/App/memmy-agent/dist/main.js"
+    };
+
+    expect(resolveRuntimeEntryPaths({
+      appPath: "/packaged/app",
+      resourcesPath: "/packaged/resources",
+      logDirectory: "/logs",
+      logLevel: "info",
+      runtimeEntries
+    })).toEqual(runtimeEntries);
+  });
+
+  it("uses the development Node executable instead of Electron for runtime children", () => {
+    expect(resolveDevelopmentRuntimeExecutable({
+      MEMMY_RUNTIME_NODE_PATH: " /opt/memmy/node ",
+      npm_node_execpath: "/ignored/npm/node"
+    })).toBe("/opt/memmy/node");
+    expect(resolveDevelopmentRuntimeExecutable({
+      npm_node_execpath: "/opt/npm/node"
+    })).toBe("/opt/npm/node");
+  });
+});
 
 describe("packaged desktop runtime config", () => {
   afterEach(async () => {
@@ -80,6 +120,7 @@ describe("packaged desktop runtime config", () => {
     process.env.MEMMY_MIGRATIONS_READY_APP_DATABASE = "/stale/app.sqlite";
 
     await runPackagedMigrationCommand({
+      executablePath: "/opt/memmy/node",
       agentEntry: "/runtime/memmy-agent/dist/main.js",
       configPath: join(root, "config.yaml"),
       agentWorkspace: join(root, "workspace"),
@@ -89,7 +130,7 @@ describe("packaged desktop runtime config", () => {
       spawnProcess: spawnProcess as typeof import("node:child_process").spawn
     });
     expect(spawnProcess).toHaveBeenCalledWith(
-      process.execPath,
+      "/opt/memmy/node",
       [
         "/runtime/memmy-agent/dist/main.js",
         "migrate",
@@ -589,13 +630,14 @@ describe("packaged desktop runtime config", () => {
           resourcesPath: root,
           logDirectory,
           logLevel: "info",
+          runtimeExecutable: "/opt/memmy/node",
         },
         spawnProcess as any,
       ),
     ).resolves.toBe(true);
 
     expect(spawnProcess).toHaveBeenCalledWith(
-      process.execPath,
+      "/opt/memmy/node",
       [agentEntry, "internal", "browser-prepare"],
       expect.objectContaining({
         shell: false,
@@ -748,6 +790,9 @@ describe("AgentGatewaySupervisor", () => {
     await vi.advanceTimersByTimeAsync(60_000);
 
     expect(harness.spawn).toHaveBeenCalledTimes(1);
+    expect(harness.spawn.mock.calls[0]?.[4]).toMatchObject({
+      executablePath: "/opt/memmy/node"
+    });
     expect(harness.supervisor.hasReachedReady).toBe(false);
     expect(harness.supervisor.restartTimer).toBeNull();
   });
@@ -1014,12 +1059,13 @@ function createSupervisorHarness(overrides: {
     agentGatewayHealthPort: 18970,
     agentGatewayBootstrapSecret: "gateway-secret"
   };
-  const options: StartPackagedRuntimeServicesOptions = {
+  const options: StartManagedRuntimeServicesOptions = {
     appPath: "/app",
     appDatabaseFile: "/memmy/app.sqlite",
     resourcesPath: "/resources",
     logDirectory: "/logs",
-    logLevel: "info"
+    logLevel: "info",
+    runtimeExecutable: "/opt/memmy/node"
   };
   const children: ManagedChild[] = [];
   const spawned: ManagedChild[] = [];

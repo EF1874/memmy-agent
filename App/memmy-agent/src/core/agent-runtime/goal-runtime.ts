@@ -63,6 +63,7 @@ export type GoalRuntimeCallbacks = {
   cancelActiveTasks?: (sessionKey: string) => Promise<number>;
   scheduleGoalWork?: (sessionKey: string, goal: GoalState) => void;
   invalidateGoalWork?: (sessionKey: string) => void;
+  captureWorkspaceBaseline?: (session: Session, goalId: string) => void | Promise<void>;
 };
 
 export type GoalControlAction = "pause" | "resume" | "edit" | "set_budget" | "clear";
@@ -481,6 +482,7 @@ export class GoalRuntime {
           createdAt: now,
           updatedAt: now,
         };
+        await this.callbacks.captureWorkspaceBaseline?.(session, goal.goalId);
         session.metadata[GOAL_STATE_KEY] = goal;
         session.metadata[GOAL_ROUTE_KEY] = { ...input.route };
         return {

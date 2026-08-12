@@ -65,6 +65,9 @@ import {
 } from "./agent-command-palette.js";
 import { AgentAttachmentCard, splitAgentAttachmentName } from "./agent-file-attachment-chip.js";
 import { AgentGoalBar, type AgentGoalControlRequest } from "./agent-goal-bar.js";
+import { AgentEnvironmentPanel } from "./agent-environment-panel.js";
+import { AgentWorkspaceContext } from "./agent-workspace-context.js";
+import { resolveWorkspaceEnvironmentScope, useWorkspaceEnvironment } from "./use-workspace-environment.js";
 import { AgentQueuedMessageList } from "./agent-queued-message-list.js";
 import { AgentThreadMessages, ChatImageLightbox } from "./agent-thread-messages.js";
 import { AppFrame } from "./app-frame.js";
@@ -83,7 +86,7 @@ import {
 import { HistoryDagPanel, type HistoryDagPanelState } from "./history-dag-panel.js";
 import { LlmProviderLogo } from "./llm-provider-logo.js";
 import { Mic, Pause, Plus, Send } from "./memory/memory-prototype-icons.js";
-import { ArrowDown, Check, ChevronDown, CircleX, Folder, Plus as LucidePlus, RotateCw, X } from "lucide-react";
+import { ArrowDown, Check, ChevronDown, CircleX, Folder, Plus as LucidePlus, RotateCw, SlidersHorizontal, X } from "lucide-react";
 
 export { agentChatScopeKey, updateComposerDraftForScope };
 export { hydrateAgentThreadInBackground };
@@ -91,7 +94,6 @@ export { isComposingKeyboardEvent } from "../utils/keyboard.js";
 export type { PendingAttachment, PendingAttachmentBase, PendingFileAttachment, PendingImage };
 
 const NEW_TASK_MODEL_SCOPE_KEY = "draft-new-task";
-
 const COMPOSER_MEDIA_STRIP_STYLE = { maxHeight: "min(7.5rem, 28vh)" } satisfies CSSProperties;
 const AGENT_WS_SAFE_FRAME_BYTES = 1024 * 1024;
 const COMPOSER_HEIGHT_EPSILON = 2;
@@ -789,6 +791,7 @@ export function HomePage() {
   const [statusPanel, setStatusPanel] = useState<StatusPanelState>({ open: false });
   const [lastCompactionPanel, setLastCompactionPanel] = useState<StatusPanelState>({ open: false });
   const [historyDagPanel, setHistoryDagPanel] = useState<HistoryDagPanelState>({ open: false });
+  const [environmentPanelOpen, setEnvironmentPanelOpen] = useState(false);
   const [isCreatingChat, setIsCreatingChat] = useState(false);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const [projectPickerOperationId, setProjectPickerOperationId] = useState<string | null>(null);
@@ -846,6 +849,10 @@ export function HomePage() {
   const selectedDraftProject = draftTarget.kind === "project"
     ? state.agent.projects.find((project) => project.id === draftTarget.projectId) ?? null
     : null;
+  const environmentScope = resolveWorkspaceEnvironmentScope(
+    state.agent.currentSessionKey,
+    selectedDraftProject?.id ?? null,
+  );
   const currentSessionProjectBlocked = state.agent.projectRegistryState === "corrupt"
     && Boolean(
       state.agent.currentSessionKey
@@ -885,6 +892,11 @@ export function HomePage() {
       state.agent.runStartedAtByChatId[state.agent.currentChatId] ||
       state.agent.optimisticSendingByChatId[state.agent.currentChatId]
     )
+  );
+  const workspaceEnvironment = useWorkspaceEnvironment(
+    clients?.memmyAgent ?? null,
+    environmentScope,
+    environmentScope?.kind === "session" && isCurrentAgentRunning,
   );
   const currentGoal = state.agent.goalState?.goal_id ? state.agent.goalState : null;
   const isCurrentGoalActive = currentGoal?.status === "active";
@@ -2434,319 +2446,360 @@ export function HomePage() {
     });
   }
 
+  const environmentPanel = environmentPanelOpen && environmentScope ? (
+    <AgentEnvironmentPanel
+      client={clients?.memmyAgent ?? null}
+      scope={environmentScope.kind}
+      scopeKey={environmentScope.key}
+      environment={workspaceEnvironment.data}
+      loading={workspaceEnvironment.loading}
+      error={workspaceEnvironment.error}
+      onRefresh={workspaceEnvironment.refresh}
+      onClose={() => setEnvironmentPanelOpen(false)}
+    />
+  ) : null;
+
   return (
     <AppFrame
       title={t("home.title")}
-      topBar={hasActiveConversation ? (
-        <h1 className="agent-conversation-title" title={activeConversationTitle}>
-          <span className="agent-conversation-title__text">{activeConversationTitleDisplay}</span>
-          {activeImTitleDisplay ? <ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} /> : null}
-        </h1>
+      topBar={hasActiveConversation || environmentScope ? (
+        <div className="agent-conversation-topbar">
+          <h1 className="agent-conversation-title" title={hasActiveConversation ? activeConversationTitle : selectedDraftProject?.name}>
+            <span className="agent-conversation-title__text">
+              {hasActiveConversation ? activeConversationTitleDisplay : selectedDraftProject?.name}
+            </span>
+            {hasActiveConversation && activeImTitleDisplay ? <ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} /> : null}
+          </h1>
+          <button
+            type="button"
+            className={`agent-environment-toggle${environmentPanelOpen ? " agent-environment-toggle--active" : ""}`}
+            data-agent-environment-toggle
+            aria-label={t("home.environment.title")}
+            aria-pressed={environmentPanelOpen}
+            title={t("home.environment.title")}
+            onClick={() => setEnvironmentPanelOpen((open) => !open)}
+          >
+            <SlidersHorizontal size={16} aria-hidden="true" />
+          </button>
+        </div>
       ) : null}
-      topBarBorder={hasActiveConversation}
+      topBarBorder={Boolean(hasActiveConversation || environmentScope)}
     >
       {!hasActiveConversation ? (
-        <section className="app-frame-page-content home-empty-screen flex flex-col items-center justify-center h-full">
-          <div className="text-center mb-8">
-            <div className="home-empty-brand-mascot flex justify-center">
-              <Memmy pose="think" size={165} className="memmy-bob" />
-            </div>
-            <h1 className="text-2xl font-bold text-text-ink">{t("home.subtitle")}</h1>
-          </div>
-          <div className="w-full max-w-2xl">
-            <AgentOperationErrorSlot message={agentError} />
-            <div className="home-empty-composer-stack">
-              <div
-                className="relative home-empty-composer agent-composer-shell rounded-card-lg"
-                onDragOver={handleComposerDragOver}
-                onDrop={handleComposerDrop}
-              >
-                {slashMenuOpen && (
-                  <div className="absolute left-0 bottom-full mb-3 z-40" style={{ width: "min(448px, 100%)" }}>
-                    <AgentCommandPalette commands={filteredSlashCommands} heading={t("home.commandPalette.commands")} selectedIndex={selectedCommandIndex} onSelect={selectSlashCommand} />
-                  </div>
-                )}
-                {lastCompactionPanel.open && !slashMenuOpen && (
-                  <div className="absolute left-0 bottom-full mb-3 z-30 w-full" style={{ right: 0 }}>
-                    <AgentStatusPanel state={lastCompactionPanel} closeLabel={t("common.close")} loadingLabel={t("home.agent.connecting")} onClose={closeLastCompactionPanel} />
-                  </div>
-                )}
-                <ComposerMediaPreviewStrip
-                  items={pendingAttachments}
-                  onRemove={removePendingMedia}
-                  removeLabel={t("common.remove")}
-                  selectedLabel={t("home.media.addPhotoFile")}
-                  t={t}
-                />
-                {selectedComposerCommand ? (
-                  <div className="composer-command-chip-slot composer-command-chip-slot--home">
-                    <ComposerCommandChip
-                      command={selectedComposerCommand}
-                      removeLabel={t("common.remove")}
-                      onRemove={clearSelectedComposerCommand}
-                    />
-                  </div>
-                ) : null}
-                <textarea
-                  ref={inputRef}
-                  value={composerInput}
-                  placeholder={t("home.input")}
-                  rows={3}
-                  onChange={(event) => {
-                    updateComposerInput(event.target.value);
-                    resizeComposerInput(event.target);
-                  }}
-                  onKeyDown={handleComposerKeyDown}
-                  onPaste={handleComposerPaste}
-                  className="w-full px-5 pt-4 pb-12 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40"
-                />
-                <div className="composer-actions absolute bottom-3 right-4 z-50">
-                  <AgentModelSelector
-                    mode={modelWorkspaceMode}
-                    scopeKey={modelSelectionScopeKey}
-                    disabled={isCurrentAgentRunning || isCreatingChat || messageSendInFlight}
-                    seedConfig={state.modelConfig}
-                  />
-                  <button
-                    type="button"
-                    aria-label={t("home.media.menu")}
-                    title={t("home.media.menu")}
-                    onClick={openMediaFilePicker}
-                    className="composer-action-btn"
-                  >
-                    <Plus size={15} strokeWidth={2} />
-                  </button>
-                  <button
-                    type="button"
-                    aria-label={t("home.voiceInput")}
-                    title={t("home.voiceInput")}
-                    disabled={asrRecorder.isTranscribing || asrRecorder.isStarting}
-                    onClick={toggleVoiceInput}
-                    className={`composer-action-btn${asrRecorder.isRecording ? " composer-action-btn--active" : ""}`}
-                  >
-                    {asrRecorder.isRecording ? <Pause size={15} strokeWidth={2} /> : <Mic size={15} strokeWidth={2} />}
-                  </button>
-                  <ComposerSubmitButton
-                    isSending={isCurrentAgentRunning}
-                    disabled={composerSubmitDisabled}
-                    sendLabel={t("home.send")}
-                    stopLabel={t("home.stop")}
-                    onClick={isCurrentAgentRunning ? stopCurrentTurn : () => void sendMessage()}
-                  />
-                </div>
+        <div className="agent-workspace-layout">
+          <section className="app-frame-page-content home-empty-screen flex flex-col items-center justify-center h-full">
+            <div className="text-center mb-8">
+              <div className="home-empty-brand-mascot flex justify-center">
+                <Memmy pose="think" size={165} className="memmy-bob" />
               </div>
-              <div className="home-composer-toolbar">
-                <ProjectTargetPicker
-                  open={projectPickerOpen}
-                  target={draftTarget}
-                  selectedProject={selectedDraftProject}
-                  projects={state.agent.projects}
-                  sessions={state.agent.sessions}
-                  registryState={state.agent.projectRegistryState}
-                  disabled={messageSendInFlight || projectPickerOperationId != null}
-                  onToggle={() => setProjectPickerOpen((open) => !open)}
-                  onClose={() => setProjectPickerOpen(false)}
-                  onSelect={selectDraftTarget}
-                  onChooseOther={() => void selectOtherProjectFolder()}
-                />
-              </div>
+              <h1 className="text-2xl font-bold text-text-ink">{t("home.subtitle")}</h1>
             </div>
-            <div className="home-empty-status-area">
-              {statusText && <p className="text-center text-xs text-text-ink/45 mt-4">{statusText}</p>}
-              <p className="text-center text-[11px] text-text-ink/40 mt-4">{t("home.notice")}</p>
-            </div>
-            <input ref={fileInputRef} type="file" accept={AGENT_MEDIA_ACCEPT} multiple hidden className="hidden" onChange={(event) => void selectMedia(event)} />
-          </div>
-        </section>
-      ) : (
-        <section ref={conversationPanelRef} className="agent-conversation-panel flex flex-col h-full">
-          <div
-            ref={scrollRef}
-            className="app-frame-page-content agent-conversation-scroll flex-1 overflow-y-auto"
-            onScroll={handleAgentConversationScroll}
-            onWheel={markAgentConversationUserScrollIntent}
-            onTouchMove={markAgentConversationUserScrollIntent}
-          >
-            <div className="max-w-3xl mx-auto space-y-3">
-              {displayConnectionStatus !== "connected" && (
-                <div className="text-center">
-                  <span className="inline-flex text-[11px] px-3 py-1 rounded-tag bg-background-paper text-text-ink/55 border border-border-stone/30">
-                    {agentStatusText(displayConnectionStatus, state.agent.modelName, t)}
-                  </span>
-                </div>
-              )}
-              <AgentThreadMessages
-                key={chatScopeKey}
-                chatScopeKey={chatScopeKey}
-                historyVersion={currentHistoryVersion}
-                messages={state.agent.messages}
-                afterMessageId={firstEncounterRelayAnchorMessageId}
-                afterMessageContent={firstEncounterRelayContent}
-                forceMessageActionsForMessageId={firstEncounterRelayAnswerMessageId}
-                retryWaitStatus={state.agent.currentChatId ? state.agent.retryWaitStatusByChatId[state.agent.currentChatId] ?? null : null}
-                isSending={state.agent.isSending}
-                sanitizePlatformApiErrors={sanitizePlatformApiErrors}
-                artifactClient={sessionArtifactClient}
-              />
-            </div>
-          </div>
-          {showScrollToBottomFab ? (
-            <button
-              type="button"
-              className="agent-scroll-to-bottom-fab"
-              aria-label={t("home.scrollToLatest")}
-              title={t("home.scrollToLatest")}
-              onClick={resumeAgentConversationAutoScroll}
-            >
-              <ArrowDown size={16} aria-hidden="true" />
-            </button>
-          ) : null}
-          <div ref={composerOverlayRef} className="agent-conversation-composer">
-            <div className="max-w-3xl mx-auto">
-              <div className="agent-composer-flow">
-                {slashMenuOpen && (
-                  <div className="agent-composer-popover absolute left-0 bottom-full mb-3 z-40" style={{ width: "min(448px, 100%)" }}>
-                    <AgentCommandPalette commands={filteredSlashCommands} heading={t("home.commandPalette.commands")} selectedIndex={selectedCommandIndex} onSelect={selectSlashCommand} />
-                  </div>
-                )}
-                {statusPanel.open && !slashMenuOpen && (
-                  <div className="agent-composer-popover absolute left-0 bottom-full mb-3 z-30 w-full" style={{ right: 0 }}>
-                    <AgentStatusPanel state={statusPanel} closeLabel={t("common.close")} loadingLabel={t("home.agent.connecting")} onClose={() => setStatusPanel({ open: false })} />
-                  </div>
-                )}
-                {lastCompactionPanel.open && !statusPanel.open && !slashMenuOpen && (
-                  <div className="agent-composer-popover absolute left-0 right-0 bottom-full mb-3 z-30 w-full">
-                    <AgentStatusPanel state={lastCompactionPanel} closeLabel={t("common.close")} loadingLabel={t("home.agent.connecting")} onClose={closeLastCompactionPanel} />
-                  </div>
-                )}
-                {historyDagPanel.open && !statusPanel.open && !lastCompactionPanel.open && !slashMenuOpen && (
-                  <div className="agent-composer-popover absolute left-0 right-0 bottom-full mb-3 z-30 w-full">
-                    <HistoryDagPanel
-                      state={historyDagPanel}
-                      closeLabel={t("common.close")}
-                      loadingLabel={t("home.agent.connecting")}
-                      labels={{
-                        currentTask: t("home.historyDag.currentTask"),
-                        nodeCount: t("home.historyDag.nodeCount"),
-                        edgeCount: t("home.historyDag.edgeCount"),
-                        activePath: t("home.historyDag.activePath"),
-                        none: t("home.historyDag.none"),
-                        noDag: t("home.historyDag.noDag"),
-                        selectNode: t("home.historyDag.selectNode"),
-                        refs: t("home.historyDag.refs"),
-                        noRefs: t("home.historyDag.noRefs"),
-                        finishTitle: t("home.historyDag.finishTitle")
-                      }}
-                      onClose={() => setHistoryDagPanel({ open: false })}
-                    />
-                  </div>
-                )}
-                {currentSessionProjectBlocked ? (
-                  <p className="mx-auto mb-2 w-fit rounded-tag border border-status-error/20 bg-status-error/5 px-3 py-1 text-xs text-status-error" role="status">
-                    {t("home.project.registryUnavailable")}
-                  </p>
-                ) : null}
-                {state.agent.currentChatId && currentGoal ? (
-                  <AgentGoalBar
-                    chatId={state.agent.currentChatId}
-                    goal={currentGoal}
-                    clock={state.agent.goalRunClockByChatId[state.agent.currentChatId] ?? null}
-                    pending={Boolean(goalMutationPending)}
-                    onControl={(request) => void controlGoal(request)}
+            <div className="w-full max-w-2xl">
+              <AgentOperationErrorSlot message={agentError} />
+              <div className="home-empty-composer-stack">
+                <div
+                  className="relative home-empty-composer agent-composer-shell rounded-card-lg"
+                  onDragOver={handleComposerDragOver}
+                  onDrop={handleComposerDrop}
+                >
+                  {slashMenuOpen && (
+                    <div className="absolute left-0 bottom-full mb-3 z-40" style={{ width: "min(448px, 100%)" }}>
+                      <AgentCommandPalette commands={filteredSlashCommands} heading={t("home.commandPalette.commands")} selectedIndex={selectedCommandIndex} onSelect={selectSlashCommand} />
+                    </div>
+                  )}
+                  {lastCompactionPanel.open && !slashMenuOpen && (
+                    <div className="absolute left-0 bottom-full mb-3 z-30 w-full" style={{ right: 0 }}>
+                      <AgentStatusPanel state={lastCompactionPanel} closeLabel={t("common.close")} loadingLabel={t("home.agent.connecting")} onClose={closeLastCompactionPanel} />
+                    </div>
+                  )}
+                  <ComposerMediaPreviewStrip
+                    items={pendingAttachments}
+                    onRemove={removePendingMedia}
+                    removeLabel={t("common.remove")}
+                    selectedLabel={t("home.media.addPhotoFile")}
+                    t={t}
                   />
-                ) : null}
-                <AgentOperationErrorSlot message={agentError} />
-                <div className="agent-composer-stack">
-                  <AgentQueuedMessageList
-                    items={currentQueuedMessages}
-                    label={t("home.queue.label")}
-                    removeLabel={t("home.queue.remove")}
-                    attachmentOnlyLabel={(count) => t("home.queue.attachmentOnly", { count })}
-                    sourceLabels={{
-                      gui: t("home.queue.source.gui"),
-                      tui: t("home.queue.source.tui"),
-                      im: (channelName) => t("home.queue.source.im", { channel: channelName }),
-                      unknownIm: t("home.queue.source.imUnknown")
+                  {selectedComposerCommand ? (
+                    <div className="composer-command-chip-slot composer-command-chip-slot--home">
+                      <ComposerCommandChip
+                        command={selectedComposerCommand}
+                        removeLabel={t("common.remove")}
+                        onRemove={clearSelectedComposerCommand}
+                      />
+                    </div>
+                  ) : null}
+                  <textarea
+                    ref={inputRef}
+                    value={composerInput}
+                    placeholder={t("home.input")}
+                    rows={3}
+                    onChange={(event) => {
+                      updateComposerInput(event.target.value);
+                      resizeComposerInput(event.target);
                     }}
-                    onRemove={(clientRequestId) => void removeQueuedMessage(clientRequestId)}
+                    onKeyDown={handleComposerKeyDown}
+                    onPaste={handleComposerPaste}
+                    className="w-full px-5 pt-4 pb-12 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40"
                   />
-                  <div
-                    className="relative agent-composer-shell rounded-card-lg"
-                    onDragOver={handleComposerDragOver}
-                    onDrop={handleComposerDrop}
-                  >
-                    <ComposerMediaPreviewStrip
-                      items={pendingAttachments}
-                      onRemove={removePendingMedia}
-                      removeLabel={t("common.remove")}
-                      selectedLabel={t("home.media.addPhotoFile")}
-                      t={t}
+                  <div className="composer-actions absolute bottom-3 right-4 z-50">
+                    <AgentModelSelector
+                      mode={modelWorkspaceMode}
+                      scopeKey={modelSelectionScopeKey}
+                      disabled={isCurrentAgentRunning || isCreatingChat || messageSendInFlight}
+                      seedConfig={state.modelConfig}
                     />
-                    {selectedComposerCommand ? (
-                      <div className={`composer-command-chip-slot composer-command-chip-slot--conversation ${centerComposerControls ? "top-1/2 -translate-y-1/2" : "bottom-2"}`}>
-                        <ComposerCommandChip
-                          command={selectedComposerCommand}
-                          removeLabel={t("common.remove")}
-                          onRemove={clearSelectedComposerCommand}
+                    <button
+                      type="button"
+                      aria-label={t("home.media.menu")}
+                      title={t("home.media.menu")}
+                      onClick={openMediaFilePicker}
+                      className="composer-action-btn"
+                    >
+                      <Plus size={15} strokeWidth={2} />
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={t("home.voiceInput")}
+                      title={t("home.voiceInput")}
+                      disabled={asrRecorder.isTranscribing || asrRecorder.isStarting}
+                      onClick={toggleVoiceInput}
+                      className={`composer-action-btn${asrRecorder.isRecording ? " composer-action-btn--active" : ""}`}
+                    >
+                      {asrRecorder.isRecording ? <Pause size={15} strokeWidth={2} /> : <Mic size={15} strokeWidth={2} />}
+                    </button>
+                    <ComposerSubmitButton
+                      isSending={isCurrentAgentRunning}
+                      disabled={composerSubmitDisabled}
+                      sendLabel={t("home.send")}
+                      stopLabel={t("home.stop")}
+                      onClick={isCurrentAgentRunning ? stopCurrentTurn : () => void sendMessage()}
+                    />
+                  </div>
+                </div>
+                <div className="home-composer-toolbar">
+                  <ProjectTargetPicker
+                    open={projectPickerOpen}
+                    target={draftTarget}
+                    selectedProject={selectedDraftProject}
+                    projects={state.agent.projects}
+                    sessions={state.agent.sessions}
+                    registryState={state.agent.projectRegistryState}
+                    disabled={messageSendInFlight || projectPickerOperationId != null}
+                    onToggle={() => setProjectPickerOpen((open) => !open)}
+                    onClose={() => setProjectPickerOpen(false)}
+                    onSelect={selectDraftTarget}
+                    onChooseOther={() => void selectOtherProjectFolder()}
+                  />
+                  <AgentWorkspaceContext
+                    snapshot={workspaceEnvironment.data?.snapshot ?? null}
+                    branches={workspaceEnvironment.data?.branches ?? []}
+                    loading={workspaceEnvironment.loading}
+                    error={workspaceEnvironment.error}
+                    onSwitchBranch={workspaceEnvironment.switchBranch}
+                  />
+                </div>
+              </div>
+              <div className="home-empty-status-area">
+                {statusText && <p className="text-center text-xs text-text-ink/45 mt-4">{statusText}</p>}
+                <p className="text-center text-[11px] text-text-ink/40 mt-4">{t("home.notice")}</p>
+              </div>
+              <input ref={fileInputRef} type="file" accept={AGENT_MEDIA_ACCEPT} multiple hidden className="hidden" onChange={(event) => void selectMedia(event)} />
+            </div>
+          </section>
+          {environmentPanel}
+        </div>
+      ) : (
+        <div className="agent-workspace-layout">
+          <section ref={conversationPanelRef} className="agent-conversation-panel flex flex-col h-full">
+            <div
+              ref={scrollRef}
+              className="app-frame-page-content agent-conversation-scroll flex-1 overflow-y-auto"
+              onScroll={handleAgentConversationScroll}
+              onWheel={markAgentConversationUserScrollIntent}
+              onTouchMove={markAgentConversationUserScrollIntent}
+            >
+              <div className="max-w-3xl mx-auto space-y-3">
+                {displayConnectionStatus !== "connected" && (
+                  <div className="text-center">
+                    <span className="inline-flex text-[11px] px-3 py-1 rounded-tag bg-background-paper text-text-ink/55 border border-border-stone/30">
+                      {agentStatusText(displayConnectionStatus, state.agent.modelName, t)}
+                    </span>
+                  </div>
+                )}
+                <AgentThreadMessages
+                  key={chatScopeKey}
+                  chatScopeKey={chatScopeKey}
+                  historyVersion={currentHistoryVersion}
+                  messages={state.agent.messages}
+                  afterMessageId={firstEncounterRelayAnchorMessageId}
+                  afterMessageContent={firstEncounterRelayContent}
+                  forceMessageActionsForMessageId={firstEncounterRelayAnswerMessageId}
+                  retryWaitStatus={state.agent.currentChatId ? state.agent.retryWaitStatusByChatId[state.agent.currentChatId] ?? null : null}
+                  isSending={state.agent.isSending}
+                  sanitizePlatformApiErrors={sanitizePlatformApiErrors}
+                  artifactClient={sessionArtifactClient}
+                />
+              </div>
+            </div>
+            {showScrollToBottomFab ? (
+              <button
+                type="button"
+                className="agent-scroll-to-bottom-fab"
+                aria-label={t("home.scrollToLatest")}
+                title={t("home.scrollToLatest")}
+                onClick={resumeAgentConversationAutoScroll}
+              >
+                <ArrowDown size={16} aria-hidden="true" />
+              </button>
+            ) : null}
+            <div ref={composerOverlayRef} className="agent-conversation-composer">
+              <div className="max-w-3xl mx-auto">
+                <div className="agent-composer-flow">
+                  {slashMenuOpen && (
+                    <div className="agent-composer-popover absolute left-0 bottom-full mb-3 z-40" style={{ width: "min(448px, 100%)" }}>
+                      <AgentCommandPalette commands={filteredSlashCommands} heading={t("home.commandPalette.commands")} selectedIndex={selectedCommandIndex} onSelect={selectSlashCommand} />
+                    </div>
+                  )}
+                  {statusPanel.open && !slashMenuOpen && (
+                    <div className="agent-composer-popover absolute left-0 bottom-full mb-3 z-30 w-full" style={{ right: 0 }}>
+                      <AgentStatusPanel state={statusPanel} closeLabel={t("common.close")} loadingLabel={t("home.agent.connecting")} onClose={() => setStatusPanel({ open: false })} />
+                    </div>
+                  )}
+                  {lastCompactionPanel.open && !statusPanel.open && !slashMenuOpen && (
+                    <div className="agent-composer-popover absolute left-0 right-0 bottom-full mb-3 z-30 w-full">
+                      <AgentStatusPanel state={lastCompactionPanel} closeLabel={t("common.close")} loadingLabel={t("home.agent.connecting")} onClose={closeLastCompactionPanel} />
+                    </div>
+                  )}
+                  {historyDagPanel.open && !statusPanel.open && !lastCompactionPanel.open && !slashMenuOpen && (
+                    <div className="agent-composer-popover absolute left-0 right-0 bottom-full mb-3 z-30 w-full">
+                      <HistoryDagPanel
+                        state={historyDagPanel}
+                        closeLabel={t("common.close")}
+                        loadingLabel={t("home.agent.connecting")}
+                        labels={{
+                          currentTask: t("home.historyDag.currentTask"),
+                          nodeCount: t("home.historyDag.nodeCount"),
+                          edgeCount: t("home.historyDag.edgeCount"),
+                          activePath: t("home.historyDag.activePath"),
+                          none: t("home.historyDag.none"),
+                          noDag: t("home.historyDag.noDag"),
+                          selectNode: t("home.historyDag.selectNode"),
+                          refs: t("home.historyDag.refs"),
+                          noRefs: t("home.historyDag.noRefs"),
+                          finishTitle: t("home.historyDag.finishTitle")
+                        }}
+                        onClose={() => setHistoryDagPanel({ open: false })}
+                      />
+                    </div>
+                  )}
+                  {currentSessionProjectBlocked ? (
+                    <p className="mx-auto mb-2 w-fit rounded-tag border border-status-error/20 bg-status-error/5 px-3 py-1 text-xs text-status-error" role="status">
+                      {t("home.project.registryUnavailable")}
+                    </p>
+                  ) : null}
+                  {state.agent.currentChatId && currentGoal ? (
+                    <AgentGoalBar
+                      chatId={state.agent.currentChatId}
+                      goal={currentGoal}
+                      clock={state.agent.goalRunClockByChatId[state.agent.currentChatId] ?? null}
+                      pending={Boolean(goalMutationPending)}
+                      onControl={(request) => void controlGoal(request)}
+                    />
+                  ) : null}
+                  <AgentOperationErrorSlot message={agentError} />
+                  <div className="agent-composer-stack">
+                    <AgentQueuedMessageList
+                      items={currentQueuedMessages}
+                      label={t("home.queue.label")}
+                      removeLabel={t("home.queue.remove")}
+                      attachmentOnlyLabel={(count) => t("home.queue.attachmentOnly", { count })}
+                      sourceLabels={{
+                        gui: t("home.queue.source.gui"),
+                        tui: t("home.queue.source.tui"),
+                        im: (channelName) => t("home.queue.source.im", { channel: channelName }),
+                        unknownIm: t("home.queue.source.imUnknown")
+                      }}
+                      onRemove={(clientRequestId) => void removeQueuedMessage(clientRequestId)}
+                    />
+                    <div
+                      className="relative agent-composer-shell rounded-card-lg"
+                      onDragOver={handleComposerDragOver}
+                      onDrop={handleComposerDrop}
+                    >
+                      <ComposerMediaPreviewStrip
+                        items={pendingAttachments}
+                        onRemove={removePendingMedia}
+                        removeLabel={t("common.remove")}
+                        selectedLabel={t("home.media.addPhotoFile")}
+                        t={t}
+                      />
+                      {selectedComposerCommand ? (
+                        <div className={`composer-command-chip-slot composer-command-chip-slot--conversation ${centerComposerControls ? "top-1/2 -translate-y-1/2" : "bottom-2"}`}>
+                          <ComposerCommandChip
+                            command={selectedComposerCommand}
+                            removeLabel={t("common.remove")}
+                            onRemove={clearSelectedComposerCommand}
+                          />
+                        </div>
+                      ) : null}
+                      <textarea
+                        ref={inputRef}
+                        value={composerInput}
+                        placeholder={t("home.input")}
+                        rows={1}
+                        onChange={(event) => {
+                          updateComposerInput(event.target.value);
+                          resizeComposerInput(event.target);
+                        }}
+                        onKeyDown={handleComposerKeyDown}
+                        onPaste={handleComposerPaste}
+                        className={`${isComposerSingleLine ? "agent-composer-input--single " : ""}${selectedComposerCommand ? "agent-composer-input--command-selected " : ""}block w-full pl-4 pr-36 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40`}
+                      />
+                      <div className={`composer-actions absolute right-2.5 z-50 ${centerComposerControls ? "top-1/2 -translate-y-1/2" : "bottom-2"}`}>
+                        <AgentModelSelector
+                          mode={modelWorkspaceMode}
+                          scopeKey={modelSelectionScopeKey}
+                          disabled={isCurrentAgentRunning || isCreatingChat || messageSendInFlight}
+                          seedConfig={state.modelConfig}
+                        />
+                        <button
+                          type="button"
+                          aria-label={t("home.media.menu")}
+                          title={t("home.media.menu")}
+                          onClick={openMediaFilePicker}
+                          className="composer-action-btn"
+                        >
+                          <Plus size={15} strokeWidth={2} />
+                        </button>
+                        <button
+                          type="button"
+                          aria-label={t("home.voiceInput")}
+                          title={t("home.voiceInput")}
+                          disabled={asrRecorder.isTranscribing || asrRecorder.isStarting}
+                          onClick={toggleVoiceInput}
+                          className={`composer-action-btn${asrRecorder.isRecording ? " composer-action-btn--active" : ""}`}
+                        >
+                          {asrRecorder.isRecording ? <Pause size={15} strokeWidth={2} /> : <Mic size={15} strokeWidth={2} />}
+                        </button>
+                        <ComposerSubmitButton
+                          isSending={composerPrimaryAction === "stop"}
+                          disabled={composerSubmitDisabled}
+                          sendLabel={t("home.send")}
+                          stopLabel={t("home.stop")}
+                          variant="compact"
+                          onClick={composerPrimaryAction === "stop" ? stopCurrentTurn : () => void sendMessage()}
                         />
                       </div>
-                    ) : null}
-                    <textarea
-                      ref={inputRef}
-                      value={composerInput}
-                      placeholder={t("home.input")}
-                      rows={1}
-                      onChange={(event) => {
-                        updateComposerInput(event.target.value);
-                        resizeComposerInput(event.target);
-                      }}
-                      onKeyDown={handleComposerKeyDown}
-                      onPaste={handleComposerPaste}
-                      className={`${isComposerSingleLine ? "agent-composer-input--single " : ""}${selectedComposerCommand ? "agent-composer-input--command-selected " : ""}block w-full pl-4 pr-36 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40`}
-                    />
-                    <div className={`composer-actions absolute right-2.5 z-50 ${centerComposerControls ? "top-1/2 -translate-y-1/2" : "bottom-2"}`}>
-                      <AgentModelSelector
-                        mode={modelWorkspaceMode}
-                        scopeKey={modelSelectionScopeKey}
-                        disabled={isCurrentAgentRunning || isCreatingChat || messageSendInFlight}
-                        seedConfig={state.modelConfig}
-                      />
-                      <button
-                        type="button"
-                        aria-label={t("home.media.menu")}
-                        title={t("home.media.menu")}
-                        onClick={openMediaFilePicker}
-                        className="composer-action-btn"
-                      >
-                        <Plus size={15} strokeWidth={2} />
-                      </button>
-                      <button
-                        type="button"
-                        aria-label={t("home.voiceInput")}
-                        title={t("home.voiceInput")}
-                        disabled={asrRecorder.isTranscribing || asrRecorder.isStarting}
-                        onClick={toggleVoiceInput}
-                        className={`composer-action-btn${asrRecorder.isRecording ? " composer-action-btn--active" : ""}`}
-                      >
-                        {asrRecorder.isRecording ? <Pause size={15} strokeWidth={2} /> : <Mic size={15} strokeWidth={2} />}
-                      </button>
-                      <ComposerSubmitButton
-                        isSending={composerPrimaryAction === "stop"}
-                        disabled={composerSubmitDisabled}
-                        sendLabel={t("home.send")}
-                        stopLabel={t("home.stop")}
-                        variant="compact"
-                        onClick={composerPrimaryAction === "stop" ? stopCurrentTurn : () => void sendMessage()}
-                      />
                     </div>
                   </div>
                 </div>
+                <p className="text-center text-[11px] text-text-ink/40 mt-2">{t("home.notice")}</p>
+                <input ref={fileInputRef} type="file" accept={AGENT_MEDIA_ACCEPT} multiple hidden className="hidden" onChange={(event) => void selectMedia(event)} />
               </div>
-              <p className="text-center text-[11px] text-text-ink/40 mt-2">{t("home.notice")}</p>
-              <input ref={fileInputRef} type="file" accept={AGENT_MEDIA_ACCEPT} multiple hidden className="hidden" onChange={(event) => void selectMedia(event)} />
             </div>
-          </div>
-        </section>
+          </section>
+          {environmentPanel}
+        </div>
       )}
     </AppFrame>
   );

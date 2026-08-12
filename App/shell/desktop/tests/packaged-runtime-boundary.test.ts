@@ -14,7 +14,6 @@ const startupMigrationsPath = fileURLToPath(
   new URL("../../../memmy-agent/src/entrypoints/cli/startup-migrations.ts", import.meta.url)
 );
 const devStartPath = fileURLToPath(new URL("../../../../scripts/dev-start.sh", import.meta.url));
-const devMemorySupervisorPath = fileURLToPath(new URL("../../../../scripts/internal/shared/dev-memory-supervisor.mjs", import.meta.url));
 const clearAllPath = fileURLToPath(new URL("../../../../scripts/clear-all.sh", import.meta.url));
 const clearAllWindowsPath = fileURLToPath(new URL("../../../../scripts/clear-all-windows.ps1", import.meta.url));
 const packageMacPath = fileURLToPath(new URL("../../../../scripts/package-mac.sh", import.meta.url));
@@ -356,8 +355,9 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).toContain('app.setPath("userData", userDataPath);');
     expect(source).toContain('return join(dirname(process.execPath), "data");');
     expect(source).toContain("process.env.MEMMY_MEMORY_DB = memoryDatabasePath;");
-    expect(source).toMatch(/runtimeServices = app\.isPackaged\s*\?\s*await startPackagedRuntimeServices\(/);
+    expect(source).toContain("runtimeServices = await startManagedRuntimeServices({");
     expect(source).toContain('appDatabaseFile: join(app.getPath("userData"), "app.sqlite")');
+    expect(source).toContain("resolveDevelopmentRuntimeEntryPaths(import.meta.dirname)");
     expect(source).toContain("memmyConfigPath: process.env.MEMMY_CONFIG");
     expect(source).not.toContain("startDesktopRuntimeServices");
   });
@@ -915,10 +915,10 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain("syncMenuBarTray(true);");
   });
 
-  it("keeps runtime-services packaged-only and out of Electron userData", () => {
+  it("keeps managed runtime services out of Electron userData", () => {
     const source = readFileSync(runtimeServicesPath, "utf8");
 
-    expect(source).toContain("startPackagedRuntimeServices");
+    expect(source).toContain("startManagedRuntimeServices");
     expect(source).toContain('env.MEMMY_CONFIG ?? join(memmyHome, "config.yaml")');
     expect(source).toContain("const explicitWorkspace = stringValue(env.MEMMY_AGENT_WORKSPACE);");
     expect(source).toContain("if (!explicitWorkspace) return { configPath };");
@@ -947,16 +947,14 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).not.toContain("DesktopRuntimeServices");
     expect(source).not.toContain("StartDesktopRuntimeServicesOptions");
     expect(source).not.toContain("userDataPath");
-    expect(source).not.toContain("mainDir");
     expect(source).not.toContain("getFreePort");
     expect(source).not.toContain(legacyApplicationSupportDir);
-    expect(source).not.toContain("dist/src/server/index.js");
-    expect(source).not.toContain("App/memmy-agent/dist/main.js");
+    expect(source).toContain('join(repoRoot, "Memory", "dist", "src", "server", "index.js")');
+    expect(source).toContain('join(repoRoot, "App", "memmy-agent", "dist", "main.js")');
   });
 
   it("exports shared config and workspace paths from dev-start", () => {
     const source = readFileSync(devStartPath, "utf8");
-    const supervisorSource = readFileSync(devMemorySupervisorPath, "utf8");
     const runMainIndex = source.indexOf("run_main() {");
     const migrationIndex = source.indexOf("local migration_args=(dist/main.js migrate", runMainIndex);
     const memoryInitIndex = source.indexOf("build_and_install_memory_cli", runMainIndex);
@@ -985,17 +983,14 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).toContain('export PATH="$runtime_node_dir:$PATH"');
     expect(source).not.toContain('MEMMY_BIN_DIR="$HOME/.memmy/bin"');
     expect(source).not.toContain('"bash -lc ');
-    expect(source.match(/"bash -c /g)).toHaveLength(5);
+    expect(source.match(/"bash -c /g)).toHaveLength(3);
     expect(source).toContain('const Database = require("better-sqlite3")');
     expect(source).toContain("npm run dev -w @memmy/desktop");
     expect(source).toContain("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci");
-    expect(source).toContain(
-      '"$MEMMY_RUNTIME_NODE_PATH" dist/main.js internal browser-prepare',
-    );
     expect(source).toContain("env -u ELECTRON_RUN_AS_NODE npm run dev -w @memmy/desktop");
-    expect(source).toContain("node scripts/internal/shared/dev-memory-supervisor.mjs");
-    expect(supervisorSource).toContain('["run", "memory:dev"]');
-    expect(supervisorSource).toContain("Memory dev process stopped");
+    expect(source).not.toContain("node scripts/internal/shared/dev-memory-supervisor.mjs");
+    expect(source).not.toContain("node dist/main.js gateway");
+    expect(source).not.toContain("--gateway)");
     expect(source).toContain('pgrep -f "/Memmy.app/Contents/MacOS/Memmy"');
     expect(source.match(/lsof -tiTCP:18997/g)).toHaveLength(2);
     expect(source.match(/lsof -tiTCP:18999/g)).toHaveLength(2);
