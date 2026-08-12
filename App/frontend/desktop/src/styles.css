@@ -10326,7 +10326,6 @@ input[type="checkbox"].check-sky:checked::after {
 .agent-goal-bar {
   position: relative;
   container-type: inline-size;
-  margin-bottom: 0.5rem;
   border: 1px solid color-mix(in srgb, var(--color-border-stone) 35%, transparent);
   border-radius: 0.75rem;
   background: color-mix(in srgb, var(--color-background-paper) 96%, transparent);

@@ -1314,19 +1314,21 @@ describe("HomePage", () => {
     expect(clearComposer).toHaveBeenCalledOnce();
   });
 
-  it("anchors composer popovers above the queue and measures the complete overlay", () => {
+  it("anchors composer popovers above the queue and keeps Goal next to the composer", () => {
     const source = readFileSync(homePageSourcePath, "utf8").replace(/\r\n/g, "\n");
     const flowStart = source.indexOf('<div className="agent-composer-flow">');
     const slashStart = source.indexOf("{slashMenuOpen && (", flowStart);
     const stackStart = source.indexOf('<div className="agent-composer-stack">', slashStart);
     const queueStart = source.indexOf("<AgentQueuedMessageList", stackStart);
+    const goalStart = source.indexOf("<AgentGoalBar", stackStart);
     const shellStart = source.indexOf('className="relative agent-composer-shell rounded-card-lg"', stackStart);
 
     expect(flowStart).toBeGreaterThan(0);
     expect(slashStart).toBeGreaterThan(flowStart);
     expect(stackStart).toBeGreaterThan(slashStart);
     expect(queueStart).toBeGreaterThan(stackStart);
-    expect(shellStart).toBeGreaterThan(queueStart);
+    expect(goalStart).toBeGreaterThan(queueStart);
+    expect(shellStart).toBeGreaterThan(goalStart);
     expect(source).toContain('ref={conversationPanelRef} className="agent-conversation-panel flex flex-col h-full"');
     expect(source).toContain('ref={composerOverlayRef} className="agent-conversation-composer"');
     expect(source).toContain("updateAgentComposerOverlayHeight(panel, composer, measuredHeight)");
