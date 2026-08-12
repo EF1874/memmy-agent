@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  classifyImageInputUnsupported,
   classifyQuotaExhaustion,
+  type ImageInputErrorFacts,
   type ProviderErrorFacts,
 } from "../../src/providers/provider-error-classifier.js";
 
@@ -12,6 +14,18 @@ function facts(overrides: Partial<ProviderErrorFacts>): ProviderErrorFacts {
     errorCode: null,
     metadataErrorType: null,
     baseRespStatusCode: null,
+    ...overrides,
+  };
+}
+
+function imageFacts(overrides: Partial<ImageInputErrorFacts> = {}): ImageInputErrorFacts {
+  return {
+    hasImageInput: true,
+    httpStatus: 400,
+    errorKind: null,
+    errorType: null,
+    errorCode: null,
+    content: null,
     ...overrides,
   };
 }
@@ -93,5 +107,47 @@ describe("classifyQuotaExhaustion", () => {
     } as ProviderErrorFacts;
 
     expect(classifyQuotaExhaustion(input)).toBeNull();
+  });
+});
+
+describe("classifyImageInputUnsupported", () => {
+  it.each([
+    "Only text content type is supported",
+    "`image_url` is not supported",
+    "Image content is not supported",
+    "Multimodal input is not supported",
+    "Vision input is not supported",
+    "This model does not support images",
+    "Model does not support image input",
+    "unknown variant 'image_url', expected 'text'",
+    "No endpoints found that support image input",
+    "input_image is not allowed; expected text content only",
+  ])("classifies explicit image rejection %j", (content) => {
+    expect(classifyImageInputUnsupported(imageFacts({ content }))).toBe("image_input_unsupported");
+  });
+
+  it("accepts an explicit rejection without an HTTP status", () => {
+    expect(classifyImageInputUnsupported(imageFacts({
+      httpStatus: null,
+      errorCode: "IMAGE_URL_UNSUPPORTED",
+    }))).toBe("image_input_unsupported");
+  });
+
+  it.each([
+    imageFacts({ hasImageInput: false, content: "image_url is not supported" }),
+    imageFacts({ httpStatus: 200, content: "image_url is not supported" }),
+    imageFacts({ httpStatus: 401, content: "unauthorized" }),
+    imageFacts({ httpStatus: 408, content: "image_url is not supported" }),
+    imageFacts({ httpStatus: 409, content: "image_url is not supported" }),
+    imageFacts({ httpStatus: 429, content: "image_url is not supported" }),
+    imageFacts({ httpStatus: 500, content: "image_url is not supported" }),
+    imageFacts({ errorKind: "aborted", content: "image_url is not supported" }),
+    imageFacts({ errorCategory: "quota_exhausted", content: "image_url is not supported" }),
+    imageFacts({ content: "400 invalid_request: bad request" }),
+    imageFacts({ content: "invalid image_url: malformed base64 data" }),
+    imageFacts({ content: "unsupported image MIME type image/tiff" }),
+    imageFacts({ content: "image dimensions exceed the maximum size" }),
+  ])("does not classify ambiguous, transient, quota, or invalid-image errors", (input) => {
+    expect(classifyImageInputUnsupported(input)).toBeNull();
   });
 });

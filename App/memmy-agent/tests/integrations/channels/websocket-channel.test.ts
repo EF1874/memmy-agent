@@ -1124,6 +1124,47 @@ describe("WebSocket channel", () => {
       category: "model_failed",
       detail: "Error: raw provider failure"
     });
+
+    await channel.send(new OutboundMessage({
+      channel: "websocket",
+      chatId: "chat-quota",
+      content: "图片解析失败，请稍后重试",
+      metadata: {
+        modelErrorCategory: "image_analysis_failed",
+        modelErrorDetail: "Error: internal vision failure",
+        modelErrorContext: {
+          category: "image_analysis_failed",
+          presetId: "account-agent",
+          source: "account",
+          provider: "memmy_account",
+          model: "agent_chat",
+          capability: "agent",
+          failedProvider: "memmy_account",
+          failedModel: "image2text",
+          apiKey: "must-not-leak"
+        }
+      }
+    }));
+    expect(sent(ws, 2).model_error).toEqual({
+      category: "image_analysis_failed",
+      detail: "Error: internal vision failure",
+      presetId: "account-agent",
+      source: "account",
+      provider: "memmy_account",
+      model: "agent_chat",
+      capability: "agent",
+      failedProvider: "memmy_account",
+      failedModel: "image2text"
+    });
+    expect(JSON.stringify(sent(ws, 2))).not.toContain("must-not-leak");
+
+    await channel.send(new OutboundMessage({
+      channel: "websocket",
+      chatId: "chat-quota",
+      content: "当前模型不支持图片输入，请切换到支持多模态能力的模型后重试",
+      metadata: { modelErrorCategory: "image_input_unsupported" }
+    }));
+    expect(sent(ws, 3).model_error).toEqual({ category: "image_input_unsupported" });
   });
 
   it("sends context compaction status as a dedicated WebUI event and transcript row", async () => {
@@ -2201,7 +2242,9 @@ describe("WebSocket channel", () => {
   });
 
   it("sends an idle run snapshot immediately after an explicit attach", async () => {
-    const channel = new WebSocketChannel({}, new MessageBus());
+    const channel = new WebSocketChannel({}, new MessageBus(), {
+      modelSelectionResolver: () => null,
+    });
     const ws = connection();
 
     await channel.dispatchEnvelope(ws, "client-1", { type: "attach", chat_id: "chat-1" });
@@ -2213,7 +2256,9 @@ describe("WebSocket channel", () => {
   });
 
   it("sends one authoritative running snapshot after attach", async () => {
-    const channel = new WebSocketChannel({}, new MessageBus());
+    const channel = new WebSocketChannel({}, new MessageBus(), {
+      modelSelectionResolver: () => null,
+    });
     const ws = connection();
     websocketTurnWallStartTimes.set("chat-1", 1780732800);
     channel.activeTurnIdByChatId.set("chat-1", "turn-1");
@@ -2233,7 +2278,9 @@ describe("WebSocket channel", () => {
   });
 
   it("correlates an idle snapshot with a still-known active turn", async () => {
-    const channel = new WebSocketChannel({}, new MessageBus());
+    const channel = new WebSocketChannel({}, new MessageBus(), {
+      modelSelectionResolver: () => null,
+    });
     const ws = connection();
     channel.activeTurnIdByChatId.set("chat-1", "turn-finishing");
 
@@ -2288,7 +2335,9 @@ describe("WebSocket channel", () => {
   });
 
   it("sends the run snapshot before active goal hydration", async () => {
-    const channel = new WebSocketChannel({}, new MessageBus());
+    const channel = new WebSocketChannel({}, new MessageBus(), {
+      modelSelectionResolver: () => null,
+    });
     const ws = connection();
     const goalState = {
       goalId: "8f59f58a-7295-4c34-8e03-55e7035a5a8d",
@@ -2329,7 +2378,9 @@ describe("WebSocket channel", () => {
   });
 
   it("continues subscription hydration when an earlier subscriber has disconnected", async () => {
-    const channel = new WebSocketChannel({}, new MessageBus());
+    const channel = new WebSocketChannel({}, new MessageBus(), {
+      modelSelectionResolver: () => null,
+    });
     const stale = { send: vi.fn(async () => { throw new Error("closed"); }) };
     const attaching = connection();
     const goalState = {

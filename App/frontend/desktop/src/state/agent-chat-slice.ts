@@ -3783,10 +3783,29 @@ function assistantMessageHasMedia(event: MemmyAgentWsEvent): boolean {
 function normalizeModelError(value: unknown): MemmyAgentModelError | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const record = value as Record<string, unknown>;
-  if (record.category !== "quota_exhausted" && record.category !== "model_failed") return undefined;
+  if (
+    record.category !== "quota_exhausted"
+    && record.category !== "image_input_unsupported"
+    && record.category !== "image_analysis_failed"
+    && record.category !== "model_failed"
+  ) return undefined;
   return {
     category: record.category,
-    ...(typeof record.detail === "string" ? { detail: record.detail } : {})
+    ...(typeof record.detail === "string" ? { detail: record.detail } : {}),
+    ...(typeof record.presetId === "string" ? { presetId: record.presetId } : {}),
+    ...(record.source === "account" || record.source === "byok" ? { source: record.source } : {}),
+    ...(typeof record.provider === "string" ? { provider: record.provider } : {}),
+    ...(typeof record.model === "string" ? { model: record.model } : {}),
+    ...(record.capability === "agent"
+      || record.capability === "memory_summary"
+      || record.capability === "memory_evolution"
+      || record.capability === "embedding"
+      || record.capability === "asr"
+      || record.capability === "image_generation"
+      ? { capability: record.capability }
+      : {}),
+    ...(typeof record.failedProvider === "string" ? { failedProvider: record.failedProvider } : {}),
+    ...(typeof record.failedModel === "string" ? { failedModel: record.failedModel } : {})
   };
 }
 
@@ -3816,8 +3835,19 @@ function appendAssistantMessage(state: AgentState, event: MemmyAgentWsEvent): Ag
     : updatedLast?.role === "assistant" && updatedLast.isStreaming && updatedLast.kind !== "trace" && updatedLast.kind !== "narration"
       ? updatedLastIndex
       : findLatestStreamingAssistantAnswerIndex(messages, turnId);
+  const preservePartialImageAnswer = targetIndex >= 0
+    && Boolean(messages[targetIndex]?.content.trim())
+    && (modelError?.category === "image_input_unsupported" || modelError?.category === "image_analysis_failed");
 
-  if (targetIndex >= 0) {
+  if (preservePartialImageAnswer) {
+    messages[targetIndex] = {
+      ...messages[targetIndex]!,
+      isStreaming: false,
+      reasoningStreaming: false
+    };
+  }
+
+  if (targetIndex >= 0 && !preservePartialImageAnswer) {
     const target = messages[targetIndex]!;
     messages[targetIndex] = {
       ...target,

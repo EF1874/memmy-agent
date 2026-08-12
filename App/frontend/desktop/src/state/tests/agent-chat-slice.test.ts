@@ -1243,6 +1243,90 @@ describe("agent chat slice", () => {
     });
   });
 
+  it("preserves image analysis failure context from live events and history", () => {
+    const modelError = {
+      category: "image_analysis_failed" as const,
+      detail: "Error: internal vision failure",
+      presetId: "account-agent",
+      source: "account" as const,
+      provider: "memmy_account",
+      model: "agent_chat",
+      capability: "agent" as const,
+      failedProvider: "memmy_account",
+      failedModel: "image2text"
+    };
+    const ready = agentReducer(initialAgentState, {
+      type: "agent/wsEvent",
+      event: { event: "ready", chat_id: "chat-image-error" }
+    });
+    const live = agentReducer(ready, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message",
+        chat_id: "chat-image-error",
+        text: "图片解析失败，请稍后重试",
+        model_error: modelError
+      }
+    });
+
+    expect(live.messages[0]?.modelError).toEqual(modelError);
+
+    const restored = loadHistory(initialAgentState, "websocket:chat-image-error", [{
+      role: "assistant",
+      content: "图片解析失败，请稍后重试",
+      model_error: modelError
+    }]);
+    expect(restored.messages[0]?.modelError).toEqual(modelError);
+  });
+
+  it("accepts image input unsupported as a terminal model error", () => {
+    const ready = agentReducer(initialAgentState, {
+      type: "agent/wsEvent",
+      event: { event: "ready", chat_id: "chat-image-unsupported" }
+    });
+    const state = agentReducer(ready, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message",
+        chat_id: "chat-image-unsupported",
+        text: "当前模型不支持图片输入，请切换到支持多模态能力的模型后重试",
+        model_error: { category: "image_input_unsupported" }
+      }
+    });
+
+    expect(state.messages[0]?.modelError).toEqual({ category: "image_input_unsupported" });
+  });
+
+  it("keeps a partial image response and appends the terminal error card", () => {
+    let state = agentReducer(initialAgentState, {
+      type: "agent/wsEvent",
+      event: { event: "ready", chat_id: "chat-image-partial" }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "delta", chat_id: "chat-image-partial", turn_id: "turn-1", text: "partial answer" }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "stream_end", chat_id: "chat-image-partial", turn_id: "turn-1", text: "partial answer" }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message",
+        chat_id: "chat-image-partial",
+        turn_id: "turn-1",
+        text: "当前模型不支持图片输入，请切换到支持多模态能力的模型后重试",
+        model_error: { category: "image_input_unsupported", detail: "image_url is not supported" }
+      }
+    });
+
+    const assistant = state.messages.filter((message) => message.role === "assistant");
+    expect(assistant).toHaveLength(2);
+    expect(assistant[0]).toMatchObject({ content: "partial answer", isStreaming: false });
+    expect(assistant[1]).toMatchObject({ modelError: { category: "image_input_unsupported" } });
+  });
+
   it("ignores unknown model error categories", () => {
     let state = agentReducer(initialAgentState, {
       type: "agent/wsEvent",

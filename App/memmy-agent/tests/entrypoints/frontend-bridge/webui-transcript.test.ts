@@ -158,6 +158,60 @@ describe("webui transcript replay", () => {
     });
   });
 
+  it("replays image errors without losing the internal failure source", () => {
+    const messages = replayTranscriptToUiMessages([{
+      event: "message",
+      chat_id: "t-image-failed",
+      text: "图片解析失败，请稍后重试",
+      model_error: {
+        category: "image_analysis_failed",
+        detail: "Error: internal vision failure",
+        presetId: "account-agent",
+        source: "account",
+        provider: "memmy_account",
+        model: "agent_chat",
+        capability: "agent",
+        failedProvider: "memmy_account",
+        failedModel: "image2text"
+      }
+    }]);
+
+    expect(messages[0]?.model_error).toEqual({
+      category: "image_analysis_failed",
+      detail: "Error: internal vision failure",
+      presetId: "account-agent",
+      source: "account",
+      provider: "memmy_account",
+      model: "agent_chat",
+      capability: "agent",
+      failedProvider: "memmy_account",
+      failedModel: "image2text"
+    });
+  });
+
+  it("preserves a partial answer and appends the image error card during replay", () => {
+    const messages = replayTranscriptToUiMessages([
+      { event: "delta", chat_id: "t-image-partial", text: "partial answer", turn_id: "turn-1" },
+      { event: "stream_end", chat_id: "t-image-partial", text: "partial answer", turn_id: "turn-1" },
+      {
+        event: "message",
+        chat_id: "t-image-partial",
+        text: "当前模型不支持图片输入，请切换到支持多模态能力的模型后重试",
+        turn_id: "turn-1",
+        model_error: { category: "image_input_unsupported", detail: "image_url is not supported" }
+      },
+      { event: "turn_end", chat_id: "t-image-partial", turn_id: "turn-1" }
+    ]);
+
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toMatchObject({ role: "assistant", content: "partial answer" });
+    expect(messages[0]?.isStreaming).not.toBe(true);
+    expect(messages[1]).toMatchObject({
+      role: "assistant",
+      model_error: { category: "image_input_unsupported" }
+    });
+  });
+
   it.each([
     null,
     "quota_exhausted",

@@ -6,6 +6,8 @@ export const zhCNErrorNoticeMessages = {
   "agent.error.loginExpired": "登录已过期，请重新登录",
   "agent.error.rateLimited": "请求过于频繁，请稍后再试",
   "agent.error.quotaExceeded": "当前模型 Token 余额不足，请更换模型后重试",
+  "agent.error.imageInputUnsupported": "当前模型不支持图片输入，请切换到支持多模态能力的模型后重试",
+  "agent.error.imageAnalysisFailed": "图片解析失败，请稍后重试",
   "agent.error.retrying": "模型请求失败，{seconds} 秒后重试（第 {attempt} 次）",
   "agent.error.retryWait": "模型请求重试中，{seconds} 秒后继续（第 {attempt} 次）",
   "agent.error.givingUp": "模型请求多次重试后仍失败",
@@ -44,6 +46,8 @@ export const enUSErrorNoticeMessages = {
   "agent.error.loginExpired": "Your login has expired. Please sign in again.",
   "agent.error.rateLimited": "Too many requests. Please wait a moment and try again.",
   "agent.error.quotaExceeded": "The current model has insufficient tokens. Switch models and try again.",
+  "agent.error.imageInputUnsupported": "The current model does not support image input. Switch to a multimodal model and try again.",
+  "agent.error.imageAnalysisFailed": "Image analysis failed. Please try again later.",
   "agent.error.retrying": "Model request failed. Retrying in {seconds}s (attempt {attempt}).",
   "agent.error.retryWait": "Waiting to retry the model request in {seconds}s (attempt {attempt}).",
   "agent.error.givingUp": "The model request failed after several retries",
@@ -78,7 +82,9 @@ export const enUSErrorNoticeMessages = {
 export const ERROR_NOTICE_KEYS = {
   agent: {
     modelFailed: "agent.error.modelFailed",
-    quotaExhausted: "agent.error.quotaExceeded"
+    quotaExhausted: "agent.error.quotaExceeded",
+    imageInputUnsupported: "agent.error.imageInputUnsupported",
+    imageAnalysisFailed: "agent.error.imageAnalysisFailed"
   },
   memory: {
     failed: "memory.memories.processing.failureTitle",

@@ -167,6 +167,33 @@ describe("GUI transcript synchronization", () => {
     expect(records.map((record) => record.text)).toEqual(["new"]);
   });
 
+  it("mirrors image model errors with the selected and internally failed models separated", () => {
+    const { workspace, sessions, mirror } = fixture();
+    const session = saveProjectedSession(sessions, workspace, "cli:image-error");
+    const turn = mirror.turn(session.key, "turn-image-error", { kind: "tui", channel: "cli" })!;
+
+    mirror.final(turn, "图片解析失败，请稍后重试", 17, null, "image_analysis_failed", {
+      category: "image_analysis_failed",
+      presetId: "account-agent",
+      source: "account",
+      provider: "memmy_account",
+      model: "agent_chat",
+      capability: "agent",
+      failedProvider: "memmy_account",
+      failedModel: "image2text",
+    });
+
+    expect(readTranscriptLines(`websocket:${toGuiChatId(session.key)}`).at(-1)).toMatchObject({
+      event: "message",
+      model_error: {
+        category: "image_analysis_failed",
+        model: "agent_chat",
+        failedProvider: "memmy_account",
+        failedModel: "image2text",
+      },
+    });
+  });
+
   it("requests a thread refresh after a malformed appended line", async () => {
     const { workspace, sessions, projection } = fixture();
     const key = "slack:room";

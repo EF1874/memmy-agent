@@ -52,18 +52,6 @@ function imageMessage() {
   ];
 }
 
-function imageMessageNoMeta() {
-  return [
-    {
-      role: "user",
-      content: [
-        { type: "text", text: "describe this" },
-        { type: "image_url", image_url: { url: "data:image/png;base64,abc" } },
-      ],
-    },
-  ];
-}
-
 describe("chatWithRetry", () => {
   it("retries a transient error and then succeeds", async () => {
     const provider = new ScriptedProvider([
@@ -144,29 +132,45 @@ describe("chatWithRetry", () => {
     expect(provider.lastArgs.reasoningEffort).toBe("low");
   });
 
-  it("retries non-transient image errors once with images stripped", async () => {
-    const provider = new ScriptedProvider([
-      new LLMResponse({ content: "API call arguments are invalid", finishReason: "error" }),
-      new LLMResponse({ content: "ok, no image" }),
-    ]);
-    const response = await provider.chatWithRetry({ messages: imageMessage() });
-    expect(response.content).toBe("ok, no image");
-    expect(provider.calls).toBe(2);
-    const content = provider.lastArgs.messages[0].content;
-    expect(content.every((block: any) => block.type !== "image_url")).toBe(true);
-    expect(content.some((block: any) => String(block.text ?? "").includes("[image: /media/test.png]"))).toBe(true);
-  });
-
-  it("mutates original messages after a successful image fallback", async () => {
+  it("does not strip or retry images for an ambiguous non-transient error", async () => {
     const messages = imageMessage();
     const provider = new ScriptedProvider([
-      new LLMResponse({ content: "model does not support images", finishReason: "error" }),
-      new LLMResponse({ content: "ok, no image" }),
+      new LLMResponse({ content: "API call arguments are invalid", finishReason: "error" }),
+      new LLMResponse({ content: "unexpected retry" }),
     ]);
     const response = await provider.chatWithRetry({ messages });
-    expect(response.content).toBe("ok, no image");
-    expect(messages[0].content.every((block: any) => block.type !== "image_url")).toBe(true);
-    expect(messages[0].content.some((block: any) => String(block.text ?? "").includes("[image: /media/test.png]"))).toBe(true);
+    expect(response.content).toBe("API call arguments are invalid");
+    expect(provider.calls).toBe(1);
+    expect(provider.lastArgs.messages).toBe(messages);
+    expect(messages[0].content.some((block: any) => block.type === "image_url")).toBe(true);
+  });
+
+  it("classifies an explicit image rejection without mutating messages", async () => {
+    const messages = imageMessage();
+    const provider = new ScriptedProvider([
+      new LLMResponse({
+        content: "model does not support images",
+        finishReason: "error",
+        errorStatusCode: 400,
+      }),
+      new LLMResponse({ content: "unexpected retry" }),
+    ]);
+    const response = await provider.chatWithRetry({ messages });
+    expect(response.errorCategory).toBe("image_input_unsupported");
+    expect(provider.calls).toBe(1);
+    expect(messages[0].content.some((block: any) => block.type === "image_url")).toBe(true);
+  });
+
+  it("does not infer image capability from an explicit category on a text-only request", async () => {
+    const response = new LLMResponse({
+      content: "misclassified upstream error",
+      finishReason: "error",
+      errorCategory: "image_input_unsupported",
+    });
+
+    expect(LLMProvider.classifyImageInputUnsupportedResponse(response, userMessages()))
+      .toBe(response);
+    expect(response.errorCategory).toBeNull();
   });
 
   it("does not retry non-transient errors without images", async () => {
@@ -176,26 +180,21 @@ describe("chatWithRetry", () => {
     expect(response.finishReason).toBe("error");
   });
 
-  it("returns the second image-fallback error when retry also fails", async () => {
+  it("keeps transient image retries on the original image messages", async () => {
+    const messages = imageMessage();
     const provider = new ScriptedProvider([
-      new LLMResponse({ content: "some model error", finishReason: "error" }),
-      new LLMResponse({ content: "still failing", finishReason: "error" }),
-    ]);
-    const response = await provider.chatWithRetry({ messages: imageMessage() });
-    expect(provider.calls).toBe(2);
-    expect(response.content).toBe("still failing");
-    expect(response.finishReason).toBe("error");
-  });
-
-  it("uses default placeholders for image fallback without metadata", async () => {
-    const provider = new ScriptedProvider([
-      new LLMResponse({ content: "error", finishReason: "error" }),
+      new LLMResponse({
+        content: "temporary upstream failure",
+        finishReason: "error",
+        errorStatusCode: 503,
+      }),
       new LLMResponse({ content: "ok" }),
     ]);
-    const response = await provider.chatWithRetry({ messages: imageMessageNoMeta() });
-    expect(response.content).toBe("ok");
+    const response = await provider.chatWithRetry({ messages });
     expect(provider.calls).toBe(2);
-    expect(provider.lastArgs.messages[0].content.some((block: any) => String(block.text ?? "").includes("[image omitted]"))).toBe(true);
+    expect(response.content).toBe("ok");
+    expect(provider.lastArgs.messages).toBe(messages);
+    expect(provider.lastArgs.messages[0].content.some((block: any) => block.type === "image_url")).toBe(true);
   });
 
   it("uses retry-after text and emits wait progress", async () => {
