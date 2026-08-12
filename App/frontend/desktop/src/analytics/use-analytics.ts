@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import { gtagEvent } from "./gtag-init.js";
+import { trackCloudAnalyticsEvent } from "./cloud-analytics.js";
 import type { AnalyticsEvent } from "./analytics-events.js";
 import { useAppState } from "../state/app-state.js";
 
@@ -17,8 +17,8 @@ export function useAnalytics() {
       }
 
       const { name, params } = event;
-      console.log("[analytics] track:", name, params);
-      gtagEvent(name, params as Record<string, string | number | boolean> | undefined);
+      console.log("[analytics] track → cloud:", name, params);
+      trackCloudAnalyticsEvent(name, params as Record<string, string | number | boolean> | undefined);
     },
     [state]
   );

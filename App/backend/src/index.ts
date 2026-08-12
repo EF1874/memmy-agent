@@ -33,8 +33,6 @@ import { loadCloudServiceEnv } from "./load-env.js";
 
 export type { BootstrapScenario };
 export { loadCloudServiceEnv };
-export { sendGa4Events, resolveGa4Config } from "./analytics/ga4-client.js";
-export type { Ga4Config, Ga4Event, SendGa4EventsOptions } from "./analytics/ga4-client.js";
 export { trackAnalyticsEvent } from "./analytics/analytics-transport.js";
 
 const DEFAULT_MEMORY_LAYER_TIMEOUT_MS = 20_000;
