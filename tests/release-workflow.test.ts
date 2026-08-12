@@ -160,6 +160,7 @@ describe("GitHub Draft Release v2 workflow", () => {
     });
     expect(draftWorkflow.on.pull_request).toBeUndefined();
     expect(draftWorkflow.on.workflow_dispatch.inputs.version.required).toBe(true);
+    expect(draftWorkflow.on.workflow_dispatch.inputs.target_sha.required).toBe(false);
     expect(draftWorkflow.on.workflow_dispatch.inputs.preflight_level.default).toBe("smoke");
     expect(draftWorkflow.on.workflow_dispatch.inputs.preflight_level.options).toEqual([
       "smoke",
@@ -182,6 +183,9 @@ describe("GitHub Draft Release v2 workflow", () => {
     expect(resolve).toContain('create_draft="true"');
     expect(resolve).toContain('version="$MANUAL_VERSION"');
     expect(resolve).toContain('if [[ "$CREATE_DRAFT_INPUT" == "true" ]]');
+    expect(resolve).toContain('if [[ -n "$MANUAL_TARGET_SHA" ]]');
+    expect(resolve).toContain('manual_target_sha_supplied="true"');
+    expect(resolve).toContain("manual_target_sha_supplied=$manual_target_sha_supplied");
     expect(resolve).toContain("preflight_level=$preflight_level");
     expect(resolve).toContain("create_draft=$create_draft");
     expect(resolve).toContain("git/ref/heads/main");
@@ -255,6 +259,9 @@ describe("GitHub Draft Release v2 workflow", () => {
     expect(duplicateCheck).toContain("tag_preexists=false");
     expect(duplicateCheck).toContain("Release tag points to a different commit");
     expect(duplicateCheck).toContain("create the missing Draft Release without moving the tag");
+    expect(duplicateCheck).toContain("Manual recovery target requires an existing tag");
+    expect(duplicateCheck).toContain("A target_sha was supplied");
+    expect(duplicateCheck).toContain("tag-exists/release-missing recovery");
     expect(duplicateCheck).toContain('gh release view "$TAG"');
     expect(duplicateCheck).toContain("Release already exists");
     expect(duplicateCheck).not.toContain("--force");

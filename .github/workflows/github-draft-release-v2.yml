@@ -12,6 +12,10 @@ on:
         description: Release version without the v prefix (for example, 1.2.3)
         required: true
         type: string
+      target_sha:
+        description: Optional recovery commit SHA; only use when the tag already exists but the Draft Release is missing
+        required: false
+        type: string
       preflight_level:
         description: Smoke validates the target and Doc Agent config; full also verifies installers, release notes, and evidence
         required: false
@@ -51,6 +55,7 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           MANUAL_VERSION: ${{ inputs.version }}
+          MANUAL_TARGET_SHA: ${{ inputs.target_sha }}
           PREFLIGHT_LEVEL_INPUT: ${{ inputs.preflight_level || 'smoke' }}
           CREATE_DRAFT_INPUT: ${{ inputs.create_draft || false }}
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
@@ -60,6 +65,7 @@ jobs:
 
           preflight_level="$PREFLIGHT_LEVEL_INPUT"
           create_draft="false"
+          manual_target_sha_supplied="false"
           if [[ "$EVENT_NAME" == "pull_request_target" ]]; then
             if [[ ! "$PR_HEAD_REF" =~ ^(release/)?v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))$ ]]; then
               echo "Release branch must match vX.Y.Z or release/vX.Y.Z" >&2
@@ -79,7 +85,12 @@ jobs:
               create_draft="true"
               preflight_level="full"
             fi
-            target_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
+            if [[ -n "$MANUAL_TARGET_SHA" ]]; then
+              manual_target_sha_supplied="true"
+              target_sha="$MANUAL_TARGET_SHA"
+            else
+              target_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
+            fi
           fi
 
           if [[ "$preflight_level" != "smoke" && "$preflight_level" != "full" ]]; then
@@ -100,6 +111,7 @@ jobs:
           echo "target_sha=$target_sha" >> "$GITHUB_OUTPUT"
           echo "preflight_level=$preflight_level" >> "$GITHUB_OUTPUT"
           echo "create_draft=$create_draft" >> "$GITHUB_OUTPUT"
+          echo "manual_target_sha_supplied=$manual_target_sha_supplied" >> "$GITHUB_OUTPUT"
 
       - name: Check for an existing tag or release
         id: existing
@@ -107,6 +119,7 @@ jobs:
         env:
           TAG: ${{ steps.release.outputs.tag }}
           TARGET_SHA: ${{ steps.release.outputs.target_sha }}
+          MANUAL_TARGET_SHA_SUPPLIED: ${{ steps.release.outputs.manual_target_sha_supplied }}
         run: |
           set -euo pipefail
           repo_url="https://github.com/${GITHUB_REPOSITORY}.git"
@@ -123,6 +136,10 @@ jobs:
             fi
             echo "::notice title=Release tag already exists::$TAG already points to the target commit $TARGET_SHA. The workflow will create the missing Draft Release without moving the tag."
           else
+            if [[ "$MANUAL_TARGET_SHA_SUPPLIED" == "true" ]]; then
+              echo "::error title=Manual recovery target requires an existing tag::A target_sha was supplied for $TAG, but the tag does not exist. Manual recovery target_sha is only allowed for tag-exists/release-missing recovery; merge a release branch or re-run without target_sha to create a new tag from current main." >&2
+              exit 1
+            fi
             echo "tag_preexists=false" >> "$GITHUB_OUTPUT"
             echo "existing_tag_sha=" >> "$GITHUB_OUTPUT"
           fi
