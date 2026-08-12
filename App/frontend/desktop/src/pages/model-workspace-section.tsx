@@ -834,7 +834,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
                             disabled={lastSelected}
                             title={lastSelected ? t("settings.modelWorkspace.taskAtLeastOne") : undefined}
                             onClick={() => toggleTaskCandidate(candidate.id)}
-                            className="contents"
+                            className="task-model-picker__choice"
                           >
                           <span className={`task-model-picker__checkbox${selected ? " is-selected" : ""}`}>
                             {selected && <Check size={11} strokeWidth={3} aria-hidden="true" />}
@@ -853,7 +853,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
                               type="button"
                               aria-pressed={isDefault}
                               onClick={() => chooseDefaultTaskCandidate(candidate.id)}
-                              className="ml-2 shrink-0 text-[10px] text-action-sky"
+                              className="task-model-picker__default-button shrink-0 text-[10px] text-action-sky"
                             >
                               {isDefault
                                 ? t("settings.modelWorkspace.defaultModel")

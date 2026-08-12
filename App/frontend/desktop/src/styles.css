@@ -6958,6 +6958,19 @@ input[type="checkbox"].check-sky:checked::after {
   font-size: 12px;
 }
 
+.task-model-picker__choice {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+}
+
+.task-model-picker__default-button {
+  margin-left: 8px;
+}
+
 .task-model-picker__option:hover:not(:disabled) {
   background: var(--color-background-paper);
 }
