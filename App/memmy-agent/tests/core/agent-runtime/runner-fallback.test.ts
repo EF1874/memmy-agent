@@ -38,6 +38,30 @@ function errorResponse(content = "api error"): LLMResponse {
   return makeResponse(content, "error", { errorKind: "server_error" });
 }
 
+function catalogPreset(model: string, provider: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    endpoint: "chat",
+    model,
+    provider,
+    source: "byok",
+    capabilities: ["agent"],
+    ...extra,
+  };
+}
+
+function configuredProvider(
+  apiKey: string,
+  endpointId = "chat",
+  apiBase = "https://api.example.test/v1",
+): Record<string, unknown> {
+  return {
+    apiKey,
+    endpoints: {
+      [endpointId]: { apiBase, protocol: "openai-chat-completions" },
+    },
+  };
+}
+
 function fallback(
   model: string,
   provider = "custom",
@@ -54,8 +78,11 @@ function fallback(
   } = {},
 ): ModelPresetConfig {
   return new ModelPresetConfig({
+    endpoint: "chat",
     model,
     provider,
+    source: "byok",
+    capabilities: ["agent"],
     maxTokens,
     contextWindowTokens,
     temperature,
@@ -105,8 +132,9 @@ describe("FallbackProvider configuration", () => {
         },
       },
       modelPresets: {
-        deep: { provider: "anthropic", model: "claude-opus-4-7" },
+        deep: catalogPreset("claude-opus-4-7", "anthropic"),
       },
+      providers: { anthropic: configuredProvider("fallback-key") },
     });
 
     expect(config.agents.defaults.fallbackModels[0]).toBe("deep");
@@ -128,12 +156,12 @@ describe("FallbackProvider configuration", () => {
     const base = {
       agents: { defaults: { modelPreset: "fast", fallbackModels: ["deep"] } },
       modelPresets: {
-        fast: { model: "openai/gpt-4.1", provider: "openai" },
-        deep: { model: "anthropic/claude-sonnet-4-6", provider: "anthropic" },
+        fast: catalogPreset("openai/gpt-4.1", "openai"),
+        deep: catalogPreset("anthropic/claude-sonnet-4-6", "anthropic"),
       },
       providers: {
-        openai: { apiKey: "primary-key" },
-        anthropic: { apiKey: "fallback-key" },
+        openai: configuredProvider("primary-key"),
+        anthropic: configuredProvider("fallback-key"),
       },
     };
     const changedFallback = {
@@ -141,18 +169,18 @@ describe("FallbackProvider configuration", () => {
       agents: { defaults: { modelPreset: "fast", fallbackModels: ["backup"] } },
       modelPresets: {
         ...base.modelPresets,
-        backup: { model: "deepseek/deepseek-chat", provider: "deepseek" },
+        backup: catalogPreset("deepseek/deepseek-chat", "deepseek"),
       },
       providers: {
         ...base.providers,
-        deepseek: { apiKey: "deepseek-key" },
+        deepseek: configuredProvider("deepseek-key"),
       },
     };
     const changedKey = {
       ...base,
       providers: {
-        openai: { apiKey: "primary-key" },
-        anthropic: { apiKey: "new-fallback-key" },
+        openai: configuredProvider("primary-key"),
+        anthropic: configuredProvider("new-fallback-key"),
       },
     };
 
@@ -166,30 +194,33 @@ describe("FallbackProvider configuration", () => {
     const config = Config.fromObject({
       agents: { defaults: { modelPreset: "fast", fallbackModels: ["deep"] } },
       modelPresets: {
-        fast: { model: "openai/gpt-4.1", provider: "openai", contextWindowTokens: 128_000 },
-        deep: { model: "deepseek/deepseek-chat", provider: "deepseek", contextWindowTokens: 64_000 },
+        fast: catalogPreset("openai/gpt-4.1", "openai", { contextWindowTokens: 128_000 }),
+        deep: catalogPreset("deepseek/deepseek-chat", "deepseek", { contextWindowTokens: 64_000 }),
       },
       providers: {
-        openai: { apiKey: "primary-key" },
-        deepseek: { apiKey: "fallback-key" },
+        openai: configuredProvider("primary-key"),
+        deepseek: configuredProvider("fallback-key"),
       },
     });
 
     expect(buildProviderSnapshot(config).contextWindowTokens).toBe(64_000);
   });
 
-  it("inline fallbacks inherit the primary default maxTokens", () => {
+  it("named fallbacks inherit the primary default maxTokens", () => {
     const config = Config.fromObject({
       agents: {
         defaults: {
-          model: "openai/gpt-4.1",
-          provider: "openai",
-          fallbackModels: [{ model: "deepseek/deepseek-chat", provider: "deepseek" }],
+          modelPreset: "fast",
+          fallbackModels: ["deep"],
         },
       },
+      modelPresets: {
+        fast: catalogPreset("openai/gpt-4.1", "openai"),
+        deep: catalogPreset("deepseek/deepseek-chat", "deepseek"),
+      },
       providers: {
-        openai: { apiKey: "primary-key" },
-        deepseek: { apiKey: "fallback-key" },
+        openai: configuredProvider("primary-key"),
+        deepseek: configuredProvider("fallback-key"),
       },
     });
 
@@ -197,6 +228,38 @@ describe("FallbackProvider configuration", () => {
 
     expect(provider.generation.maxTokens).toBe(DEFAULT_MAX_TOKENS);
     expect(provider.fallbackPresets[0].maxTokens).toBe(DEFAULT_MAX_TOKENS);
+  });
+
+  it("named fallbacks bind the target provider's explicit text endpoint", () => {
+    const config = Config.fromObject({
+      agents: {
+        defaults: {
+          modelPreset: "fast",
+          fallbackModels: ["deep"],
+        },
+      },
+      modelPresets: {
+        fast: catalogPreset("openai/gpt-4.1", "openai", { endpoint: "primary-chat" }),
+        deep: catalogPreset("deepseek/deepseek-chat", "deepseek", { endpoint: "fallback-text" }),
+      },
+      providers: {
+        openai: configuredProvider("primary-key", "primary-chat", "https://primary.example.test/v1"),
+        deepseek: configuredProvider("fallback-key", "fallback-text", "https://fallback.example.test/v1"),
+      },
+    });
+
+    const provider = buildProviderSnapshot(config).provider as FallbackProvider;
+    const preset = provider.fallbackPresets[0] as ModelPresetConfig;
+    const fallbackProvider = provider.providerFactory(preset);
+
+    expect(preset).toMatchObject({
+      endpoint: "fallback-text",
+      provider: "deepseek",
+      source: "byok",
+      capabilities: ["agent"],
+    });
+    expect(fallbackProvider.apiBase).toBe("https://fallback.example.test/v1");
+    expect(fallbackProvider.apiKey).toBe("fallback-key");
   });
 
   it("named fallback presets preserve an explicit maxTokens value during failover", async () => {
@@ -209,11 +272,11 @@ describe("FallbackProvider configuration", () => {
         },
       },
       modelPresets: {
-        small: { model: "deepseek/deepseek-chat", provider: "deepseek", maxTokens: 4096 },
+        small: catalogPreset("deepseek/deepseek-chat", "deepseek", { maxTokens: 4096 }),
       },
       providers: {
-        openai: { apiKey: "primary-key" },
-        deepseek: { apiKey: "fallback-key" },
+        openai: configuredProvider("primary-key"),
+        deepseek: configuredProvider("fallback-key"),
       },
     });
     const configured = buildProviderSnapshot(config).provider as FallbackProvider;
@@ -241,15 +304,16 @@ describe("FallbackProvider configuration", () => {
     expect(snapshot.contextWindowTokens).toBe(200_000);
   });
 
-  it("inline fallback reasoning effort does not inherit the primary setting", () => {
+  it("named fallback reasoning effort does not inherit the primary setting", () => {
     const config = Config.fromObject({
-      agents: { defaults: { modelPreset: "fast", fallbackModels: [{ provider: "openai", model: "gpt-4.1" }] } },
+      agents: { defaults: { modelPreset: "fast", fallbackModels: ["normal"] } },
       modelPresets: {
-        fast: { model: "anthropic/claude-opus-4-5", provider: "anthropic", reasoningEffort: "high" },
+        fast: catalogPreset("anthropic/claude-opus-4-5", "anthropic", { reasoningEffort: "high" }),
+        normal: catalogPreset("openai/gpt-4.1", "openai"),
       },
       providers: {
-        anthropic: { apiKey: "primary-key" },
-        openai: { apiKey: "fallback-key" },
+        anthropic: configuredProvider("primary-key"),
+        openai: configuredProvider("fallback-key"),
       },
     });
 

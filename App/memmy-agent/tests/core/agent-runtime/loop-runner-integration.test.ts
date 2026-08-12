@@ -13,7 +13,6 @@ import { Session, SessionManager } from "../../../src/core/session/manager.js";
 import { GuiTranscriptMirror } from "../../../src/entrypoints/frontend-bridge/gui-transcript-sync.js";
 
 const roots: string[] = [];
-const originalHome = process.env.HOME;
 const originalDataDir = process.env.MEMMY_AGENT_DATA_DIR;
 
 function workspace(): string {
@@ -64,8 +63,6 @@ function loop(p = provider(), extra: Record<string, any> = {}): AgentLoop {
 
 afterEach(() => {
   vi.restoreAllMocks();
-  if (originalHome === undefined) delete process.env.HOME;
-  else process.env.HOME = originalHome;
   if (originalDataDir === undefined) delete process.env.MEMMY_AGENT_DATA_DIR;
   else process.env.MEMMY_AGENT_DATA_DIR = originalDataDir;
   for (const dir of roots.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
@@ -74,7 +71,7 @@ afterEach(() => {
 describe("AgentLoop direct processing", () => {
   it("expands the default home workspace instead of creating a literal tilde directory", () => {
     const fakeHome = workspace();
-    process.env.HOME = fakeHome;
+    vi.spyOn(os, "homedir").mockReturnValue(fakeHome);
     const p = provider(["ok"]);
     const agent = new AgentLoop({
       provider: p,
@@ -253,7 +250,12 @@ describe("AgentLoop direct processing", () => {
     const persisted = agent.sessions.getOrCreate("websocket:web-quota").messages;
     expect(persisted.at(-1)?.model_error).toEqual({
       category: "quota_exhausted",
-      detail: "raw provider quota detail"
+      detail: "raw provider quota detail",
+      presetId: "default",
+      provider: "unknown",
+      model: "test-model",
+      capability: "agent",
+      source: "byok",
     });
   });
 

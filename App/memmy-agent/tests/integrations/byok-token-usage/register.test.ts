@@ -39,7 +39,8 @@ describe("installByokTokenUsage", () => {
         model: "gpt-4.1-mini",
         provider: {
           spec: { name: "openai" }
-        }
+        },
+        actualModelContext: actualModelContext(),
       },
     });
     await hooks[0]?.beforeRun(ctx);
@@ -106,6 +107,7 @@ describe("installByokTokenUsage", () => {
       spec: {
         sessionKey: "cli:direct",
         model: "gpt-4.1-mini",
+        actualModelContext: actualModelContext(),
       },
     });
     await hooks[0]?.beforeRun(ctx);
@@ -147,6 +149,13 @@ describe("installByokTokenUsage", () => {
       chatId: "chat-title",
       modelId: "gpt-4.1-mini",
       operation: "session_title",
+      actualModelContext: {
+        presetId: "byok-agent",
+        source: "byok",
+        provider: "openai",
+        model: "gpt-4.1-mini",
+        capability: "agent",
+      },
     });
 
     const [url, init] = fetchImpl.mock.calls[0] as unknown as [URL, RequestInit];
@@ -154,6 +163,10 @@ describe("installByokTokenUsage", () => {
     expect(JSON.parse(String(init.body))).toMatchObject({
       kind: "agent_chat",
       source: "agent",
+      presetId: "byok-agent",
+      provider: "openai",
+      model: "gpt-4.1-mini",
+      capability: "agent",
       metadata: {
         operation: "session_title",
         sessionKey: "websocket:chat-title",
@@ -180,4 +193,18 @@ function configFixture(): Config {
       },
     },
   });
+}
+
+function actualModelContext() {
+  return {
+    presetId: "byok-agent",
+    provider: "openai",
+    endpointId: "chat",
+    protocol: "openai-chat-completions" as const,
+    model: "gpt-4.1-mini",
+    source: "byok" as const,
+    ownerAccountId: null,
+    capability: "agent" as const,
+    capabilities: ["agent" as const],
+  };
 }

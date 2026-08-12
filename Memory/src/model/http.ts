@@ -1,4 +1,5 @@
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
+import type { ActualModelContext } from "@memmy/local-api-contracts";
 
 const logger = createMemoryLogger("model-http");
 
@@ -10,7 +11,8 @@ export class ModelHttpError extends Error {
     readonly provider: string,
     readonly httpStatus: number,
     readonly errorCode: string | undefined,
-    readonly detail: string
+    readonly detail: string,
+    readonly actualModelContext?: Readonly<ActualModelContext>
   ) {
     super(message);
   }
@@ -26,6 +28,7 @@ export async function postJsonWithRetry<T>(
     body: unknown;
     timeoutMs: number;
     maxRetries: number;
+    actualModelContext?: Readonly<ActualModelContext>;
   }
 ): Promise<T> {
   let lastError: unknown;
@@ -51,7 +54,8 @@ export async function postJsonWithRetry<T>(
             input.provider,
             response.status,
             failure.errorCode,
-            failure.detail
+            failure.detail,
+            input.actualModelContext
           );
         }
         return parseJsonResponse<T>(input.provider, response, text);
@@ -86,7 +90,11 @@ export async function postJsonWithRetry<T>(
       }
     }
   }
-  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  const normalized = lastError instanceof Error ? lastError : new Error(String(lastError));
+  if (input.actualModelContext && !("actualModelContext" in normalized)) {
+    Object.assign(normalized, { actualModelContext: input.actualModelContext });
+  }
+  throw normalized;
 }
 
 export function trimTrailingSlash(value: string): string {

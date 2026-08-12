@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
 import YAML from "yaml";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -11,6 +11,7 @@ import {
   AgentGatewaySupervisor,
   preparePackagedBrowser,
   preparePackagedRuntimeConfig,
+  resolvePackagedRuntimeMigrationTargets,
   runPackagedMigrationCommand,
   restartExternalMemoryService,
   spawnNodeService,
@@ -51,6 +52,7 @@ describe("packaged desktop runtime config", () => {
     vi.restoreAllMocks();
     delete process.env.MEMMY_MIGRATIONS_READY_CONFIG;
     delete process.env.MEMMY_MIGRATIONS_READY_WORKSPACE;
+    delete process.env.MEMMY_MIGRATIONS_READY_APP_DATABASE;
     await Promise.all(testServers.splice(0).map((server) => new Promise<void>((resolveClose) => {
       server.close(() => resolveClose());
       server.closeAllConnections();
@@ -75,11 +77,13 @@ describe("packaged desktop runtime config", () => {
     });
     process.env.MEMMY_MIGRATIONS_READY_CONFIG = "/stale/config.yaml";
     process.env.MEMMY_MIGRATIONS_READY_WORKSPACE = "/stale/workspace";
+    process.env.MEMMY_MIGRATIONS_READY_APP_DATABASE = "/stale/app.sqlite";
 
     await runPackagedMigrationCommand({
       agentEntry: "/runtime/memmy-agent/dist/main.js",
       configPath: join(root, "config.yaml"),
       agentWorkspace: join(root, "workspace"),
+      appDatabaseFile: join(root, "app.sqlite"),
       logDirectory: root,
       logLevel: "info",
       spawnProcess: spawnProcess as typeof import("node:child_process").spawn
@@ -92,7 +96,9 @@ describe("packaged desktop runtime config", () => {
         "--config",
         join(root, "config.yaml"),
         "--workspace",
-        join(root, "workspace")
+        join(root, "workspace"),
+        "--app-database",
+        join(root, "app.sqlite")
       ],
       expect.objectContaining({
         env: expect.objectContaining({
@@ -106,6 +112,40 @@ describe("packaged desktop runtime config", () => {
     const spawnedEnv = spawnProcess.mock.calls[0]?.[2]?.env;
     expect(spawnedEnv).not.toHaveProperty("MEMMY_MIGRATIONS_READY_CONFIG");
     expect(spawnedEnv).not.toHaveProperty("MEMMY_MIGRATIONS_READY_WORKSPACE");
+    expect(spawnedEnv).not.toHaveProperty("MEMMY_MIGRATIONS_READY_APP_DATABASE");
+  });
+
+  it("omits an implicit workspace override while still passing the Desktop database target", async () => {
+    const root = await makeTempRoot();
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      exitCode: null,
+      signalCode: null,
+      kill: vi.fn()
+    }) as unknown as ChildProcess;
+    const spawnProcess = vi.fn(() => {
+      queueMicrotask(() => child.emit("close", 0, null));
+      return child;
+    });
+
+    await runPackagedMigrationCommand({
+      agentEntry: "/runtime/memmy-agent/dist/main.js",
+      configPath: join(root, "config.yaml"),
+      appDatabaseFile: join(root, "app.sqlite"),
+      logDirectory: root,
+      logLevel: "info",
+      spawnProcess: spawnProcess as typeof import("node:child_process").spawn
+    });
+
+    expect(spawnProcess.mock.calls[0]?.[1]).toEqual([
+      "/runtime/memmy-agent/dist/main.js",
+      "migrate",
+      "--config",
+      join(root, "config.yaml"),
+      "--app-database",
+      join(root, "app.sqlite")
+    ]);
   });
 
   it("rejects when the packaged migration command exits unsuccessfully", async () => {
@@ -122,6 +162,7 @@ describe("packaged desktop runtime config", () => {
       agentEntry: "/runtime/memmy-agent/dist/main.js",
       configPath: join(root, "config.yaml"),
       agentWorkspace: join(root, "workspace"),
+      appDatabaseFile: join(root, "app.sqlite"),
       logDirectory: root,
       logLevel: "info",
       spawnProcess: (() => child) as typeof import("node:child_process").spawn
@@ -145,6 +186,7 @@ describe("packaged desktop runtime config", () => {
       agentEntry: "/runtime/memmy-agent/dist/main.js",
       configPath: join(root, "config.yaml"),
       agentWorkspace: join(root, "workspace"),
+      appDatabaseFile: join(root, "app.sqlite"),
       logDirectory: root,
       logLevel: "info",
       timeoutMs: 5,
@@ -227,11 +269,7 @@ describe("packaged desktop runtime config", () => {
     });
     expect(config).toMatchObject({
       agents: {
-        defaults: {
-          model: "custom/memmy-desktop",
-          provider: "custom",
-          workspace: join(memmyHome, "workspace")
-        }
+        defaults: { workspace: join(memmyHome, "workspace") }
       },
       channels: {
         websocket: {
@@ -262,6 +300,32 @@ describe("packaged desktop runtime config", () => {
     });
     await expect(stat(join(memmyHome, "workspace"))).resolves.toBeTruthy();
     await expect(stat(join(memmyHome, "memory-service"))).resolves.toBeTruthy();
+    expect(recordValue(recordValue(config, "agents"), "defaults")).not.toHaveProperty("model");
+    expect(recordValue(recordValue(config, "agents"), "defaults")).not.toHaveProperty("provider");
+  });
+
+  it("rereads the migrated workspace instead of pinning the pre-migration legacy value", async () => {
+    const memmyHome = await makeTempRoot();
+    const configPath = join(memmyHome, "config.yaml");
+    const legacyWorkspace = join(memmyHome, "legacy-workspace");
+    await writeFile(configPath, YAML.stringify({
+      agent: { workspace: legacyWorkspace }
+    }), "utf8");
+
+    expect(await resolvePackagedRuntimeMigrationTargets({
+      MEMMY_HOME: memmyHome,
+      MEMMY_CONFIG: configPath
+    })).toEqual({ configPath });
+
+    await writeFile(configPath, YAML.stringify({
+      agents: { defaults: { workspace: legacyWorkspace } }
+    }), "utf8");
+    const runtime = await preparePackagedRuntimeConfig({
+      env: { MEMMY_HOME: memmyHome, MEMMY_CONFIG: configPath },
+      secretFactory: () => "stable-secret"
+    });
+
+    expect(runtime.agentWorkspace).toBe(legacyWorkspace);
   });
 
   it("preserves existing user model, memory, and websocket settings", async () => {
@@ -301,7 +365,17 @@ describe("packaged desktop runtime config", () => {
         }
       },
       providers: {
-        anthropic: { apiKey: "sk-test" }
+        anthropic: {
+          apiKey: "sk-test",
+          futureProviderField: "keep-provider",
+          endpoints: { chat: { futureEndpointField: "keep-endpoint" } }
+        }
+      },
+      modelPresets: {
+        "future-preset": { futurePresetField: "keep-preset" }
+      },
+      futureSection: {
+        keepMe: true
       }
     }), "utf8");
 
@@ -338,6 +412,14 @@ describe("packaged desktop runtime config", () => {
       sqlitePath
     });
     expect(recordValue(config, "fileMemory")).toEqual({ enabled: true });
+    expect(recordValue(config, "futureSection")).toEqual({ keepMe: true });
+    expect(recordValue(recordValue(config, "providers"), "anthropic")).toMatchObject({
+      futureProviderField: "keep-provider",
+      endpoints: { chat: { futureEndpointField: "keep-endpoint" } }
+    });
+    expect(recordValue(recordValue(config, "modelPresets"), "future-preset")).toEqual({
+      futurePresetField: "keep-preset"
+    });
   });
 
   it("fills a missing file memory enabled field without changing explicit values", async () => {
@@ -807,6 +889,9 @@ describe("AgentGatewaySupervisor", () => {
       MEMMY_DESKTOP_MANAGED_GATEWAY: "1",
       MEMMY_MIGRATIONS_READY_CONFIG: "/memmy/config.yaml",
       MEMMY_MIGRATIONS_READY_WORKSPACE: "/memmy/workspace",
+      MEMMY_MIGRATIONS_READY_SESSION_DAG: resolve("/memmy/session-dag"),
+      MEMMY_APP_DATABASE: "/memmy/app.sqlite",
+      MEMMY_MIGRATIONS_READY_APP_DATABASE: "/memmy/app.sqlite",
       MEMMY_BROWSER_PREPARATION_ATTEMPT_ID: "test-browser-attempt",
       MEMMY_AGENT_RESTART_NOTIFY_CHANNEL: "websocket",
       MEMMY_AGENT_RESTART_NOTIFY_CHAT_ID: "chat-1",
@@ -917,6 +1002,7 @@ function createSupervisorHarness(overrides: {
   };
   const runtimeConfig: PackagedRuntimeConfig = {
     configPath: "/memmy/config.yaml",
+    appDatabaseFile: "/memmy/app.sqlite",
     agentWorkspace: "/memmy/workspace",
     memoryDatabasePath: "/memmy/memory.sqlite",
     memoryBaseUrl: "http://127.0.0.1:18960",
@@ -930,6 +1016,7 @@ function createSupervisorHarness(overrides: {
   };
   const options: StartPackagedRuntimeServicesOptions = {
     appPath: "/app",
+    appDatabaseFile: "/memmy/app.sqlite",
     resourcesPath: "/resources",
     logDirectory: "/logs",
     logLevel: "info"

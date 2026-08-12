@@ -19,7 +19,6 @@ import {
   parseInboundPayload,
   parseQuery,
   parseRequestPath,
-  publishRuntimeModelUpdate,
   stripTrailingSlash,
 } from "../../../src/integrations/channels/websocket.js";
 import { webuiTranscriptPath } from "../../../src/entrypoints/frontend-bridge/transcript.js";
@@ -37,10 +36,19 @@ function sent(ws: { send: ReturnType<typeof vi.fn> }, index = 0): any {
 }
 
 function modelSelection(preset: string, provider: string, model: string): any {
+  const endpointId = provider === "anthropic" ? "messages" : "chat";
+  const protocol = provider === "anthropic" ? "anthropic-messages" : "openai-chat-completions";
   return {
     preset,
+    presetId: preset,
     provider,
+    endpointId,
+    protocol,
     model,
+    source: "byok",
+    ownerAccountId: null,
+    capability: "agent",
+    capabilities: ["agent"],
     snapshot: {
       provider: null,
       model,
@@ -129,7 +137,7 @@ describe("WebSocket channel", () => {
     expect(String(response.body)).toContain("surface_invalid");
   });
 
-  it("uses one request id and the confirmed fallback model for a new chat's first message", async () => {
+  it("returns the complete confirmed model selection for a new chat's first message", async () => {
     const root = tempDataDir();
     const workspace = path.join(root, "workspace");
     fs.mkdirSync(workspace, { recursive: true });
@@ -146,7 +154,7 @@ describe("WebSocket channel", () => {
     await channel.dispatchEnvelope(ws, "client-1", {
       type: "new_chat",
       client_request_id: requestId,
-      model_preset: "deleted-model",
+      model_preset: "current-default",
     });
 
     const attached = sent(ws);
@@ -156,6 +164,16 @@ describe("WebSocket channel", () => {
       model_preset: "current-default",
       model_provider: "openai",
       model: "gpt-5",
+      model_selection: {
+        preset_id: "current-default",
+        provider: "openai",
+        endpoint_id: "chat",
+        protocol: "openai-chat-completions",
+        model: "gpt-5",
+        source: "byok",
+        owner_account_id: null,
+        capabilities: ["agent"],
+      },
     });
 
     await channel.dispatchEnvelope(ws, "client-1", {
@@ -177,13 +195,75 @@ describe("WebSocket channel", () => {
       model: "gpt-5",
     });
     expect(resolver).toHaveBeenNthCalledWith(1, {
-      requestedPreset: "deleted-model",
-      sessionPreset: null,
+      requestedPreset: "current-default",
     });
     expect(resolver).toHaveBeenNthCalledWith(2, {
       requestedPreset: "current-default",
-      sessionPreset: null,
     });
+  });
+
+  it("returns an existing Session's committed model selection on attach", async () => {
+    const root = tempDataDir();
+    const sessions = new SessionManager(path.join(root, "sessions"));
+    const session = sessions.getOrCreate("websocket:chat-existing");
+    session.metadata.modelPreset = "fast";
+    session.metadata.modelSelection = {
+      presetId: "fast",
+      provider: "anthropic",
+      endpointId: "messages",
+      protocol: "anthropic-messages",
+      model: "claude-sonnet-4-5",
+      source: "byok",
+      ownerAccountId: null,
+      capabilities: ["agent"],
+    };
+    sessions.save(session);
+    const channel = new WebSocketChannel({}, new MessageBus(), { sessionManager: sessions });
+    const ws = connection();
+
+    await channel.dispatchEnvelope(ws, "client-1", { type: "attach", chat_id: "chat-existing" });
+
+    expect(JSON.parse(ws.send.mock.calls[0][0])).toEqual({
+      event: "attached",
+      chat_id: "chat-existing",
+      model_preset: "fast",
+      model_provider: "anthropic",
+      model: "claude-sonnet-4-5",
+      model_selection: {
+        preset_id: "fast",
+        provider: "anthropic",
+        endpoint_id: "messages",
+        protocol: "anthropic-messages",
+        model: "claude-sonnet-4-5",
+        source: "byok",
+        owner_account_id: null,
+        capabilities: ["agent"],
+      },
+    });
+  });
+
+  it("rejects an explicitly unavailable new-chat selection without falling back", async () => {
+    const resolver = vi.fn((input: any) => input.requestedPreset === "deleted-model"
+      ? null
+      : modelSelection("current-default", "openai", "gpt-5"));
+    const channel = new WebSocketChannel({}, new MessageBus(), {
+      modelSelectionResolver: resolver,
+    });
+    const ws = connection();
+
+    await channel.dispatchEnvelope(ws, "client-1", {
+      type: "new_chat",
+      client_request_id: "12121212-1212-4212-8212-121212121212",
+      model_preset: "deleted-model",
+    });
+
+    expect(sent(ws)).toEqual({
+      event: "error",
+      client_request_id: "12121212-1212-4212-8212-121212121212",
+      detail: "new_chat_rejected",
+      reason: "model_selection_unavailable",
+    });
+    expect(channel.subscriptions.size).toBe(0);
   });
 
   it("acknowledges queued WebUI requests without accepting or duplicating them", async () => {
@@ -928,7 +1008,7 @@ describe("WebSocket channel", () => {
       event: "error",
       client_request_id: "22222222-2222-4222-8222-222222222222",
       detail: "new_chat_rejected",
-      reason: "model_preset_invalid",
+      reason: "model_selection_unavailable",
     });
     expect(channel.subscriptions.size).toBe(0);
   });
@@ -981,7 +1061,17 @@ describe("WebSocket channel", () => {
         metadata: {
           x: 1,
           modelErrorCategory: "quota_exhausted",
-          modelErrorDetail: "Error: raw provider detail 40309"
+          modelErrorDetail: "Error: raw provider detail 40309",
+          modelErrorContext: {
+            category: "quota_exhausted",
+            presetId: "byok-agent",
+            source: "byok",
+            provider: "openai",
+            model: "gpt-4o",
+            capability: "agent",
+            apiKey: "must-not-leak",
+            extraHeaders: { Authorization: "must-not-leak" }
+          }
         },
       }),
     );
@@ -990,10 +1080,20 @@ describe("WebSocket channel", () => {
       event: "message",
       content: "当前模型额度已用完",
       metadata: { x: 1 },
-      model_error: { category: "quota_exhausted", detail: "Error: raw provider detail 40309" },
+      model_error: {
+        category: "quota_exhausted",
+        detail: "Error: raw provider detail 40309",
+        presetId: "byok-agent",
+        source: "byok",
+        provider: "openai",
+        model: "gpt-4o",
+        capability: "agent"
+      },
     });
     expect(sent(ws).metadata).not.toHaveProperty("modelErrorCategory");
     expect(sent(ws).metadata).not.toHaveProperty("modelErrorDetail");
+    expect(sent(ws).metadata).not.toHaveProperty("modelErrorContext");
+    expect(JSON.stringify(sent(ws))).not.toContain("must-not-leak");
     const transcript = fs
       .readFileSync(webuiTranscriptPath("websocket:chat-quota"), "utf8")
       .trim()
@@ -1002,7 +1102,12 @@ describe("WebSocket channel", () => {
     expect(transcript).toHaveLength(1);
     expect(transcript[0].model_error).toEqual({
       category: "quota_exhausted",
-      detail: "Error: raw provider detail 40309"
+      detail: "Error: raw provider detail 40309",
+      presetId: "byok-agent",
+      source: "byok",
+      provider: "openai",
+      model: "gpt-4o",
+      capability: "agent"
     });
     expect(transcript[0].metadata).toEqual({ x: 1 });
 
@@ -1205,9 +1310,22 @@ describe("WebSocket channel", () => {
       await channel.send(await bus.nextOutbound());
     }
 
-    const events = ws.send.mock.calls.map(([payload]) => JSON.parse(payload).event);
+    const payloads = ws.send.mock.calls.map(([payload]) => JSON.parse(payload));
+    const events = payloads.map((payload) => payload.event);
     expect(events).toContain("message_accepted");
     expect(events).toContain("session_updated");
+    expect(payloads.find((payload) => payload.event === "message_accepted")).toMatchObject({
+      chat_id: "chat-1",
+      client_request_id: "11111111-1111-4111-8111-111111111111",
+      model_selection: {
+        preset_id: "default",
+        endpoint_id: "default",
+        model: "anthropic/claude-opus-4-5",
+        source: "byok",
+        owner_account_id: null,
+        capabilities: ["agent"],
+      },
+    });
   });
 
   it("writes only a Goal objective into the accepted WebUI transcript", async () => {
@@ -1699,7 +1817,7 @@ describe("WebSocket channel", () => {
     expect(sent(ws).reply_to).toBe("user-1");
   });
 
-  it("broadcasts runtime model updates", async () => {
+  it("ignores legacy unscoped runtime model updates", async () => {
     const channel = new WebSocketChannel({}, new MessageBus());
     const ws = connection();
     channel.attachConnection(ws, "chat-1");
@@ -1712,18 +1830,53 @@ describe("WebSocket channel", () => {
       }),
     );
 
-    expect(sent(ws)).toEqual({ event: "runtime_model_updated", model_name: "openai/gpt-4.1", model_preset: "fast" });
+    expect(ws.send).not.toHaveBeenCalled();
   });
 
-  it("publishes runtime model update messages onto the bus", async () => {
-    const bus = new MessageBus();
+  it("scopes complete runtime model updates to the matching chat and request", async () => {
+    const channel = new WebSocketChannel({}, new MessageBus());
+    const matching = connection();
+    const other = connection();
+    channel.attachConnection(matching, "chat-1");
+    channel.attachConnection(other, "chat-2");
 
-    publishRuntimeModelUpdate(bus, "openai/gpt-4.1", "fast");
+    await channel.send(new OutboundMessage({
+      channel: "websocket",
+      chatId: "chat-1",
+      metadata: {
+        runtimeModelUpdated: true,
+        clientRequestId: "77777777-7777-4777-8777-777777777777",
+        modelSelection: {
+          preset_id: "fast",
+          provider: "openai",
+          endpoint_id: "chat",
+          protocol: "openai-chat-completions",
+          model: "gpt-4.1",
+          source: "byok",
+          owner_account_id: null,
+          capabilities: ["agent"],
+        },
+      },
+    }));
 
-    const outbound = await bus.nextOutbound();
-    expect(outbound.channel).toBe("websocket");
-    expect(outbound.chatId).toBe("*");
-    expect(outbound.metadata).toMatchObject({ runtimeModelUpdated: true, model: "openai/gpt-4.1", model_preset: "fast" });
+    expect(sent(matching)).toEqual({
+      event: "runtime_model_updated",
+      chat_id: "chat-1",
+      client_request_id: "77777777-7777-4777-8777-777777777777",
+      model_name: "gpt-4.1",
+      model_preset: "fast",
+      model_selection: {
+        preset_id: "fast",
+        provider: "openai",
+        endpoint_id: "chat",
+        protocol: "openai-chat-completions",
+        model: "gpt-4.1",
+        source: "byok",
+        owner_account_id: null,
+        capabilities: ["agent"],
+      },
+    });
+    expect(other.send).not.toHaveBeenCalled();
   });
 
   it("sending to a missing connection is a no-op", async () => {
@@ -2054,7 +2207,7 @@ describe("WebSocket channel", () => {
     await channel.dispatchEnvelope(ws, "client-1", { type: "attach", chat_id: "chat-1" });
 
     expect(ws.send.mock.calls.map(([raw]) => JSON.parse(raw))).toEqual([
-      { event: "attached", chat_id: "chat-1" },
+      { event: "attached", chat_id: "chat-1", model_preset: null, model_provider: null, model: null, model_selection: null },
       { event: "run_status_snapshot", chat_id: "chat-1", status: "idle" },
     ]);
   });
@@ -2068,7 +2221,7 @@ describe("WebSocket channel", () => {
     await channel.dispatchEnvelope(ws, "client-1", { type: "attach", chat_id: "chat-1" });
 
     expect(ws.send.mock.calls.map(([raw]) => JSON.parse(raw))).toEqual([
-      { event: "attached", chat_id: "chat-1" },
+      { event: "attached", chat_id: "chat-1", model_preset: null, model_provider: null, model: null, model_selection: null },
       {
         event: "run_status_snapshot",
         chat_id: "chat-1",
@@ -2087,7 +2240,7 @@ describe("WebSocket channel", () => {
     await channel.dispatchEnvelope(ws, "client-1", { type: "attach", chat_id: "chat-1" });
 
     expect(ws.send.mock.calls.map(([raw]) => JSON.parse(raw))).toEqual([
-      { event: "attached", chat_id: "chat-1" },
+      { event: "attached", chat_id: "chat-1", model_preset: null, model_provider: null, model: null, model_selection: null },
       {
         event: "run_status_snapshot",
         chat_id: "chat-1",
@@ -2156,7 +2309,7 @@ describe("WebSocket channel", () => {
     await channel.dispatchEnvelope(ws, "client-1", { type: "attach", chat_id: "chat-1" });
 
     expect(ws.send.mock.calls.map(([raw]) => JSON.parse(raw))).toEqual([
-      { event: "attached", chat_id: "chat-1" },
+      { event: "attached", chat_id: "chat-1", model_preset: null, model_provider: null, model: null, model_selection: null },
       { event: "run_status_snapshot", chat_id: "chat-1", status: "idle" },
       {
         event: "goal_state",
@@ -2202,7 +2355,7 @@ describe("WebSocket channel", () => {
     })).resolves.toBeUndefined();
 
     expect(attaching.send.mock.calls.map(([raw]) => JSON.parse(raw))).toEqual([
-      { event: "attached", chat_id: "chat-1" },
+      { event: "attached", chat_id: "chat-1", model_preset: null, model_provider: null, model: null, model_selection: null },
       { event: "run_status_snapshot", chat_id: "chat-1", status: "idle" },
       {
         event: "goal_state",
@@ -2513,23 +2666,14 @@ describe("WebSocketChannel memmy parity cases", () => {
     });
   });
 
-  it("broadcasts runtime model updates", async () => {
+  it("ignores duplicate legacy unscoped runtime model updates", async () => {
     const channel = new WebSocketChannel({}, new MessageBus());
     const ws = connection();
     channel.attachConnection(ws, "chat-1");
 
     await channel.send(new OutboundMessage({ channel: "websocket", chatId: "*", metadata: { runtimeModelUpdated: true, model: "openai/gpt-4.1", model_preset: "fast" } }));
 
-    expect(sent(ws)).toEqual({ event: "runtime_model_updated", model_name: "openai/gpt-4.1", model_preset: "fast" });
-  });
-
-  it("publishes runtime model updates as WebSocket outbound events", async () => {
-    const bus = new MessageBus();
-    publishRuntimeModelUpdate(bus, "openai/gpt-4.1", "fast");
-    const event = await bus.nextOutbound();
-    expect(event.channel).toBe("websocket");
-    expect(event.chatId).toBe("*");
-    expect(event.metadata).toEqual({ runtimeModelUpdated: true, model: "openai/gpt-4.1", model_preset: "fast" });
+    expect(ws.send).not.toHaveBeenCalled();
   });
 
   it("ignores sends without matching connections", async () => {

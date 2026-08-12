@@ -33,6 +33,7 @@ function definition(
   options: {
     scope?: MigrationDefinition["scope"];
     up?: MigrationDefinition["up"];
+    requiredTargets?: MigrationDefinition["requiredTargets"];
   } = {},
 ): MigrationDefinition {
   return {
@@ -40,6 +41,7 @@ function definition(
     introducedIn,
     scope: options.scope ?? "agent-workspace",
     description: `Test migration ${id}`,
+    ...(options.requiredTargets ? { requiredTargets: options.requiredTargets } : {}),
     up: options.up ?? (async () => ({ scanned: 0, changed: 0, ignored: 0 })),
   };
 }
@@ -108,8 +110,11 @@ describe("migration runner", () => {
       "v1.0.5/0001-flatten-memory-model-config",
       "v1.0.5/0002-normalize-goal-state",
       "v1.0.5/0003-add-goal-dag-boundary",
+      "v1.0.7/0001-normalize-runtime-model-catalog",
+      "v1.0.7/0003-remove-legacy-runtime-model-fields",
     ]);
-    expect(first.results).toEqual({ scanned: 3, changed: 2, ignored: 1 });
+    expect(first.deferred).toEqual(["v1.0.7/0002-import-legacy-app-state-model-config"]);
+    expect(first.results).toEqual({ scanned: 5, changed: 3, ignored: 2 });
     expect(second).toEqual({
       applied: [],
       skipped: [
@@ -117,7 +122,10 @@ describe("migration runner", () => {
         "v1.0.5/0001-flatten-memory-model-config",
         "v1.0.5/0002-normalize-goal-state",
         "v1.0.5/0003-add-goal-dag-boundary",
+        "v1.0.7/0001-normalize-runtime-model-catalog",
+        "v1.0.7/0003-remove-legacy-runtime-model-fields",
       ],
+      deferred: ["v1.0.7/0002-import-legacy-app-state-model-config"],
       results: { scanned: 0, changed: 0, ignored: 0 },
     });
 
@@ -155,6 +163,24 @@ describe("migration runner", () => {
         target: {
           type: "session-dag",
           key: expect.stringMatching(/^[a-f0-9]{64}$/),
+        },
+      },
+      {
+        id: "v1.0.7/0001-normalize-runtime-model-catalog",
+        introducedIn: "1.0.7",
+        appliedAt: expect.stringMatching(/Z$/),
+        target: {
+          type: "runtime-config",
+          key: runtimeConfigTargetKey(configPath),
+        },
+      },
+      {
+        id: "v1.0.7/0003-remove-legacy-runtime-model-fields",
+        introducedIn: "1.0.7",
+        appliedAt: expect.stringMatching(/Z$/),
+        target: {
+          type: "runtime-config",
+          key: runtimeConfigTargetKey(configPath),
         },
       },
     ]);
@@ -526,5 +552,48 @@ describe("migration runner", () => {
       scope: "runtime-config",
       errorCode: "migration_io_failed",
     });
+  });
+
+  it("defers required app DB work without a marker and keys applied state by app DB target", async () => {
+    const profileWorkspace = await workspace();
+    const configPath = path.join(profileWorkspace, "config.yaml");
+    const calls: string[] = [];
+    const definitions = [definition("v1.0.7/0002-app-db", "1.0.7", {
+      scope: "runtime-config",
+      requiredTargets: ["appDatabaseFile"],
+      up: async (context) => {
+        calls.push(context.appDatabaseFile!);
+        return { scanned: 1, changed: 1, ignored: 0 };
+      },
+    })];
+    const base = options(profileWorkspace, configPath);
+
+    const deferred = await runMigrationsForTest(base, { definitions });
+    expect(deferred).toMatchObject({ applied: [], deferred: ["v1.0.7/0002-app-db"] });
+    expect(calls).toEqual([]);
+    expect((await readMigrationState(getMigrationStatePaths(profileWorkspace).file, definitions)).applied).toEqual([]);
+
+    const databaseA = path.join(profileWorkspace, "a.sqlite");
+    const databaseB = path.join(profileWorkspace, "b.sqlite");
+    const first = await runMigrationsForTest({
+      ...base,
+      targets: { ...base.targets, appDatabaseFile: databaseA },
+    }, { definitions });
+    const repeated = await runMigrationsForTest({
+      ...base,
+      targets: { ...base.targets, appDatabaseFile: databaseA },
+    }, { definitions });
+    const secondTarget = await runMigrationsForTest({
+      ...base,
+      targets: { ...base.targets, appDatabaseFile: databaseB },
+    }, { definitions });
+
+    expect(first.applied).toHaveLength(1);
+    expect(repeated.skipped).toEqual(["v1.0.7/0002-app-db"]);
+    expect(secondTarget.applied).toHaveLength(1);
+    expect(calls).toEqual([databaseA, databaseB]);
+    const records = (await readMigrationState(getMigrationStatePaths(profileWorkspace).file, definitions)).applied;
+    expect(records).toHaveLength(2);
+    expect(records[0]?.target).not.toEqual(records[1]?.target);
   });
 });

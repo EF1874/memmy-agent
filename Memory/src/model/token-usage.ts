@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import type { ActualModelContext } from "@memmy/local-api-contracts";
 
 export type MemoryLlmModelRole = "memory_summary" | "memory_evolution";
 export type MemoryTokenUsageKind = MemoryLlmModelRole | "embedding";
@@ -12,6 +13,7 @@ export interface MemoryModelUsageEvent {
   provider: string;
   model?: string;
   endpoint?: string;
+  actualModelContext?: ActualModelContext;
   usage: ModelTokenUsage;
   metadata?: Record<string, unknown>;
 }
@@ -38,8 +40,6 @@ export interface HttpByokTokenUsageRecorderOptions {
   env?: Record<string, string | undefined>;
 }
 
-const CLOUD_ACCOUNT_PROVIDER = "memmy_account";
-const CLOUD_ACCOUNT_ENDPOINT_MARKER = "memtensor.cn/api/agentExternal";
 const DEFAULT_TIMEOUT_MS = 5_000;
 const EVENT_PATH = "/api/app/byok-token-usage/events";
 const RUNTIME_TOKEN_HEADER = "x-memmy-local-token";
@@ -138,11 +138,8 @@ export class HttpByokTokenUsageRecorder {
   }
 
   record(event: MemoryModelUsageEvent): void {
-    if (!event.provider.trim()) {
-      console.error("Memory BYOK token usage skipped event without an actual provider");
-      return;
-    }
-    if (isCloudAccountLlm(event) || isEmptyUsage(event.usage)) {
+    const context = event.actualModelContext;
+    if (!context || context.source !== "byok" || context.capability !== event.kind || isEmptyUsage(event.usage)) {
       return;
     }
 
@@ -178,6 +175,10 @@ function toByokTokenUsageEvent(event: MemoryModelUsageEvent): Record<string, unk
     kind: event.kind,
     source: "memory",
     operationId: `${event.operation}:${id}`,
+    presetId: event.actualModelContext!.presetId,
+    provider: event.actualModelContext!.provider,
+    model: event.actualModelContext!.model,
+    capability: event.actualModelContext!.capability,
     inputTokens: event.usage.inputTokens,
     outputTokens: event.usage.outputTokens,
     totalTokens: event.usage.totalTokens,
@@ -185,9 +186,9 @@ function toByokTokenUsageEvent(event: MemoryModelUsageEvent): Record<string, unk
     cacheCreationInputTokens: event.usage.cacheCreationInputTokens,
     metadata: {
       operation: event.operation,
-      model: event.model ?? null,
+      model: event.actualModelContext!.model,
       ...event.metadata,
-      provider: event.provider
+      provider: event.actualModelContext!.provider
     },
     rawUsage: event.usage.rawUsage,
     createdAt: new Date().toISOString()
@@ -215,10 +216,6 @@ function readRuntimeConfig(filePath: string): RuntimeConfig | null {
   } catch {
     return null;
   }
-}
-
-function isCloudAccountLlm(input: { provider: string; endpoint?: string }): boolean {
-  return input.provider === CLOUD_ACCOUNT_PROVIDER || Boolean(input.endpoint?.includes(CLOUD_ACCOUNT_ENDPOINT_MARKER));
 }
 
 function isEmptyUsage(usage: ModelTokenUsage): boolean {

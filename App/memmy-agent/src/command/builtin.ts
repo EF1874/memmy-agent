@@ -7,7 +7,14 @@ import {
   setRestartNoticeToEnv,
   type ManagedRestartNotice
 } from "../utils/restart.js";
-import { readModelCatalog, resolveModelSelection } from "../providers/model-catalog.js";
+import {
+  committedSelectionFromMetadata,
+  modelSelectionWire,
+  persistedModelSelection,
+  readModelCatalog,
+  resolveModelSelection,
+  type ResolvedModelSelection,
+} from "../providers/model-catalog.js";
 import { handlePairingCommand } from "../integrations/channel-auth/store.js";
 import { DEFAULT_MAX_TOKENS } from "../token-budget.js";
 import { buildStatusContent } from "../utils/helpers.js";
@@ -270,9 +277,20 @@ function modelCommandList(): string {
   return [
     "## Model presets",
     ...(items.length
-      ? items.map((item) => `- \`${item.preset}\` -> \`${item.provider} / ${item.model}\``)
+      ? items.map((item) => `- \`${item.preset}\` -> \`${item.provider} / ${catalogModelName(item)}\``)
       : ["- (none configured)"]),
   ].join("\n");
+}
+
+function catalogModelName(selection: {
+  preset?: string;
+  presetId?: string;
+  model: string;
+  source: "account" | "byok";
+  capabilities: readonly string[];
+}): string {
+  if (selection.source === "account" && selection.capabilities.includes("agent")) return "General text";
+  return selection.model.trim() || selection.presetId || selection.preset || "(unavailable)";
 }
 
 function sessionModelPreset(ctx: CommandContext): string | null {
@@ -283,12 +301,17 @@ function sessionModelPreset(ctx: CommandContext): string | null {
 }
 
 function modelCommandStatus(ctx: CommandContext): string {
-  const selection = resolveModelSelection({
-    sessionPreset: sessionModelPreset(ctx),
-  });
+  const session = ctx.session ?? ctx.loop?.sessions?.get?.(ctx.key);
+  const committedSelection = committedSelectionFromMetadata(session?.metadata);
+  const input = committedSelection
+    ? { committedSelection }
+    : { sessionPreset: sessionModelPreset(ctx) };
+  const selection = typeof ctx.loop?.resolveTurnModelSelection === "function"
+    ? ctx.loop.resolveTurnModelSelection(input)
+    : resolveModelSelection(input);
   return [
     "## Model",
-    `- Current model: \`${selection ? `${selection.provider} / ${selection.model}` : "(none configured)"}\``,
+    `- Current model: \`${selection ? `${selection.provider} / ${catalogModelName(selection)}` : "(none configured)"}\``,
     `- Current preset: \`${selection?.preset ?? "(none configured)"}\``,
     `- Available presets: ${formatPresetNames(modelPresetNames())}`,
   ].join("\n");
@@ -311,18 +334,39 @@ export async function cmdModel(ctx: CommandContext): Promise<OutboundMessage> {
     const selection = typeof loop?.applySessionModelPresetLocked === "function"
       ? loop.applySessionModelPresetLocked(session, parts[0])
       : resolveAndPersistSessionModel(loop, session, parts[0]);
+    await publishSessionModelUpdate(ctx, selection);
     const lines = [
       `Switched this Session to \`${selection.preset}\`.`,
-      `- Model: \`${selection.provider} / ${selection.model}\``,
+      `- Model: \`${selection.provider} / ${catalogModelName(selection)}\``,
       `- Context window: ${selection.snapshot.contextWindowTokens}`,
     ];
     const maxTokens = selection.snapshot.provider?.generation?.maxTokens;
     if (maxTokens != null) lines.push(`- Max output tokens: ${maxTokens}`);
     return reply(ctx, lines.join("\n"), metadata);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return reply(ctx, `Could not switch model preset: ${message}\n\nAvailable presets: ${formatPresetNames(modelPresetNames())}`, metadata);
+    void err;
+    return reply(ctx, `Could not switch model preset: model_selection_unavailable\n\nAvailable presets: ${formatPresetNames(modelPresetNames())}`, metadata);
   }
+}
+
+async function publishSessionModelUpdate(
+  ctx: CommandContext,
+  selection: ResolvedModelSelection,
+): Promise<void> {
+  const clientRequestId = ctx.msg.metadata?.client_request_id;
+  const wire = modelSelectionWire(selection);
+  if (ctx.msg.channel !== "websocket" || typeof clientRequestId !== "string" || !wire) return;
+  await ctx.loop?.bus?.publishOutbound?.(new OutboundMessage({
+    channel: "websocket",
+    chatId: ctx.msg.chatId,
+    content: "",
+    metadata: {
+      runtimeModelUpdated: true,
+      webuiRequestSessionKey: ctx.key,
+      clientRequestId,
+      modelSelection: wire,
+    },
+  }));
 }
 
 function resolveAndPersistSessionModel(loop: any, session: any, preset: string) {
@@ -332,6 +376,7 @@ function resolveAndPersistSessionModel(loop: any, session: any, preset: string) 
     throw new Error(`Unknown or unavailable model preset '${preset}'`);
   }
   session.metadata.modelPreset = selection.preset;
+  session.metadata.modelSelection = persistedModelSelection(selection);
   loop.sessions.save(session, { fsync: true });
   loop.guiTranscriptMirror?.sessionUpdated?.(session.key);
   return selection;

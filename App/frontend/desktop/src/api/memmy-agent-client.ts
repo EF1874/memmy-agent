@@ -77,11 +77,60 @@ export function isAgentGoalState(value: unknown): value is AgentGoalState {
 export const DEFAULT_MEMMY_AGENT_WEBUI_BASE_URL = "http://127.0.0.1:18980";
 const WEBUI_TOKEN_REFRESH_SKEW_MS = 30_000;
 
+const ModelSelectionWireSchema = z.object({
+  preset_id: z.string().min(1),
+  provider: z.string().min(1),
+  endpoint_id: z.string().min(1),
+  protocol: z.string().min(1),
+  model: z.string().min(1),
+  source: z.enum(["account", "byok"]),
+  owner_account_id: z.string().min(1).nullable().optional(),
+  capabilities: z.array(z.string().min(1))
+}).strict();
+
+export type MemmyAgentModelSelection = {
+  presetId: string;
+  provider: string;
+  endpointId: string;
+  protocol: string;
+  model: string;
+  source: "account" | "byok";
+  ownerAccountId: string | null;
+  capabilities: string[];
+};
+
+export function parseMemmyAgentModelSelection(value: unknown): MemmyAgentModelSelection | null {
+  const parsed = ModelSelectionWireSchema.safeParse(value);
+  if (!parsed.success) return null;
+  return {
+    presetId: parsed.data.preset_id,
+    provider: parsed.data.provider,
+    endpointId: parsed.data.endpoint_id,
+    protocol: parsed.data.protocol,
+    model: parsed.data.model,
+    source: parsed.data.source,
+    ownerAccountId: parsed.data.owner_account_id ?? null,
+    capabilities: [...parsed.data.capabilities]
+  };
+}
+
+const ModelSelectionSchema = ModelSelectionWireSchema.transform((value): MemmyAgentModelSelection => ({
+  presetId: value.preset_id,
+  provider: value.provider,
+  endpointId: value.endpoint_id,
+  protocol: value.protocol,
+  model: value.model,
+  source: value.source,
+  ownerAccountId: value.owner_account_id ?? null,
+  capabilities: [...value.capabilities]
+}));
+
 const BootstrapSchema = z.object({
   token: z.string(),
   ws_path: z.string(),
   expires_in: z.number(),
-  model_name: z.string().nullable()
+  model_name: z.string().nullable(),
+  model_selection: ModelSelectionSchema.nullable().optional()
 });
 
 const ChatModelPresetSchema = z.object({
@@ -107,7 +156,8 @@ const SessionSummarySchema = z.object({
   run_started_at: z.number().optional(),
   projectId: z.string().nullable(),
   cwd: z.string(),
-  model_preset: z.string().nullable().optional()
+  model_preset: z.string().nullable().optional(),
+  model_selection: ModelSelectionSchema.nullable().optional()
 }).passthrough();
 
 const ProjectSchema = z.object({
@@ -437,11 +487,17 @@ export type MemmyAgentSendMessageInput = {
 export interface MemmyAgentNewChatResult {
   chatId: string;
   modelPreset: string;
+  modelSelection: MemmyAgentModelSelection;
 }
 
 export type MemmyAgentModelError = {
   category: "quota_exhausted" | "model_failed";
   detail?: string;
+  presetId?: string;
+  source?: "account" | "byok";
+  provider?: string;
+  model?: string;
+  capability?: "agent" | "memory_summary" | "memory_evolution" | "embedding" | "asr" | "image_generation";
 };
 
 export type MemmyAgentWsEvent = {
@@ -476,6 +532,7 @@ export type MemmyAgentWsEvent = {
   scope?: string;
   model_name?: string;
   model_preset?: string;
+  model_selection?: unknown;
   request_id?: string;
   ok?: boolean;
   outcome?: string;
@@ -2161,13 +2218,13 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
 
   private resolvePendingNewChat(event: MemmyAgentWsEvent, generation: number): void {
     const pending = this.pendingNewChat;
+    const modelSelection = parseMemmyAgentModelSelection(event.model_selection);
     if (
       !pending
       || pending.generation !== generation
       || event.client_request_id !== pending.clientRequestId
       || !event.chat_id
-      || typeof event.model_preset !== "string"
-      || !event.model_preset
+      || !modelSelection
     ) {
       return;
     }
@@ -2175,7 +2232,8 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     clearTimeout(pending.timer);
     pending.resolve({
       chatId: event.chat_id,
-      modelPreset: event.model_preset
+      modelPreset: modelSelection.presetId,
+      modelSelection
     });
   }
 

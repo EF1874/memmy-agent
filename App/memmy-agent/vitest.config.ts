@@ -47,7 +47,7 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      "memmy-agent": new URL("./src/index.ts", import.meta.url).pathname,
+      "memmy-agent": fileURLToPath(new URL("./src/index.ts", import.meta.url)),
     },
   },
 });

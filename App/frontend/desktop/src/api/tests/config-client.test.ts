@@ -1,6 +1,6 @@
-import type { RuntimeConfig } from "@memmy/local-api-contracts";
+import type { ModelConfigInput, ModelConfigView, RuntimeConfig } from "@memmy/local-api-contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createHttpConfigClient } from "../config-client.js";
+import { CLIENT_PRESET_ID_PREFIX, createHttpConfigClient } from "../config-client.js";
 
 const config: RuntimeConfig = {
   baseUrl: "http://127.0.0.1:18100",
@@ -11,757 +11,290 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("config-client", () => {
-  it("http client 调用应用设置、隐私和模型配置真实路由", async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = input.toString();
-      expect(init?.headers).toMatchObject({
-        "x-memmy-local-token": "token"
-      });
-      if (init?.body !== undefined) {
-        expect(init?.headers).toMatchObject({
-          "content-type": "application/json"
-        });
-      }
-
-      if (url.endsWith("/api/app/settings")) {
-        expect(init?.method).toBe("PATCH");
-        expect(JSON.parse(String(init?.body))).toEqual({ language: "zh-CN" });
-        return jsonResponse({
-          userMode: "account",
-          language: "zh-CN",
-          theme: "system",
-          autoUpdateEnabled: false,
-          defaultLaunchMode: "pet",
-          avatarId: "memmy-default",
-          skinId: "default"
-        });
-      }
-
-      if (url.endsWith("/api/app/privacy")) {
-        expect(init?.method).toBe("PATCH");
-        expect(JSON.parse(String(init?.body))).toEqual({ allowMemoryImprovementUpload: true });
-        return jsonResponse({
-          telemetryOptIn: true,
-          crashReportOptIn: false,
-          allowMemoryImprovementUpload: true,
-          localOnlyMode: false
-        });
-      }
-
-      if (url.endsWith("/api/app/scan-preferences")) {
-        expect(init?.method).toBe("PATCH");
-        expect(JSON.parse(String(init?.body))).toEqual({ autoInjectSkill: true });
-        return jsonResponse({
-          autoScanKnownAgents: true,
-          watchFileChanges: true,
-          autoInjectSkill: true
-        });
-      }
-
-      if (url.endsWith("/api/app/improvement-program")) {
-        expect(init?.method).toBe("PATCH");
-        expect(JSON.parse(String(init?.body))).toEqual({ improvementProgram: "accepted" });
-        return jsonResponse({
-          onboarding: {
-            completed: false,
-            currentStep: "product_tour_required",
-            hasAcceptedTerms: false,
-            acceptedTermsVersion: null,
-            scanPermission: "scan_only",
-            improvementProgram: "accepted",
-            completedAt: null
-          },
-          privacy: {
-            telemetryOptIn: true,
-            crashReportOptIn: false,
-            allowMemoryImprovementUpload: true,
-            localOnlyMode: false
-          },
-          tokenUsage: {
-            planName: "体验 Token",
-            totalTokens: 35000000,
-            usedTokens: 1000000,
-            remainingTokens: 34000000,
-            expiresAt: null,
-            lastSyncedAt: "2026-06-05T10:00:00.000Z"
-          }
-        });
-      }
-
-      if (url.endsWith("/api/app/token-usage")) {
-        expect(init?.method).toBe("GET");
-        return jsonResponse({
-          planName: "体验 Token",
-          totalTokens: 40000000,
-          usedTokens: 900000,
-          remainingTokens: 39100000,
-          expiresAt: null,
-          lastSyncedAt: "2026-06-24T10:00:00.000Z"
-        });
-      }
-
-      if (url.endsWith("/api/app/model-config") && init?.method === "PUT") {
-        expect(init?.method).toBe("PUT");
-        expect(JSON.parse(String(init?.body))).toMatchObject({
-          configRevision: "unknown",
-          providers: [{
-            provider: "openai",
-            apiBase: "https://api.openai.com/v1",
-            apiKey: "sk-test",
-            models: [{
-              model: "gpt-4.1-mini"
-            }]
-          }],
-          memmyMemory: {
-            summary: {
-              mode: "fixed",
-              fixed: {
-                provider: "anthropic",
-                baseUrl: "https://memory.example.com/v1",
-                modelId: "claude-3-5-haiku",
-                apiKey: "sk-memory"
-              }
-            },
-            evolution: {
-              mode: "fixed",
-              fixed: {
-                provider: "qwen",
-                baseUrl: "https://skill.example.com/v1",
-                modelId: "qwen-plus",
-                apiKey: "sk-skill"
-              }
-            }
-          },
-          asr: {
-            provider: "aliyun",
-            baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            modelId: "qwen3-asr-flash",
-            apiKey: "sk-asr"
-          }
-        });
-        return jsonResponse(modelConfigView({
-          revision: "revision-2",
-          apiBase: "https://api.openai.com/v1",
-          model: "gpt-4.1-mini",
-          apiKeyMasked: "sk••••test",
-          memmyMemory: {
-            summary: {
-              mode: "fixed",
-              fixed: roleView("anthropic", "https://memory.example.com/v1", "claude-3-5-haiku", "sk••••mory")
-            },
-            evolution: {
-              mode: "fixed",
-              fixed: roleView("qwen", "https://skill.example.com/v1", "qwen-plus", "sk••••kill")
-            }
-          },
-          asr: {
-            provider: "aliyun",
-            baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            modelId: "qwen3-asr-flash",
-            hasApiKey: true,
-            apiKeyMasked: "sk••••asr",
-            apiKey: ""
-          }
-        }));
-      }
-
-      if (url.endsWith("/api/app/model-config") && init?.method === "GET") {
-        return jsonResponse(modelConfigView({
-          revision: "revision-1",
-          apiBase: "https://api.openai.com/v1",
-          model: "gpt-4.1-mini",
-          apiKeyMasked: "sk••••test",
-          memmyMemory: {
-            summary: {
-              mode: "fixed",
-              fixed: roleView("openai_compatible", "https://api.openai.com/v1", "gpt-4.1-mini", "sk••••test")
-            },
-            evolution: {
-              mode: "fixed",
-              fixed: roleView("openai_compatible", "https://api.openai.com/v1", "gpt-4.1-mini", "sk••••test")
-            }
-          },
-          asr: {
-            provider: "aliyun",
-            baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            modelId: "qwen3-asr-flash",
-            hasApiKey: true,
-            apiKeyMasked: "sk••••asr",
-            apiKey: ""
-          }
-        }));
-      }
-
-      if (url.endsWith("/api/app/model-config/test") && init?.method === "POST") {
-        const body = JSON.parse(String(init?.body));
-        if (body.capability === "asr") {
-          expect(body).toMatchObject({
-            provider: "qwen",
-            baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            modelId: "qwen3-asr-flash",
-            apiKey: "sk-asr",
-            capability: "asr"
-          });
-        } else if (body.capability === "embedding") {
-          expect(body).toMatchObject({
-            provider: "openai_compatible",
-            baseUrl: "https://api.openai.com/v1",
-            modelId: "text-embedding-3-small",
-            apiKey: "sk-test",
-            capability: "embedding"
-          });
-        } else {
-          expect(body).toMatchObject({
-            provider: "openai_compatible",
-            baseUrl: "https://api.openai.com/v1",
-            modelId: "gpt-5.5",
-            apiKey: "sk-test",
-            capability: "chat"
-          });
-        }
-        return jsonResponse({
-          ok: true,
-          message: "连接成功",
-          checkedAt: "2026-06-05T10:00:00.000Z"
-        });
-      }
-
-      return jsonResponse({ error: "not found" }, 404);
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
+describe("config-client canonical model catalog", () => {
+  it("GET 返回 revision/catalog，PUT 原样提交 endpoint/preset/capability/assignment", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      requests.push({ url: input.toString(), init });
+      return jsonResponse(catalog(init?.method === "PUT" ? "revision-2" : "revision-1"));
+    }));
     const client = createHttpConfigClient(config);
+    const loaded = await client.getModelConfig();
 
-    await expect(client.updateSettings({ language: "zh-CN" })).resolves.toMatchObject({ language: "zh-CN" });
-    await expect(client.updatePrivacy({ allowMemoryImprovementUpload: true })).resolves.toMatchObject({ allowMemoryImprovementUpload: true });
-    await expect(client.updateScanPreferences({ autoInjectSkill: true })).resolves.toMatchObject({ autoInjectSkill: true });
-    await expect(client.setImprovementProgram(true)).resolves.toMatchObject({
-      onboarding: { currentStep: "product_tour_required", improvementProgram: "accepted" },
-      privacy: { allowMemoryImprovementUpload: true },
-      tokenUsage: { remainingTokens: 34000000 }
-    });
-    await expect(client.getTokenUsage()).resolves.toMatchObject({
-      totalTokens: 40000000,
-      remainingTokens: 39100000,
-      lastSyncedAt: "2026-06-24T10:00:00.000Z"
-    });
-    await expect(
-      client.saveModelConfig({
-        provider: "openai",
-        endpoint: "https://api.openai.com/v1",
-        model: "gpt-4.1-mini",
-        apiKey: "sk-test",
-        apiKeyMasked: "",
-        configured: true,
-        memmyMemory: {
-        summary: {
-            provider: "anthropic",
-            endpoint: "https://memory.example.com/v1",
-            model: "claude-3-5-haiku",
-            apiKey: "sk-memory",
-            apiKeyMasked: "",
-            configured: true
-          },
-          evolution: {
-            provider: "qwen",
-            endpoint: "https://skill.example.com/v1",
-            model: "qwen-plus",
-            apiKey: "sk-skill",
-            apiKeyMasked: "",
-            configured: true
-          }
-        },
-        asr: {
-          provider: "aliyun",
-          endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-          model: "qwen3-asr-flash",
-          apiKey: "sk-asr",
-          apiKeyMasked: "",
-          configured: true
-        }
-      })
-    ).resolves.toMatchObject({
-      provider: "openai",
-      endpoint: "https://api.openai.com/v1",
-      model: "gpt-4.1-mini",
-      apiKeyMasked: "sk••••test",
-      configured: true,
-      memmyMemory: {
-        summary: {
-          provider: "anthropic",
-          endpoint: "https://memory.example.com/v1",
-          model: "claude-3-5-haiku",
-          apiKeyMasked: "sk••••mory",
-          configured: true
-        },
-        evolution: {
-          provider: "qwen",
-          endpoint: "https://skill.example.com/v1",
-          model: "qwen-plus",
-          apiKeyMasked: "sk••••kill",
-          configured: true
-        }
-      },
-      asr: {
-        provider: "aliyun",
-        endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        model: "qwen3-asr-flash",
-        apiKeyMasked: "sk••••asr",
-        configured: true
-      }
-    });
-    await expect(client.getModelConfig()).resolves.toMatchObject({
-      provider: "openai",
-      endpoint: "https://api.openai.com/v1",
-      model: "gpt-4.1-mini",
-      apiKeyMasked: "sk••••test",
-      configured: true,
-      asr: {
-        provider: "aliyun",
-        endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        model: "qwen3-asr-flash",
-        apiKeyMasked: "sk••••asr",
-        configured: true
-      }
-    });
-    await expect(
-      client.testModelConfig({
-        provider: "openai",
-        endpoint: "https://api.openai.com/v1",
-        model: "gpt-5.5",
-        apiKey: "sk-test",
-        apiKeyMasked: "",
-        configured: false
-      })
-    ).resolves.toEqual({
-      ok: true,
-      message: "连接成功",
-      checkedAt: "2026-06-05T10:00:00.000Z"
-    });
-    await expect(
-      client.testModelConfig({
-        provider: "openai",
-        endpoint: "https://api.openai.com/v1",
-        model: "text-embedding-3-small",
-        apiKey: "sk-test",
-        apiKeyMasked: "",
-        configured: false
-      }, "embedding")
-    ).resolves.toEqual({
-      ok: true,
-      message: "连接成功",
-      checkedAt: "2026-06-05T10:00:00.000Z"
-    });
-    await expect(
-      client.testModelConfig({
-        provider: "qwen",
-        endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        model: "qwen3-asr-flash",
-        apiKey: "sk-asr",
-        apiKeyMasked: "",
-        configured: false
-      }, "asr")
-    ).resolves.toEqual({
-      ok: true,
-      message: "连接成功",
-      checkedAt: "2026-06-05T10:00:00.000Z"
-    });
-    expect(fetchMock).toHaveBeenCalledTimes(10);
-  });
+    expect(loaded.catalog?.configRevision).toBe("revision-1");
+    expect(loaded.catalog?.providers[0]?.endpoints).toEqual(expect.arrayContaining([
+      expect.objectContaining({ endpointId: "chat", protocol: "openai-chat-completions" }),
+      expect.objectContaining({ endpointId: "embedding", protocol: "openai-embeddings" })
+    ]));
+    expect(loaded.catalog?.modelAssignments.byok.agent).toEqual({ candidates: ["byok-agent"], default: "byok-agent" });
 
-  it("测试已有脱敏 key 的配置时发送 secret target 且不把 masked key 当作明文 secret", async () => {
-    const requestBodies: unknown[] = [];
-    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      requestBodies.push(JSON.parse(String(init?.body)));
-      return jsonResponse({
-        ok: true,
-        message: "连接成功",
-        checkedAt: "2026-06-05T10:00:00.000Z"
-      });
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    const client = createHttpConfigClient(config);
-
-    await expect(
-      (client.testModelConfig as any)({
-        provider: "openai",
-        endpoint: "https://api.openai.com/v1",
-        model: "gpt-4o",
-        apiKey: "",
-        apiKeyMasked: "sk-t••••cret",
-        configured: true
-      }, "chat", "primary")
-    ).resolves.toMatchObject({ ok: true });
-
-    expect(requestBodies).toEqual([
-      {
-        provider: "openai_compatible",
-        baseUrl: "https://api.openai.com/v1",
-        modelId: "gpt-4o",
-        capability: "chat",
-        secretTarget: "primary"
-      }
-    ]);
-  });
-
-  it("保存已有脱敏 key 的配置时不把 masked key 当作明文 secret 回传", async () => {
-    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body));
-      expect(body).toMatchObject({
-        providers: [{
-          provider: "openai",
-          apiBase: "https://api.openai.com/v1",
-          models: [{ model: "gpt-4.1-mini" }]
-        }],
-        memmyMemory: {
-          summary: {
-            mode: "fixed",
-            fixed: {
-              provider: "openai_compatible",
-              baseUrl: "https://api.openai.com/v1",
-              modelId: "gpt-4.1-mini"
-            }
-          }
-        },
-        embedding: {
-          mode: "custom",
-          custom: {
-            baseUrl: "https://embedding.example.com/v1",
-            modelId: "text-embedding-3-small"
-          }
-        },
-        asr: {
-          provider: "aliyun",
-          baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-          modelId: "qwen3-asr-flash"
-        }
-      });
-      expect(body.providers[0]).not.toHaveProperty("apiKey");
-      expect(body.embedding.custom).not.toHaveProperty("apiKey");
-      expect(body.memmyMemory.summary.fixed).not.toHaveProperty("apiKey");
-      expect(body.memmyMemory.evolution.fixed).not.toHaveProperty("apiKey");
-      expect(body.asr).not.toHaveProperty("apiKey");
-      return jsonResponse(modelConfigView({
-        revision: "revision-masked",
-        apiBase: "https://api.openai.com/v1",
-        model: "gpt-4.1-mini",
-        apiKeyMasked: "sk-t••••cret",
-        embedding: {
-          mode: "custom",
-          custom: {
-            baseUrl: "https://embedding.example.com/v1",
-            modelId: "text-embedding-3-small",
-            hasApiKey: true,
-            apiKeyMasked: "sk-e••••cret",
-            apiKey: ""
-          }
-        },
-        memmyMemory: {
-          summary: {
-            mode: "fixed",
-            fixed: roleView("openai_compatible", "https://api.openai.com/v1", "gpt-4.1-mini", "sk-t••••cret")
-          },
-          evolution: {
-            mode: "fixed",
-            fixed: roleView("openai_compatible", "https://api.openai.com/v1", "gpt-4.1-mini", "sk-t••••cret")
-          }
-        },
-        asr: {
-          provider: "aliyun",
-          baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-          modelId: "qwen3-asr-flash",
-          hasApiKey: true,
-          apiKeyMasked: "sk-a••••cret",
-          apiKey: ""
-        }
-      }));
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const client = createHttpConfigClient(config);
-
-    await expect(client.saveModelConfig({
-      provider: "openai",
-      endpoint: "https://api.openai.com/v1",
-      model: "gpt-4.1-mini",
-      apiKey: "",
-      apiKeyMasked: "sk-t••••cret",
-      configured: true,
-      embedding: {
-        mode: "custom",
-        endpoint: "https://embedding.example.com/v1",
-        model: "text-embedding-3-small",
-        apiKey: "",
-        apiKeyMasked: "sk-e••••cret",
-        configured: true
-      },
-      memmyMemory: {
-        summary: {
-          provider: "openai",
-          endpoint: "https://api.openai.com/v1",
-          model: "gpt-4.1-mini",
-          apiKey: "",
-          apiKeyMasked: "sk-t••••cret",
-          configured: true
-        },
-        evolution: {
-          provider: "openai",
-          endpoint: "https://api.openai.com/v1",
-          model: "gpt-4.1-mini",
-          apiKey: "",
-          apiKeyMasked: "sk-t••••cret",
-          configured: true
-        }
-      },
-      asr: {
-        provider: "aliyun",
-        endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        model: "qwen3-asr-flash",
-        apiKey: "",
-        apiKeyMasked: "sk-a••••cret",
-        configured: true
-      }
-    })).resolves.toMatchObject({
-      apiKeyMasked: "sk-t••••cret",
-      configured: true,
-      asr: {
-        apiKeyMasked: "sk-a••••cret",
-        configured: true
-      }
-    });
-  });
-
-  it("测试连接后自动保存：memmyMemory 角色未配置(空 modelId)时省略 memmyMemory 而不是发送非法输入", async () => {
-    // Regression for the 2026-07-13 main.log ZodError: a seeded model_id='' hydrated a memory role with model="".
-    // Autosaving the complete state then failed RoleModelConfigInputSchema.modelId min(1) without visible feedback.
-    const requestBodies: unknown[] = [];
-    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      requestBodies.push(JSON.parse(String(init?.body)));
-      return jsonResponse(savedModelConfigView());
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const client = createHttpConfigClient(config);
-
-    await expect(client.saveModelConfig({
-      provider: "openai",
-      endpoint: "https://gateway.example.com/v1",
-      model: "gpt-4.1-mini",
-      apiKey: "sk-test",
-      apiKeyMasked: "",
-      configured: true,
-      memmyMemory: {
-        summary: {
-          provider: "openai",
-          endpoint: "https://api.openai.com/v1",
-          model: "",
-          apiKey: "",
-          apiKeyMasked: "",
-          configured: false
-        },
-        evolution: {
-          provider: "openai",
-          endpoint: "https://api.openai.com/v1",
-          model: "",
-          apiKey: "",
-          apiKeyMasked: "",
-          configured: false
-        }
-      }
-    })).resolves.toMatchObject({ provider: "openai" });
-
-    expect(requestBodies).toHaveLength(1);
-    expect(requestBodies[0]).toMatchObject({
+    const saved = await client.saveModelCatalog(loaded.catalog!);
+    const body = JSON.parse(String(requests[1]?.init?.body));
+    expect(body).toMatchObject({
+      configRevision: "revision-1",
       providers: [{
         provider: "openai",
-        apiBase: "https://gateway.example.com/v1",
-        models: [{ model: "gpt-4.1-mini" }]
+        endpoints: [
+          { endpointId: "chat", protocol: "openai-chat-completions" },
+          { endpointId: "embedding", protocol: "openai-embeddings" }
+        ],
+        models: [
+          { presetId: "byok-agent", endpointId: "chat", capabilities: ["agent"] },
+          { presetId: "byok-embedding", endpointId: "embedding", capabilities: ["embedding"] }
+        ]
+      }],
+      modelAssignments: { byok: { agent: { candidates: ["byok-agent"], default: "byok-agent" } } }
+    });
+    expect(saved.catalog?.configRevision).toBe("revision-2");
+  });
+
+  it("View 回写不会泄露 masked secret，脱敏扩展字段通过省略触发后端保留", async () => {
+    let body: any;
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return jsonResponse(catalog("revision-2"));
+    }));
+    const view = catalog("revision-1");
+    await createHttpConfigClient(config).saveModelCatalog(view);
+
+    expect(JSON.stringify(body)).not.toContain("sk••••test");
+    expect(body.providers[0].apiKey).toBeUndefined();
+    expect(body.providers[0].endpoints[0].apiKey).toBeUndefined();
+    expect(body.providers[0].extraBody).toBeUndefined();
+    expect(body.providers[0].endpoints[0].extraHeaders).toBeUndefined();
+  });
+
+  it("View 回写不提交只读账号 Provider，只保留账号 assignment", async () => {
+    let body: any;
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return jsonResponse(catalog("revision-2"));
+    }));
+    const view = catalog("revision-1");
+    view.providers.push({
+      provider: "memmy_account",
+      configured: true,
+      hasApiKey: true,
+      apiKeyMasked: "••••",
+      apiKey: "",
+      ownerAccountId: "owner-a",
+      endpoints: [{
+        endpointId: "platform",
+        apiBase: "https://account.example/v1",
+        protocol: "memmy-account",
+        hasApiKey: false,
+        apiKeyMasked: "",
+        apiKey: ""
+      }],
+      accountManaged: true,
+      editable: false,
+      models: [{
+        presetId: "account-agent",
+        provider: "memmy_account",
+        endpointId: "platform",
+        protocol: "memmy-account",
+        model: "agent_chat",
+        source: "account",
+        ownerAccountId: "owner-a",
+        capabilities: ["agent"],
+        available: true
       }]
     });
-    expect(requestBodies[0]).not.toHaveProperty("memmyMemory");
+    view.modelAssignments.account.agent = { candidates: ["account-agent", "byok-agent"], default: "byok-agent" };
+
+    await createHttpConfigClient(config).saveModelCatalog(view);
+
+    expect(body.providers.map((provider: any) => provider.provider)).toEqual(["openai"]);
+    expect(body.modelAssignments.account.agent).toEqual({ candidates: ["account-agent", "byok-agent"], default: "byok-agent" });
   });
 
-  it("保存时 memmyMemory 只有单个角色未配置则该角色回退主模型", async () => {
-    const requestBodies: unknown[] = [];
-    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      requestBodies.push(JSON.parse(String(init?.body)));
-      return jsonResponse(savedModelConfigView());
-    });
-    vi.stubGlobal("fetch", fetchMock);
+  it("显式 ModelConfigInput 的扩展字段保持原样透传", async () => {
+    let body: any;
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return jsonResponse(catalog("revision-2"));
+    }));
+    const input = inputFromCatalog(catalog("revision-1"));
+    input.providers[0]!.extraBody = { preserved: true };
+    input.providers[0]!.endpoints[0]!.extraHeaders = { "x-extra": "1" };
 
-    const client = createHttpConfigClient(config);
+    await createHttpConfigClient(config).saveModelCatalog(input);
 
-    await client.saveModelConfig({
-      provider: "openai",
-      endpoint: "https://gateway.example.com/v1",
-      model: "gpt-4.1-mini",
-      apiKey: "sk-test",
-      apiKeyMasked: "",
-      configured: true,
-      memmyMemory: {
-        summary: {
-          provider: "anthropic",
-          endpoint: "https://memory.example.com/v1",
-          model: "claude-3-5-haiku",
-          apiKey: "sk-memory",
-          apiKeyMasked: "",
-          configured: true
-        },
-        evolution: {
-          provider: "openai",
-          endpoint: "",
-          model: "",
-          apiKey: "",
-          apiKeyMasked: "",
-          configured: false
-        }
-      }
-    });
-
-    expect(requestBodies[0]).toMatchObject({
-      memmyMemory: {
-        summary: {
-          mode: "fixed",
-          fixed: {
-            provider: "anthropic",
-            baseUrl: "https://memory.example.com/v1",
-            modelId: "claude-3-5-haiku"
-          }
-        },
-        evolution: {
-          mode: "follow"
-        }
-      }
-    });
+    expect(body.providers[0].extraBody).toEqual({ preserved: true });
+    expect(body.providers[0].endpoints[0].extraHeaders).toEqual({ "x-extra": "1" });
   });
 
-  it("保存时未配置的 custom embedding 与空 endpoint 的 asr 被省略", async () => {
-    const requestBodies: unknown[] = [];
-    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      requestBodies.push(JSON.parse(String(init?.body)));
-      return jsonResponse(savedModelConfigView());
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const client = createHttpConfigClient(config);
-
-    await client.saveModelConfig({
-      provider: "openai",
-      endpoint: "https://gateway.example.com/v1",
-      model: "gpt-4.1-mini",
-      apiKey: "sk-test",
-      apiKeyMasked: "",
-      configured: true,
-      embedding: {
-        mode: "custom",
-        endpoint: "",
-        model: "",
-        apiKey: "",
-        apiKeyMasked: "",
-        configured: false
-      },
-      asr: {
-        provider: "aliyun",
-        endpoint: "",
-        model: "qwen3-asr-flash",
-        apiKey: "",
-        apiKeyMasked: "",
-        configured: false
+  it("新 preset 首次 PUT 不带客户端 ID，第二次 PUT 使用响应 UUID 完成 assignment", async () => {
+    const bodies: any[] = [];
+    const serverPresetId = "2f9c9d4d-f96a-4e45-bf26-536d762ff2d8";
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      bodies.push(body);
+      const response = catalog(bodies.length === 1 ? "revision-2" : "revision-3");
+      response.providers[0]!.models.push({
+        presetId: serverPresetId,
+        provider: "openai",
+        endpointId: "chat",
+        protocol: "openai-chat-completions",
+        model: "gpt-new",
+        source: "byok",
+        capabilities: ["agent"],
+        available: true
+      });
+      if (bodies.length > 1) {
+        response.modelAssignments.byok.agent = {
+          candidates: ["byok-agent", serverPresetId],
+          default: serverPresetId
+        };
       }
+      return jsonResponse(response);
+    }));
+    const input = inputFromCatalog(catalog("revision-1"));
+    const clientPresetId = `${CLIENT_PRESET_ID_PREFIX}test`;
+    input.providers[0]!.models.push({
+      presetId: clientPresetId,
+      endpointId: "chat",
+      model: "gpt-new",
+      source: "byok",
+      capabilities: ["agent"]
     });
+    input.modelAssignments.byok.agent = {
+      candidates: ["byok-agent", clientPresetId],
+      default: clientPresetId
+    };
 
-    expect(requestBodies[0]).not.toHaveProperty("embedding");
-    expect(requestBodies[0]).not.toHaveProperty("asr");
+    const saved = await createHttpConfigClient(config).saveModelCatalog(input);
+
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0].providers[0].models.find((model: any) => model.model === "gpt-new").presetId).toBeUndefined();
+    expect(JSON.stringify(bodies[0].modelAssignments)).not.toContain(CLIENT_PRESET_ID_PREFIX);
+    expect(bodies[1].providers[0].models.find((model: any) => model.model === "gpt-new").presetId).toBe(serverPresetId);
+    expect(bodies[1].modelAssignments.byok.agent).toEqual({
+      candidates: ["byok-agent", serverPresetId],
+      default: serverPresetId
+    });
+    expect(saved.catalog?.modelAssignments.byok.agent.default).toBe(serverPresetId);
+  });
+
+  it("首次成功 GET 后只清理旧 workspace cache", async () => {
+    const removeItem = vi.fn();
+    vi.stubGlobal("window", { localStorage: { removeItem } });
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(catalog("revision-1"))));
+
+    await createHttpConfigClient(config).getModelConfig();
+
+    expect(removeItem).toHaveBeenCalledWith("memmy-model-workspace-v1");
+  });
+
+  it("连接测试仍按 capability 和 secret target 调用真实测试路由", async () => {
+    let body: any;
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return jsonResponse({ ok: true, message: "ok", checkedAt: "2026-08-11T00:00:00.000Z" });
+    }));
+
+    const result = await createHttpConfigClient(config).testModelConfig({
+      provider: "openai",
+      endpointId: "chat",
+      protocol: "openai-chat-completions",
+      endpoint: "https://api.openai.com/v1",
+      model: "gpt-4o",
+      apiKey: "sk-live",
+      apiKeyMasked: "",
+      configured: true
+    }, "chat", "primary");
+
+    expect(body).toEqual({
+      provider: "openai_compatible",
+      endpointId: "chat",
+      protocol: "openai-chat-completions",
+      apiBase: "https://api.openai.com/v1",
+      modelId: "gpt-4o",
+      apiKey: "sk-live",
+      capability: "chat",
+      secretTarget: "primary"
+    });
+    expect(result.ok).toBe(true);
   });
 });
 
-function savedModelConfigView() {
-  return modelConfigView({
-    revision: "saved-revision",
-    apiBase: "https://gateway.example.com/v1",
-    model: "gpt-4.1-mini",
-    apiKeyMasked: "sk••••test",
-    memmyMemory: {
-      summary: {
-        mode: "fixed",
-        fixed: roleView("openai_compatible", "https://gateway.example.com/v1", "gpt-4.1-mini", "sk••••test")
-      },
-      evolution: {
-        mode: "fixed",
-        fixed: roleView("openai_compatible", "https://gateway.example.com/v1", "gpt-4.1-mini", "sk••••test")
-      }
-    }
-  });
+function catalog(configRevision: string): ModelConfigView {
+  const agent = {
+    presetId: "byok-agent",
+    provider: "openai" as const,
+    endpointId: "chat",
+    protocol: "openai-chat-completions" as const,
+    model: "gpt-4o",
+    source: "byok" as const,
+    capabilities: ["agent" as const],
+    available: true
+  };
+  const embedding = {
+    presetId: "byok-embedding",
+    provider: "openai" as const,
+    endpointId: "embedding",
+    protocol: "openai-embeddings" as const,
+    model: "text-embedding-3-small",
+    source: "byok" as const,
+    capabilities: ["embedding" as const],
+    available: true
+  };
+  const byok = {
+    agent: { candidates: ["byok-agent"], default: "byok-agent" },
+    memorySummary: null,
+    memoryEvolution: null,
+    embedding: "byok-embedding",
+    asr: null,
+    imageGeneration: null
+  };
+  return {
+    configRevision,
+    providers: [{
+      provider: "openai",
+      configured: true,
+      hasApiKey: true,
+      apiKeyMasked: "sk••••test",
+      apiKey: "",
+      endpoints: [
+        { endpointId: "chat", apiBase: "https://api.openai.com/v1", protocol: "openai-chat-completions", hasApiKey: true, apiKeyMasked: "sk••••test", apiKey: "" },
+        { endpointId: "embedding", apiBase: "https://api.openai.com/v1", protocol: "openai-embeddings", hasApiKey: true, apiKeyMasked: "sk••••test", apiKey: "" }
+      ],
+      accountManaged: false,
+      editable: true,
+      models: [agent, embedding]
+    }],
+    modelAssignments: { byok, account: { ...structuredClone(byok), ownerAccountId: "owner-a" } },
+    effectiveCandidates: { byok: [agent, embedding], account: [agent, embedding] },
+    configured: true,
+    updatedAt: "2026-08-11T00:00:00.000Z"
+  };
+}
+
+function inputFromCatalog(view: ModelConfigView): ModelConfigInput {
+  return {
+    configRevision: view.configRevision,
+    providers: view.providers.map((provider) => ({
+      provider: provider.provider,
+      endpoints: provider.endpoints.map((endpoint) => ({
+        endpointId: endpoint.endpointId,
+        apiBase: endpoint.apiBase,
+        protocol: endpoint.protocol
+      })),
+      models: provider.models.map((model) => ({
+        presetId: model.presetId,
+        endpointId: model.endpointId,
+        model: model.model,
+        source: model.source,
+        capabilities: [...model.capabilities]
+      }))
+    })),
+    modelAssignments: structuredClone(view.modelAssignments)
+  };
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: {
-      "content-type": "application/json"
-    }
+    headers: { "content-type": "application/json" }
   });
-}
-
-function localEmbeddingView() {
-  return {
-    mode: "local",
-    custom: null
-  };
-}
-
-function roleView(
-  provider: string,
-  baseUrl: string,
-  modelId: string,
-  apiKeyMasked: string
-) {
-  return {
-    provider,
-    baseUrl,
-    modelId,
-    hasApiKey: true,
-    apiKeyMasked,
-    apiKey: ""
-  };
-}
-
-function modelConfigView(input: {
-  revision: string;
-  apiBase: string;
-  model: string;
-  apiKeyMasked: string;
-  embedding?: unknown;
-  memmyMemory: unknown;
-  asr?: unknown;
-}) {
-  const presetName = "desktop-openai-gpt-4-1-mini-abcd1234";
-  return {
-    configRevision: input.revision,
-    providers: [{
-      provider: "openai",
-      apiBase: input.apiBase,
-      apiType: "auto",
-      configured: true,
-      hasApiKey: true,
-      apiKeyMasked: input.apiKeyMasked,
-      apiKey: "",
-      accountManaged: false,
-      editable: true,
-      models: [{
-        presetName,
-        model: input.model,
-        isDefault: true,
-        available: true
-      }]
-    }],
-    defaultModelPreset: presetName,
-    configured: true,
-    embedding: input.embedding ?? localEmbeddingView(),
-    memmyMemory: input.memmyMemory,
-    asr: input.asr ?? null,
-    imageGen: null,
-    updatedAt: "2026-07-13T00:00:00.000Z"
-  };
 }

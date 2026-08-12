@@ -721,12 +721,6 @@ export function AgentRuntimeBridge(props: {
   const registerConnectionHandlers = useCallback((nextConnection: MemmyAgentWebSocketConnection): void => {
     connectionUnsubscribersRef.current = [
       nextConnection.onSessionUpdate((chatId, scope, generation) => dispatch(agentActions.wsEventReceived({ event: "session_updated", chat_id: chatId, connection_generation: generation, ...(scope ? { scope } : {}) }))),
-      nextConnection.onRuntimeModelUpdate((modelName, modelPreset, generation) => dispatch(agentActions.wsEventReceived({
-        event: "runtime_model_updated",
-        connection_generation: generation,
-        ...(modelName ? { model_name: modelName } : {}),
-        ...(modelPreset ? { model_preset: modelPreset } : {})
-      }))),
       nextConnection.onRunLifecycle((chatId, event) => {
         if (chatId === subscribedChatRef.current) {
           return;

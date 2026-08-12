@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { Window } from "happy-dom";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { MemmyAgentRequestError } from "../../api/memmy-agent-client.js";
+import { MemmyAgentMessageRejectedError, MemmyAgentRequestError } from "../../api/memmy-agent-client.js";
 import { AgentRuntimeBridge } from "../../app/agent-runtime-bridge.js";
 import { AppProviders } from "../../app/providers.js";
 import { FOCUSED_AGENT_CHAT_STORAGE_KEY } from "../../app/routes.js";
@@ -129,7 +129,7 @@ describe("HomePage", () => {
     expect(styles).toContain(".agent-composer-shell textarea.agent-composer-input--command-selected");
   });
 
-  it("在空白和已有会话 composer 都展示按 chatScopeKey 隔离的模型选择器", () => {
+  it("在空白和已有会话 composer 都展示由 Agent state 隔离的 catalog preset 选择器", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
     const selectorSource = readFileSync(agentModelSelectorSourcePath, "utf8");
     const styles = readFileSync(stylesSourcePath, "utf8");
@@ -138,7 +138,12 @@ describe("HomePage", () => {
     expect(source).toContain("scopeKey={modelSelectionScopeKey}");
     expect(source).toContain("const modelWorkspaceMode = state.bootstrap?.app.userMode");
     expect(source).toContain("disabled={isCurrentAgentRunning || isCreatingChat || messageSendInFlight}");
-    expect(source).toContain("copyScopedModelSelection(modelWorkspace, modelSelectionScopeKey, chatId)");
+    expect(source).toContain("state.agent.pendingPresetByScope[modelSelectionScopeKey]");
+    expect(source).toContain("state.agent.committedModelSelectionByScope[modelSelectionScopeKey]?.presetId");
+    expect(source).toContain("modelPreset: resolvedConversationModel.candidateId ?? undefined");
+    expect(source).not.toContain("copyScopedModelSelection");
+    expect(selectorSource).toContain("agentActions.pendingModelPresetUpdated");
+    expect(selectorSource).not.toContain("localStorage");
     expect(source).not.toContain('sendMessage({ chatId: state.agent.currentChatId, content: "/model');
     expect(styles).toContain(".agent-model-selector .agent-model-selector__menu");
     expect(styles).toContain("top: calc(100% + 6px)");
@@ -619,7 +624,16 @@ describe("HomePage", () => {
     expect(source).toContain('const isAccountMode = state.bootstrap?.app.userMode === "account";');
     expect(source).toContain("const sanitizePlatformApiErrors = isAccountMode;");
     expect(threadBlock).toContain("sanitizePlatformApiErrors={sanitizePlatformApiErrors}");
-    expect(threadBlock).toContain("accountMode={isAccountMode}");
+    expect(threadBlock).not.toContain("accountMode=");
+  });
+
+  it("prechecks platform quota only for the resolved account-sourced candidate", () => {
+    const source = readFileSync(homePageSourcePath, "utf8");
+    const sendBlock = source.slice(source.indexOf("async function sendMessage()"), source.indexOf("async function removeQueuedMessage"));
+
+    expect(sendBlock).toContain('resolvedConversationModel.candidate?.source === "platform"');
+    expect(sendBlock).toContain("isAccountTokenQuotaExhausted(state.bootstrap)");
+    expect(sendBlock).toContain('message: "agent.error.quotaExceeded"');
   });
 
   it("keeps background run lifecycle events intact for reducer completion semantics", () => {
@@ -1025,8 +1039,43 @@ describe("HomePage", () => {
     expect(agentErrorText("home.media.error.sendUnsupported")).toBe("当前不支持此文件格式。请上传图片、PDF、Office 文档或文本文件。");
     expect(agentErrorText("home.media.error.sendTooManyAttachments")).toBe("最多 4 个附件。");
     expect(agentErrorText("home.media.error.sendFileSize")).toBe("单个文件不能超过 10 MB。");
+    expect(agentErrorText("message_request_rejected:model_selection_unavailable")).toBe("当前模型或连接已失效，无法继续调用，需要切换模型。");
     expect(agentErrorText("plain error")).toBe("操作未完成，请重试");
     expect(agentErrorText(null)).toBeNull();
+  });
+
+  it("keeps the model unavailable reason when a tombstone blocks new-chat creation", async () => {
+    const dispatch = vi.fn();
+
+    await expect(submitAgentComposerMessage({
+      chatId: null,
+      modelPreset: "deleted-preset",
+      connection: {
+        getReadyGeneration: () => 1,
+        newChat: vi.fn(async () => {
+          throw new MemmyAgentMessageRejectedError("new_chat_rejected", "model_selection_unavailable");
+        }),
+        submitMessage: vi.fn()
+      },
+      content: "继续",
+      pendingAttachments: [],
+      uploadAgentMedia: vi.fn(async () => []),
+      dispatch,
+      track: vi.fn(),
+      clearComposer: vi.fn(),
+      scopeKey: "new-task"
+    })).resolves.toBe(false);
+
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({
+      type: "agent/operationFailed",
+      error: expect.objectContaining({
+        message: "new_chat_rejected:model_selection_unavailable",
+        scopeKey: "new-task"
+      })
+    }));
+    expect(agentErrorText("new_chat_rejected:model_selection_unavailable")).toBe(
+      "当前模型或连接已失效，无法继续调用，需要切换模型。"
+    );
   });
 
   it("blank composer first send creates chat then sends message", async () => {

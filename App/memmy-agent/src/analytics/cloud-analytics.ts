@@ -164,20 +164,47 @@ export function resolveLoggedInAnalyticsUserId(
   return normalizeAnalyticsUserId(typeof app?.userId === "string" ? app.userId : null);
 }
 
-/** Maps memmyMemory.activeProfile (account/byok) to analytics user_mode. */
+/** Derives analytics mode from the current owner-bound assignment namespaces. */
 export function resolveAnalyticsUserModeFromConfig(
   config:
-    | { memmyMemory?: { activeProfile?: unknown } }
+    | {
+        app?: { cloudUuid?: unknown; userId?: unknown };
+        modelAssignments?: {
+          account?: { ownerAccountId?: unknown };
+          byok?: {
+            agent?: { candidates?: unknown };
+            memorySummary?: unknown;
+            memoryEvolution?: unknown;
+            embedding?: unknown;
+            asr?: unknown;
+            imageGeneration?: unknown;
+          };
+        };
+      }
     | Record<string, any>
     | null
     | undefined,
 ): AnalyticsUserMode | null {
-  const memmyMemory = (
-    config as { memmyMemory?: { activeProfile?: unknown } } | null | undefined
-  )?.memmyMemory;
-  const activeProfile =
-    typeof memmyMemory?.activeProfile === "string" ? memmyMemory.activeProfile : null;
-  return resolveAnalyticsUserMode(activeProfile);
+  if (!config) return null;
+  const app = (config as Record<string, any>).app;
+  const assignments = (config as Record<string, any>).modelAssignments;
+  const owner = typeof assignments?.account?.ownerAccountId === "string"
+    ? assignments.account.ownerAccountId.trim()
+    : "";
+  const cloudUuid = typeof app?.cloudUuid === "string" ? app.cloudUuid.trim() : "";
+  const userId = typeof app?.userId === "string" ? app.userId.trim() : "";
+  if (cloudUuid && owner && (!userId || owner === userId)) return "account";
+
+  const byok = assignments?.byok;
+  const candidates = Array.isArray(byok?.agent?.candidates) ? byok.agent.candidates : [];
+  if (candidates.length || [
+    byok?.memorySummary,
+    byok?.memoryEvolution,
+    byok?.embedding,
+    byok?.asr,
+    byok?.imageGeneration,
+  ].some((value) => typeof value === "string" && value.trim())) return "byok";
+  return null;
 }
 
 /**
@@ -187,7 +214,7 @@ export function resolveAnalyticsUserModeFromConfig(
  * when the YAML projection changes.
  */
 export function resolveLiveAnalyticsUserMode(
-  load: () => { memmyMemory?: { activeProfile?: unknown } } | null | undefined = loadConfig,
+  load: () => Record<string, any> | null | undefined = loadConfig,
 ): AnalyticsUserMode | null {
   try {
     return resolveAnalyticsUserModeFromConfig(load());

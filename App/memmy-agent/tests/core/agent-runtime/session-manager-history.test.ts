@@ -53,6 +53,43 @@ describe("SessionManager history and previews", () => {
     expect(rows[0]).toMatchObject({ key: "websocket:chat-title", title: "自动生成标题" });
   });
 
+  it("persists and bootstraps the complete committed model selection", () => {
+    const root = tempRoot();
+    const manager = new SessionManager(root);
+    const session = manager.getOrCreate("websocket:chat-model");
+    session.metadata.modelPreset = "work-gpt";
+    session.metadata.modelSelection = {
+      presetId: "work-gpt",
+      provider: "openai",
+      endpointId: "responses",
+      protocol: "openai-responses",
+      model: "gpt-5",
+      source: "byok",
+      ownerAccountId: null,
+      capability: "agent",
+      capabilities: ["agent"],
+    };
+    manager.save(session);
+
+    const reopened = new SessionManager(root);
+    expect(reopened.loadSession("websocket:chat-model")?.metadata.modelSelection).toEqual(
+      session.metadata.modelSelection,
+    );
+    expect(reopened.listSessions()[0]).toMatchObject({
+      model_preset: "work-gpt",
+      model_selection: {
+        preset_id: "work-gpt",
+        provider: "openai",
+        endpoint_id: "responses",
+        protocol: "openai-responses",
+        model: "gpt-5",
+        source: "byok",
+        owner_account_id: null,
+        capabilities: ["agent"],
+      },
+    });
+  });
+
   it("renames a session title and marks it as user edited", () => {
     const manager = new SessionManager(tempRoot());
     const session = manager.getOrCreate("websocket:chat-rename");

@@ -114,7 +114,15 @@ describe("webui transcript replay", () => {
       event: "message",
       chat_id: "t-quota",
       text: "当前模型额度已用完",
-      model_error: { category: "quota_exhausted", detail: "Error: raw provider detail 40309" },
+      model_error: {
+        category: "quota_exhausted",
+        detail: "Error: raw provider detail 40309",
+        presetId: "byok-agent",
+        source: "byok",
+        provider: "openai",
+        model: "gpt-4o",
+        capability: "agent"
+      },
     });
 
     const response = buildWebuiThreadResponse(key, { augmentUserMedia: null });
@@ -124,7 +132,15 @@ describe("webui transcript replay", () => {
     expect(response?.messages[0]).toMatchObject({
       role: "assistant",
       content: "当前模型额度已用完",
-      model_error: { category: "quota_exhausted", detail: "Error: raw provider detail 40309" },
+      model_error: {
+        category: "quota_exhausted",
+        detail: "Error: raw provider detail 40309",
+        presetId: "byok-agent",
+        source: "byok",
+        provider: "openai",
+        model: "gpt-4o",
+        capability: "agent"
+      },
     });
   });
 

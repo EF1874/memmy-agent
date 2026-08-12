@@ -1,9 +1,5 @@
 import type { AppStateStore } from "../infrastructure/app-state-store/index.js";
-import {
-  mapModelProtocol,
-  resolveMemmyAccountApiBase,
-  type MemmyConfigWriter
-} from "../infrastructure/memmy-config/index.js";
+import { type MemmyConfigWriter } from "../infrastructure/memmy-config/index.js";
 import type { AgentAdapterRegistry } from "../adapters/outbound/agent-adapter/index.js";
 import {
   createBuiltinOnboardingInsightSamplers,
@@ -30,6 +26,7 @@ import {
   resolveLoggedInAnalyticsUserId,
 } from "../analytics/agent-source-analytics.js";
 import { createMemoryDesktopAddAnalytics } from "../analytics/memory-add-analytics.js";
+import { createToolConnectionAnalytics } from "../analytics/tool-connection-analytics.js";
 import { createAgentSourceService, type AgentSourceService } from "./agent-source-service.js";
 import { createAgentSourceAutoInjectService, type AgentSourceAutoInjectService } from "./agent-source-auto-inject-service.js";
 import { createBuiltinAgentSourceRegistry } from "./builtin-agent-source-registry.js";
@@ -178,6 +175,10 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       getUserMode: resolveAnalyticsUserMode,
     }),
   });
+  const toolConnectionAnalytics = createToolConnectionAnalytics({
+    getUserId: resolveAnalyticsUserId,
+    getUserMode: resolveAnalyticsUserMode,
+  });
 
   return {
     memoryClient: options.memoryClient,
@@ -185,7 +186,6 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     bootstrap: createBootstrapService(options),
     appConfig: createAppConfigService({
       bootstrapRepository: options.appStateStore.repositories.bootstrap,
-      modelConfigRepository: options.appStateStore.repositories.modelConfig,
       cloudClient: options.cloudClient,
       accountSessionRepository: options.appStateStore.repositories.accountSession,
       memmyConfigWriter: options.memmyConfigWriter,
@@ -199,11 +199,13 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     }),
     integrations: createIntegrationService({
       cloudClient: options.cloudClient,
-      composioMachineTokenRepository: options.appStateStore.repositories.composioMachineToken
+      composioMachineTokenRepository: options.appStateStore.repositories.composioMachineToken,
+      toolConnectionAnalytics,
     }),
     channels: createChannelService({
       memmyConfigWriter,
-      memmyAgentAdminClient
+      memmyAgentAdminClient,
+      toolConnectionAnalytics,
     }),
     localData: createLocalDataService({
       localDataStore: options.appStateStore.localDataStore
@@ -218,7 +220,7 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       samplers: createBuiltinOnboardingInsightSamplers(),
       conversationWindowReader: createSourceRegistryOnboardingConversationWindowReader(sourceRegistry),
       memoryWriter: createOnboardingFirstReportMemoryWriter(options.memoryClient),
-      agentModelResolver: createAppStateAgentTaskModelResolver(options.appStateStore)
+      agentModelResolver: createCatalogAgentTaskModelResolver(options.appStateStore, memmyConfigWriter)
     }),
     progressBus,
     session: createSessionService({
@@ -244,7 +246,7 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     asr: createAsrService({
       bootstrapRepository: options.appStateStore.repositories.bootstrap,
       accountSessionRepository: options.appStateStore.repositories.accountSession,
-      modelConfigRepository: options.appStateStore.repositories.modelConfig,
+      memmyConfigWriter,
       cloudClient: options.cloudClient
     }),
     tokenQuota: createTokenQuotaService({
@@ -257,47 +259,40 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
 export { createBootstrapService };
 export type { BootstrapScenario, BootstrapService };
 
-const MEMMY_ACCOUNT_PROVIDER = "memmy_account";
-const MEMMY_ACCOUNT_MODEL = "agent_chat";
-
-function createAppStateAgentTaskModelResolver(appStateStore: AppStateStore): OnboardingInsightAgentTaskModelResolver {
-  const { bootstrap, accountSession, modelConfig } = appStateStore.repositories;
+function createCatalogAgentTaskModelResolver(
+  appStateStore: AppStateStore,
+  memmyConfigWriter: MemmyConfigWriter
+): OnboardingInsightAgentTaskModelResolver {
+  const { bootstrap, accountSession } = appStateStore.repositories;
 
   return {
-    getAgentTaskModel() {
+    async getAgentTaskModel() {
       const userMode = bootstrap.getAppSettings().userMode;
-      if (userMode === "account") {
-        const cloudUuid = accountSession.getCloudUuid();
-        if (!cloudUuid) {
-          return null;
-        }
-        return {
-          providerName: MEMMY_ACCOUNT_PROVIDER,
-          model: MEMMY_ACCOUNT_MODEL,
-          apiBase: resolveMemmyAccountApiBase(),
-          apiKey: cloudUuid
-        };
-      }
-
-      if (userMode !== "byok") {
-        return null;
-      }
-
-      const config = modelConfig.get();
-      const apiKey = modelConfig.getTestApiKey?.("primary");
-      if (!apiKey) {
-        return null;
-      }
-      const projection = mapModelProtocol(config.provider);
+      if (userMode !== "account" && userMode !== "byok") return null;
+      const account = accountSession.get();
+      const resolved = await memmyConfigWriter.resolveAssignedModel?.({
+        mode: userMode,
+        activeAccountId: account.authenticated ? account.profile.userId : null,
+        capability: "agent"
+      });
+      if (!resolved?.ok) return null;
       return {
-        providerName: projection.agentProvider,
-        model: config.modelId,
-        apiBase: config.baseUrl,
-        apiKey,
-        apiType: projection.agentApiType
+        providerName: resolved.context.provider,
+        model: resolved.context.model,
+        apiBase: resolved.provider.apiBase,
+        apiKey: resolved.provider.apiKey ?? "",
+        apiType: agentApiType(resolved.context.protocol),
+        extraHeaders: resolved.provider.extraHeaders,
+        extraBody: resolved.provider.extraBody
       };
     }
   };
+}
+
+function agentApiType(protocol: string): "auto" | "chatCompletions" | "responses" {
+  if (protocol === "openai-responses") return "responses";
+  if (protocol === "openai-chat-completions" || protocol === "memmy-account") return "chatCompletions";
+  return "auto";
 }
 
 function createUnavailableMemmyConfigWriter(): MemmyConfigWriter {

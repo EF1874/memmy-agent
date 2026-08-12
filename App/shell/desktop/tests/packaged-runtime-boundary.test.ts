@@ -16,6 +16,7 @@ const startupMigrationsPath = fileURLToPath(
 const devStartPath = fileURLToPath(new URL("../../../../scripts/dev-start.sh", import.meta.url));
 const devMemorySupervisorPath = fileURLToPath(new URL("../../../../scripts/internal/shared/dev-memory-supervisor.mjs", import.meta.url));
 const clearAllPath = fileURLToPath(new URL("../../../../scripts/clear-all.sh", import.meta.url));
+const clearAllWindowsPath = fileURLToPath(new URL("../../../../scripts/clear-all-windows.ps1", import.meta.url));
 const packageMacPath = fileURLToPath(new URL("../../../../scripts/package-mac.sh", import.meta.url));
 const packageMacDmgPath = fileURLToPath(new URL("../../../../scripts/internal/mac/build-dmg.sh", import.meta.url));
 const prepareEmbeddingModelPath = fileURLToPath(new URL("../../../../scripts/internal/shared/prepare-embedding-model.mjs", import.meta.url));
@@ -67,9 +68,8 @@ describe("desktop packaged runtime boundaries", () => {
     const agentCommands = readFileSync(agentCommandsPath, "utf8");
     const startupMigrations = readFileSync(startupMigrationsPath, "utf8");
 
-    expect(startupMigrations).toContain(
-      'import { runMigrations } from "@memmy/migrations";'
-    );
+    expect(startupMigrations).toContain('runMigrations');
+    expect(startupMigrations).toContain('from "@memmy/migrations";');
     expect(runtimeServices).not.toContain(
       'import { runMigrations } from "@memmy/migrations";'
     );
@@ -179,7 +179,7 @@ describe("desktop packaged runtime boundaries", () => {
     });
     for (const scriptName of ["prebuild", "pretypecheck", "pretest"]) {
       expect(agentPackage.scripts?.[scriptName]).toBe(
-        "npm run version:sync && npm --prefix ../../Migrations run build",
+        "npm run version:sync && npm --prefix ../../Migrations run build && npm --prefix ../backend/local-api-contracts run build",
       );
     }
   });
@@ -357,6 +357,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).toContain('return join(dirname(process.execPath), "data");');
     expect(source).toContain("process.env.MEMMY_MEMORY_DB = memoryDatabasePath;");
     expect(source).toMatch(/runtimeServices = app\.isPackaged\s*\?\s*await startPackagedRuntimeServices\(/);
+    expect(source).toContain('appDatabaseFile: join(app.getPath("userData"), "app.sqlite")');
     expect(source).toContain("memmyConfigPath: process.env.MEMMY_CONFIG");
     expect(source).not.toContain("startDesktopRuntimeServices");
   });
@@ -919,7 +920,9 @@ describe("desktop packaged runtime boundaries", () => {
 
     expect(source).toContain("startPackagedRuntimeServices");
     expect(source).toContain('env.MEMMY_CONFIG ?? join(memmyHome, "config.yaml")');
-    expect(source).toContain('env.MEMMY_AGENT_WORKSPACE ?? configuredWorkspace ?? defaultWorkspace');
+    expect(source).toContain("const explicitWorkspace = stringValue(env.MEMMY_AGENT_WORKSPACE);");
+    expect(source).toContain("if (!explicitWorkspace) return { configPath };");
+    expect(source).not.toContain("configuredWorkspace");
     expect(source).toContain("syncBundledAgentSkills");
     expect(source).toContain('join(dirname(options.agentEntry), "skills")');
     expect(source).toContain('join(options.agentWorkspace, "skills")');
@@ -955,7 +958,7 @@ describe("desktop packaged runtime boundaries", () => {
     const source = readFileSync(devStartPath, "utf8");
     const supervisorSource = readFileSync(devMemorySupervisorPath, "utf8");
     const runMainIndex = source.indexOf("run_main() {");
-    const migrationIndex = source.indexOf('"$MEMMY_RUNTIME_NODE_PATH" dist/main.js migrate', runMainIndex);
+    const migrationIndex = source.indexOf("local migration_args=(dist/main.js migrate", runMainIndex);
     const memoryInitIndex = source.indexOf("build_and_install_memory_cli", runMainIndex);
     const onboardIndex = source.indexOf("node dist/main.js onboard", runMainIndex);
     const concurrentlyIndex = source.indexOf('exec "$CONCURRENTLY_BIN"', runMainIndex);
@@ -965,13 +968,19 @@ describe("desktop packaged runtime boundaries", () => {
 
     expect(source).toContain('MEMORY_CLI_ENTRY="$ROOT_DIR/Memory/dist/src/cli/index.js"');
     expect(source).toContain('MEMMY_CONFIG_PATH="${MEMMY_CONFIG:-$HOME/.memmy/config.yaml}"');
+    expect(source).toContain('MEMMY_WORKSPACE_IS_EXPLICIT=0');
     expect(source).toContain('MEMMY_WORKSPACE_DIR="${MEMMY_WORKSPACE:-$HOME/.memmy/workspace}"');
+    expect(source).toContain('MEMMY_APP_DATABASE_FILE="${MEMMY_APP_DATABASE:-}"');
     expect(source).toContain('MEMMY_BIN_DIR="$HOME/.local/bin"');
     expect(source).toContain('export MEMMY_CONFIG="$MEMMY_CONFIG_PATH"');
-    expect(source).toContain('export MEMMY_AGENT_WORKSPACE="$MEMMY_WORKSPACE_DIR"');
+    expect(source.lastIndexOf('export MEMMY_AGENT_WORKSPACE="$MEMMY_WORKSPACE_DIR"')).toBeGreaterThan(migrationIndex);
     expect(source).toContain("unset MEMMY_MIGRATIONS_READY_CONFIG MEMMY_MIGRATIONS_READY_WORKSPACE");
     expect(source).toContain('export MEMMY_MIGRATIONS_READY_CONFIG="$MEMMY_CONFIG_PATH"');
     expect(source).toContain('export MEMMY_MIGRATIONS_READY_WORKSPACE="$MEMMY_WORKSPACE_DIR"');
+    expect(source).toContain('export MEMMY_APP_DATABASE="$MEMMY_APP_DATABASE_FILE"');
+    expect(source).toContain('export MEMMY_MIGRATIONS_READY_APP_DATABASE="$MEMMY_APP_DATABASE_FILE"');
+    expect(source).toContain('--app-database "$MEMMY_APP_DATABASE_FILE"');
+    expect(source).toContain('if [[ "$MEMMY_WORKSPACE_IS_EXPLICIT" == "1" ]]');
     expect(source).toContain('runtime_node_dir="$(cd "$(dirname "$MEMMY_RUNTIME_NODE_PATH")" && pwd)"');
     expect(source).toContain('export PATH="$runtime_node_dir:$PATH"');
     expect(source).not.toContain('MEMMY_BIN_DIR="$HOME/.memmy/bin"');
@@ -995,6 +1004,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(onboardIndex).toBeGreaterThan(migrationIndex);
     expect(concurrentlyIndex).toBeGreaterThan(migrationIndex);
     expect(nativeRebuildIndex).toBeGreaterThanOrEqual(0);
+    expect(nativeRebuildIndex).toBeLessThan(migrationIndex);
     expect(electronRuntimeCheckIndex).toBeGreaterThan(nativeRebuildIndex);
     expect(desktopLaunchIndex).toBeGreaterThan(electronRuntimeCheckIndex);
   });
@@ -1009,6 +1019,29 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).toContain('"/usr/local/bin/memmy-memory"');
     expect(source).toContain("# Memmy CLI PATH");
     expect(source).toContain("Fully quit and reopen Codex");
+  });
+
+  it("keeps Windows full uninstall scoped to verified Memmy assets", () => {
+    const source = readFileSync(clearAllWindowsPath, "utf8");
+
+    expect(source).toContain("#Requires -Version 5.1");
+    expect(source).toContain('[CmdletBinding(SupportsShouldProcess = $true');
+    expect(source).toContain('$script:NsisGuid = "886615f7-a04c-57ec-a2dd-9161dbe1a7c4"');
+    expect(source).toContain('Join-Path $env:LOCALAPPDATA "Programs\\Memmy"');
+    expect(source).toContain('Join-Path $env:LOCALAPPDATA "Memmy\\launcher"');
+    expect(source).toContain('Join-Path $env:USERPROFILE ".memmy"');
+    expect(source).toContain('Join-Path $env:APPDATA "Memmy"');
+    expect(source).toContain("function Test-IsVerifiedMemmyInstallRoot");
+    expect(source).toContain('Join-Path $normalized "resources\\app.asar"');
+    expect(source).toContain("function Test-WouldContainProtectedPath");
+    expect(source).toContain("function Test-IntersectsProtectedExternalPath");
+    expect(source).toContain("function Remove-DirectoryWithoutFollowingLinks");
+    expect(source).toContain("external-config-database-retained");
+    expect(source).toContain("retained-external-workspace");
+    expect(source).toContain("InstallLocation is shared-looking or contains a protected path");
+    expect(source).toContain("-IncludeMachineScope requires an already elevated PowerShell session");
+    expect(source).toContain("This script can only run on Windows.");
+    expect(source).toContain("Type CLEAR MEMMY to continue");
   });
 
   it("keeps packaged CLI launchers on Memmy.app and ~/.memmy/config.yaml", () => {

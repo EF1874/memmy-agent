@@ -38,6 +38,11 @@ const GENERATED_REPORT_OPEN = "<memmy_report>";
 const GENERATED_REPORT_CLOSE = "</memmy_report>";
 const GENERATED_TASK_CONTEXT_OPEN = "<memmy_task_context>";
 const GENERATED_TASK_CONTEXT_CLOSE = "</memmy_task_context>";
+const GENERATED_REPORT_ALIAS_OPEN = "<report>";
+const GENERATED_REPORT_ALIAS_CLOSE = "</report>";
+const GENERATED_TASK_CONTEXT_ALIAS_OPEN = "<taskContext>";
+const GENERATED_TASK_CONTEXT_ALIAS_CLOSE = "</taskContext>";
+const GENERATED_REPORT_OPEN_MARKERS = [GENERATED_REPORT_OPEN, GENERATED_REPORT_ALIAS_OPEN] as const;
 const GENERATED_NAKED_JSON_OPEN = "\n{";
 const GENERATED_JSON_FENCE_OPEN = "\n```json";
 
@@ -228,6 +233,8 @@ export interface OpenAiCompatibleOnboardingInsightGeneratorOptions {
   model: string;
   providerName?: string;
   apiType?: "auto" | "chatCompletions" | "responses";
+  extraHeaders?: Readonly<Record<string, string>>;
+  extraBody?: Readonly<Record<string, unknown>>;
   timeoutMs?: number;
   maxTokens?: number;
   fetch?: FetchLike;
@@ -239,6 +246,8 @@ export interface OnboardingInsightAgentTaskModelConfig {
   apiBase: string;
   apiKey: string;
   apiType?: "auto" | "chatCompletions" | "responses";
+  extraHeaders?: Readonly<Record<string, string>>;
+  extraBody?: Readonly<Record<string, unknown>>;
 }
 
 export interface OnboardingInsightAgentTaskModelResolver {
@@ -340,6 +349,8 @@ function createAgentTaskRuntimeGenerator(
     baseUrl: config.apiBase,
     apiKey: config.apiKey,
     model: config.model,
+    extraHeaders: config.extraHeaders,
+    extraBody: config.extraBody,
     timeoutMs: options.timeoutMs,
     maxTokens: options.maxTokens,
     fetch: options.fetch
@@ -374,16 +385,17 @@ export function createOpenAiCompatibleOnboardingInsightReportGenerator(
           method: "POST",
           headers: {
             "authorization": `Bearer ${options.apiKey}`,
-            "content-type": "application/json"
+            "content-type": "application/json",
+            ...(options.extraHeaders ?? {})
           },
-          body: JSON.stringify(useResponsesApi ? buildResponsesRequestBody(input, options, maxTokens, false) : {
+          body: JSON.stringify(withExtraBody(useResponsesApi ? buildResponsesRequestBody(input, options, maxTokens, false) : {
             model: options.model,
             messages: buildLlmMessages(input),
             ...openAiCompatibleTemperatureFields(options, 0.2),
             max_tokens: maxTokens,
             stream: false,
             ...openAiCompatibleThinkingControlFields(options)
-          }),
+          }, options.extraBody)),
           signal: timeoutSignal(timeoutMs, input.signal)
         });
 
@@ -401,16 +413,17 @@ export function createOpenAiCompatibleOnboardingInsightReportGenerator(
         method: "POST",
         headers: {
           "authorization": `Bearer ${options.apiKey}`,
-          "content-type": "application/json"
+          "content-type": "application/json",
+          ...(options.extraHeaders ?? {})
         },
-        body: JSON.stringify(useResponsesApi ? buildResponsesRequestBody(input, options, maxTokens, true) : {
+        body: JSON.stringify(withExtraBody(useResponsesApi ? buildResponsesRequestBody(input, options, maxTokens, true) : {
           model: options.model,
           messages: buildLlmMessages(input),
           ...openAiCompatibleTemperatureFields(options, 0.2),
           max_tokens: maxTokens,
           stream: true,
           ...openAiCompatibleThinkingControlFields(options)
-        }),
+        }, options.extraBody)),
         signal: timeoutSignal(timeoutMs, input.signal)
       });
 
@@ -438,9 +451,13 @@ function createAnthropicOnboardingInsightReportGenerator(
           headers: {
             "content-type": "application/json",
             "x-api-key": options.apiKey,
-            "anthropic-version": "2023-06-01"
+            "anthropic-version": "2023-06-01",
+            ...(options.extraHeaders ?? {})
           },
-          body: JSON.stringify(buildAnthropicRequestBody(input, options.model, maxTokens, false)),
+          body: JSON.stringify(withExtraBody(
+            buildAnthropicRequestBody(input, options.model, maxTokens, false),
+            options.extraBody
+          )),
           signal: timeoutSignal(timeoutMs, input.signal)
         });
 
@@ -459,9 +476,13 @@ function createAnthropicOnboardingInsightReportGenerator(
         headers: {
           "content-type": "application/json",
           "x-api-key": options.apiKey,
-          "anthropic-version": "2023-06-01"
+          "anthropic-version": "2023-06-01",
+          ...(options.extraHeaders ?? {})
         },
-        body: JSON.stringify(buildAnthropicRequestBody(input, options.model, maxTokens, true)),
+        body: JSON.stringify(withExtraBody(
+          buildAnthropicRequestBody(input, options.model, maxTokens, true),
+          options.extraBody
+        )),
         signal: timeoutSignal(timeoutMs, input.signal)
       });
 
@@ -488,9 +509,10 @@ function createGoogleOnboardingInsightReportGenerator(
           method: "POST",
           headers: {
             "content-type": "application/json",
-            "x-goog-api-key": options.apiKey
+            "x-goog-api-key": options.apiKey,
+            ...(options.extraHeaders ?? {})
           },
-          body: JSON.stringify(buildGoogleRequestBody(input, maxTokens)),
+          body: JSON.stringify(withExtraBody(buildGoogleRequestBody(input, maxTokens), options.extraBody)),
           signal: timeoutSignal(timeoutMs, input.signal)
         });
 
@@ -504,6 +526,13 @@ function createGoogleOnboardingInsightReportGenerator(
       }
     }
   };
+}
+
+function withExtraBody(
+  body: Record<string, unknown>,
+  extraBody: Readonly<Record<string, unknown>> | undefined
+): Record<string, unknown> {
+  return { ...body, ...(extraBody ?? {}) };
 }
 
 async function sampleRecentQueries(
@@ -871,11 +900,19 @@ function parseGeneratedFirstReport(
     return null;
   }
 
-  const reportStart = normalized.indexOf(GENERATED_REPORT_OPEN);
-  const reportContentStart = reportStart >= 0 ? reportStart + GENERATED_REPORT_OPEN.length : 0;
-  const contextSection = findGeneratedTaskContext(normalized);
-  const reportClose = normalized.indexOf(GENERATED_REPORT_CLOSE, reportContentStart);
-  const reportEnd = [reportClose, contextSection?.start ?? -1]
+  const reportOpen = findGeneratedReportOpen(normalized);
+  const reportContentStart = reportOpen ? reportOpen.index + reportOpen.marker.length : 0;
+  const reportCloseMarker = reportOpen?.marker === GENERATED_REPORT_ALIAS_OPEN
+    ? GENERATED_REPORT_ALIAS_CLOSE
+    : GENERATED_REPORT_CLOSE;
+  const reportClose = reportOpen
+    ? findFirstGeneratedMarker(normalized, [reportCloseMarker], reportContentStart)
+    : null;
+  const contextSection = findGeneratedTaskContext(
+    normalized,
+    reportClose ? reportClose.index + reportClose.marker.length : null
+  );
+  const reportEnd = [reportClose?.index ?? -1, contextSection?.start ?? -1]
     .filter((index) => index >= reportContentStart)
     .sort((left, right) => left - right)[0] ?? normalized.length;
 
@@ -892,14 +929,31 @@ function parseGeneratedFirstReport(
   return { reportMarkdown, taskContext };
 }
 
-function findGeneratedTaskContext(output: string): { start: number; taskContext: OnboardingTaskContextSummary | null } | null {
-  const taggedStart = output.indexOf(GENERATED_TASK_CONTEXT_OPEN);
-  if (taggedStart >= 0) {
-    const contentStart = taggedStart + GENERATED_TASK_CONTEXT_OPEN.length;
-    const taggedEnd = output.indexOf(GENERATED_TASK_CONTEXT_CLOSE, contentStart);
+function findGeneratedReportOpen(output: string): { index: number; marker: string } | null {
+  if (output.startsWith(GENERATED_REPORT_ALIAS_OPEN)) {
+    return { index: 0, marker: GENERATED_REPORT_ALIAS_OPEN };
+  }
+  return findFirstGeneratedMarker(output, [GENERATED_REPORT_OPEN]);
+}
+
+function findGeneratedTaskContext(
+  output: string,
+  aliasSearchStart: number | null
+): { start: number; taskContext: OnboardingTaskContextSummary | null } | null {
+  const canonical = findFirstGeneratedMarker(output, [GENERATED_TASK_CONTEXT_OPEN]);
+  const alias = aliasSearchStart === null
+    ? null
+    : findFirstGeneratedMarker(output, [GENERATED_TASK_CONTEXT_ALIAS_OPEN], aliasSearchStart);
+  const taggedStart = !canonical || (alias && alias.index < canonical.index) ? alias : canonical;
+  if (taggedStart) {
+    const contentStart = taggedStart.index + taggedStart.marker.length;
+    const closeMarker = taggedStart.marker === GENERATED_TASK_CONTEXT_ALIAS_OPEN
+      ? GENERATED_TASK_CONTEXT_ALIAS_CLOSE
+      : GENERATED_TASK_CONTEXT_CLOSE;
+    const taggedEnd = findFirstGeneratedMarker(output, [closeMarker], contentStart);
     return {
-      start: taggedStart,
-      taskContext: parseGeneratedTaskContext(output.slice(contentStart, taggedEnd >= 0 ? taggedEnd : output.length))
+      start: taggedStart.index,
+      taskContext: parseGeneratedTaskContext(output.slice(contentStart, taggedEnd?.index ?? output.length))
     };
   }
 
@@ -1095,6 +1149,7 @@ function renderFallbackTrajectory(input: {
 class FirstReportStreamParser {
   private mode: "prefix" | "report" | "hidden" | "plain" = "prefix";
   private buffer = "";
+  private reportCloseMarker: string = GENERATED_REPORT_CLOSE;
 
   push(delta: string): string[] {
     if (this.mode === "hidden") {
@@ -1103,10 +1158,11 @@ class FirstReportStreamParser {
     this.buffer += delta;
     if (this.mode === "prefix") {
       const candidate = this.buffer.trimStart();
-      if (!candidate || GENERATED_REPORT_OPEN.startsWith(candidate)) {
+      const reportOpen = findLeadingGeneratedMarker(candidate, GENERATED_REPORT_OPEN_MARKERS);
+      if (!candidate || (!reportOpen && isGeneratedMarkerPrefix(candidate, GENERATED_REPORT_OPEN_MARKERS))) {
         return [];
       }
-      if (!candidate.startsWith(GENERATED_REPORT_OPEN)) {
+      if (!reportOpen) {
         this.mode = "plain";
         return this.drainVisibleText([
           GENERATED_TASK_CONTEXT_OPEN,
@@ -1116,7 +1172,10 @@ class FirstReportStreamParser {
         ]);
       }
       this.mode = "report";
-      this.buffer = candidate.slice(GENERATED_REPORT_OPEN.length);
+      this.reportCloseMarker = reportOpen === GENERATED_REPORT_ALIAS_OPEN
+        ? GENERATED_REPORT_ALIAS_CLOSE
+        : GENERATED_REPORT_CLOSE;
+      this.buffer = candidate.slice(reportOpen.length);
     }
     return this.mode === "plain"
       ? this.drainVisibleText([
@@ -1126,7 +1185,7 @@ class FirstReportStreamParser {
           GENERATED_NAKED_JSON_OPEN
         ])
       : this.drainVisibleText([
-          GENERATED_REPORT_CLOSE,
+          this.reportCloseMarker,
           GENERATED_TASK_CONTEXT_OPEN,
           GENERATED_JSON_FENCE_OPEN,
           GENERATED_NAKED_JSON_OPEN
@@ -1137,24 +1196,23 @@ class FirstReportStreamParser {
     if (this.mode === "prefix" || this.mode === "report" || this.mode === "plain") {
       const remainder = this.buffer;
       this.buffer = "";
-      const isPartialInternalMarker = [
-        GENERATED_REPORT_CLOSE,
+      const internalMarkers = [
+        ...(this.mode === "prefix" ? GENERATED_REPORT_OPEN_MARKERS : []),
+        this.mode === "report" ? this.reportCloseMarker : GENERATED_REPORT_CLOSE,
         GENERATED_TASK_CONTEXT_OPEN,
         GENERATED_JSON_FENCE_OPEN,
         GENERATED_NAKED_JSON_OPEN
-      ].some((marker) => marker.startsWith(remainder));
+      ];
+      const isPartialInternalMarker = isGeneratedMarkerPrefix(remainder, internalMarkers);
       return remainder && !isPartialInternalMarker ? [remainder] : [];
     }
     return [];
   }
 
   private drainVisibleText(delimiters: readonly string[]): string[] {
-    const delimiterIndex = delimiters
-      .map((delimiter) => this.buffer.indexOf(delimiter))
-      .filter((index) => index >= 0)
-      .sort((left, right) => left - right)[0];
-    if (delimiterIndex !== undefined) {
-      const report = this.buffer.slice(0, delimiterIndex);
+    const delimiter = findFirstGeneratedMarker(this.buffer, delimiters);
+    if (delimiter) {
+      const report = this.buffer.slice(0, delimiter.index);
       this.buffer = "";
       this.mode = "hidden";
       return report ? [report] : [];
@@ -1174,6 +1232,29 @@ function matchingDelimiterSuffixLength(value: string, delimiter: string): number
     }
   }
   return 0;
+}
+
+function findFirstGeneratedMarker(
+  value: string,
+  markers: readonly string[],
+  start = 0
+): { index: number; marker: string } | null {
+  let first: { index: number; marker: string } | null = null;
+  for (const marker of markers) {
+    const index = value.indexOf(marker, start);
+    if (index >= 0 && (!first || index < first.index)) {
+      first = { index, marker };
+    }
+  }
+  return first;
+}
+
+function findLeadingGeneratedMarker(value: string, markers: readonly string[]): string | null {
+  return markers.find((marker) => value.startsWith(marker)) ?? null;
+}
+
+function isGeneratedMarkerPrefix(value: string, markers: readonly string[]): boolean {
+  return markers.some((marker) => marker.startsWith(value));
 }
 
 function renderChineseReport(profile: OnboardingInsightProfileSignals, sample: SampleBundle): string {
@@ -2126,11 +2207,7 @@ function extractLlmDelta(body: unknown): string | null {
 }
 
 function sanitizeGeneratedReport(report: string | null): string | null {
-  const withoutInternalContext = (report ?? "")
-    .replaceAll(GENERATED_REPORT_OPEN, "")
-    .split(GENERATED_REPORT_CLOSE, 1)[0]
-    ?.split(GENERATED_TASK_CONTEXT_OPEN, 1)[0] ?? "";
-  const trimmed = stripActionCopyFromReport(withoutInternalContext).trim();
+  const trimmed = stripActionCopyFromReport(report ?? "").trim();
   return trimmed ? trimmed.slice(0, 4_000) : null;
 }
 

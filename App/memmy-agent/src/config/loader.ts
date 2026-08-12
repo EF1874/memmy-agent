@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import YAML from "yaml";
+import { mutateRuntimeConfigSync } from "@memmy/migrations";
 import { configureSsrfWhitelist } from "../security/network.js";
 import { Config, FileMemoryConfig } from "./schema.js";
 
@@ -27,7 +28,12 @@ export function getConfigPath(): string {
 }
 
 export function resolveConfigEnvVars(config: Config): Config {
-  return new Config(resolveEnvVars(config as any) as any);
+  const serialized = config.toObject();
+  const dream = serialized.agents?.defaults?.dream;
+  if (dream && config.agents.defaults.dream.cron) {
+    dream.cron = config.agents.defaults.dream.cron;
+  }
+  return new Config(resolveEnvVars(serialized) as any);
 }
 
 function resolveInPlace(obj: any): any {
@@ -55,23 +61,6 @@ export function resolveEnvVars(obj: any): any {
   return resolveInPlace(structuredClone(obj));
 }
 
-export function migrateConfig(data: any): any {
-  if (!data || typeof data !== "object") return {};
-  const copy = structuredClone(data);
-  if (copy.agent && !copy.agents) copy.agents = { defaults: copy.agent };
-  if (copy.model && !copy.agents?.defaults?.model) {
-    copy.agents ??= {};
-    copy.agents.defaults ??= {};
-    copy.agents.defaults.model = copy.model;
-  }
-  if (copy.tools) {
-    delete copy.tools.my;
-    delete copy.tools.myEnabled;
-    delete copy.tools.mySet;
-  }
-  return copy;
-}
-
 export function loadConfig(configPath?: string | null): Config {
   const target = expandHome(configPath ?? getConfigPath());
   if (!fs.existsSync(target)) {
@@ -91,7 +80,7 @@ export function loadConfig(configPath?: string | null): Config {
     ) {
       new FileMemoryConfig(parsed.fileMemory);
     }
-    config = new Config(migrateConfig(parsed));
+    config = new Config(parsed);
   } catch (error) {
     // The config file exists but is unusable (bad YAML or a value that fails schema
     // validation). Silently falling back to defaults here would run the agent on a
@@ -105,8 +94,37 @@ export function loadConfig(configPath?: string | null): Config {
 
 export function saveConfig(config: Config, configPath?: string | null): void {
   const target = expandHome(configPath ?? getConfigPath());
-  fs.mkdirSync(path.dirname(target), { recursive: true });
   const dumped = config.toObject();
-  const body = YAML.stringify(dumped);
-  fs.writeFileSync(target, body, "utf8");
+  mutateRuntimeConfigSync(target, (current) => {
+    const merged = mergeConfigFields(current, dumped);
+    for (const key of Object.keys(current)) delete current[key];
+    Object.assign(current, merged);
+  });
+}
+
+function mergeConfigFields(current: Record<string, any>, next: Record<string, any>): Record<string, any> {
+  const merged: Record<string, any> = { ...current };
+  for (const [key, value] of Object.entries(next)) {
+    if (isPlainRecord(value) && isPlainRecord(current[key])) {
+      merged[key] = mergeConfigFields(current[key], value);
+    } else {
+      merged[key] = value;
+    }
+  }
+  // These maps are owned collections: an absent child means the caller deleted it.
+  // Their surviving entries already carry unknown nested fields through Base.toObject().
+  for (const key of ["providers", "modelPresets", "modelAssignments"]) {
+    if (Object.prototype.hasOwnProperty.call(next, key)) merged[key] = next[key];
+  }
+  if (isPlainRecord(next.tools)) {
+    merged.tools = isPlainRecord(merged.tools) ? merged.tools : {};
+    if (Object.prototype.hasOwnProperty.call(next.tools, "mcpServers")) {
+      merged.tools.mcpServers = next.tools.mcpServers;
+    }
+  }
+  return merged;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, any> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

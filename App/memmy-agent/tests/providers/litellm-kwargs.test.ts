@@ -97,7 +97,11 @@ describe("OpenAI-compatible request kwargs", () => {
     const provider = makeProvider(
       new Config({
         agents: { defaults: { provider: "custom", model: "custom/my-model" } },
-        providers: { custom: { apiKey: "key", apiBase: "https://llm.example/v1", extraBody: { user: "u1" } } },
+        providers: { custom: {
+          apiKey: "key",
+          endpoints: { chat: { apiBase: "https://llm.example/v1", protocol: "openai-chat-completions" } },
+          extraBody: { user: "u1" },
+        } },
       }),
     ) as OpenAICompatProvider;
 

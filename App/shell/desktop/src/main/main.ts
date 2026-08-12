@@ -89,6 +89,11 @@ import {
 } from "./logger.js";
 import { persistSharedAnalyticsClientId } from "./analytics-client-id-store.js";
 import { backupSqliteDatabase } from "./sqlite-backup.js";
+import {
+  resolveStartupSplashHtml,
+  resolveStartupSplashLanguage,
+  type StartupSplashLanguage
+} from "./startup-splash.js";
 
 let mainWindow: BrowserWindow | null = null;
 let petWindow: BrowserWindow | null = null;
@@ -302,6 +307,7 @@ async function boot(): Promise<void> {
     runtimeServices = app.isPackaged
       ? await startPackagedRuntimeServices({
         appPath: app.getAppPath(),
+        appDatabaseFile: join(app.getPath("userData"), "app.sqlite"),
         resourcesPath: process.resourcesPath,
         logDirectory: app.getPath("logs"),
         logLevel: getCurrentLogLevel()
@@ -1315,7 +1321,7 @@ async function writeWindowsUpdatePromptLanguage(language: WindowsUpdatePromptLan
 async function ensureWindowsUpdatePromptLanguageFile(): Promise<string> {
   const languagePath = resolveWindowsUpdatePromptLanguagePath();
   if (!existsSync(languagePath)) {
-    await writeWindowsUpdatePromptLanguage(resolveDefaultWindowsUpdatePromptLanguage());
+    await writeWindowsUpdatePromptLanguage(resolveDefaultDesktopDisplayLanguage());
   }
   return languagePath;
 }
@@ -1335,15 +1341,15 @@ function resolveWindowsUpdatePromptLanguageFromAppSettings(): WindowsUpdatePromp
     void writePackagedStartupLog(`windows-update-prompt-language-failed:${String(error)}`);
   }
 
-  return resolveDefaultWindowsUpdatePromptLanguage();
+  return resolveDefaultDesktopDisplayLanguage();
 }
 
 /**
- * Windows update prompt language used when the app has no explicitly selected language.
+ * Display language used before the app settings are available.
  *
  * @returns The default display language of the current edition.
  */
-function resolveDefaultWindowsUpdatePromptLanguage(): WindowsUpdatePromptLanguage {
+function resolveDefaultDesktopDisplayLanguage(): StartupSplashLanguage {
   return resolveCurrentDesktopEdition() === "intl" ? "en-US" : "zh-CN";
 }
 
@@ -3113,23 +3119,6 @@ let splashCloseTimer: ReturnType<typeof setTimeout> | null = null;
 const SPLASH_MAX_VISIBLE_MS = 15 * 1000;
 
 /**
- * The splash page HTML (purely static, inline data URL, no extra files or preload needed).
- *
- * @returns The splash HTML string.
- */
-function resolveSplashHtml(): string {
-  return `<!doctype html><html><head><meta charset="utf-8"><style>
-html,body{margin:0;height:100%;overflow:hidden;font-family:-apple-system,"Segoe UI",sans-serif;}
-body{display:flex;align-items:center;justify-content:center;background:#1f2937;color:#f9fafb;-webkit-user-select:none;cursor:default;}
-.box{display:flex;flex-direction:column;align-items:center;gap:16px;}
-.title{font-size:22px;font-weight:600;letter-spacing:1px;}
-.hint{font-size:13px;color:#9ca3af;}
-.spinner{width:28px;height:28px;border:3px solid rgba(255,255,255,.2);border-top-color:#34d399;border-radius:50%;animation:spin .8s linear infinite;}
-@keyframes spin{to{transform:rotate(360deg);}}
-</style></head><body><div class="box"><div class="spinner"></div><div class="title">Memmy</div><div class="hint">正在启动…</div></div></body></html>`;
-}
-
-/**
  * Shows the startup splash. Only called on the normal boot path; creation failures do not affect the boot flow.
  *
  * @returns Nothing.
@@ -3160,7 +3149,11 @@ function showSplashWindow(): void {
         splash.show();
       }
     });
-    void splash.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(resolveSplashHtml())}`);
+    const language = resolveStartupSplashLanguage(
+      join(app.getPath("userData"), "app.sqlite"),
+      resolveDefaultDesktopDisplayLanguage()
+    );
+    void splash.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(resolveStartupSplashHtml(language))}`);
     splashCloseTimer = setTimeout(closeSplashWindow, SPLASH_MAX_VISIBLE_MS);
     splashCloseTimer.unref?.();
   } catch (error) {

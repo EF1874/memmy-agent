@@ -52,6 +52,23 @@ function response(body: unknown, status = 200): Response {
   });
 }
 
+const bootstrapSelection = {
+  preset_id: "base",
+  provider: "openai",
+  endpoint_id: "chat",
+  protocol: "openai-chat-completions",
+  model: "gpt-base",
+  source: "byok",
+  owner_account_id: null,
+  capabilities: ["agent"],
+};
+
+const sessionSelection = {
+  ...bootstrapSelection,
+  preset_id: "fast",
+  model: "gpt-fast",
+};
+
 async function waitUntil(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate() && Date.now() < deadline) {
@@ -76,6 +93,7 @@ async function connectClient({
         ws_path: "/gateway",
         expires_in: 300,
         model_name: "openai/gpt-test",
+        model_selection: bootstrapSelection,
         tool_names: ["exec", "read_file"],
       });
     }
@@ -103,7 +121,11 @@ async function connectClient({
   socket.open();
   socket.message({ event: "ready", chat_id: "unused" });
   expect(socket.sent).toContainEqual({ type: "attach", chat_id: "ext_Y2xpOnRlc3Q" });
-  socket.message({ event: "attached", chat_id: "ext_Y2xpOnRlc3Q" });
+  socket.message({
+    event: "attached",
+    chat_id: "ext_Y2xpOnRlc3Q",
+    model_selection: sessionSelection,
+  });
   socket.message({
     event: "message_queue_snapshot",
     chat_id: "ext_Y2xpOnRlc3Q",
@@ -133,6 +155,12 @@ describe("TuiGatewayClient", () => {
       attached: true,
       queueRevision: 0,
       modelName: "openai/gpt-test",
+      modelSelection: {
+        presetId: "fast",
+        provider: "openai",
+        endpointId: "chat",
+        model: "gpt-fast",
+      },
       toolNames: ["exec", "read_file"],
     });
     expect(client.snapshot().messages.map((message) => message.text)).toEqual(["from TUI", "answer"]);
@@ -499,6 +527,69 @@ describe("TuiGatewayClient", () => {
       goal_id: "goal-1",
       status: "active",
       objective: "finish the work",
+    });
+    client.close();
+  });
+
+  it("updates committed selection only after a matching /model acknowledgement", async () => {
+    const { client, sockets } = await connectClient();
+    const socket = sockets[0]!;
+    const requestId = "77777777-7777-4777-8777-777777777777";
+    const switched = {
+      ...sessionSelection,
+      preset_id: "power",
+      provider: "anthropic",
+      endpoint_id: "messages",
+      protocol: "anthropic-messages",
+      model: "claude-sonnet-4-5",
+    };
+    const submission = client.submit("/model power", "queue", requestId);
+
+    socket.message({
+      event: "runtime_model_updated",
+      chat_id: client.chatId,
+      client_request_id: requestId,
+      model_selection: switched,
+    });
+    expect(client.snapshot().modelSelection?.presetId).toBe("fast");
+
+    socket.message({
+      event: "message_accepted",
+      chat_id: client.chatId,
+      client_request_id: requestId,
+      turn_id: "turn-model",
+      model_selection: sessionSelection,
+    });
+    await expect(submission).resolves.toMatchObject({ status: "accepted" });
+
+    socket.message({
+      event: "runtime_model_updated",
+      chat_id: "another-chat",
+      client_request_id: requestId,
+      model_selection: switched,
+    });
+    socket.message({
+      event: "runtime_model_updated",
+      chat_id: client.chatId,
+      client_request_id: "88888888-8888-4888-8888-888888888888",
+      model_selection: switched,
+    });
+    expect(client.snapshot().modelSelection?.presetId).toBe("fast");
+
+    socket.message({
+      event: "runtime_model_updated",
+      chat_id: client.chatId,
+      client_request_id: requestId,
+      model_selection: switched,
+    });
+    expect(client.snapshot().modelSelection).toMatchObject({
+      presetId: "power",
+      provider: "anthropic",
+      endpointId: "messages",
+      protocol: "anthropic-messages",
+      model: "claude-sonnet-4-5",
+      source: "byok",
+      ownerAccountId: null,
     });
     client.close();
   });

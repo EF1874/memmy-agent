@@ -262,8 +262,17 @@ export const agentActions = {
     return { type: "agent/pendingModelPresetCleared", scopeKey };
   },
 
-  modelSelectionCommitted(scopeKey: string, chatId: string, preset: string): AppAction {
-    return { type: "agent/modelSelectionCommitted", scopeKey, chatId, preset };
+  modelSelectionRequestStarted(
+    scopeKey: string,
+    chatId: string | null,
+    clientRequestId: string,
+    presetId: string | null
+  ): AppAction {
+    return { type: "agent/modelSelectionRequestStarted", scopeKey, chatId, clientRequestId, presetId };
+  },
+
+  modelSelectionRequestCancelled(clientRequestId: string): AppAction {
+    return { type: "agent/modelSelectionRequestCancelled", clientRequestId };
   },
 
   connectionConnecting(): AppAction {
