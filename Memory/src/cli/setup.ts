@@ -145,8 +145,10 @@ function setupMemmyMemoryConfig(
   }
 ): Record<string, unknown> {
   const roleRouting = asRecord(existing.roleRouting);
+  const embedding = asRecord(existing.embedding);
   const storage = asRecord(existing.storage);
   const algorithm = asRecord(existing.algorithm);
+  validateEmbeddingForSetup(embedding);
   const memmyMemory: Record<string, unknown> = {
     ...existing,
     version: 1,
@@ -156,7 +158,6 @@ function setupMemmyMemoryConfig(
       summary: memoryRoleRouting(roleRouting.summary),
       evolution: memoryRoleRouting(roleRouting.evolution)
     },
-    embedding: currentEmbeddingForSetup(asRecord(existing.embedding)),
     storage: {
       ...storage,
       mode: "local",
@@ -172,14 +173,20 @@ function setupMemmyMemoryConfig(
       enableQueryRewrite: false
     }
   };
+  delete memmyMemory.embedding;
   return memmyMemory;
 }
 
-function currentEmbeddingForSetup(existing: Record<string, unknown>): Record<string, unknown> {
-  if (existing.mode === "cloud" || existing.mode === "local" || existing.mode === "custom") {
-    return { ...existing };
+function validateEmbeddingForSetup(existing: Record<string, unknown>): void {
+  const keys = Object.keys(existing);
+  if (keys.length === 0) return;
+  if (
+    keys.length === 1
+    && keys[0] === "mode"
+    && (existing.mode === "cloud" || existing.mode === "local" || existing.mode === "custom")
+  ) {
+    return;
   }
-  if (Object.keys(existing).length === 0) return { mode: "local" };
   throw new Error("memmyMemory.embedding requires the registered runtime config migration");
 }
 

@@ -65,9 +65,6 @@ describe("memmy-memory CLI setup commands", () => {
           sqlitePath: dbPath,
           endpoint: "http://127.0.0.1:18888"
         },
-        embedding: {
-          mode: "local"
-        },
         algorithm: {
           enableMemoryAdd: true,
           enableMemorySearch: true,
@@ -75,6 +72,7 @@ describe("memmy-memory CLI setup commands", () => {
         }
       }
     });
+    expect(saved.memmyMemory).not.toHaveProperty("embedding");
     expect(existsSync(dbPath)).toBe(false);
   });
 
@@ -311,35 +309,71 @@ describe("memmy-memory CLI setup commands", () => {
         sqlitePath: dbPath,
         endpoint: "http://new.local"
       },
-      embedding: {
-        mode: "local"
-      },
       algorithm: {
         enableMemoryAdd: true,
         enableMemorySearch: true,
         enableQueryRewrite: false
       }
     });
+    expect(saved.memmyMemory).not.toHaveProperty("embedding");
     expect(existsSync(dbPath)).toBe(false);
   });
 
-  it("rejects legacy embedding config instead of normalizing it during setup", async () => {
-    const root = tempRoot();
-    const configPath = join(root, "config.yaml");
-    createAllAgentRoots(root);
-    setEnv("HOME", root);
-    writeFileSync(configPath, YAML.stringify({
-      memmyMemory: {
-        embedding: {
+  it("removes obsolete embedding mode markers during setup", async () => {
+    for (const mode of ["cloud", "local", "custom"]) {
+      const root = tempRoot();
+      const configPath = join(root, "config.yaml");
+      setEnv("HOME", root);
+      writeFileSync(configPath, YAML.stringify({
+        memmyMemory: {
+          embedding: { mode }
+        }
+      }));
+
+      await runCommand({
+        argv: [
+          "init",
+          "--home", root,
+          "--config", configPath,
+          "--db", join(root, "memory.sqlite"),
+          "--skip-agent-skills"
+        ]
+      });
+
+      const saved = YAML.parse(readFileSync(configPath, "utf8"));
+      expect(saved.memmyMemory).not.toHaveProperty("embedding");
+    }
+  });
+
+  it("rejects legacy embedding connections instead of discarding them during setup", async () => {
+    for (const embedding of [
+      {
+        provider: "openai_compatible",
+        endpoint: "https://example.com/v1"
+      },
+      {
+        mode: "custom",
+        custom: {
           provider: "openai_compatible",
           endpoint: "https://example.com/v1"
         }
       }
-    }));
+    ]) {
+      const root = tempRoot();
+      const configPath = join(root, "config.yaml");
+      setEnv("HOME", root);
+      writeFileSync(configPath, YAML.stringify({ memmyMemory: { embedding } }));
 
-    await expect(runCommand({
-      argv: ["init", "--home", root, "--config", configPath, "--db", join(root, "memory.sqlite")]
-    })).rejects.toThrow("memmyMemory.embedding requires the registered runtime config migration");
+      await expect(runCommand({
+        argv: [
+          "init",
+          "--home", root,
+          "--config", configPath,
+          "--db", join(root, "memory.sqlite"),
+          "--skip-agent-skills"
+        ]
+      })).rejects.toThrow("memmyMemory.embedding requires the registered runtime config migration");
+    }
   });
 
   it("installs agent inject and skill folder during init when an agent is specified", async () => {
