@@ -166,6 +166,7 @@ const TRANSLATABLE_AGENT_ERROR_KEYS = new Set<MessageKey>([
   "home.agent.executionInterrupted",
   "home.agent.recoveryTimeout",
   "home.goal.controlUnknown",
+  "home.modelSelector.unavailable",
   "home.project.desktopRequired",
   "home.queue.removeFailed",
   "home.queue.steerFailed",
