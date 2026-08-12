@@ -530,7 +530,10 @@ describe("FallbackProvider failover", () => {
       providerFactory: factory,
     });
 
-    const result = await provider.chat({ messages: [{ role: "user", content: "hi" }] });
+    const result = await provider.chat({ messages: [{
+      role: "user",
+      content: [{ type: "image_url", image_url: { url: "data:image/png;base64,one" } }],
+    }] });
 
     expect(result.errorCategory).toBe("image_input_unsupported");
     expect(factory).not.toHaveBeenCalled();
