@@ -8,6 +8,7 @@ import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { mockBootstrap } from "./fixtures/bootstrap.js";
 import { appActions } from "../../state/app-actions.js";
 import { appReducer, createInitialAppState, type AppState } from "../../state/app-reducer.js";
+import { createModelWorkspace, modelConfigInput, upsertModelConnection } from "../../state/model-workspace.js";
 import type { UpdateCoordinatorValue } from "../../app/update-coordinator.js";
 import {
   LOG_LEVEL_STORAGE_KEY,
@@ -21,7 +22,12 @@ import {
   writeLogLevel
 } from "../settings-page.js";
 import { formatMessage, zhCNMessages } from "../../i18n/messages.js";
-import { availableConnectionProtocols } from "../model-workspace-section.js";
+import {
+  availableConnectionProtocols,
+  editorProtocolForCapabilities,
+  modelCapabilitiesForKind,
+  normalizeEditorCapabilities
+} from "../model-workspace-section.js";
 
 const settingsPageSourcePath = fileURLToPath(new URL("../settings-page.tsx", import.meta.url));
 const updateCoordinatorSourcePath = fileURLToPath(new URL("../../app/update-coordinator.tsx", import.meta.url));
@@ -91,6 +97,103 @@ describe("多 BYOK endpoint 入口", () => {
     expect(available).toContain("openai");
     expect(available).toContain("anthropic");
     expect(available[0]).toBe("openai");
+  });
+});
+
+describe("自定义模型能力选择", () => {
+  it("四种单选类型映射为对应的底层能力", () => {
+    expect(modelCapabilitiesForKind("text")).toEqual(["chat", "memorySummary", "memoryEvolution"]);
+    expect(modelCapabilitiesForKind("embedding")).toEqual(["embedding"]);
+    expect(modelCapabilitiesForKind("asr")).toEqual(["asr"]);
+    expect(modelCapabilitiesForKind("image")).toEqual(["image"]);
+  });
+
+  it("旧文本用途进入编辑器时统一归一化为通用文本", () => {
+    expect(normalizeEditorCapabilities(["chat"])).toEqual(["chat", "memorySummary", "memoryEvolution"]);
+    expect(normalizeEditorCapabilities(["memorySummary"])).toEqual(["chat", "memorySummary", "memoryEvolution"]);
+    expect(normalizeEditorCapabilities(["memoryEvolution"])).toEqual(["chat", "memorySummary", "memoryEvolution"]);
+    expect(normalizeEditorCapabilities(["embedding"])).toEqual(["embedding"]);
+    expect(normalizeEditorCapabilities(["asr"])).toEqual(["asr"]);
+    expect(normalizeEditorCapabilities(["image"])).toEqual(["image"]);
+  });
+
+  it("四种编辑器类型保存为精确的 catalog 能力", () => {
+    const cases = [
+      ["text", "openai-chat-completions", ["agent", "memory_summary", "memory_evolution"]],
+      ["embedding", "openai-embeddings", ["embedding"]],
+      ["asr", "dashscope-input-audio-chat", ["asr"]],
+      ["image", "openai-images", ["image_generation"]]
+    ] as const;
+
+    for (const [kind, protocol, expectedCapabilities] of cases) {
+      const capabilities = modelCapabilitiesForKind(kind);
+      const result = upsertModelConnection(createModelWorkspace(null), "byok", {
+        provider: "openai",
+        endpoint: "https://example.com/v1",
+        protocol,
+        apiKey: "sk-test",
+        models: [`custom-${kind}`],
+        modelEntries: [{
+          model: `custom-${kind}`,
+          capability: capabilities[0]!,
+          capabilities
+        }]
+      });
+
+      expect(result.error).toBeNull();
+      expect(modelConfigInput(result.workspace).providers[0]?.models[0]?.capabilities).toEqual(expectedCapabilities);
+    }
+  });
+
+  it("编辑模型切换类型时同步切换 endpoint 协议", () => {
+    const textCapabilities = modelCapabilitiesForKind("text");
+    const created = upsertModelConnection(createModelWorkspace(null), "byok", {
+      provider: "openai",
+      endpoint: "https://example.com/v1",
+      protocol: "openai-chat-completions",
+      apiKey: "sk-test",
+      models: ["custom-model"],
+      modelEntries: [{ model: "custom-model", capability: "chat", capabilities: textCapabilities }]
+    });
+    const connection = created.workspace.spaces.byok.connections[0]!;
+    const embeddingCapabilities = modelCapabilitiesForKind("embedding");
+    const protocol = editorProtocolForCapabilities("openai", embeddingCapabilities, connection.protocol);
+    const edited = upsertModelConnection(created.workspace, "byok", {
+      id: connection.id,
+      provider: "openai",
+      endpoint: connection.endpoint,
+      protocol,
+      apiKeyMasked: connection.apiKeyMasked,
+      models: ["custom-model"],
+      modelEntries: [{
+        presetId: connection.modelEntries[0]!.presetId,
+        model: "custom-model",
+        capability: "embedding",
+        capabilities: embeddingCapabilities
+      }]
+    });
+
+    expect(protocol).toBe("openai-embeddings");
+    expect(edited.error).toBeNull();
+    expect(modelConfigInput(edited.workspace).providers[0]?.endpoints[0]?.protocol).toBe("openai-embeddings");
+    expect(modelConfigInput(edited.workspace).providers[0]?.models[0]?.capabilities).toEqual(["embedding"]);
+    expect(editorProtocolForCapabilities("openai", textCapabilities, "openai-responses")).toBe("openai-responses");
+    expect(editorProtocolForCapabilities("qwen", ["image"])).toBe("dashscope-multimodal-generation");
+  });
+
+  it("模型能力沿用标准 Select 四选一，不再拆分文本用途", () => {
+    const source = readFileSync(modelWorkspaceSourcePath, "utf8");
+
+    expect(source).toContain('const MODEL_KIND_OPTIONS = ["text", "embedding", "asr", "image"] as const;');
+    expect(source).toContain("value={kind}");
+    expect(source).toContain("options={modelKindOptions(t)}");
+    expect(source).toContain("onValueChange={(value) => props.onChange(modelCapabilitiesForKind(value as ModelKind))}");
+    expect(source).toContain('className="select-control--subtle model-capability-select"');
+    expect(source.match(/t\("settings\.modelWorkspace\.modelCapability"\)/g)).toHaveLength(1);
+    expect(source).toContain("normalizeEditorCapabilities(entry.capabilities.map(fromCatalogCapability))");
+    expect(source).not.toContain('type="checkbox"');
+    expect(source).not.toContain('t("settings.modelWorkspace.textRoles")');
+    expect(source).not.toContain('t("settings.modelWorkspace.capability.agent")');
   });
 });
 
