@@ -78,6 +78,16 @@ describe("Memmy release workflow metadata", () => {
     expect(existsSync(legacyWorkflowPath)).toBe(false);
   });
 
+  it("tracks release notes whose title matches the current project version", () => {
+    const version = readJson("package.json").version;
+    const notes = readFileSync(
+      resolve(repoRoot, `.github/release-notes/v${version}.md`),
+      "utf8",
+    );
+
+    expect(notes.split(/\r?\n/, 1)[0]).toBe(`# Memmy v${version}`);
+  });
+
   it("allows versioned manual release notes to be tracked", () => {
     const result = spawnSync(
       "git",
