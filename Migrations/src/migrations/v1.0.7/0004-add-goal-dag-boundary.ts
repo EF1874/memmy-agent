@@ -8,7 +8,7 @@ import {
   type MigrationResult,
 } from "../../types.js";
 
-const MIGRATION_ID = "v1.0.5/0003-add-goal-dag-boundary";
+const MIGRATION_ID = "v1.0.7/0004-add-goal-dag-boundary";
 
 type MigrationHooks = {
   beforeCommit?: (db: Database.Database, filePath: string) => void;
@@ -150,9 +150,9 @@ export async function addGoalDagBoundary(
   return result;
 }
 
-export const addGoalDagBoundaryV105: MigrationDefinition = {
+export const addGoalDagBoundaryV107: MigrationDefinition = {
   id: MIGRATION_ID,
-  introducedIn: "1.0.5",
+  introducedIn: "1.0.7",
   scope: "session-dag",
   description: "Add Goal task boundaries and side branches to Session DAG databases",
   up: addGoalDagBoundary,

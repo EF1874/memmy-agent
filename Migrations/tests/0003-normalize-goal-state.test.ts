@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { normalizeGoalStates } from "../src/migrations/v1.0.5/0002-normalize-goal-state.js";
+import { normalizeGoalStates } from "../src/migrations/v1.0.7/0003-normalize-goal-state.js";
 
 const roots: string[] = [];
 
@@ -248,10 +248,10 @@ describe("normalize GoalState migration", () => {
 
   it("cleans only strict temporary remnants for this migration", async () => {
     const { sessionsDir, context } = await fixture();
-    const stale = `.legacy.jsonl.v1.0.5-0002.123.${randomUUID()}.tmp`;
+    const stale = `.legacy.jsonl.v1.0.7-0003.123.${randomUUID()}.tmp`;
     const unrelated = [
-      ".legacy.jsonl.v1.0.5-0003.123.00000000-0000-4000-8000-000000000000.tmp",
-      ".legacy.jsonl.v1.0.5-0002.123.not-a-uuid.tmp",
+      ".legacy.jsonl.v1.0.7-0004.123.00000000-0000-4000-8000-000000000000.tmp",
+      ".legacy.jsonl.v1.0.7-0003.123.not-a-uuid.tmp",
       "ordinary.tmp",
     ];
     await fs.writeFile(path.join(sessionsDir, stale), "stale");

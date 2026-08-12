@@ -1,15 +1,7 @@
-import {
-  mutateRuntimeConfig,
-  mutateRuntimeConfigLockHeld,
-} from "../../runtime-config-writer.js";
-import {
-  MigrationError,
-  type AgentWorkspaceMigrationContext,
-  type MigrationDefinition,
-  type MigrationResult,
-} from "../../types.js";
+import type { RuntimeConfigDocument } from "../../runtime-config-writer.js";
+import { MigrationError } from "../../types.js";
 
-const MIGRATION_ID = "v1.0.5/0001-flatten-memory-model-config";
+const MIGRATION_ID = "v1.0.7/0001-normalize-runtime-model-catalog";
 const CONNECTION_FIELDS = [
   "provider",
   "vendor",
@@ -40,10 +32,6 @@ type LegacyMemoryView = {
   rootEvolution: JsonObject | null;
   rootEmbedding: JsonObject | null;
   hasLegacyShape: boolean;
-};
-
-type MigrationHooks = {
-  beforeCommit?: (configPath: string) => Promise<void>;
 };
 
 function isObject(value: unknown): value is JsonObject {
@@ -431,53 +419,9 @@ function migrateConfig(config: JsonObject): { changed: boolean; config: JsonObje
   return { changed: true, config: migrated };
 }
 
-async function migrateRuntimeConfig(
-  context: AgentWorkspaceMigrationContext,
-  hooks: MigrationHooks = {},
-): Promise<MigrationResult> {
-  const mutator = (config: JsonObject): boolean => {
-    const result = migrateConfig(config);
-    if (!result.changed) return false;
-    for (const key of Object.keys(config)) delete config[key];
-    Object.assign(config, result.config);
-    return true;
-  };
-  const options = {
-    createIfMissing: false as const,
-    beforeCommit: hooks.beforeCommit,
-  };
-  let result;
-  try {
-    result = context.runtimeConfigLock
-      ? await mutateRuntimeConfigLockHeld(context.runtimeConfigLock, mutator, options)
-      : await mutateRuntimeConfig(context.runtimeConfigFile, mutator, options);
-  } catch (error) {
-    if (error instanceof MigrationError && error.migrationId === null) {
-      throw new MigrationError(error.code, error.message, {
-        migrationId: MIGRATION_ID,
-        scope: "runtime-config",
-        cause: error.cause,
-      });
-    }
-    throw error;
-  }
-  if (!result.sourceExists) return { scanned: 0, changed: 0, ignored: 1 };
-  return result.changed
-    ? { scanned: 1, changed: 1, ignored: 0 }
-    : { scanned: 1, changed: 0, ignored: 1 };
-}
-
-export const flattenMemoryModelConfigV105: MigrationDefinition = {
-  id: MIGRATION_ID,
-  introducedIn: "1.0.5",
-  scope: "runtime-config",
-  description: "Flatten legacy Memory account/byok model profiles",
-  up: migrateRuntimeConfig,
-};
-
-export function flattenMemoryModelConfigForTest(
-  context: AgentWorkspaceMigrationContext,
-  hooks: MigrationHooks = {},
-): Promise<MigrationResult> {
-  return migrateRuntimeConfig(context, hooks);
+export function flattenLegacyMemoryModelConfig(config: RuntimeConfigDocument): void {
+  const result = migrateConfig(config);
+  if (!result.changed) return;
+  for (const key of Object.keys(config)) delete config[key];
+  Object.assign(config, result.config);
 }

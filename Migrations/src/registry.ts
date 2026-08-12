@@ -1,10 +1,8 @@
 import { addWebuiSessionBindingV104 } from "./migrations/v1.0.4/0001-add-webui-session-binding.js";
-import { flattenMemoryModelConfigV105 } from "./migrations/v1.0.5/0001-flatten-memory-model-config.js";
-import { normalizeGoalStateV105 } from "./migrations/v1.0.5/0002-normalize-goal-state.js";
-import { addGoalDagBoundaryV105 } from "./migrations/v1.0.5/0003-add-goal-dag-boundary.js";
 import { normalizeRuntimeModelCatalogV107 } from "./migrations/v1.0.7/0001-normalize-runtime-model-catalog.js";
 import { importLegacyAppStateModelConfigV107 } from "./migrations/v1.0.7/0002-import-legacy-app-state-model-config.js";
-import { removeLegacyRuntimeModelFieldsV107 } from "./migrations/v1.0.7/0003-remove-legacy-runtime-model-fields.js";
+import { normalizeGoalStateV107 } from "./migrations/v1.0.7/0003-normalize-goal-state.js";
+import { addGoalDagBoundaryV107 } from "./migrations/v1.0.7/0004-add-goal-dag-boundary.js";
 import { MigrationError, type MigrationDefinition } from "./types.js";
 
 const STABLE_SEMVER_PATTERN =
@@ -20,12 +18,10 @@ const MIGRATION_TARGETS = new Set([
 
 export const migrations: readonly MigrationDefinition[] = [
   addWebuiSessionBindingV104,
-  flattenMemoryModelConfigV105,
-  normalizeGoalStateV105,
-  addGoalDagBoundaryV105,
   normalizeRuntimeModelCatalogV107,
   importLegacyAppStateModelConfigV107,
-  removeLegacyRuntimeModelFieldsV107,
+  normalizeGoalStateV107,
+  addGoalDagBoundaryV107,
 ];
 
 function definitionError(message: string, migrationId: string | null = null): never {
