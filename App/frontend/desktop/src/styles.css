@@ -6647,7 +6647,9 @@ input[type="checkbox"].check-sky:checked::after {
 }
 
 .provider-model-list {
+  max-width: 100%;
   max-height: 220px;
+  overflow-x: hidden;
   overflow-y: auto;
 }
 

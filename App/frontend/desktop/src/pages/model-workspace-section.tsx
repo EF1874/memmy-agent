@@ -1,5 +1,5 @@
 import { AlertTriangle, Check, CheckCircle2, ChevronDown, ChevronUp, Database, Info, KeyRound, Loader2, Pencil, Plus, Trash2, Wrench, X, XCircle } from "lucide-react";
-import type { ModelEndpointProtocol } from "@memmy/local-api-contracts";
+import { MODEL_NAME_MAX_LENGTH, type ModelEndpointProtocol } from "@memmy/local-api-contracts";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ConfigClient, ModelProviderConfig } from "../api/config-client.js";
 import { Button } from "../components/button.js";
@@ -1079,8 +1079,9 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
                 <ConfigField
                   label={t("apiKey.model")}
                   value={editor.modelDraft}
+                  maxLength={MODEL_NAME_MAX_LENGTH}
                   onChange={(value) => {
-                    setEditor({ ...editor, modelDraft: value });
+                    setEditor({ ...editor, modelDraft: value.slice(0, MODEL_NAME_MAX_LENGTH) });
                     setFormError(null);
                   }}
                   placeholder={t("settings.modelWorkspace.modelPlaceholder")}
@@ -1187,7 +1188,7 @@ function ProviderModelList(props: {
             index > 0 ? "border-t border-border-stone/30" : ""
           }`}
         >
-          <span className="min-w-0 truncate text-sm text-text-ink/70" title={item.model}>
+          <span className="min-w-0 flex-1 truncate text-sm text-text-ink/70" title={item.model}>
             {item.model}
           </span>
           <div className="flex shrink-0 items-center gap-1.5">
