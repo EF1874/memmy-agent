@@ -15,6 +15,7 @@ import {
   getModelCandidates,
   getTaskModelCandidates,
   modelConfigInput,
+  protocolSupportsModelCapabilities,
   setModelAssignment,
   setModelConnectionAvailability,
   setDefaultTaskModel,
@@ -40,9 +41,19 @@ import {
 } from "./settings-nav.js";
 
 type TestStatus = "idle" | "testing" | "success" | "error";
-type ModelKind = "text" | "embedding" | "asr" | "image";
+export type ModelKind = "text" | "embedding" | "asr" | "image";
 
 const DEFAULT_TEXT_CAPABILITIES: ModelCapability[] = ["chat", "memorySummary", "memoryEvolution"];
+const MODEL_KIND_OPTIONS = ["text", "embedding", "asr", "image"] as const;
+
+export function modelCapabilitiesForKind(kind: ModelKind): ModelCapability[] {
+  if (kind === "text") return [...DEFAULT_TEXT_CAPABILITIES];
+  return [kind];
+}
+
+export function normalizeEditorCapabilities(capabilities: ModelCapability[]): ModelCapability[] {
+  return modelCapabilitiesForKind(modelKindForCapabilities(capabilities));
+}
 
 interface ConnectionTestState {
   status: TestStatus;
@@ -234,7 +245,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
       models: connection.modelEntries.map((entry) => ({
         presetId: entry.presetId,
         name: entry.model,
-        capabilities: entry.capabilities.map(fromCatalogCapability)
+        capabilities: normalizeEditorCapabilities(entry.capabilities.map(fromCatalogCapability))
       })),
       modelDraft: "",
       capabilityDrafts: [...DEFAULT_TEXT_CAPABILITIES],
@@ -289,11 +300,16 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
     const providerChanged = Boolean(
       existing && protocolFromConnection(existing.provider) !== editor.provider
     );
+    const capabilities = resolved.models.flatMap((model) => model.capabilities);
     const result = upsertModelConnection(workspace, props.mode, {
       id: editor.connectionId ?? undefined,
       provider: editor.provider,
       endpoint: editor.endpoint,
-      ...(existing && !providerChanged ? { protocol: existing.protocol } : {}),
+      protocol: editorProtocolForCapabilities(
+        editor.provider,
+        capabilities,
+        providerChanged ? undefined : existing?.protocol
+      ),
       apiKey: editor.apiKey || undefined,
       apiKeyMasked: providerChanged ? undefined : existing?.apiKeyMasked,
       models: resolved.models.map((model) => model.name),
@@ -478,7 +494,11 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
         ? await props.configClient.testModelConfig({
           provider: fromProtocol(editor.provider),
           endpointId: existing?.endpointId ?? editor.connectionId ?? "connection-test-new",
-          protocol: existing?.protocol ?? protocolForEditor(editor.provider, selectedModel.capabilities[0]!),
+          protocol: editorProtocolForCapabilities(
+            editor.provider,
+            selectedModel.capabilities,
+            providerChanged ? undefined : existing?.protocol
+          ),
           endpoint: editor.endpoint,
             model: selectedModel.name,
             apiKey: editor.apiKey,
@@ -1065,13 +1085,10 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
                   }}
                   placeholder={t("settings.modelWorkspace.modelPlaceholder")}
                 />
-                <div className="grid gap-1.5">
-                  <div className="text-xs text-text-ink/65">{t("settings.modelWorkspace.modelCapability")}</div>
-                  <ModelCapabilityPicker
-                    capabilities={editor.capabilityDrafts}
-                    onChange={(capabilityDrafts) => setEditor({ ...editor, capabilityDrafts })}
-                  />
-                </div>
+                <ModelCapabilityPicker
+                  capabilities={editor.capabilityDrafts}
+                  onChange={(capabilityDrafts) => setEditor({ ...editor, capabilityDrafts })}
+                />
               </div>
               <div className="model-editor-actions">
                 <button
@@ -1174,11 +1191,9 @@ function ProviderModelList(props: {
             {item.model}
           </span>
           <div className="flex shrink-0 items-center gap-1.5">
-            {item.capabilities.map((capability) => (
-              <span key={capability} className="rounded-tag bg-canvas-oat px-2 py-0.5 text-[10px] text-text-ink/50">
-                {t(modelCapabilityMessageKey(capability))}
-              </span>
-            ))}
+            <span className="rounded-tag bg-canvas-oat px-2 py-0.5 text-[10px] text-text-ink/50">
+              {t(modelKindMessageKey(modelKindForCapabilities(item.capabilities)))}
+            </span>
             {item.onEdit && (
               <button
                 type="button"
@@ -1331,12 +1346,23 @@ function protocolFromConnection(provider: string): Protocol {
 }
 
 function protocolForEditor(provider: Protocol, capability: ModelCapability): ModelEndpointProtocol {
-  if (provider === "anthropic") return "anthropic-messages";
-  if (provider === "gemini") return "gemini-generate-content";
   if (capability === "embedding") return "openai-embeddings";
   if (capability === "asr") return "dashscope-input-audio-chat";
-  if (capability === "image") return "openai-images";
+  if (capability === "image") return provider === "qwen" ? "dashscope-multimodal-generation" : "openai-images";
+  if (provider === "anthropic") return "anthropic-messages";
+  if (provider === "gemini") return "gemini-generate-content";
   return "openai-chat-completions";
+}
+
+export function editorProtocolForCapabilities(
+  provider: Protocol,
+  capabilities: ModelCapability[],
+  existingProtocol?: ModelEndpointProtocol
+): ModelEndpointProtocol {
+  if (existingProtocol && protocolSupportsModelCapabilities(existingProtocol, capabilities)) {
+    return existingProtocol;
+  }
+  return protocolForEditor(provider, capabilities[0] ?? "chat");
 }
 
 function modelKindForCapabilities(capabilities: ModelCapability[]): ModelKind {
@@ -1351,57 +1377,30 @@ function ModelCapabilityPicker(props: {
   onChange: (capabilities: ModelCapability[]) => void;
 }) {
   const { t } = useTranslation();
-  const detailsRef = useRef<HTMLDetailsElement | null>(null);
   const kind = modelKindForCapabilities(props.capabilities);
-  const textCapabilities = props.capabilities.filter((capability) => DEFAULT_TEXT_CAPABILITIES.includes(capability));
-  const triggerLabel = kind === "text"
-    ? `${t("settings.modelWorkspace.capability.chat")} · ${t("settings.modelWorkspace.capabilityCount", { count: textCapabilities.length })}`
-    : t(modelCapabilityMessageKey(kind));
 
   return (
-    <details ref={detailsRef} className="model-capability-picker">
-      <summary className="model-capability-picker__trigger" aria-label={t("settings.modelWorkspace.modelCapability")}>
-        <span className="model-capability-picker__value">{triggerLabel}</span>
-        <ChevronDown size={14} aria-hidden="true" />
-      </summary>
-      <div className="model-capability-picker__menu">
-        <fieldset className="model-capability-picker__text-group">
-          <legend>{t("settings.modelWorkspace.textRoles")}</legend>
-          {(["chat", "memorySummary", "memoryEvolution"] as const).map((capability) => {
-            const checked = textCapabilities.includes(capability);
-            return (
-              <label key={capability} className="model-capability-picker__option">
-                <input
-                  type="checkbox"
-                  checked={checked}
-                  onChange={() => props.onChange(toggleModelCapability(props.capabilities, capability))}
-                />
-                <span>{capability === "chat"
-                  ? t("settings.modelWorkspace.capability.agent")
-                  : t(modelCapabilityMessageKey(capability))}</span>
-              </label>
-            );
-          })}
-        </fieldset>
-        <div className="model-capability-picker__single-types" role="group" aria-label={t("settings.modelWorkspace.modelType")}>
-          {(["embedding", "asr", "image"] as const).map((capability) => (
-            <button
-              key={capability}
-              type="button"
-              className={`model-capability-picker__type ${kind === capability ? "model-capability-picker__type--selected" : ""}`}
-              onClick={() => {
-                props.onChange([capability]);
-                if (detailsRef.current) detailsRef.current.open = false;
-              }}
-            >
-              <span>{t(modelCapabilityMessageKey(capability))}</span>
-              {kind === capability && <Check size={13} aria-hidden="true" />}
-            </button>
-          ))}
-        </div>
-      </div>
-    </details>
+    <Select
+      label={t("settings.modelWorkspace.modelCapability")}
+      labelClassName="model-capability-select__label"
+      value={kind}
+      options={modelKindOptions(t)}
+      onValueChange={(value) => props.onChange(modelCapabilitiesForKind(value as ModelKind))}
+      className="select-control--subtle model-capability-select"
+      menuClassName="model-capability-select__menu"
+    />
   );
+}
+
+function modelKindOptions(t: ReturnType<typeof useTranslation>["t"]): SelectOption[] {
+  return MODEL_KIND_OPTIONS.map((kind) => ({
+    value: kind,
+    label: t(modelKindMessageKey(kind))
+  }));
+}
+
+function modelKindMessageKey(kind: ModelKind) {
+  return modelCapabilityMessageKey(kind === "text" ? "chat" : kind);
 }
 
 function modelCapabilityMessageKey(capability: ModelCapability) {
@@ -1427,14 +1426,6 @@ function toCatalogCapabilityForEditor(capability: ModelCapability) {
   if (capability === "memoryEvolution") return "memory_evolution" as const;
   if (capability === "image") return "image_generation" as const;
   return capability;
-}
-
-function toggleModelCapability(current: ModelCapability[], capability: ModelCapability): ModelCapability[] {
-  const textCapabilities: ModelCapability[] = ["chat", "memorySummary", "memoryEvolution"];
-  if (!textCapabilities.includes(capability)) return [capability];
-  const textCurrent = current.filter((item) => textCapabilities.includes(item));
-  if (!textCurrent.includes(capability)) return [...textCurrent, capability];
-  return textCurrent.length > 1 ? textCurrent.filter((item) => item !== capability) : textCurrent;
 }
 
 function platformModelName(
