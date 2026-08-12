@@ -531,9 +531,37 @@ describe("HomePage", () => {
   it("centers the composer controls only while the session composer is one line", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
 
-    expect(source).toContain('${isComposerSingleLine ? "agent-composer-input--single " : ""}${selectedComposerCommand ? "agent-composer-input--command-selected " : ""}block w-full pl-4 pr-36 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40');
+    expect(source).toContain('${isComposerSingleLine ? "agent-composer-input--single " : ""}${selectedComposerCommand ? "agent-composer-input--command-selected " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40');
     expect(source).toContain('centerComposerControls ? "top-1/2 -translate-y-1/2" : "bottom-2"');
     expect(source).toContain("COMPOSER_SINGLE_LINE_HEIGHT_PX = 52");
+  });
+
+  it("reserves the conversation composer action rail from long text", () => {
+    const source = readFileSync(homePageSourcePath, "utf8");
+    const composerStart = source.indexOf('className="agent-conversation-composer"');
+    const textareaStart = source.indexOf("<textarea", composerStart);
+    const actionsStart = source.indexOf("composer-actions absolute", textareaStart);
+    const textareaSource = source.slice(textareaStart, actionsStart);
+
+    expect(composerStart).toBeGreaterThan(0);
+    expect(textareaStart).toBeGreaterThan(composerStart);
+    expect(actionsStart).toBeGreaterThan(textareaStart);
+    expect(textareaSource).toContain("agent-composer-input--conversation");
+    expect(textareaSource).not.toContain("pr-36");
+
+    const window = new Window();
+    const style = window.document.createElement("style");
+    style.textContent = readFileSync(stylesSourcePath, "utf8").replace(/^@import[^;]+;$/gm, "");
+    window.document.head.append(style);
+
+    const shell = window.document.createElement("div");
+    shell.className = "agent-composer-shell";
+    const textarea = window.document.createElement("textarea");
+    textarea.className = "agent-composer-input--conversation";
+    shell.append(textarea);
+    window.document.body.append(shell);
+
+    expect(window.getComputedStyle(textarea).paddingRight).toBe("304px");
   });
 
   it("keeps the single-line composer text and caret vertically centered", () => {

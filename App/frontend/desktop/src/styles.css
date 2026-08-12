@@ -2687,6 +2687,13 @@ button {
   padding: 12px 16px 4px;
 }
 
+/* Reserve the complete action rail: model selector (180px), three 32px
+   buttons, gaps, and the right inset. This must be explicit because the
+   committed utility sheet does not include the former `pr-36` class. */
+.agent-composer-shell textarea.agent-composer-input--conversation {
+  padding-right: 19rem;
+}
+
 /* Keep this more specific than `.agent-composer-shell textarea` above so its generic line-height cannot shift the caret.
    Keep overflow-y:auto (not hidden): if single-line detection lags behind wrapped content, the field must stay scrollable. */
 .agent-composer-shell textarea.agent-composer-input--single {
