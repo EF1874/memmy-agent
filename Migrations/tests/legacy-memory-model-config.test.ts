@@ -3,10 +3,20 @@ import os from "node:os";
 import path from "node:path";
 import YAML from "yaml";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { flattenLegacyMemoryModelConfig } from "../src/migrations/v1.0.7/legacy-memory-model-config.js";
+import { mutateRuntimeConfig } from "../src/runtime-config-writer.js";
 import {
-  flattenMemoryModelConfigForTest,
-} from "../src/migrations/v1.0.5/0001-flatten-memory-model-config.js";
-import type { AgentWorkspaceMigrationContext, MigrationLogger } from "../src/types.js";
+  MigrationError,
+  type AgentWorkspaceMigrationContext,
+  type MigrationLogger,
+  type MigrationResult,
+} from "../src/types.js";
+
+const MIGRATION_ID = "v1.0.7/0001-normalize-runtime-model-catalog";
+
+type MigrationHooks = {
+  beforeCommit?: (configPath: string) => Promise<void>;
+};
 
 const temporaryDirectories: string[] = [];
 
@@ -42,6 +52,32 @@ async function migratedConfig(configPath: string): Promise<Record<string, any>> 
   return YAML.parse(await fs.readFile(configPath, "utf8")) as Record<string, any>;
 }
 
+async function flattenMemoryModelConfigForTest(
+  context: AgentWorkspaceMigrationContext,
+  hooks: MigrationHooks = {},
+): Promise<MigrationResult> {
+  try {
+    const result = await mutateRuntimeConfig(
+      context.runtimeConfigFile,
+      flattenLegacyMemoryModelConfig,
+      { createIfMissing: false, beforeCommit: hooks.beforeCommit },
+    );
+    if (!result.sourceExists) return { scanned: 0, changed: 0, ignored: 1 };
+    return result.changed
+      ? { scanned: 1, changed: 1, ignored: 0 }
+      : { scanned: 1, changed: 0, ignored: 1 };
+  } catch (error) {
+    if (error instanceof MigrationError && error.migrationId === null) {
+      throw new MigrationError(error.code, error.message, {
+        migrationId: MIGRATION_ID,
+        scope: "runtime-config",
+        cause: error.cause,
+      });
+    }
+    throw error;
+  }
+}
+
 afterEach(async () => {
   await Promise.all(
     temporaryDirectories.splice(0).map((directory) =>
@@ -50,7 +86,7 @@ afterEach(async () => {
   );
 });
 
-describe("v1.0.5/0001-flatten-memory-model-config", () => {
+describe("legacy Memory model config normalization", () => {
   it("migrates an account profile to follow/cloud without treating platform roles as fixed", async () => {
     const { configPath, context } = await fixture({
       app: { cloudUuid: "cloud-uuid" },
@@ -465,7 +501,7 @@ describe("v1.0.5/0001-flatten-memory-model-config", () => {
 
     await expect(flattenMemoryModelConfigForTest(context)).rejects.toMatchObject({
       code: "migration_config_invalid",
-      migrationId: "v1.0.5/0001-flatten-memory-model-config",
+      migrationId: MIGRATION_ID,
       scope: "runtime-config",
     });
     await expect(fs.readFile(configPath, "utf8")).resolves.toBe(source);

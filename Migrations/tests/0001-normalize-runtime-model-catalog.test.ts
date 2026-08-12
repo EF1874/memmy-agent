@@ -301,6 +301,28 @@ describe("v1.0.7/0001-normalize-runtime-model-catalog", () => {
     await expect(fs.stat(configPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("reports invalid YAML against the consolidated migration", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "memmy-model-catalog-invalid-"));
+    roots.push(root);
+    const configPath = path.join(root, "config.yaml");
+    const source = "memmyMemory: [\n";
+    await fs.writeFile(configPath, source, "utf8");
+    const context: AgentWorkspaceMigrationContext = {
+      profileWorkspace: root,
+      sessionsDir: path.join(root, "sessions"),
+      runtimeConfigFile: configPath,
+      sessionDagDir: path.join(root, "session-dag"),
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    };
+
+    await expect(normalizeRuntimeModelCatalogForTest(context)).rejects.toMatchObject({
+      code: "migration_config_invalid",
+      migrationId: "v1.0.7/0001-normalize-runtime-model-catalog",
+      scope: "runtime-config",
+    });
+    await expect(fs.readFile(configPath, "utf8")).resolves.toBe(source);
+  });
+
   it("rekeys a legacy account preset by owner without rebinding another owner", async () => {
     const first = await fixture({
       app: { userId: "owner-a" },
@@ -459,5 +481,122 @@ describe("v1.0.7/0001-normalize-runtime-model-catalog", () => {
       message: "Endpoint openai/broken is missing apiBase",
     });
     await expect(fs.readFile(configPath, "utf8")).resolves.toBe(before);
+  });
+
+  it("flattens legacy Memory profiles before building the catalog in one write", async () => {
+    const { configPath, context } = await fixture({
+      providers: {
+        openai: {
+          apiBase: "https://api.example.com/v1/",
+          apiKey: "sk-agent",
+        },
+      },
+      agents: {
+        defaults: {
+          provider: "openai",
+          model: "gpt-main",
+        },
+      },
+      memmyMemory: {
+        activeProfile: "byok",
+        profiles: {
+          byok: {
+            summary: {
+              provider: "openai_compatible",
+              endpoint: "https://api.example.com/v1",
+              model: "gpt-main",
+              apiKey: "sk-agent",
+            },
+            evolution: {
+              provider: "anthropic",
+              endpoint: "https://anthropic.example",
+              model: "claude-fixed",
+              apiKey: "sk-evolution",
+            },
+            embedding: { provider: "local", batchSize: 16 },
+          },
+        },
+      },
+    });
+
+    await expect(normalizeRuntimeModelCatalogForTest(context)).resolves.toEqual({
+      scanned: 1,
+      changed: 1,
+      ignored: 0,
+    });
+
+    const config = await readConfig(configPath);
+    const agentPreset = config.modelAssignments.byok.agent.default;
+    expect(config.modelAssignments.byok.memorySummary).toBe(agentPreset);
+    expect(config.modelAssignments.byok.memoryEvolution).toMatch(/^byok-anthropic-/);
+    expect(config.modelAssignments.byok.embedding).toBeNull();
+    expect(config.memmyMemory.roleRouting).toEqual({
+      summary: "follow",
+      evolution: "fixed",
+    });
+    expect(config.memmyMemory.activeProfile).toBeUndefined();
+    expect(config.memmyMemory.profiles).toBeUndefined();
+    expect(config.memmyMemory.summary).toBeUndefined();
+    expect(config.memmyMemory.evolution).toBeUndefined();
+    expect(config.memmyMemory.embedding).toBeUndefined();
+  });
+
+  it("removes an invalid BYOK account projection without disturbing valid assignments", async () => {
+    const { configPath, context } = await fixture({
+      providers: {
+        memmy_account: {
+          ownerAccountId: "owner-a",
+          endpoints: {
+            platform: {
+              apiBase: "https://account.example/v1",
+              protocol: "memmy-account",
+            },
+          },
+        },
+        openai: {
+          apiKey: "sk-valid",
+          endpoints: {
+            chat: {
+              apiBase: "https://api.openai.com/v1",
+              protocol: "openai-chat-completions",
+            },
+          },
+        },
+      },
+      modelPresets: {
+        invalidAccountCopy: {
+          provider: "memmy_account",
+          endpoint: "platform",
+          model: "agent_chat",
+          source: "byok",
+          capabilities: ["agent"],
+        },
+        validMemory: {
+          provider: "openai",
+          endpoint: "chat",
+          model: "gpt-4.1-mini",
+          source: "byok",
+          capabilities: ["memory_summary", "memory_evolution"],
+        },
+      },
+      modelAssignments: {
+        byok: {
+          agent: { candidates: ["invalidAccountCopy"], default: "invalidAccountCopy" },
+          memorySummary: "validMemory",
+          memoryEvolution: "validMemory",
+          embedding: null,
+          asr: null,
+          imageGeneration: null,
+        },
+      },
+    });
+
+    await normalizeRuntimeModelCatalogForTest(context);
+
+    const config = await readConfig(configPath);
+    expect(config.modelPresets.invalidAccountCopy).toBeUndefined();
+    expect(config.modelAssignments.byok.agent).toEqual({ candidates: [], default: null });
+    expect(config.modelAssignments.byok.memorySummary).toBe("validMemory");
+    expect(config.modelAssignments.byok.memoryEvolution).toBe("validMemory");
   });
 });

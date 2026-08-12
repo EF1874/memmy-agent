@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { addGoalDagBoundary } from "../src/migrations/v1.0.5/0003-add-goal-dag-boundary.js";
+import { addGoalDagBoundary } from "../src/migrations/v1.0.7/0004-add-goal-dag-boundary.js";
 
 const roots: string[] = [];
 

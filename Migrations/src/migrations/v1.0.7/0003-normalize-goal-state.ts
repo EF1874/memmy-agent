@@ -9,8 +9,8 @@ import {
   type MigrationResult,
 } from "../../types.js";
 
-const MIGRATION_ID = "v1.0.5/0002-normalize-goal-state";
-const TEMP_MARKER = "v1.0.5-0002";
+const MIGRATION_ID = "v1.0.7/0003-normalize-goal-state";
+const TEMP_MARKER = "v1.0.7-0003";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const FINAL_STATUSES = new Set([
   "active",
@@ -30,7 +30,7 @@ const FINAL_KEYS = new Set([
   "createdAt",
   "updatedAt",
 ]);
-const TEMP_FILE_PATTERN = /^\..+\.jsonl\.v1\.0\.5-0002\.\d+\.[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.tmp$/i;
+const TEMP_FILE_PATTERN = /^\..+\.jsonl\.v1\.0\.7-0003\.\d+\.[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.tmp$/i;
 
 type JsonObject = Record<string, unknown>;
 
@@ -363,9 +363,9 @@ export async function normalizeGoalStates(
   return result;
 }
 
-export const normalizeGoalStateV105: MigrationDefinition = {
+export const normalizeGoalStateV107: MigrationDefinition = {
   id: MIGRATION_ID,
-  introducedIn: "1.0.5",
+  introducedIn: "1.0.7",
   scope: "agent-workspace",
   description: "Normalize persisted Goal state and route metadata",
   up: normalizeGoalStates,
