@@ -30,6 +30,7 @@ describe("createPetAgentBridge", () => {
       clientRequestId: expect.any(String),
       target: { kind: "standalone" }
     }, 1);
+    expect(socket.connection.steerQueuedMessage).not.toHaveBeenCalled();
 
     expect(bridge.stopTask("task-1")).toBe(true);
 
@@ -375,6 +376,10 @@ function createFakeSocket(): { connection: MemmyAgentWebSocketConnection; unsubs
     newChat: vi.fn(async () => ({ chatId: "chat-1", modelPreset: "desktop-openai-gpt-5" })),
     attach: vi.fn(),
     sendMessage: vi.fn(),
+    submitMessage: vi.fn(),
+    removeQueuedMessage: vi.fn(),
+    steerQueuedMessage: vi.fn(),
+    requestQueueSnapshot: vi.fn(),
     stop: vi.fn(),
     restart: vi.fn(),
     status: vi.fn(),
@@ -393,6 +398,7 @@ function createFakeSocket(): { connection: MemmyAgentWebSocketConnection; unsubs
       status: "idle" as const,
       startedAt: null,
       turnId: null,
+      source: null,
       connectionGeneration: 1
     })),
     getRunStartedAt: vi.fn(() => null),
@@ -435,6 +441,7 @@ function createRecoveryHarness(overrides: {
     status: "running" | "idle";
     startedAt: number | null;
     turnId: string | null;
+    source: { kind: "gui" | "tui" | "im"; channel: string } | null;
     connectionGeneration: number;
   };
   goalState?: AgentGoalState | null;

@@ -25,7 +25,8 @@ function nonEmptyString(value: unknown): string | null {
 function expandHome(value: string, env: NodeJS.ProcessEnv): string {
   if (value !== "~" && !value.startsWith("~/") && !value.startsWith("~\\")) return value;
   const home = env.HOME ?? env.USERPROFILE;
-  return home ? path.join(home, value.slice(2)) : value;
+  if (!home || value === "~") return home ?? value;
+  return path.join(home, ...value.slice(2).split(/[\\/]+/u));
 }
 
 function absolutePath(value: string, env: NodeJS.ProcessEnv): string {
@@ -85,7 +86,7 @@ export function resolveMigrationTargets(
     sessionDagDir: absolutePath(
       options.sessionDagDirOverride?.trim()
         || env.MEMMY_AGENT_SESSION_DAG_DIR
-        || path.join(path.dirname(canonicalWorkspace), "session-dag"),
+        || path.join(path.dirname(workspacePath), "session-dag"),
       env,
     ),
   };

@@ -25,7 +25,9 @@ describe("build runtime assets", () => {
 
     execFileSync(
       process.platform === "win32" ? (process.env.ComSpec ?? "cmd.exe") : npmBin,
-      process.platform === "win32" ? ["/d", "/s", "/c", "npm.cmd run build"] : ["run", "build"],
+      process.platform === "win32"
+        ? ["/d", "/s", "/c", "npm.cmd run --ignore-scripts build"]
+        : ["run", "--ignore-scripts", "build"],
       { cwd: process.cwd(), stdio: "pipe" },
     );
 

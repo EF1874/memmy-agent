@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentLoop, UNIFIED_SESSION_KEY } from "../../../src/core/agent-runtime/loop.js";
 import { Config } from "../../../src/config/schema.js";
 import { InboundMessage, MessageBus } from "../../../src/core/runtime-messages/index.js";
+import { SessionManager } from "../../../src/core/session/manager.js";
 
 const roots: string[] = [];
 
@@ -859,6 +860,236 @@ describe("AgentLoop Turn admission", () => {
         turn_source: source,
       }),
     ]);
+  });
+
+  it("atomically moves an eligible GUI queue item into the active Turn once", async () => {
+    const loop = makeLoop();
+    const sessionKey = "websocket:queue-steer";
+    const clientRequestId = "88888888-8888-4888-8888-888888888888";
+    const session = loop.sessions.getOrCreate(sessionKey);
+    let releaseActive!: () => void;
+    const activeGate = new Promise<void>((resolve) => {
+      releaseActive = resolve;
+    });
+    loop.processMessageInternal = vi.fn(async (message: InboundMessage, _key, options: any) => {
+      if (message.content === "active") {
+        options.slot.acceptingSteer = true;
+        await activeGate;
+        const pending = options.pendingQueue.getNowait() as InboundMessage | undefined;
+        if (pending) {
+          session.addMessage("user", pending.content, {
+            client_request_id: pending.metadata.client_request_id,
+            turn_id: options.turnId,
+          });
+          loop.sessions.save(session, { fsync: true });
+        }
+      }
+      options.slot.stopReason = "completed";
+      return null;
+    }) as any;
+
+    const running = loop.run();
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "websocket",
+      chatId: "queue-steer",
+      content: "active",
+      sessionKeyOverride: sessionKey,
+      turnSource: { kind: "gui", channel: "websocket" },
+    }));
+    await waitUntil(() => (loop.turnSlots.get(sessionKey) as any[])?.[0]?.acceptingSteer === true);
+    const activeTurnId = (loop.turnSlots.get(sessionKey) as any[])[0].turnId as string;
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "websocket",
+      chatId: "queue-steer",
+      content: "please adjust",
+      metadata: {
+        client_request_id: clientRequestId,
+        webui_queue_surface: "chat_composer",
+      },
+      sessionKeyOverride: sessionKey,
+      turnSource: { kind: "gui", channel: "websocket" },
+    }));
+    await waitUntil(async () => (await loop.getQueueSnapshot(sessionKey)).items.length === 1);
+
+    await expect(loop.steerQueuedWebuiMessage(
+      sessionKey,
+      clientRequestId,
+      activeTurnId,
+    )).resolves.toMatchObject({
+      outcome: "steered",
+      revision: 2,
+      turnId: activeTurnId,
+      descriptor: {
+        clientRequestId,
+        queueSurface: "chat_composer",
+        turnAdmission: "steer",
+        turnId: activeTurnId,
+      },
+    });
+    expect(await loop.getQueueSnapshot(sessionKey)).toMatchObject({
+      revision: 2,
+      items: [],
+      startedItems: [{ clientRequestId, turnAdmission: "steer", turnId: activeTurnId }],
+    });
+    await expect(loop.steerQueuedWebuiMessage(
+      sessionKey,
+      clientRequestId,
+      activeTurnId,
+    )).resolves.toEqual({ outcome: "already_dequeued", revision: 2 });
+
+    releaseActive();
+    await waitUntil(() => !loop.isSessionBusy(sessionKey));
+    expect(session.messages).toEqual([
+      expect.objectContaining({
+        role: "user",
+        client_request_id: clientRequestId,
+        turn_id: activeTurnId,
+      }),
+    ]);
+    expect(loop.goalRuntime.queueSteerTransfers(sessionKey)).toEqual([]);
+    loop.stop();
+    await running;
+  });
+
+  it("leaves stale, cross-surface, and slash queue items untouched", async () => {
+    const loop = makeLoop();
+    const sessionKey = "websocket:queue-steer-reject";
+    loop.sessions.getOrCreate(sessionKey);
+    let releaseActive!: () => void;
+    const activeGate = new Promise<void>((resolve) => {
+      releaseActive = resolve;
+    });
+    loop.processMessageInternal = vi.fn(async (message: InboundMessage, _key, options: any) => {
+      if (message.content === "active") {
+        options.slot.acceptingSteer = true;
+        await activeGate;
+      }
+      options.slot.stopReason = "completed";
+      return null;
+    }) as any;
+    const running = loop.run();
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "websocket",
+      chatId: "queue-steer-reject",
+      content: "active",
+      sessionKeyOverride: sessionKey,
+      turnSource: { kind: "gui", channel: "websocket" },
+    }));
+    await waitUntil(() => (loop.turnSlots.get(sessionKey) as any[])?.[0]?.acceptingSteer === true);
+    const activeTurnId = (loop.turnSlots.get(sessionKey) as any[])[0].turnId as string;
+    const clientRequestId = "99999999-9999-4999-8999-999999999999";
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "websocket",
+      chatId: "queue-steer-reject",
+      content: "/definitely-not-a-command",
+      metadata: {
+        client_request_id: clientRequestId,
+        webui_queue_surface: "chat_composer",
+      },
+      sessionKeyOverride: sessionKey,
+      turnSource: { kind: "gui", channel: "websocket" },
+    }));
+    await waitUntil(async () => (await loop.getQueueSnapshot(sessionKey)).items.length === 1);
+
+    await expect(loop.steerQueuedWebuiMessage(
+      sessionKey,
+      clientRequestId,
+      activeTurnId,
+    )).resolves.toEqual({ outcome: "not_steerable", revision: 1 });
+    await expect(loop.steerQueuedWebuiMessage(
+      sessionKey,
+      clientRequestId,
+      "stale-turn",
+    )).resolves.toEqual({ outcome: "not_steerable", revision: 1 });
+    expect((await loop.getQueueSnapshot(sessionKey)).items).toEqual([
+      expect.objectContaining({ clientRequestId, queueSurface: "chat_composer" }),
+    ]);
+
+    releaseActive();
+    await waitUntil(() => !loop.isSessionBusy(sessionKey));
+    loop.stop();
+    await running;
+  });
+
+  it("restores an unpersisted slot transfer as an ordinary queued Turn after restart", async () => {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-turn-admission-restart-"));
+    roots.push(workspace);
+    const sessions = new SessionManager(path.join(workspace, "sessions"));
+    const sessionKey = "websocket:queue-steer-restart";
+    const clientRequestId = "34343434-3434-4434-8434-343434343434";
+    const session = sessions.getOrCreate(sessionKey);
+    session.metadata.webui_queue_steer_transfers = [{
+      clientRequestId,
+      expectedTurnId: "56565656-5656-4656-8656-565656565656",
+      store: "slot",
+      descriptor: {
+        clientRequestId,
+        content: "recover me",
+        media: [],
+        queuedAt: "2026-08-10T12:00:00.000Z",
+        sessionKey,
+        source: { kind: "gui", channel: "websocket" },
+        queueSurface: "chat_composer",
+      },
+      messageFields: {
+        channel: "websocket",
+        chatId: "queue-steer-restart",
+        senderId: "user",
+        content: "recover me",
+        media: [],
+        metadata: {
+          client_request_id: clientRequestId,
+          webui_request_digest: "restart-digest",
+          webui_queue_surface: "chat_composer",
+          turn_source: { kind: "gui", channel: "websocket" },
+        },
+        timestamp: "2026-08-10T12:00:00.000Z",
+        sessionKey,
+        turnSource: { kind: "gui", channel: "websocket" },
+      },
+    }];
+    sessions.save(session, { fsync: true });
+    const loop = new AgentLoop({
+      bus: new MessageBus(),
+      config: new Config({ memmyMemory: { enabled: false } }),
+      provider: {
+        generation: { maxTokens: 256 },
+        getDefaultModel: () => "test-model",
+      },
+      workspace,
+      sessionManager: sessions,
+      model: "test-model",
+    });
+    loop.initializeRuntimeTools = vi.fn(async () => undefined);
+    const received: InboundMessage[] = [];
+    loop.processMessageInternal = vi.fn(async (message: InboundMessage, _key, options: any) => {
+      received.push(message);
+      options.slot.stopReason = "completed";
+      return null;
+    }) as any;
+    let releaseQueueAnnouncement!: () => void;
+    const queueAnnouncement = new Promise<void>((resolve) => {
+      releaseQueueAnnouncement = resolve;
+    });
+    const publishQueued = vi.spyOn(loop, "publishWebuiMessageQueued")
+      .mockImplementation(async () => queueAnnouncement);
+
+    const running = loop.run();
+    await waitUntil(() => publishQueued.mock.calls.length === 1);
+    expect(received).toHaveLength(0);
+    releaseQueueAnnouncement();
+    await waitUntil(() => received.length === 1);
+    expect(received[0]).toMatchObject({
+      content: "recover me",
+      turnAdmission: "queue",
+    });
+    expect(received[0]?.metadata).toMatchObject({
+      client_request_id: clientRequestId,
+      webui_queue_surface: "chat_composer",
+    });
+    expect(received[0]?.metadata.webui_queue_steer_origin).toBeUndefined();
+    loop.stop();
+    await running;
   });
 
   it("keeps direct, Slot-backed, and deletion-barrier Sessions out of auto-compaction", () => {

@@ -24,7 +24,13 @@ describe("provider initialization", () => {
       makeProvider(
         new Config({
           agents: { defaults: { provider: "azure", model: "deployment" } },
-          providers: { azure_openai: { apiKey: "key", apiBase: "https://res.openai.azure.com" } },
+          providers: { azure_openai: {
+            apiKey: "key",
+            endpoints: { chat: {
+              apiBase: "https://res.openai.azure.com",
+              protocol: "openai-chat-completions",
+            } },
+          } },
         }),
       ),
     ).toBeInstanceOf(AzureOpenAIProvider);

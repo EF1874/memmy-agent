@@ -82,7 +82,6 @@ describe("memmy memory discovery", () => {
         enabled: true,
         version: 1,
         storage: { endpoint: "http://127.0.0.1:18960", token: "service-token" },
-        embedding: { provider: "hash" },
       },
     });
     const defaultConfig = new Config();
@@ -100,7 +99,6 @@ describe("memmy memory discovery", () => {
       userId: "user_config_1",
       version: 1,
       storage: { endpoint: "http://127.0.0.1:18960", token: "service-token" },
-      embedding: { provider: "hash" },
     });
     expect(enabled.toObject().app).toEqual({
       userId: "user_config_1",

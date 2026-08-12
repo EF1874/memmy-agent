@@ -162,7 +162,9 @@ const TRANSLATABLE_AGENT_ERROR_KEYS = new Set<MessageKey>([
   "home.agent.recoveryTimeout",
   "home.goal.controlUnknown",
   "home.project.desktopRequired",
-  "home.queue.removeFailed"
+  "home.queue.removeFailed",
+  "home.queue.steerFailed",
+  "home.queue.steerUnavailable"
 ]);
 export const AGENT_ATTACHMENT_ACCEPT = agentAttachmentAccept();
 export const AGENT_MEDIA_ACCEPT = AGENT_ATTACHMENT_ACCEPT;
@@ -823,6 +825,7 @@ export function HomePage() {
   const goalMutationLocksRef = useRef<Set<string>>(new Set());
   const messageSendLocksRef = useRef<Set<string>>(new Set());
   const queueRemoveLocksRef = useRef<Set<string>>(new Set());
+  const queueSteerLocksRef = useRef<Set<string>>(new Set());
   const draftTargetRevisionRef = useRef(state.agent.draftTargetRevisionByScope);
   draftTargetRevisionRef.current = state.agent.draftTargetRevisionByScope;
   const asrRecorder = useAsrRecorder(clients?.asr, { emptyAudioMessage: t("home.asrEmptyAudio") });
@@ -861,6 +864,22 @@ export function HomePage() {
   const currentQueuedMessages = state.agent.currentChatId
     ? state.agent.queuedMessagesByChatId[state.agent.currentChatId] ?? []
     : [];
+  const currentActiveTurnId = state.agent.currentChatId
+    ? state.agent.activeTurnIdByChatId[state.agent.currentChatId] ?? null
+    : null;
+  const currentActiveTurnSource = state.agent.currentChatId
+    ? state.agent.activeTurnSourceByChatId[state.agent.currentChatId] ?? null
+    : null;
+  const canSteerCurrentQueue = Boolean(
+    state.agent.currentChatId
+    && state.agent.connectionStatus === "connected"
+    && state.agent.recoveringGeneration === null
+    && state.agent.runStartedAtByChatId[state.agent.currentChatId]
+    && currentActiveTurnId
+    && currentActiveTurnSource?.kind === "gui"
+    && currentActiveTurnSource.channel === "websocket"
+    && !currentQueuedMessages.some((item) => item.status === "steering")
+  );
   const hasActiveConversation = hasActiveAgentConversation(state.agent.currentChatId, state.agent.messages.length);
   const activeConversationTitle = state.agent.currentSessionKey
     ? state.agent.tasks.find((task) => task.sessionKey === state.agent.currentSessionKey)?.title.trim() || t("home.title")
@@ -1708,6 +1727,76 @@ export function HomePage() {
       ));
     } finally {
       queueRemoveLocksRef.current.delete(clientRequestId);
+    }
+  }
+
+  async function steerQueuedMessage(clientRequestId: string) {
+    const chatId = state.agent.currentChatId;
+    const generation = connection?.getReadyGeneration() ?? null;
+    const turnId = chatId ? state.agent.activeTurnIdByChatId[chatId] ?? null : null;
+    const source = chatId ? state.agent.activeTurnSourceByChatId[chatId] ?? null : null;
+    const item = chatId
+      ? state.agent.queuedMessagesByChatId[chatId]?.find(
+          (candidate) => candidate.clientRequestId === clientRequestId
+        )
+      : null;
+    if (
+      !chatId
+      || !connection
+      || generation === null
+      || !turnId
+      || source?.kind !== "gui"
+      || source.channel !== "websocket"
+      || item?.source.kind !== "gui"
+      || item.queueSurface !== "chat_composer"
+      || item.content.trimStart().startsWith("/")
+      || item.status !== "queued"
+      || queueSteerLocksRef.current.has(chatId)
+    ) return;
+    queueSteerLocksRef.current.add(chatId);
+    dispatch(agentActions.queueItemSteerStarted(chatId, clientRequestId));
+    try {
+      const result = await connection.steerQueuedMessage(
+        chatId,
+        clientRequestId,
+        turnId,
+        generation
+      );
+      if (result.outcome !== "steered") {
+        if (result.outcome === "already_dequeued") {
+          dispatch(agentActions.queueItemSteerReset(chatId, clientRequestId));
+        } else {
+          dispatch(agentActions.queueItemSteerFailed(
+            chatId,
+            clientRequestId,
+            createAgentOperationError({
+              source: "queue",
+              message: "home.queue.steerUnavailable",
+              chatId
+            })
+          ));
+        }
+        const readyGeneration = connection.getReadyGeneration();
+        if (readyGeneration !== null) {
+          connection.requestQueueSnapshot(chatId, readyGeneration);
+        }
+      }
+    } catch {
+      dispatch(agentActions.queueItemSteerFailed(
+        chatId,
+        clientRequestId,
+        createAgentOperationError({
+          source: "queue",
+          message: "home.queue.steerFailed",
+          chatId
+        })
+      ));
+      const readyGeneration = connection.getReadyGeneration();
+      if (readyGeneration !== null) {
+        connection.requestQueueSnapshot(chatId, readyGeneration);
+      }
+    } finally {
+      queueSteerLocksRef.current.delete(chatId);
     }
   }
 
@@ -2661,6 +2750,8 @@ export function HomePage() {
                     items={currentQueuedMessages}
                     label={t("home.queue.label")}
                     removeLabel={t("home.queue.remove")}
+                    steerLabel={t("home.queue.steer")}
+                    canSteer={canSteerCurrentQueue}
                     attachmentOnlyLabel={(count) => t("home.queue.attachmentOnly", { count })}
                     sourceLabels={{
                       gui: t("home.queue.source.gui"),
@@ -2669,6 +2760,7 @@ export function HomePage() {
                       unknownIm: t("home.queue.source.imUnknown")
                     }}
                     onRemove={(clientRequestId) => void removeQueuedMessage(clientRequestId)}
+                    onSteer={(clientRequestId) => void steerQueuedMessage(clientRequestId)}
                   />
                   <div
                     className="relative agent-composer-shell rounded-card-lg"

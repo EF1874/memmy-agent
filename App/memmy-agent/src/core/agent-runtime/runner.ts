@@ -251,7 +251,12 @@ export class AgentRunner {
 
   static appendInjectedMessages(messages: Record<string, any>[], injections: Record<string, any>[]): void {
     for (const injection of injections) {
-      if (messages.length && injection.role === "user" && messages.at(-1)?.role === "user") {
+      if (
+        messages.length
+        && injection.role === "user"
+        && messages.at(-1)?.role === "user"
+        && injection.webui_queue_steer_origin !== true
+      ) {
         const merged = { ...messages.at(-1)! };
         merged.content = AgentRunner.mergeMessageContent(merged.content, injection.content);
         messages[messages.length - 1] = merged;
@@ -280,7 +285,24 @@ export class AgentRunner {
       if (item && typeof item === "object" && item.role === "user" && "content" in item) {
         const content = item.content;
         if (typeof content === "string" && !content.trim()) continue;
-        messages.push({ role: "user", content });
+        messages.push({
+          role: "user",
+          content,
+          ...(typeof item.client_request_id === "string"
+            ? { client_request_id: item.client_request_id }
+            : {}),
+          ...(typeof item.webui_request_digest === "string"
+            ? { webui_request_digest: item.webui_request_digest }
+            : {}),
+          ...(typeof item.turn_id === "string" ? { turn_id: item.turn_id } : {}),
+          ...(item.turn_source ? { turn_source: structuredClone(item.turn_source) } : {}),
+          ...(item.webui_queue_steer_origin === true
+            ? { webui_queue_steer_origin: true }
+            : {}),
+          ...(item.webui_queue_steer_recovery
+            ? { webui_queue_steer_recovery: structuredClone(item.webui_queue_steer_recovery) }
+            : {}),
+        });
       } else {
         const text = String(item?.content ?? item ?? "");
         if (text.trim()) messages.push({ role: "user", content: text });
@@ -326,6 +348,12 @@ export class AgentRunner {
       messages: messages.map((message) => {
         const providerMessage = { ...message };
         delete providerMessage.finish_reason;
+        delete providerMessage.client_request_id;
+        delete providerMessage.webui_request_digest;
+        delete providerMessage.turn_id;
+        delete providerMessage.turn_source;
+        delete providerMessage.webui_queue_steer_origin;
+        delete providerMessage.webui_queue_steer_recovery;
         return providerMessage;
       }),
       tools,

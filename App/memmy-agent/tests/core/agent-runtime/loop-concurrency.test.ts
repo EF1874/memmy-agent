@@ -349,7 +349,7 @@ describe("AgentLoop concurrent chat turns", () => {
         },
       },
     ])) as Record<string, any>;
-    const workspace = tmpRoot();
+    const workspace = fs.realpathSync(tmpRoot());
     const loop = new AgentLoop({
       bus: new MessageBus(),
       config: new Config({ memmyMemory: { enabled: false } }),

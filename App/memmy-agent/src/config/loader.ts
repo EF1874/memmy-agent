@@ -28,7 +28,12 @@ export function getConfigPath(): string {
 }
 
 export function resolveConfigEnvVars(config: Config): Config {
-  return new Config(resolveEnvVars(config.toObject()) as any);
+  const serialized = config.toObject();
+  const dream = serialized.agents?.defaults?.dream;
+  if (dream && config.agents.defaults.dream.cron) {
+    dream.cron = config.agents.defaults.dream.cron;
+  }
+  return new Config(resolveEnvVars(serialized) as any);
 }
 
 function resolveInPlace(obj: any): any {
