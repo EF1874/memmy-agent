@@ -61,7 +61,12 @@ import {
 import { AgentAttachmentCard, splitAgentAttachmentName } from "./agent-file-attachment-chip.js";
 import { AgentThreadMessages, ChatImageLightbox } from "./agent-thread-messages.js";
 import { AppFrame } from "./app-frame.js";
-import { mergeVoiceTranscript, useAsrRecorder } from "./asr-recorder.js";
+import {
+  MicrophonePermissionError,
+  mergeVoiceTranscript,
+  microphonePermissionDeniedMessageKey,
+  useAsrRecorder
+} from "./asr-recorder.js";
 import { FirstEncounterRelayChallenge, FirstEncounterRelayOptIn, firstEncounterFollowUpMode, hasDetectedRelayAgents, relayAgentOptions } from "./first-encounter-relay-challenge.js";
 import {
   consumeFirstEncounterRelayArm,
@@ -113,7 +118,10 @@ const TRANSLATABLE_AGENT_ERROR_KEYS = new Set<MessageKey>([
   "home.agent.messageNotRecorded",
   "home.agent.executionInterrupted",
   "home.agent.recoveryTimeout",
-  "home.project.desktopRequired"
+  "home.project.desktopRequired",
+  "asr.error.microphonePermissionDenied",
+  "asr.error.microphonePermissionDenied.mac",
+  "asr.error.microphonePermissionDenied.windows"
 ]);
 export const AGENT_ATTACHMENT_ACCEPT = agentAttachmentAccept();
 export const AGENT_MEDIA_ACCEPT = AGENT_ATTACHMENT_ACCEPT;
@@ -2907,10 +2915,16 @@ function browserStorage(): SlashCommandStorageLike | null {
 /**
  * Produces an ASR error message for the main interface.
  *
+ * Microphone denials use a stable message key so the toast shows OS-specific
+ * settings guidance instead of the generic "operation failed" fallback.
+ *
  * @param error An unknown exception.
- * @returns Error text that can be shown to the user.
+ * @returns Error text or a MessageKey that can be shown to the user.
  */
 function toReadableAsrError(error: unknown, t: HomeTranslate = defaultHomeTranslate): string {
+  if (error instanceof MicrophonePermissionError) {
+    return microphonePermissionDeniedMessageKey();
+  }
   return error instanceof Error && error.message
     ? t("home.asrFailedWithMessage", { message: error.message })
     : t("home.asrFailed");

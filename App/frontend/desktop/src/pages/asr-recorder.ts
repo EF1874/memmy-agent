@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AsrTranscriptionResponse } from "@memmy/local-api-contracts";
 import type { AsrClient } from "../api/asr-client.js";
-import { formatMessage, zhCNMessages } from "../i18n/messages.js";
+import { formatMessage, type MessageKey, zhCNMessages } from "../i18n/messages.js";
 
 const EMPTY_AUDIO_ERROR_MESSAGE = formatMessage(zhCNMessages["asr.error.emptyAudio"]);
 const MICROPHONE_PERMISSION_ERROR_MESSAGE = formatMessage(zhCNMessages["asr.error.microphonePermissionDenied"]);
@@ -46,6 +46,22 @@ export class MicrophonePermissionError extends Error {
   }
 }
 
+/**
+ * Resolves the toast/copy key that guides the user to the OS microphone settings page.
+ *
+ * macOS and Windows use different Settings paths, so the key is platform-aware.
+ *
+ * @param platform The desktop runtime platform (`darwin`, `win32`, …).
+ * @returns A message key that can be translated for the current OS.
+ */
+export function microphonePermissionDeniedMessageKey(
+  platform: string | undefined = typeof window === "undefined" ? undefined : window.memmy?.platform
+): MessageKey {
+  return platform === "win32"
+    ? "asr.error.microphonePermissionDenied.windows"
+    : "asr.error.microphonePermissionDenied.mac";
+}
+
 export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOptions = {}): AsrRecorder {
   const [status, setStatus] = useState<AsrRecorderStatus>("idle");
   const [error, setError] = useState<Error | null>(null);
@@ -88,7 +104,15 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
         }
       });
       setStatus("starting");
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (mediaError) {
+        if (isMicrophonePermissionDenial(mediaError)) {
+          throw new MicrophonePermissionError("denied");
+        }
+        throw mediaError;
+      }
       const recorder = new MediaRecorder(stream, pickRecorderOptions());
       chunksRef.current = [];
       streamRef.current = stream;
@@ -201,8 +225,29 @@ export async function ensureMicrophoneAccess(
   if (requestedStatus === "granted") {
     return "granted";
   }
+  // Windows/Linux prompt via getUserMedia; leave not-determined so the recorder can continue.
+  if (requestedStatus === "not-determined") {
+    return "not-determined";
+  }
 
   throw new MicrophonePermissionError(requestedStatus);
+}
+
+/**
+ * Detects browser/OS denials from getUserMedia that should surface as a microphone-permission toast.
+ *
+ * @param error The rejection from getUserMedia.
+ * @returns True when the user (or OS policy) blocked microphone access.
+ */
+export function isMicrophonePermissionDenial(error: unknown): boolean {
+  if (!(error instanceof DOMException) && !(error instanceof Error)) {
+    return false;
+  }
+  const name = error.name;
+  if (name === "NotAllowedError" || name === "PermissionDeniedError" || name === "SecurityError") {
+    return true;
+  }
+  return /permission|not allowed|denied/i.test(error.message);
 }
 
 export async function blobToAudioBase64(blob: Blob, emptyAudioMessage = EMPTY_AUDIO_ERROR_MESSAGE): Promise<EncodedAudio> {
