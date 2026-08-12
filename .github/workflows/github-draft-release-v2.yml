@@ -102,14 +102,29 @@ jobs:
           echo "create_draft=$create_draft" >> "$GITHUB_OUTPUT"
 
       - name: Check for an existing tag or release
+        id: existing
         if: ${{ steps.release.outputs.preflight_level == 'full' }}
         env:
           TAG: ${{ steps.release.outputs.tag }}
+          TARGET_SHA: ${{ steps.release.outputs.target_sha }}
         run: |
           set -euo pipefail
-          if git ls-remote --exit-code --tags "https://github.com/${GITHUB_REPOSITORY}.git" "refs/tags/$TAG" >/dev/null 2>&1; then
-            echo "::error title=Release tag already exists::$TAG already exists. Manual recovery: inspect the existing tag and Release before retrying; do not move or overwrite the tag." >&2
-            exit 1
+          repo_url="https://github.com/${GITHUB_REPOSITORY}.git"
+          tag_object_sha="$(git ls-remote --tags "$repo_url" "refs/tags/$TAG" | awk '{print $1}' | tail -n 1)"
+          tag_peeled_sha="$(git ls-remote --tags "$repo_url" "refs/tags/$TAG^{}" | awk '{print $1}' | tail -n 1)"
+          tag_target_sha="${tag_peeled_sha:-$tag_object_sha}"
+
+          if [[ -n "$tag_object_sha" ]]; then
+            echo "tag_preexists=true" >> "$GITHUB_OUTPUT"
+            echo "existing_tag_sha=$tag_target_sha" >> "$GITHUB_OUTPUT"
+            if [[ "$tag_target_sha" != "$TARGET_SHA" ]]; then
+              echo "::error title=Release tag points to a different commit::$TAG already points to $tag_target_sha, but this release targets $TARGET_SHA. Manual recovery: inspect the existing tag; do not move or overwrite it automatically." >&2
+              exit 1
+            fi
+            echo "::notice title=Release tag already exists::$TAG already points to the target commit $TARGET_SHA. The workflow will create the missing Draft Release without moving the tag."
+          else
+            echo "tag_preexists=false" >> "$GITHUB_OUTPUT"
+            echo "existing_tag_sha=" >> "$GITHUB_OUTPUT"
           fi
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "::error title=Release already exists::$TAG already has a GitHub Release. Manual recovery: inspect whether it is the intended Draft/Published Release before retrying." >&2
@@ -791,14 +806,20 @@ jobs:
         env:
           TAG: ${{ steps.release.outputs.tag }}
           TARGET_SHA: ${{ steps.release.outputs.target_sha }}
+          TAG_PREEXISTS: ${{ steps.existing.outputs.tag_preexists }}
         run: |
           set -euo pipefail
           draft_created=0
           cleanup_draft_release() {
             status="$?"
             if [[ "$status" -ne 0 && "$draft_created" == "1" ]]; then
-              echo "Draft Release asset upload failed; deleting $TAG and its tag so the workflow can be safely re-run." >&2
-              gh release delete "$TAG" --cleanup-tag --yes --repo "$GITHUB_REPOSITORY" || true
+              if [[ "$TAG_PREEXISTS" == "true" ]]; then
+                echo "Draft Release asset upload failed; deleting the half-created Draft Release $TAG but preserving the pre-existing tag." >&2
+                gh release delete "$TAG" --yes --repo "$GITHUB_REPOSITORY" || true
+              else
+                echo "Draft Release asset upload failed; deleting $TAG and its tag so the workflow can be safely re-run." >&2
+                gh release delete "$TAG" --cleanup-tag --yes --repo "$GITHUB_REPOSITORY" || true
+              fi
             fi
             exit "$status"
           }

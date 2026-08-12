@@ -234,14 +234,18 @@ describe("GitHub Draft Release v2 workflow", () => {
     expect(script).toContain("LLM generation: not invoked by smoke");
   });
 
-  it("refuses duplicate tags/releases and never forces publication", () => {
+  it("reuses a pre-existing tag only when it points at the target commit", () => {
     expect(
       draftSteps.find((step) => step.name === "Check for an existing tag or release")?.if,
     ).toBe("${{ steps.release.outputs.preflight_level == 'full' }}");
     const duplicateCheck = draftScript("Check for an existing tag or release");
-    expect(duplicateCheck).toContain("git ls-remote --exit-code --tags");
+    expect(duplicateCheck).toContain("git ls-remote --tags");
+    expect(duplicateCheck).toContain('"refs/tags/$TAG^{}"');
+    expect(duplicateCheck).toContain("tag_preexists=true");
+    expect(duplicateCheck).toContain("tag_preexists=false");
+    expect(duplicateCheck).toContain("Release tag points to a different commit");
+    expect(duplicateCheck).toContain("create the missing Draft Release without moving the tag");
     expect(duplicateCheck).toContain('gh release view "$TAG"');
-    expect(duplicateCheck).toContain("Release tag already exists");
     expect(duplicateCheck).toContain("Release already exists");
     expect(duplicateCheck).not.toContain("--force");
     expect(draftSource).toContain("gh release create");
@@ -345,8 +349,11 @@ describe("GitHub Draft Release v2 workflow", () => {
   it("cleans up a half-created Draft Release if asset upload fails", () => {
     const create = draftScript("Create draft release and upload every asset");
     expect(create).toContain("cleanup_draft_release()");
+    expect(create).toContain("TAG_PREEXISTS");
     expect(create).toContain('draft_created=1');
+    expect(create).toContain("preserving the pre-existing tag");
     expect(create).toContain('gh release delete "$TAG" --cleanup-tag --yes');
+    expect(create).toContain('gh release delete "$TAG" --yes');
     expect(create).toContain("Draft Release creation failed");
     expect(create).toContain("Draft asset upload failed");
     expect(create).toContain("Automatic recovery");
