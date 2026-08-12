@@ -853,7 +853,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
                               type="button"
                               aria-pressed={isDefault}
                               onClick={() => chooseDefaultTaskCandidate(candidate.id)}
-                              className="ml-2 shrink-0 text-[10px] text-action-sky"
+                              className="task-model-picker__default-button ml-2 shrink-0"
                             >
                               {isDefault
                                 ? t("settings.modelWorkspace.defaultModel")
