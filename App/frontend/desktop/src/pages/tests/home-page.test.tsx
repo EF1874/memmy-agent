@@ -1043,6 +1043,7 @@ describe("HomePage", () => {
     expect(agentErrorText("home.media.error.sendUnsupported")).toBe("当前不支持此文件格式。请上传图片、PDF、Office 文档或文本文件。");
     expect(agentErrorText("home.media.error.sendTooManyAttachments")).toBe("最多 4 个附件。");
     expect(agentErrorText("home.media.error.sendFileSize")).toBe("单个文件不能超过 10 MB。");
+    expect(agentErrorText("home.modelSelector.unavailable")).toBe("当前模型或连接已失效，无法继续调用，需要切换模型。");
     expect(agentErrorText("message_request_rejected:model_selection_unavailable")).toBe("当前模型或连接已失效，无法继续调用，需要切换模型。");
     expect(agentErrorText("asr.error.microphonePermissionDenied.mac")).toBe(
       "麦克风权限未开启。请到 系统设置 › 隐私与安全性 › 麦克风 中开启 Memmy"
