@@ -491,13 +491,15 @@ export interface MemmyAgentNewChatResult {
 }
 
 export type MemmyAgentModelError = {
-  category: "quota_exhausted" | "model_failed";
+  category: "quota_exhausted" | "image_input_unsupported" | "image_analysis_failed" | "model_failed";
   detail?: string;
   presetId?: string;
   source?: "account" | "byok";
   provider?: string;
   model?: string;
   capability?: "agent" | "memory_summary" | "memory_evolution" | "embedding" | "asr" | "image_generation";
+  failedProvider?: string;
+  failedModel?: string;
 };
 
 export type MemmyAgentWsEvent = {

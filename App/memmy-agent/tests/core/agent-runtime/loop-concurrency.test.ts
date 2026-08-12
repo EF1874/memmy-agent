@@ -9,6 +9,14 @@ import { GOAL_STATE_KEY, readGoalState } from "../../../src/core/session/goal-st
 
 const roots: string[] = [];
 
+function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
 function tmpRoot(): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-loop-concurrency-"));
   roots.push(root);
@@ -55,6 +63,59 @@ afterEach(() => {
 });
 
 describe("AgentLoop concurrent chat turns", () => {
+  it("releases the slot after an image error so the next queued turn can run", async () => {
+    const loop = makeLoop();
+    loop.initializeRuntimeTools = vi.fn(async () => undefined);
+    const firstStarted = deferred<void>();
+    const releaseFirst = deferred<void>();
+    const calls: string[] = [];
+    loop.runner.run = vi.fn(async (spec: any) => {
+      calls.push(String(spec.initialMessages.at(-1)?.content ?? ""));
+      if (calls.length === 1) {
+        firstStarted.resolve();
+        await releaseFirst.promise;
+        return {
+          ...runResult(),
+          finalContent: "image_url is not supported",
+          content: "image_url is not supported",
+          stopReason: "error",
+          finishReason: "error",
+          error: "image_url is not supported",
+          response: {
+            usage: {},
+            finishReason: "error",
+            errorCategory: "image_input_unsupported",
+          },
+        } as any;
+      }
+      return { ...runResult(), finalContent: "second completed", content: "second completed" } as any;
+    });
+
+    const running = loop.run();
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "telegram",
+      chatId: "image-queue",
+      senderId: "user",
+      content: "first image turn",
+    }));
+    await firstStarted.promise;
+    await loop.bus.publishInbound(new InboundMessage({
+      channel: "telegram",
+      chatId: "image-queue",
+      senderId: "user",
+      content: "second text turn",
+    }));
+    expect(calls).toHaveLength(1);
+
+    releaseFirst.resolve();
+    while (calls.length < 2) await new Promise((resolve) => setTimeout(resolve, 5));
+    loop.stop();
+    await running;
+
+    expect(calls[0]).toContain("first image turn");
+    expect(calls[1]).toContain("second text turn");
+  });
+
   it("keeps A/B/C delivery routes as ordered independent turns", async () => {
     const loop = makeLoop();
     const started: string[] = [];

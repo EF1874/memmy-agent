@@ -150,6 +150,26 @@ describe("GoalRuntime state transitions", () => {
     expect(result.goal?.status).toBe("blocked");
   });
 
+  it.each([
+    "image_input_unsupported",
+    "image_analysis_failed",
+  ] as const)("settles %s as a blocked Goal instead of completion", async (errorCategory) => {
+    const { runtime } = createRuntime();
+    const goal = await createGoal(runtime, { turnId: `turn-${errorCategory}` });
+    const result = await runtime.settleTurn({
+      sessionKey: SESSION_KEY,
+      turnId: `turn-${errorCategory}`,
+      goalId: goal.goalId,
+      usage: {},
+      latencyMs: 0,
+      stopReason: "error",
+      errorCategory,
+    });
+
+    expect(result.goal?.status).toBe("blocked");
+    expect(result.shouldContinue).toBe(false);
+  });
+
   it("keeps updatedAt strictly increasing when the clock stalls or moves backward", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-04T00:00:00.000Z"));

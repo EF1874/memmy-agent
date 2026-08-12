@@ -523,16 +523,21 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
   }
 
   function modelError(value: any): {
-    category: "quota_exhausted" | "model_failed";
+    category: "quota_exhausted" | "image_input_unsupported" | "image_analysis_failed" | "model_failed";
     detail?: string;
     presetId?: string;
     source?: "account" | "byok";
     provider?: string;
     model?: string;
     capability?: string;
+    failedProvider?: string;
+    failedModel?: string;
   } | null {
     if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-    return value.category === "quota_exhausted" || value.category === "model_failed"
+    return value.category === "quota_exhausted"
+      || value.category === "image_input_unsupported"
+      || value.category === "image_analysis_failed"
+      || value.category === "model_failed"
       ? {
           category: value.category,
           ...(typeof value.detail === "string" ? { detail: value.detail } : {}),
@@ -541,6 +546,8 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
           ...(typeof value.provider === "string" ? { provider: value.provider } : {}),
           ...(typeof value.model === "string" ? { model: value.model } : {}),
           ...(typeof value.capability === "string" ? { capability: value.capability } : {}),
+          ...(typeof value.failedProvider === "string" ? { failedProvider: value.failedProvider } : {}),
+          ...(typeof value.failedModel === "string" ? { failedModel: value.failedModel } : {}),
         }
       : null;
   }
@@ -1372,6 +1379,26 @@ export function replayTranscriptToUiMessages(lines: Dict[], options: ReplayTrans
         continue;
       }
       const targetMessageId = bufferMessageId ?? closedAnswerMessageId;
+      if (
+        (structuredModelError?.category === "image_input_unsupported"
+          || structuredModelError?.category === "image_analysis_failed")
+        && targetMessageId
+      ) {
+        const targetIndex = messages.findIndex((message) => message.id === targetMessageId);
+        const target = targetIndex >= 0 ? messages[targetIndex] : null;
+        if (target && String(target.content ?? "").trim()) {
+          messages[targetIndex] = {
+            ...target,
+            isStreaming: false,
+            reasoningStreaming: false,
+          };
+          absorbComplete(extra, rec, idx);
+          closedAnswerMessageId = null;
+          bufferMessageId = null;
+          bufferParts = [];
+          continue;
+        }
+      }
       if (absorbCompleteIntoMessage(targetMessageId, extra)) {
         closedAnswerMessageId = targetMessageId;
         bufferMessageId = null;

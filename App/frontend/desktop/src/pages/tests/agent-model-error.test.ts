@@ -7,6 +7,8 @@ const t = (key: string, values?: Record<string, string | number>) => {
   if (key === "agent.error.givingUp") return "模型请求多次重试后仍失败";
   if (key === "agent.error.modelFailed") return "模型请求失败";
   if (key === "agent.error.quotaExceeded") return "当前模型 Token 余额不足，请更换模型后重试";
+  if (key === "agent.error.imageInputUnsupported") return "当前模型不支持图片输入，请切换到支持多模态能力的模型后重试";
+  if (key === "agent.error.imageAnalysisFailed") return "图片解析失败，请稍后重试";
   return key;
 };
 
@@ -48,6 +50,20 @@ describe("agent-model-error", () => {
     });
   });
 
+  it("identifies image2text as the source of an internal quota error", () => {
+    expect(formatAgentModelError("localized fallback", t, {
+      modelError: {
+        category: "quota_exhausted",
+        detail: "Error: account quota exhausted",
+        failedProvider: "memmy_account",
+        failedModel: "image2text"
+      }
+    })).toEqual({
+      title: "当前模型 Token 余额不足，请更换模型后重试",
+      detail: "memmy_account/image2text: Error: account quota exhausted"
+    });
+  });
+
   it("formats a structured generic model failure without dropping its raw detail", () => {
     expect(
       formatAgentModelError("localized fallback", t, {
@@ -56,6 +72,35 @@ describe("agent-model-error", () => {
     ).toEqual({
       title: "模型请求失败",
       detail: "Error: raw provider failure"
+    });
+  });
+
+  it("formats image input rejection as a dedicated model error", () => {
+    expect(formatAgentModelError("localized fallback", t, {
+      modelError: {
+        category: "image_input_unsupported",
+        source: "byok",
+        detail: "Error: image_url is not supported"
+      }
+    })).toEqual({
+      title: "当前模型不支持图片输入，请切换到支持多模态能力的模型后重试",
+      detail: "Error: image_url is not supported"
+    });
+  });
+
+  it("formats image analysis failure and identifies the internal failed model", () => {
+    expect(formatAgentModelError("localized fallback", t, {
+      modelError: {
+        category: "image_analysis_failed",
+        source: "account",
+        model: "agent_chat",
+        failedProvider: "memmy_account",
+        failedModel: "image2text",
+        detail: "Error: upstream unavailable"
+      }
+    })).toEqual({
+      title: "图片解析失败，请稍后重试",
+      detail: "memmy_account/image2text: Error: upstream unavailable"
     });
   });
 

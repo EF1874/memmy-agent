@@ -35,12 +35,15 @@ type UserFacingModelError = {
   provider?: string;
   model?: string;
   capability?: string;
+  failedProvider?: string;
+  failedModel?: string;
 };
 
 function userFacingModelError(
   category: UserFacingModelErrorCategory,
   detail: string | null | undefined,
   selection: ResolvedModelSelection | null | undefined,
+  failure: { failedProvider?: string | null; failedModel?: string | null } = {},
 ): UserFacingModelError {
   return {
     category,
@@ -52,6 +55,8 @@ function userFacingModelError(
       model: selection.model,
       capability: selection.capability,
     } : {}),
+    ...(failure.failedProvider ? { failedProvider: failure.failedProvider } : {}),
+    ...(failure.failedModel ? { failedModel: failure.failedModel } : {}),
   };
 }
 import { makeReloadingProviderSnapshotLoader, makeReloadingToolsSnapshotLoader } from "../../providers/snapshot-loader.js";
@@ -209,6 +214,8 @@ type AgentLoopResult = [
   actualModel: string | null,
   errorCategory: ProviderErrorCategory | null,
   usage: Record<string, number>,
+  failedProvider: string | null,
+  failedModel: string | null,
 ];
 
 export enum TurnState {
@@ -250,6 +257,8 @@ export class TurnContext {
   errorDetail: string | null = null;
   finalContentStreamed = false;
   errorCategory: ProviderErrorCategory | null = null;
+  failedProvider: string | null = null;
+  failedModel: string | null = null;
   usage: Record<string, number> = {};
   goalIdForTurn: string | null = null;
   dagGoalContext: DagGoalContext | null = null;
@@ -383,6 +392,10 @@ function platformApiErrorFallback(language: any): string {
 
 const QUOTA_API_ERROR_FALLBACK_ZH = "当前模型额度已用完";
 const QUOTA_API_ERROR_FALLBACK_EN = "This model's quota has been used up.";
+const IMAGE_INPUT_UNSUPPORTED_ZH = "当前模型不支持图片输入，请切换到支持多模态能力的模型后重试";
+const IMAGE_INPUT_UNSUPPORTED_EN = "The current model does not support image input. Switch to a multimodal model and try again.";
+const IMAGE_ANALYSIS_FAILED_ZH = "图片解析失败，请稍后重试";
+const IMAGE_ANALYSIS_FAILED_EN = "Image analysis failed. Please try again later.";
 
 function quotaApiErrorFallback(language: any): string {
   return usesChineseWebuiLanguage(language)
@@ -2840,8 +2853,18 @@ export class AgentLoop {
     stopReason: string,
     errorCategory: ProviderErrorCategory | null = null,
   ): string | null {
-    if (!isWebuiVisible(channel, metadata)) return content ?? null;
     const language = metadata?.[WEBUI_LANGUAGE_METADATA_KEY] ?? session?.metadata?.[WEBUI_LANGUAGE_METADATA_KEY] ?? null;
+    if (stopReason === "error" && errorCategory === "image_input_unsupported") {
+      return usesChineseWebuiLanguage(language)
+        ? IMAGE_INPUT_UNSUPPORTED_ZH
+        : IMAGE_INPUT_UNSUPPORTED_EN;
+    }
+    if (stopReason === "error" && errorCategory === "image_analysis_failed") {
+      return usesChineseWebuiLanguage(language)
+        ? IMAGE_ANALYSIS_FAILED_ZH
+        : IMAGE_ANALYSIS_FAILED_EN;
+    }
+    if (!isWebuiVisible(channel, metadata)) return content ?? null;
     if (stopReason === "error" && errorCategory === "quota_exhausted") {
       return quotaApiErrorFallback(language);
     }
@@ -3328,6 +3351,8 @@ export class AgentLoop {
       firstString(result.response?.actualModel, activeModel),
       result.response?.errorCategory ?? null,
       usage,
+      firstString(result.response?.failedProvider),
+      firstString(result.response?.failedModel),
     ];
   }
 
@@ -3347,6 +3372,8 @@ export class AgentLoop {
       goalId = null,
       goalOutcome = null,
       modelSelection = null,
+      failedProvider = null,
+      failedModel = null,
     }: {
       turnLatencyMs?: number | null;
       tools?: ToolRegistryInstance | null;
@@ -3357,6 +3384,8 @@ export class AgentLoop {
       goalId?: string | null;
       goalOutcome?: GoalStatus | null;
       modelSelection?: ResolvedModelSelection | null;
+      failedProvider?: string | null;
+      failedModel?: string | null;
     } = {},
   ): OutboundMessage | null {
     void allMessages;
@@ -3378,7 +3407,10 @@ export class AgentLoop {
         ...(modelErrorCategory ? { modelErrorCategory } : {}),
         ...(modelErrorCategory && errorDetail ? { modelErrorDetail: errorDetail } : {}),
         ...(modelErrorCategory && modelSelection ? {
-          modelErrorContext: userFacingModelError(modelErrorCategory, null, modelSelection)
+          modelErrorContext: userFacingModelError(modelErrorCategory, null, modelSelection, {
+            failedProvider,
+            failedModel,
+          })
         } : {}),
         ...(usage ? { usage } : {}),
         ...(goalId && goalOutcome ? { goalId, goalOutcome } : {}),
@@ -3739,6 +3771,8 @@ export class AgentLoop {
       actualModel,
       errorCategory,
       usage,
+      failedProvider,
+      failedModel,
     ] = await this.runAgentLoop(ctx.initialMessages, {
       onProgress: ctx.onProgress,
       onStream: ctx.onStream,
@@ -3770,6 +3804,8 @@ export class AgentLoop {
     if (ctx.slot) ctx.slot.stopReason = stopReason;
     settleSlot();
     ctx.errorCategory = errorCategory;
+    ctx.failedProvider = failedProvider;
+    ctx.failedModel = failedModel;
     ctx.usage = usage;
     if (ctx.abortSignal?.aborted || stopReason === "cancelled") {
       throw createTaskCancelledError();
@@ -3829,7 +3865,10 @@ export class AgentLoop {
       modelName: ctx.actualModel ?? ctx.modelSelection?.model,
       modelSelection: ctx.modelSelection,
       modelError: ctx.stopReason === "error"
-        ? userFacingModelError(ctx.errorCategory ?? "model_failed", ctx.errorDetail, ctx.modelSelection)
+        ? userFacingModelError(ctx.errorCategory ?? "model_failed", ctx.errorDetail, ctx.modelSelection, {
+            failedProvider: ctx.failedProvider,
+            failedModel: ctx.failedModel,
+          })
         : null,
     });
     this.clearPendingUserTurn(ctx.session!);
@@ -3871,7 +3910,10 @@ export class AgentLoop {
         null,
         ctx.errorCategory,
         ctx.stopReason === "error"
-          ? userFacingModelError(ctx.errorCategory ?? "model_failed", ctx.errorDetail, ctx.modelSelection)
+          ? userFacingModelError(ctx.errorCategory ?? "model_failed", ctx.errorDetail, ctx.modelSelection, {
+              failedProvider: ctx.failedProvider,
+              failedModel: ctx.failedModel,
+            })
           : null,
       );
     }
@@ -3916,6 +3958,8 @@ export class AgentLoop {
       goalId: ctx.goalIdForTurn,
       goalOutcome: ctx.goalOutcome,
       modelSelection: ctx.modelSelection,
+      failedProvider: ctx.failedProvider,
+      failedModel: ctx.failedModel,
     });
     return "ok";
   }
@@ -4076,6 +4120,9 @@ export class AgentLoop {
       actualModelProvider,
       actualModel,
       errorCategory,
+      ,
+      failedProvider,
+      failedModel,
     ] = await this.runAgentLoop(messages, {
       onProgress,
       onStream,
@@ -4112,7 +4159,10 @@ export class AgentLoop {
       modelName: actualModel ?? modelSelection.model,
       modelSelection,
       modelError: stopReason === "error"
-        ? userFacingModelError(errorCategory ?? "model_failed", rawFinalContent, modelSelection)
+        ? userFacingModelError(errorCategory ?? "model_failed", rawFinalContent, modelSelection, {
+            failedProvider,
+            failedModel,
+          })
         : null,
     });
     this.clearRuntimeCheckpoint(session);
@@ -4140,7 +4190,10 @@ export class AgentLoop {
     if (stopReason === "error") metadata.modelErrorCategory = errorCategory ?? "model_failed";
     if (stopReason === "error" && rawFinalContent) metadata.modelErrorDetail = rawFinalContent;
     if (stopReason === "error") {
-      metadata.modelErrorContext = userFacingModelError(errorCategory ?? "model_failed", null, modelSelection);
+      metadata.modelErrorContext = userFacingModelError(errorCategory ?? "model_failed", null, modelSelection, {
+        failedProvider,
+        failedModel,
+      });
     }
     return new OutboundMessage({
       channel,

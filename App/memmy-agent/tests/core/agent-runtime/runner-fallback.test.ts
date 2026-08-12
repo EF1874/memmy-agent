@@ -6,6 +6,7 @@ import {
   ModelPresetConfig,
 } from "../../../src/config/schema.js";
 import { GenerationSettings, LLMProvider, LLMResponse } from "../../../src/providers/base.js";
+import type { ProviderErrorCategory } from "../../../src/providers/provider-error-classifier.js";
 import { FallbackProvider } from "../../../src/providers/fallback-provider.js";
 import { ProviderSnapshot, buildProviderSnapshot, providerSignature } from "../../../src/providers/factory.js";
 import { DEFAULT_MAX_TOKENS } from "../../../src/token-budget.js";
@@ -19,7 +20,7 @@ function makeResponse(
     errorType?: string | null;
     errorCode?: string | null;
     errorShouldRetry?: boolean | null;
-    errorCategory?: "quota_exhausted" | null;
+    errorCategory?: ProviderErrorCategory | null;
   } = {},
 ): LLMResponse {
   return new LLMResponse({
@@ -490,6 +491,54 @@ describe("FallbackProvider failover", () => {
 
     expect(result.finishReason).toBe("error");
     expect(factory).not.toHaveBeenCalled();
+  });
+
+  it("classifies raw image rejection before considering provider fallback", async () => {
+    const primary = new FakeProvider(
+      "primary",
+      makeResponse("server error: model does not support image input", "error"),
+    );
+    const factory = vi.fn(() => new FakeProvider("fallback", makeResponse("fallback ok")));
+    const provider = new FallbackProvider({
+      primary,
+      fallbackPresets: [fallback("fallback-a")],
+      providerFactory: factory,
+    });
+
+    const result = await provider.chat({ messages: [{
+      role: "user",
+      content: [{ type: "image_url", image_url: { url: "data:image/png;base64,one" } }],
+    }] });
+
+    expect(result.errorCategory).toBe("image_input_unsupported");
+    expect(factory).not.toHaveBeenCalled();
+    expect(provider.primaryFailures).toBe(0);
+  });
+
+  it.each([400, null])("does not fail over image input errors with status %j", async (errorStatusCode) => {
+    const primary = new FakeProvider(
+      "primary",
+      makeResponse("image_url is not supported", "error", {
+        errorStatusCode,
+        errorCategory: "image_input_unsupported",
+      }),
+    );
+    const factory = vi.fn();
+    const provider = new FallbackProvider({
+      primary,
+      fallbackPresets: [fallback("fallback-a")],
+      providerFactory: factory,
+    });
+
+    const result = await provider.chat({ messages: [{
+      role: "user",
+      content: [{ type: "image_url", image_url: { url: "data:image/png;base64,one" } }],
+    }] });
+
+    expect(result.errorCategory).toBe("image_input_unsupported");
+    expect(factory).not.toHaveBeenCalled();
+    expect(provider.primaryFailures).toBe(0);
+    expect(provider.primaryTrippedAt).toBeNull();
   });
 
   it("does not fail over on auth errors", async () => {

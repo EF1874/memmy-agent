@@ -136,6 +136,12 @@ function publicModelErrorContext(value: unknown): Record<string, string> {
     provider: String(context.provider),
     model: String(context.model),
     capability: String(context.capability),
+    ...(typeof context.failedProvider === "string" && context.failedProvider.trim()
+      ? { failedProvider: context.failedProvider }
+      : {}),
+    ...(typeof context.failedModel === "string" && context.failedModel.trim()
+      ? { failedModel: context.failedModel }
+      : {}),
   };
 }
 type SignedMediaPath = {
@@ -4201,7 +4207,10 @@ export class WebSocketChannel extends BaseChannel {
       metadata: publicMetadata,
       media: message.media ?? [],
       ...(turnId ? { turn_id: turnId } : {}),
-      ...(modelErrorCategory === "quota_exhausted" || modelErrorCategory === "model_failed"
+      ...(modelErrorCategory === "quota_exhausted"
+        || modelErrorCategory === "image_input_unsupported"
+        || modelErrorCategory === "image_analysis_failed"
+        || modelErrorCategory === "model_failed"
         ? {
             model_error: {
               category: modelErrorCategory,
