@@ -14,7 +14,7 @@ import { useAppState } from "../state/app-state.js";
 import { isComposingKeyboardEvent } from "../utils/keyboard.js";
 import memoIdleUrl from "../assets/mascot/memo-idle-alpha.webm";
 import { AlertCircle, AlertTriangle, CheckCircle2, Loader2, Maximize, Maximize2, Mic, Pause, Send, StopSquare, X } from "./memory/memory-prototype-icons.js";
-import { useAsrRecorder } from "./asr-recorder.js";
+import { MicrophonePermissionError, microphonePermissionDeniedMessageKey, useAsrRecorder } from "./asr-recorder.js";
 import { createPetAgentBridge, PetReconnectRecoveryTracker } from "./pet-agent-bridge.js";
 import type { AgentArtifactClient } from "./agent-message-content.js";
 
@@ -2710,6 +2710,9 @@ function clearTimerRef(ref: { current: number | null }): void {
  * @returns Error text that can be shown in the input box.
  */
 function toReadableAsrError(error: unknown, t: ReturnType<typeof useTranslation>["t"]): string {
+  if (error instanceof MicrophonePermissionError) {
+    return t(microphonePermissionDeniedMessageKey());
+  }
   return error instanceof Error && error.message
     ? t("pet.asrFailedWithMessage", { message: error.message })
     : t("pet.asrFailed");
