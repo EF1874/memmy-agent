@@ -201,11 +201,37 @@ describe("GitHub Draft Release v2 workflow", () => {
 
   it("requires the requested version to match every release manifest", () => {
     const verify = draftScript("Verify repository version metadata");
+    expect(draftSteps.find((step) => step.name === "Verify repository version metadata")?.if).toBe(
+      "${{ steps.release.outputs.preflight_level == 'full' }}",
+    );
     expect(verify).toContain("require('./package.json').version");
     expect(verify).toContain('= "$VERSION"');
     expect(verify).toContain("npm run version:check");
     expect(verify).toContain("Root version mismatch");
     expect(verify).toContain("Release version metadata mismatch");
+  });
+
+  it("smoke-checks the Doc Agent draft endpoint before release branches are merged", () => {
+    const preflight = draftSteps.find(
+      (step) => step.name === "Preflight Doc Agent draft endpoint",
+    );
+    expect(preflight).toBeDefined();
+    expect(preflight?.if).toBeUndefined();
+    const script = draftScript("Preflight Doc Agent draft endpoint");
+
+    expect(script).toContain("DOC_AGENT_RELEASE_NOTES_DRAFT_URL");
+    expect(script).toContain("DOC_AGENT_RELEASE_NOTES_DRAFT_TOKEN");
+    expect(script).toContain("Doc Agent draft URL is missing");
+    expect(script).toContain("Doc Agent draft token is missing");
+    expect(script).toContain("/internal/(memmy-)?release-notes/draft");
+    expect(script).toContain("--data-binary '[]'");
+    expect(script).toContain("400|422");
+    expect(script).toContain("Doc Agent smoke contract mismatch");
+    expect(script).toContain("Doc Agent draft token rejected");
+    expect(script).toContain("Doc Agent draft endpoint disabled or wrong path");
+    expect(script).toContain("Doc Agent draft endpoint unavailable");
+    expect(script).toContain("Doc Agent smoke response contract mismatch");
+    expect(script).toContain("LLM generation: not invoked by smoke");
   });
 
   it("refuses duplicate tags/releases and never forces publication", () => {
@@ -272,11 +298,19 @@ describe("GitHub Draft Release v2 workflow", () => {
     expect(releaseNotes).toContain("MEMMY_RELEASE_STYLE_EXAMPLES.json");
     expect(releaseNotes).toContain("candidate_count: 3");
     expect(releaseNotes).toContain(".release_notes_md // .release_notes_markdown");
+    expect(releaseNotes).toContain("Doc Agent draft configuration missing");
     expect(releaseNotes).toContain("Doc Agent draft generation failed");
-    expect(releaseNotes).toContain("GitHub generated release notes fallback");
-    expect(releaseNotes).toContain("Release notes generation failed");
+    expect(releaseNotes).toContain("do not fall back silently");
+    expect(releaseNotes).toContain("Doc Agent returned invalid release notes");
+    expect(releaseNotes).toContain("Doc Agent quality report missing");
+    expect(releaseNotes).toContain("Doc Agent candidate selection missing");
+    expect(releaseNotes).toContain("Doc Agent release notes need review");
+    expect(releaseNotes).toContain("requested_candidate_count");
+    expect(releaseNotes).toContain("Release notes generation produced an empty body");
     expect(releaseNotes).toContain("RELEASE_NOTES_SOURCE.json");
     expect(releaseNotes).toContain("QUALITY_REPORT.json");
+    expect(releaseNotes).not.toContain("releases/generate-notes");
+    expect(releaseNotes).not.toContain("github-generated");
     const evidence = draftScript("Build auditable release evidence");
     expect(evidence).toContain("compare/${compare_base}...${TARGET_SHA}");
     expect(evidence).toContain("commits/${commit_sha}/pulls");
@@ -345,8 +379,9 @@ describe("GitHub Draft Release v2 workflow", () => {
       "${{ steps.release.outputs.create_draft != 'true' }}",
     );
     expect(preflight).toContain("No tag, Release, assets, or external publication was created.");
-    expect(preflight).toContain("Smoke only validates the target commit and version metadata.");
-    expect(preflight).toContain("run full preflight before creating a Draft Release.");
+    expect(preflight).toContain("Smoke validates the target commit and Doc Agent draft endpoint configuration.");
+    expect(preflight).toContain("It intentionally skips release version metadata");
+    expect(preflight).toContain("Run full preflight before creating a Draft Release.");
     expect(preflight).toContain("Set create_draft=true only when intentionally creating a Draft Release.");
   });
 });

@@ -13,7 +13,7 @@ on:
         required: true
         type: string
       preflight_level:
-        description: Smoke validates the target only; full also verifies installers, release notes, and evidence
+        description: Smoke validates the target and Doc Agent config; full also verifies installers, release notes, and evidence
         required: false
         default: smoke
         type: choice
@@ -139,7 +139,76 @@ jobs:
           git checkout --detach "$TARGET_SHA"
           test "$(git rev-parse HEAD)" = "$TARGET_SHA"
 
+      - name: Preflight Doc Agent draft endpoint
+        env:
+          DOC_AGENT_RELEASE_NOTES_DRAFT_URL: ${{ vars.DOC_AGENT_RELEASE_NOTES_DRAFT_URL || secrets.DOC_AGENT_RELEASE_NOTES_DRAFT_URL }}
+          DOC_AGENT_RELEASE_NOTES_DRAFT_TOKEN: ${{ secrets.DOC_AGENT_RELEASE_NOTES_DRAFT_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$DOC_AGENT_RELEASE_NOTES_DRAFT_URL" ]]; then
+            echo "::error title=Doc Agent draft URL is missing::Configure DOC_AGENT_RELEASE_NOTES_DRAFT_URL before merging release branches. Manual recovery: add the Actions variable pointing to the 106 /internal/memmy-release-notes/draft endpoint, then re-run smoke." >&2
+            exit 1
+          fi
+          if [[ -z "$DOC_AGENT_RELEASE_NOTES_DRAFT_TOKEN" ]]; then
+            echo "::error title=Doc Agent draft token is missing::Configure DOC_AGENT_RELEASE_NOTES_DRAFT_TOKEN before merging release branches. Manual recovery: add the Actions secret matching the 106 RELEASE_NOTES_DRAFT_TOKEN, then re-run smoke." >&2
+            exit 1
+          fi
+          if [[ ! "$DOC_AGENT_RELEASE_NOTES_DRAFT_URL" =~ ^https?://[^[:space:]]+/internal/(memmy-)?release-notes/draft$ ]]; then
+            echo "::error title=Doc Agent draft URL is invalid::DOC_AGENT_RELEASE_NOTES_DRAFT_URL must point to /internal/memmy-release-notes/draft or /internal/release-notes/draft. Manual recovery: fix the Actions variable, then re-run smoke." >&2
+            exit 1
+          fi
+
+          mkdir -p release-assets
+          response_file="release-assets/DOC_AGENT_SMOKE_RESPONSE.json"
+          http_status="$(curl --silent --show-error --location --retry 2 --retry-all-errors \
+            --connect-timeout 10 --max-time 45 \
+            --header "Content-Type: application/json" \
+            --header "Authorization: Bearer $DOC_AGENT_RELEASE_NOTES_DRAFT_TOKEN" \
+            --data-binary '[]' \
+            --output "$response_file" \
+            --write-out '%{http_code}' \
+            "$DOC_AGENT_RELEASE_NOTES_DRAFT_URL" || true)"
+
+          case "$http_status" in
+            400|422) ;;
+            200)
+              echo "::error title=Doc Agent smoke contract mismatch::The 106 draft endpoint accepted an intentionally invalid smoke payload. Manual recovery: verify the endpoint still rejects non-object evidence packets before release." >&2
+              exit 1
+              ;;
+            401|403)
+              echo "::error title=Doc Agent draft token rejected::The 106 draft endpoint rejected DOC_AGENT_RELEASE_NOTES_DRAFT_TOKEN with HTTP $http_status. Manual recovery: make the GitHub secret match the 106 RELEASE_NOTES_DRAFT_TOKEN, then re-run smoke." >&2
+              exit 1
+              ;;
+            404)
+              echo "::error title=Doc Agent draft endpoint disabled or wrong path::The 106 draft endpoint returned HTTP 404. Manual recovery: enable RELEASE_NOTES_DRAFT_ENABLED=true on 106 and verify the URL path, then re-run smoke." >&2
+              exit 1
+              ;;
+            000|5*)
+              echo "::error title=Doc Agent draft endpoint unavailable::The 106 draft endpoint was unreachable or returned HTTP $http_status. Manual recovery: verify doc-agent.service health and network access, then re-run smoke." >&2
+              exit 1
+              ;;
+            *)
+              echo "::error title=Unexpected Doc Agent draft endpoint status::The 106 draft endpoint returned HTTP $http_status. Manual recovery: inspect the 106 logs and endpoint configuration, then re-run smoke." >&2
+              exit 1
+              ;;
+          esac
+
+          if ! jq -e 'type == "object" and (has("detail") or has("error") or has("message") or has("warnings"))' "$response_file" >/dev/null; then
+            echo "::error title=Doc Agent smoke response contract mismatch::Validation failures must return a JSON object with detail/error/message/warnings so release failures are actionable." >&2
+            exit 1
+          fi
+
+          {
+            echo "## Doc Agent draft endpoint preflight"
+            echo
+            echo "- Endpoint: configured"
+            echo "- Token: accepted"
+            echo "- Validation response: HTTP $http_status"
+            echo "- LLM generation: not invoked by smoke"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Verify repository version metadata
+        if: ${{ steps.release.outputs.preflight_level == 'full' }}
         env:
           VERSION: ${{ steps.release.outputs.version }}
         run: |
@@ -453,80 +522,72 @@ jobs:
                 }
               }' > release-assets/DOC_AGENT_RELEASE_NOTES_REQUEST.json
 
-            if [[ -n "$DOC_AGENT_RELEASE_NOTES_DRAFT_URL" && -n "$DOC_AGENT_RELEASE_NOTES_DRAFT_TOKEN" ]]; then
-              if curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
-                --connect-timeout 10 --max-time 120 \
-                --header "Content-Type: application/json" \
-                --header "Authorization: Bearer $DOC_AGENT_RELEASE_NOTES_DRAFT_TOKEN" \
-                --data-binary @release-assets/DOC_AGENT_RELEASE_NOTES_REQUEST.json \
-                "$DOC_AGENT_RELEASE_NOTES_DRAFT_URL" \
-                > release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json; then
-                if jq -e '((.release_notes_md // .release_notes_markdown // "") | length) > 0' \
-                  release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json >/dev/null; then
-                  jq -r '.release_notes_md // .release_notes_markdown' \
-                    release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json > "$notes"
-                  jq '{
-                    source: (.source // "doc-agent"),
-                    ok: (.ok // false),
-                    needs_review: (.needs_review // false),
-                    confidence: (.confidence // "medium"),
-                    candidate_selection: (.quality_report.candidate_selection // .candidate_selection // {}),
-                    warnings: (.quality_report.warnings // .warnings // [])
-                  }' release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json \
-                    > release-assets/RELEASE_NOTES_SOURCE.json
-                  jq '.quality_report // {
-                    ok: (.ok // false),
-                    needs_review: (.needs_review // false),
-                    confidence: (.confidence // "medium"),
-                    warnings: (.warnings // []),
-                    coverage: (.coverage // {}),
-                    candidate_selection: (.candidate_selection // {}),
-                    attempts: (.attempts // [])
-                  }' release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json \
-                    > release-assets/QUALITY_REPORT.json
-                  notes_source="doc-agent"
-                  needs_review="$(jq -r '.needs_review // .quality_report.needs_review // false' release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json)"
-                else
-                  echo "::warning title=Doc Agent returned no release notes::Falling back to GitHub generated release notes."
-                fi
-              else
-                echo "::warning title=Doc Agent draft generation failed::Falling back to GitHub generated release notes."
-              fi
-            else
-              echo "::notice title=Doc Agent draft generation skipped::DOC_AGENT_RELEASE_NOTES_DRAFT_URL or DOC_AGENT_RELEASE_NOTES_DRAFT_TOKEN is not configured."
+            if [[ -z "$DOC_AGENT_RELEASE_NOTES_DRAFT_URL" || -z "$DOC_AGENT_RELEASE_NOTES_DRAFT_TOKEN" ]]; then
+              echo "::error title=Doc Agent draft configuration missing::Full preflight requires DOC_AGENT_RELEASE_NOTES_DRAFT_URL and DOC_AGENT_RELEASE_NOTES_DRAFT_TOKEN. Manual recovery: configure them and run smoke before full preflight." >&2
+              exit 1
             fi
 
+            response_status="$(curl --silent --show-error --location --retry 3 --retry-all-errors \
+              --connect-timeout 10 --max-time 180 \
+              --header "Content-Type: application/json" \
+              --header "Authorization: Bearer $DOC_AGENT_RELEASE_NOTES_DRAFT_TOKEN" \
+              --data-binary @release-assets/DOC_AGENT_RELEASE_NOTES_REQUEST.json \
+              --output release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json \
+              --write-out '%{http_code}' \
+              "$DOC_AGENT_RELEASE_NOTES_DRAFT_URL" || true)"
+            if [[ "$response_status" != "200" ]]; then
+              echo "::error title=Doc Agent draft generation failed::The 106 draft endpoint returned HTTP $response_status. Manual recovery: inspect release-assets/DOC_AGENT_RELEASE_NOTES_REQUEST.json, 106 logs, token/URL config, and LLM settings; do not fall back silently for a real Memmy release." >&2
+              exit 1
+            fi
+            if ! jq -e 'type == "object" and ((.release_notes_md // .release_notes_markdown // "") | length) > 0' \
+              release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json >/dev/null; then
+              echo "::error title=Doc Agent returned invalid release notes::The response must include release_notes_md or release_notes_markdown. Manual recovery: fix the 106 draft endpoint contract before retrying." >&2
+              exit 1
+            fi
+            if ! jq -e '(.source // "doc-agent") == "doc-agent" and (.quality_report | type == "object")' \
+              release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json >/dev/null; then
+              echo "::error title=Doc Agent quality report missing::The response must include source=doc-agent and a quality_report object. Manual recovery: deploy the corrected 106 code before retrying." >&2
+              exit 1
+            fi
+            if ! jq -e '(.quality_report.candidate_selection.requested_candidate_count // .candidate_selection.requested_candidate_count // 0) >= 3' \
+              release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json >/dev/null; then
+              echo "::error title=Doc Agent candidate selection missing::The 106 response must prove three-candidate generation/scoring for Memmy. Manual recovery: verify the 106 Memmy draft endpoint is running the v2 renderer." >&2
+              exit 1
+            fi
+            if jq -e '(.needs_review // .quality_report.needs_review // false) == true or (.quality_report.ok // .ok // false) != true' \
+              release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json >/dev/null; then
+              echo "::error title=Doc Agent release notes need review::The generated release notes did not pass quality gates. Manual recovery: inspect QUALITY_REPORT.json, fix evidence/style/LLM output, or add .github/release-notes/$TAG.md as a reviewed manual override." >&2
+              jq '.quality_report // .' release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json > release-assets/QUALITY_REPORT.json || true
+              exit 1
+            fi
+
+            jq -r '.release_notes_md // .release_notes_markdown' \
+              release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json > "$notes"
+            jq '{
+              source: (.source // "doc-agent"),
+              ok: (.ok // .quality_report.ok // false),
+              needs_review: (.needs_review // .quality_report.needs_review // false),
+              confidence: (.confidence // .quality_report.confidence // "medium"),
+              candidate_selection: (.quality_report.candidate_selection // .candidate_selection // {}),
+              warnings: (.quality_report.warnings // .warnings // [])
+            }' release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json \
+              > release-assets/RELEASE_NOTES_SOURCE.json
+            jq '.quality_report // {
+              ok: (.ok // false),
+              needs_review: (.needs_review // false),
+              confidence: (.confidence // "medium"),
+              warnings: (.warnings // []),
+              coverage: (.coverage // {}),
+              candidate_selection: (.candidate_selection // {}),
+              attempts: (.attempts // [])
+            }' release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json \
+              > release-assets/QUALITY_REPORT.json
+            notes_source="doc-agent"
+            needs_review="$(jq -r '.needs_review // .quality_report.needs_review // false' release-assets/DOC_AGENT_RELEASE_NOTES_RESPONSE.json)"
+
             if [[ ! -s "$notes" ]]; then
-              generate_args=(
-                --method POST
-                "repos/${GITHUB_REPOSITORY}/releases/generate-notes"
-                -f tag_name="$TAG"
-                -f target_commitish="$TARGET_SHA"
-              )
-              if [[ -n "$PREVIOUS_TAG" ]]; then
-                generate_args+=(-f previous_tag_name="$PREVIOUS_TAG")
-              fi
-              if ! gh api "${generate_args[@]}" --jq '.body' > "$notes"; then
-                echo "::error title=Release notes generation failed::Both Doc Agent and GitHub generated notes failed for $TAG. Manual recovery: re-run after service recovery, or add .github/release-notes/$TAG.md and retry." >&2
-                exit 1
-              fi
-              notes_source="github-generated"
-              needs_review="true"
-              tmp_notes="$(mktemp)"
-              {
-                echo "> **Needs review:** Doc Agent was unavailable, so this Draft uses GitHub generated notes. Review and edit before publishing."
-                echo
-                cat "$notes"
-              } > "$tmp_notes"
-              mv "$tmp_notes" "$notes"
-              jq -n \
-                --arg source "$notes_source" \
-                '{source: $source, needs_review: true, warnings: ["Doc Agent unavailable; used GitHub generated release notes fallback"]}' \
-                > release-assets/RELEASE_NOTES_SOURCE.json
-              jq -n \
-                --arg source "$notes_source" \
-                '{ok: false, needs_review: true, source: $source, warnings: ["Doc Agent unavailable; used GitHub generated release notes fallback"]}' \
-                > release-assets/QUALITY_REPORT.json
+              echo "::error title=Release notes generation produced an empty body::No release notes were produced. Manual recovery: inspect the Doc Agent response or add .github/release-notes/$TAG.md as a reviewed manual override." >&2
+              exit 1
             fi
           fi
 
@@ -791,7 +852,9 @@ jobs:
             echo "- Level: $PREFLIGHT_LEVEL"
             echo "- No tag, Release, assets, or external publication was created."
             if [[ "$PREFLIGHT_LEVEL" == "smoke" ]]; then
-              echo "- Smoke only validates the target commit and version metadata. It intentionally skips duplicate tag/Release, installer, release notes, and evidence checks; run full preflight before creating a Draft Release."
+              echo "- Smoke validates the target commit and Doc Agent draft endpoint configuration."
+              echo "- It intentionally skips release version metadata, duplicate tag/Release, installer, release notes, and evidence checks."
+              echo "- Run full preflight before creating a Draft Release."
             fi
             echo "- Set create_draft=true only when intentionally creating a Draft Release."
           } >> "$GITHUB_STEP_SUMMARY"
