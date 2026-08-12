@@ -43,10 +43,8 @@ import {
   preparePackagedRuntimeConfig,
   restartExternalMemoryService,
   resolveAgentGatewayRuntimeConfig,
-  resolveDevelopmentRuntimeExecutable,
-  resolveDevelopmentRuntimeEntryPaths,
-  startManagedRuntimeServices,
-  type ManagedRuntimeServices
+  startPackagedRuntimeServices,
+  type PackagedRuntimeServices
 } from "./runtime-services.js";
 import { resolveRendererContextMenuCommands, resolveRendererContextMenuMaxLabelWidth, type RendererContextMenuCommand } from "./renderer-context-menu.js";
 import { startPackagedRendererStaticServer, type PackagedRendererStaticServer } from "./renderer-static-server.js";
@@ -102,7 +100,7 @@ let petWindow: BrowserWindow | null = null;
 let localBackend: LocalBackend | null = null;
 let menuBarTray: Tray | null = null;
 const MENU_BAR_TRAY_GUID = "8B2A0C33-45C0-4C43-8F1C-77F7D4FDF2D4";
-let runtimeServices: ManagedRuntimeServices | null = null;
+let runtimeServices: PackagedRuntimeServices | null = null;
 let runtimeConfig: DesktopRuntimeConfig | null = null;
 let memoryServiceControl: { baseUrl: string; token: string } | null = null;
 let memoryServiceRestart: Promise<DesktopMemoryServiceRestartResult> | null = null;
@@ -306,19 +304,15 @@ async function boot(): Promise<void> {
     registerIpcHandlers();
     await installBundledCliIfNeeded();
     await startPackagedRendererServerIfNeeded();
-    runtimeServices = await startManagedRuntimeServices({
-      appPath: app.getAppPath(),
-      appDatabaseFile: join(app.getPath("userData"), "app.sqlite"),
-      resourcesPath: process.resourcesPath,
-      logDirectory: app.getPath("logs"),
-      logLevel: getCurrentLogLevel(),
-      runtimeEntries: app.isPackaged
-        ? undefined
-        : resolveDevelopmentRuntimeEntryPaths(import.meta.dirname),
-      runtimeExecutable: app.isPackaged
-        ? undefined
-        : resolveDevelopmentRuntimeExecutable()
-    });
+    runtimeServices = app.isPackaged
+      ? await startPackagedRuntimeServices({
+        appPath: app.getAppPath(),
+        appDatabaseFile: join(app.getPath("userData"), "app.sqlite"),
+        resourcesPath: process.resourcesPath,
+        logDirectory: app.getPath("logs"),
+        logLevel: getCurrentLogLevel()
+      })
+      : null;
     runtimeConfig = await startLocalApi(runtimeServices);
     isBootReady = true;
     createInitialWindow();
@@ -717,7 +711,7 @@ function showPackagedStartupError(error: unknown): void {
  * Starts the local API backend.
  * @returns The runtime config the main process stores and exposes to the renderer.
  */
-async function startLocalApi(services: ManagedRuntimeServices | null): Promise<DesktopRuntimeConfig> {
+async function startLocalApi(services: PackagedRuntimeServices | null): Promise<DesktopRuntimeConfig> {
   const databasePath = join(app.getPath("userData"), "app.sqlite");
   let memoryControl: { baseUrl: string; token: string };
   if (services) {

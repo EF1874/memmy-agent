@@ -529,17 +529,15 @@ try {
 
 const defaults = config.agents?.defaults ?? {};
 const presetName = defaults.modelPreset;
-const activeModel = presetName && presetName !== "default"
-  ? config.modelPresets?.[presetName]
-  : defaults;
-const providerName = activeModel?.provider;
-const endpointName = activeModel?.endpoint;
-const modelName = activeModel?.model;
+const preset = presetName ? config.modelPresets?.[presetName] : null;
+const providerName = preset?.provider;
+const endpointName = preset?.endpoint;
+const modelName = preset?.model;
 const provider = providerName ? config.providers?.[providerName] : null;
 const endpoint = endpointName ? provider?.endpoints?.[endpointName] : null;
 const apiKey = endpoint?.apiKey ?? provider?.apiKey;
 
-if (!providerName || !modelName || !apiKey || (endpointName && !endpoint)) process.exit(1);
+if (!presetName || !providerName || !endpointName || !modelName || !endpoint || !apiKey) process.exit(1);
 process.exit(0);
 NODE
 }
@@ -556,6 +554,15 @@ wait_for_agent_model_config() {
     sleep 2
   done
   log "agent model config is ready"
+}
+
+run_gateway() {
+  require_command node
+  export MEMMY_AGENT_WORKSPACE="${MEMMY_AGENT_WORKSPACE:-$MEMMY_WORKSPACE_DIR}"
+  cd "$ROOT_DIR"
+  wait_for_agent_model_config
+  cd "$MEMMY_AGENT_DIR"
+  exec node dist/main.js gateway
 }
 
 run_agent_api() {
@@ -678,11 +685,20 @@ NODE
   log "refreshing non-interactive memmy-agent onboard state"
   node dist/main.js onboard </dev/null
 
-  log "starting agent API, frontend, and desktop backend; Electron manages Memory and supervises gateway"
+  log "copying built skills into memmy workspace"
+  mkdir -p "$MEMMY_WORKSPACE_DIR/skills"
+  cp -R "$MEMMY_AGENT_DIR/dist/skills/." "$MEMMY_WORKSPACE_DIR/skills/"
+
+  log "preparing managed Chromium"
+  "$MEMMY_RUNTIME_NODE_PATH" dist/main.js internal browser-prepare
+
+  log "starting Memory, agent API, gateway, frontend, and desktop backend"
   cd "$ROOT_DIR"
   mkdir -p "$LOG_DIR"
-  exec "$CONCURRENTLY_BIN" -k -n agent-api,frontend,backend -c cyan,magenta,yellow \
+  exec "$CONCURRENTLY_BIN" -k -n memory,agent-api,gateway,frontend,backend -c green,cyan,blue,magenta,yellow \
+    "bash -c 'set -o pipefail; node scripts/internal/shared/dev-memory-supervisor.mjs 2>&1 | tee .tmp/dev-stack/memory.log'" \
     "bash -c 'set -o pipefail; bash scripts/dev-start.sh --agent-api 2>&1 | tee .tmp/dev-stack/agent-api.log'" \
+    "bash -c 'set -o pipefail; bash scripts/dev-start.sh --gateway 2>&1 | tee .tmp/dev-stack/gateway.log'" \
     "bash -c 'set -o pipefail; npm run dev -w @memmy/frontend-desktop -- --host 127.0.0.1 2>&1 | tee .tmp/dev-stack/frontend.log'" \
     "bash -c 'set -o pipefail; ./node_modules/.bin/wait-on http://127.0.0.1:19000 && env -u ELECTRON_RUN_AS_NODE npm run dev -w @memmy/desktop 2>&1 | tee .tmp/dev-stack/backend.log'"
 }
@@ -692,11 +708,14 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     --agent-api)
       run_agent_api
       ;;
+    --gateway)
+      run_gateway
+      ;;
     "")
       run_main
       ;;
     *)
-      printf 'Usage: %s [--agent-api]\n' "$0" >&2
+      printf 'Usage: %s [--agent-api|--gateway]\n' "$0" >&2
       exit 2
       ;;
   esac
