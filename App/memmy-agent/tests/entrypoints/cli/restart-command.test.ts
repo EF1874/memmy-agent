@@ -22,6 +22,7 @@ function tempRoot(): string {
 function provider(): any {
   return {
     getDefaultModel: () => "test-model",
+    spec: { name: "openai" },
     generation: { maxTokens: 8192, temperature: 0.1 },
   };
 }
@@ -30,6 +31,20 @@ function makeLoop(): [AgentLoop, MessageBus] {
   const bus = new MessageBus();
   const loop = new AgentLoop({ bus, provider: provider(), workspace: tempRoot(), model: "test-model" });
   return [loop, bus];
+}
+
+function stubStatusEstimate(
+  loop: AgentLoop,
+  estimate: [number, string] | Error,
+): ReturnType<typeof vi.fn> {
+  const estimateSessionPromptTokens = vi.fn(() => {
+    if (estimate instanceof Error) throw estimate;
+    return estimate;
+  });
+  loop.consolidator.withProviderSnapshot = vi.fn(() => ({
+    estimateSessionPromptTokens,
+  })) as any;
+  return estimateSessionPromptTokens;
 }
 
 function stubRestartRuntime(runScheduled = false): {
@@ -254,53 +269,51 @@ describe("/restart command", () => {
     expect((loop as any).running).toBe(false);
   });
 
-  it("status reports model, usage, context, session, uptime and tasks", async () => {
+  it("status reports the session model, run usage, context, conversation and Agent uptime", async () => {
     const [loop] = makeLoop();
     const session = new Session({ key: "telegram:c1" });
     session.messages = [{ role: "user", content: "a" }, { role: "user", content: "b" }, { role: "user", content: "c" }];
     loop.sessions.getOrCreate = vi.fn(() => session) as any;
     loop.startTime = Date.now() / 1000 - 125;
     loop.lastUsageBySession.set("telegram:c1", { prompt_tokens: 0, completion_tokens: 0 });
-    loop.consolidator.estimateSessionPromptTokens = vi.fn(() => [20_500, "tiktoken"]) as any;
-    loop.subagents.getRunningCountBySession = vi.fn(() => 0) as any;
+    stubStatusEstimate(loop, [20_500, "test"]);
 
     const response = await loop.processMessage(new InboundMessage({ channel: "telegram", senderId: "u1", chatId: "c1", content: "/status" }));
 
-    expect(response?.content).toContain("Model: test-model");
-    expect(response?.content).toContain("Tokens: 0 in / 0 out");
-    expect(response?.content).toContain("Context: 20k/200k (10% of input budget)");
-    expect(response?.content).toContain("Session: 3 messages");
-    expect(response?.content).toContain("Uptime: 2m 5s");
-    expect(response?.content).toContain("Tasks: 0 active");
+    expect(response?.content).toContain("Model: openai / test-model");
+    expect(response?.content).toContain("Last run tokens: 0 in / 0 out");
+    expect(response?.content).toContain("Context: ~20k / 200k");
+    expect(response?.content).toContain("Conversation: 3 user turns");
+    expect(response?.content).toContain("Agent uptime: 2m 5s");
+    expect(response?.content).not.toContain("Tasks:");
     expect(response?.metadata).toEqual({ renderAs: "text" });
   });
 
-  it("status counts the default history window for long sessions", async () => {
+  it("status counts retained user turns beyond the default history window", async () => {
     const [loop] = makeLoop();
     const session = new Session({ key: "telegram:c1" });
     session.messages = [...Array(131).keys()].map((i) => ({ role: "user", content: `message ${i}` }));
     loop.sessions.getOrCreate = vi.fn(() => session) as any;
-    loop.consolidator.estimateSessionPromptTokens = vi.fn(() => [1000, "tiktoken"]) as any;
-    loop.subagents.getRunningCountBySession = vi.fn(() => 0) as any;
+    stubStatusEstimate(loop, [1000, "test"]);
 
     const response = await loop.processMessage(new InboundMessage({ channel: "telegram", senderId: "u1", chatId: "c1", content: "/status" }));
 
-    expect(response?.content).toContain("Session: 120 messages");
-    expect(response?.content).not.toContain("Session: 131 messages");
+    expect(response?.content).toContain("Conversation: 131 user turns");
   });
 
-  it("status counts running dispatch and subagent tasks", async () => {
+  it("status does not query or display dispatch and subagent tasks", async () => {
     const [loop] = makeLoop();
     const session = new Session({ key: "telegram:c1" });
     session.getHistory = vi.fn(() => [{ role: "user" }]) as any;
     loop.sessions.getOrCreate = vi.fn(() => session) as any;
-    loop.consolidator.estimateSessionPromptTokens = vi.fn(() => [1000, "tiktoken"]) as any;
+    stubStatusEstimate(loop, [1000, "test"]);
     loop.subagents.getRunningCountBySession = vi.fn(() => 2) as any;
     loop.activeTasks.set("telegram:c1", [{ done: () => false }, { done: () => true }] as any);
 
     const response = await loop.processMessage(new InboundMessage({ channel: "telegram", senderId: "u1", chatId: "c1", content: "/status" }));
 
-    expect(response?.content).toContain("Tasks: 3 active");
+    expect(response?.content).not.toMatch(/Tasks:|Goal:|Queue:|Subagent/i);
+    expect(loop.subagents.getRunningCountBySession).not.toHaveBeenCalled();
   });
 
   it("resets usage counters when the runner omits usage", async () => {
@@ -314,25 +327,24 @@ describe("/restart command", () => {
     expect(loop.lastUsageBySession.get("telegram:c1")).toMatchObject({ prompt_tokens: 9, completion_tokens: 4 });
 
     await loop.runAgentLoop([], { sessionKey: "telegram:c1" });
-    expect(loop.lastUsageBySession.get("telegram:c1")).toMatchObject({ prompt_tokens: 0, completion_tokens: 0 });
+    expect(loop.lastUsageBySession.has("telegram:c1")).toBe(false);
   });
 
-  it("status falls back to last usage when context estimate is missing", async () => {
+  it("status does not substitute last usage when context estimation fails", async () => {
     const [loop] = makeLoop();
     const session = new Session({ key: "telegram:c1" });
     session.getHistory = vi.fn(() => [{ role: "user" }]) as any;
     loop.sessions.getOrCreate = vi.fn(() => session) as any;
     loop.lastUsageBySession.set("telegram:c1", { prompt_tokens: 1200, completion_tokens: 34 });
     loop.lastUsageBySession.set("telegram:other", { prompt_tokens: 9999, completion_tokens: 888 });
-    loop.consolidator.estimateSessionPromptTokens = vi.fn(() => [0, "none"]) as any;
-    loop.subagents.getRunningCountBySession = vi.fn(() => 0) as any;
+    stubStatusEstimate(loop, new Error("estimate failed"));
 
     const response = await loop.processMessage(new InboundMessage({ channel: "telegram", senderId: "u1", chatId: "c1", content: "/status" }));
 
-    expect(response?.content).toContain("Tokens: 1200 in / 34 out");
+    expect(response?.content).toContain("Last run tokens: 1200 in / 34 out");
     expect(response?.content).not.toContain("9999 in / 888 out");
-    expect(response?.content).toContain("Context: 1k/200k (0% of input budget)");
-    expect(response?.content).toContain("Tasks: 0 active");
+    expect(response?.content).toContain("Context: error (token estimation failed)");
+    expect(response?.content).not.toContain("Context: ~1k");
   });
 
   it("history shows recent user and assistant messages", async () => {
