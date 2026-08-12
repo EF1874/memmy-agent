@@ -2743,15 +2743,6 @@ export function HomePage() {
                     {t("home.project.registryUnavailable")}
                   </p>
                 ) : null}
-                {state.agent.currentChatId && currentGoal ? (
-                  <AgentGoalBar
-                    chatId={state.agent.currentChatId}
-                    goal={currentGoal}
-                    clock={state.agent.goalRunClockByChatId[state.agent.currentChatId] ?? null}
-                    pending={Boolean(goalMutationPending)}
-                    onControl={(request) => void controlGoal(request)}
-                  />
-                ) : null}
                 <AgentOperationErrorSlot message={agentError} />
                 <div className="agent-composer-stack">
                   <AgentQueuedMessageList
@@ -2770,6 +2761,15 @@ export function HomePage() {
                     onRemove={(clientRequestId) => void removeQueuedMessage(clientRequestId)}
                     onSteer={(clientRequestId) => void steerQueuedMessage(clientRequestId)}
                   />
+                  {state.agent.currentChatId && currentGoal ? (
+                    <AgentGoalBar
+                      chatId={state.agent.currentChatId}
+                      goal={currentGoal}
+                      clock={state.agent.goalRunClockByChatId[state.agent.currentChatId] ?? null}
+                      pending={Boolean(goalMutationPending)}
+                      onControl={(request) => void controlGoal(request)}
+                    />
+                  ) : null}
                   <div
                     className="relative agent-composer-shell rounded-card-lg"
                     onDragOver={handleComposerDragOver}
