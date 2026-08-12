@@ -63,7 +63,6 @@ import {
   WEBUI_PROJECT_ID_METADATA_KEY,
   WEBUI_WORKSPACE_CWD_METADATA_KEY,
 } from "../session/manager.js";
-import { captureGoalWorkspaceBaseline } from "../session/workspace-environment.js";
 import {
   TerminalRunControl,
   TerminalSessionTurnLock,
@@ -757,7 +756,6 @@ export class AgentLoop {
       cancelActiveTasks: (sessionKey) => this.cancelActiveTasks(sessionKey),
       scheduleGoalWork: (sessionKey, goal) => this.scheduleGoalWork(sessionKey, goal),
       invalidateGoalWork: (sessionKey) => this.scheduledGoalSessions.delete(sessionKey),
-      captureWorkspaceBaseline: (session, goalId) => captureGoalWorkspaceBaseline(session, goalId),
     });
     this.projectStore = init.projectStore ?? null;
     this.guiTranscriptMirror = init.guiTranscriptMirror ?? null;
