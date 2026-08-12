@@ -401,7 +401,7 @@ export function upsertModelConnection(
     endpointId = newId("endpoint");
   }
   const protocol = input.protocol ?? protocolFor(providerId, entries[0]!.capabilities[0]!);
-  if (!protocolSupports(protocol, entries.flatMap((entry) => entry.capabilities))) {
+  if (!protocolSupportsModelCapabilities(protocol, entries.flatMap((entry) => entry.capabilities))) {
     return { workspace, error: "invalid_model" };
   }
 
@@ -706,7 +706,7 @@ function protocolFor(provider: CatalogProviderId, capability: ModelCapability): 
   return "openai-chat-completions";
 }
 
-function protocolSupports(protocol: ModelEndpointProtocol, capabilities: ModelCapability[]): boolean {
+export function protocolSupportsModelCapabilities(protocol: ModelEndpointProtocol, capabilities: ModelCapability[]): boolean {
   return capabilities.every((capability) => protocolSupportsCatalog(protocol, toCatalogCapability(capability)));
 }
 
