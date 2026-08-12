@@ -21,14 +21,20 @@ describe("agent-model-error", () => {
     expect(formatAgentModelError("Error: 503 upstream connect error or disconnect/reset before headers", t).title).toBe("无法连接到模型服务");
   });
 
-  it("maps auth failures to login-expired copy in account mode", () => {
-    expect(formatAgentModelError("Error calling LLM: 401 Unauthorized", t, { accountMode: true }).title).toBe("agent.error.loginExpired");
-    expect(formatAgentModelError("Error: invalid api key provided", t, { accountMode: true }).title).toBe("agent.error.loginExpired");
+  it("maps auth failures to login-expired copy only for the actual account source", () => {
+    expect(formatAgentModelError("Error calling LLM: 401 Unauthorized", t, {
+      modelError: { category: "model_failed", source: "account" }
+    }).title).toBe("agent.error.loginExpired");
+    expect(formatAgentModelError("Error: invalid api key provided", t, {
+      modelError: { category: "model_failed", source: "account" }
+    }).title).toBe("agent.error.loginExpired");
   });
 
-  it("keeps API-key copy for auth failures outside account mode", () => {
+  it("keeps API-key copy for BYOK auth failures even when the app is in account mode", () => {
     expect(formatAgentModelError("Error calling LLM: 401 Unauthorized", t).title).toBe("agent.error.authFailed");
-    expect(formatAgentModelError("Error: invalid api key provided", t, { accountMode: false }).title).toBe("agent.error.authFailed");
+    expect(formatAgentModelError("Error: invalid api key provided", t, {
+      modelError: { category: "model_failed", source: "byok" }
+    }).title).toBe("agent.error.authFailed");
   });
 
   it("formats a structured quota category without dropping its raw detail", () => {

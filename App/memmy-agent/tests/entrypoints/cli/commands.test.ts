@@ -28,6 +28,7 @@ import {
 } from "../../../src/utils/restart.js";
 import {
   agent,
+  app,
   cliRuntimeLogsEnabled,
   deleteOauthFiles,
   gateway,
@@ -54,11 +55,17 @@ import {
 } from "../../../src/entrypoints/cli/commands.js";
 import { API_MAX_BODY_BYTES } from "../../../src/entrypoints/openai-like-api/server.js";
 import { setQuestionary } from "../../../src/entrypoints/cli/onboard.js";
+import { prepareStartupMigrations } from "../../../src/entrypoints/cli/startup-migrations.js";
 import { VERSION } from "../../../src/version.js";
 
 const ENV_KEYS = [
   "MEMMY_AGENT_DATA_DIR",
+  "MEMMY_AGENT_WORKSPACE",
   "MEMMY_CONFIG",
+  "MEMMY_MIGRATIONS_READY_CONFIG",
+  "MEMMY_MIGRATIONS_READY_SESSION_DAG",
+  "MEMMY_MIGRATIONS_READY_WORKSPACE",
+  "MEMMY_AGENT_SESSION_DAG_DIR",
   "MEMMY_CLOUD_SERVICE",
   "OAUTH_CLI_KIT_TOKEN_PATH",
   "OPENAI_CODEX_TOKEN_PATH",
@@ -79,6 +86,7 @@ const originalStdinIsTty = (process.stdin as any).isTTY;
 function tempRoot(prefix = "memmy-cli-"): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   roots.push(root);
+  process.env.MEMMY_AGENT_SESSION_DAG_DIR = path.join(root, "session-dag");
   return root;
 }
 
@@ -87,6 +95,17 @@ function writeConfig(root: string, data: Record<string, any> = {}, name = "confi
   fs.mkdirSync(path.dirname(configPath), { recursive: true });
   fs.writeFileSync(configPath, YAML.stringify(data), "utf8");
   return configPath;
+}
+
+function currentProvider(
+  apiBase: string,
+  apiKey?: string,
+  protocol = "openai-chat-completions",
+): Record<string, any> {
+  return {
+    ...(apiKey ? { apiKey } : {}),
+    endpoints: { chat: { apiBase, protocol } },
+  };
 }
 
 function fakeAgentLoop(content = "mock-response"): any {
@@ -203,6 +222,9 @@ describe("CLI command helpers", () => {
   });
 
   it("routes bare memmy to the Ink TUI", async () => {
+    const root = tempRoot();
+    setConfigPath(writeConfig(root, {}));
+    process.env.MEMMY_AGENT_WORKSPACE = path.join(root, "workspace");
     const runRoot = vi.fn(async () => undefined);
     setRootInteractiveRunnerForTest(runRoot);
 
@@ -210,6 +232,37 @@ describe("CLI command helpers", () => {
     await main(["node", "memmy"]);
 
     expect(runRoot).toHaveBeenCalledOnce();
+  });
+
+  it("shows terminal target options in root help", () => {
+    const help = app.helpInformation();
+
+    expect(help).toContain("-s, --session <sessionId>");
+    expect(help).toContain("--standalone");
+    expect(help).toContain("--project <path>");
+  });
+
+  it("stops before the root TUI when startup migrations fail", async () => {
+    const root = tempRoot("memmy-root-migration-failure-");
+    const workspace = path.join(root, "workspace");
+    const statePath = path.join(
+      workspace,
+      ".memmy-migrations",
+      "agent-workspace.json",
+    );
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    fs.writeFileSync(statePath, "{invalid-json", "utf8");
+    setConfigPath(writeConfig(root, {
+      agents: { defaults: { workspace } },
+    }));
+    process.env.MEMMY_AGENT_WORKSPACE = workspace;
+    const runRoot = vi.fn(async () => undefined);
+    setRootInteractiveRunnerForTest(runRoot);
+
+    await expect(main(["node", "memmy"])).rejects.toMatchObject({
+      code: "migration_state_invalid",
+    });
+    expect(runRoot).not.toHaveBeenCalled();
   });
 
   it("matches explicit provider prefixes", () => {
@@ -269,6 +322,8 @@ describe("CLI command helpers", () => {
     expect(raw.channels.websocket).toEqual(expect.objectContaining({ enabled: true }));
     expect(raw.channels.slack).toEqual(expect.objectContaining({ enabled: false }));
     expect(raw.fileMemory).toEqual({ enabled: false });
+    expect(raw.providers).toEqual({});
+    expect(raw.modelPresets).toEqual({});
     expect(config.fileMemory.enabled).toBe(false);
     expect(fs.existsSync(path.join(workspace, "memory", "history.jsonl"))).toBe(
       true,
@@ -300,6 +355,7 @@ describe("CLI command helpers", () => {
     const root = tempRoot("memmy-onboard-existing-");
     const configPath = writeConfig(root, {
       agents: { defaults: { model: "openai/custom-model", workspace: path.join(root, "old-workspace") } },
+      futureSection: { removeOnConfirmedReset: true },
     });
     const workspace = path.join(root, "new-workspace");
     (process.stdin as any).isTTY = true;
@@ -313,11 +369,36 @@ describe("CLI command helpers", () => {
     const raw = YAML.parse(fs.readFileSync(configPath, "utf8"));
     expect(raw.agents.defaults.model).toBe(new Config().agents.defaults.model);
     expect(raw.agents.defaults.workspace).toBe(workspace);
+    expect(raw.futureSection).toBeUndefined();
   });
 
   it("sets app.userId through config set and mirrors it into memmyMemory.userId", () => {
     const root = tempRoot("memmy-config-set-");
-    const configPath = writeConfig(root, {});
+    const configPath = writeConfig(root, {
+      futureSection: { keepMe: true },
+      providers: {
+        openai: {
+          futureProviderField: "keep-provider",
+          endpoints: {
+            chat: {
+              apiBase: "https://api.openai.com/v1",
+              protocol: "openai-chat-completions",
+              futureEndpointField: "keep-endpoint",
+            },
+          },
+        },
+      },
+      modelPresets: {
+        "future-preset": {
+          provider: "openai",
+          endpoint: "chat",
+          model: "gpt-test",
+          source: "byok",
+          capabilities: ["agent"],
+          futurePresetField: "keep-preset",
+        },
+      },
+    });
 
     const result = setConfigValue("app.userId", "user_123", { config: configPath });
     const raw = YAML.parse(fs.readFileSync(configPath, "utf8"));
@@ -329,29 +410,45 @@ describe("CLI command helpers", () => {
     expect(raw.app.userId).toBe("user_123");
     expect(raw.memmyMemory.userId).toBe("user_123");
     expect(raw.identity).toBeUndefined();
+    expect(raw.futureSection).toEqual({ keepMe: true });
+    expect(raw.providers.openai).toMatchObject({
+      futureProviderField: "keep-provider",
+      endpoints: { chat: { futureEndpointField: "keep-endpoint" } },
+    });
+    expect(raw.modelPresets["future-preset"]).toMatchObject({ futurePresetField: "keep-preset" });
   });
 
-  it("preserves image generation profiles through config set", () => {
+  it("preserves image model catalog assignments through config set", () => {
     const root = tempRoot("memmy-config-set-image-");
     const configPath = writeConfig(root, {
+      providers: {
+        openai: currentProvider("https://api.openai.com/v1", "sk-byok", "openai-images"),
+      },
+      modelPresets: {
+        image: {
+          provider: "openai",
+          endpoint: "chat",
+          model: "gpt-image-1",
+          source: "byok",
+          capabilities: ["image_generation"],
+          futurePresetField: "keep-preset",
+        },
+      },
+      modelAssignments: {
+        byok: {
+          agent: { candidates: [], default: null },
+          memorySummary: null,
+          memoryEvolution: null,
+          embedding: null,
+          asr: null,
+          imageGeneration: "image",
+        },
+        account: { agent: { candidates: [], default: null } },
+      },
       tools: {
         imageGeneration: {
           enabled: true,
-          activeProfile: "account",
-          profiles: {
-            account: {
-              provider: "memmy_account",
-              model: "image_gen",
-              apiKey: "cloud-login-uuid",
-              apiBase: "https://cloud.example.com/api/agentExternal/v1",
-            },
-            byok: {
-              provider: "openai",
-              model: "gpt-image-1",
-              apiKey: "sk-byok",
-              apiBase: "https://api.openai.com/v1",
-            },
-          },
+          defaultImageSize: "2K",
         },
       },
     });
@@ -359,22 +456,21 @@ describe("CLI command helpers", () => {
     setConfigValue("app.userId", "user_123", { config: configPath });
     const raw = YAML.parse(fs.readFileSync(configPath, "utf8"));
 
-    expect(raw.tools.imageGeneration.activeProfile).toBe("account");
-    expect(raw.tools.imageGeneration.profiles.account).toMatchObject({
-      provider: "memmy_account",
-      model: "image_gen",
-      apiKey: "cloud-login-uuid",
-    });
-    expect(raw.tools.imageGeneration.profiles.byok).toMatchObject({
+    expect(raw.tools.imageGeneration).toEqual(expect.objectContaining({ enabled: true, defaultImageSize: "2K" }));
+    expect(raw.tools.imageGeneration).not.toHaveProperty("profiles");
+    expect(raw.modelAssignments.byok.imageGeneration).toBe("image");
+    expect(raw.modelPresets.image).toMatchObject({
       provider: "openai",
       model: "gpt-image-1",
-      apiKey: "sk-byok",
+      futurePresetField: "keep-preset",
     });
   });
 
   it("runs memmy config set app.userId", async () => {
     const root = tempRoot("memmy-config-set-cli-");
-    const configPath = writeConfig(root, {});
+    const configPath = writeConfig(root, {
+      agents: { defaults: { workspace: path.join(root, "workspace") } },
+    });
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
 
     await main(["node", "memmy", "config", "set", "app.userId", "user_cli_123", "-c", configPath]);
@@ -434,13 +530,6 @@ describe("CLI command helpers", () => {
   it("serve connects MCP on startup and closes it when the API server closes", async () => {
     const root = tempRoot("memmy-serve-mcp-");
     const workspace = path.join(root, "workspace");
-    const migrationStatePath = path.join(
-      workspace,
-      ".memmy-migrations",
-      "agent-workspace.json",
-    );
-    fs.mkdirSync(path.dirname(migrationStatePath), { recursive: true });
-    fs.writeFileSync(migrationStatePath, "invalid migration state", "utf8");
     const configPath = writeConfig(root, {
       agents: { defaults: { workspace, model: "openai/test-model" } },
       api: { host: "127.0.0.1", port: 0, timeout: 1 },
@@ -451,7 +540,6 @@ describe("CLI command helpers", () => {
 
     const server = await serve({ config: configPath });
     expect(loop.connectMcp).toHaveBeenCalledTimes(1);
-    expect(fs.readFileSync(migrationStatePath, "utf8")).toBe("invalid migration state");
     await closeServer(server);
 
     expect(loop.closeMcp).toHaveBeenCalledTimes(1);
@@ -563,7 +651,10 @@ describe("CLI command helpers", () => {
       dispatchMessage: vi.fn(async () => undefined),
       processMessage: vi.fn(async () => null),
       processDirect: vi.fn(async () => null),
-      llmRuntime: vi.fn(() => ({ provider: {}, model: "openai/test-model" })),
+      llmRuntime: vi.fn(() => {
+        fakeLoop.refreshProviderSnapshot();
+        return { provider: {}, model: fakeLoop.model };
+      }),
       scheduleBackground: vi.fn((promise: Promise<any>) => {
         void promise.catch(() => undefined);
       }),
@@ -582,22 +673,19 @@ describe("CLI command helpers", () => {
     };
     let cronStorePath = "";
     let bindingAtLoopCreation: Record<string, unknown> | null = null;
-    let publishedModelUpdate: OutboundMessage | undefined;
     vi.spyOn(AgentLoop, "fromConfig").mockImplementation((_loaded: any, bus: any, extra: any = {}) => {
       const metadataLine = fs.readFileSync(legacySessionPath, "utf8").trim().split("\n")[0]!;
       bindingAtLoopCreation = JSON.parse(metadataLine).metadata;
       migratedSessionManager = new SessionManager(sessionsDir);
       fakeLoop.sessions = migratedSessionManager;
       cronStorePath = extra.cronService?.storePath ?? "";
-      if (typeof extra.runtimeModelPublisher === "function") {
-        extra.runtimeModelPublisher("gpt-x", "fast");
-        publishedModelUpdate = bus.outbound.getNowait();
-      }
+      expect(extra.runtimeModelPublisher).toBeUndefined();
       return fakeLoop as any;
     });
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.spyOn(console, "info").mockImplementation(() => undefined);
 
+    await prepareStartupMigrations({ config: configPath });
     const runtime = await gateway({ config: configPath });
     const address = runtime.healthServer.address();
     const actualPort = typeof address === "object" && address ? address.port : 0;
@@ -617,12 +705,16 @@ describe("CLI command helpers", () => {
       ".memmy-migrations",
       "agent-workspace.json",
     );
-    expect(JSON.parse(fs.readFileSync(migrationStatePath, "utf8")).applied).toEqual([
+    expect(JSON.parse(fs.readFileSync(migrationStatePath, "utf8")).applied).toEqual(expect.arrayContaining([
       expect.objectContaining({
         id: "v1.0.4/0001-add-webui-session-binding",
         introducedIn: "1.0.4",
       }),
-    ]);
+      expect.objectContaining({
+        id: "v1.0.5/0001-flatten-memory-model-config",
+        introducedIn: "1.0.5",
+      }),
+    ]));
     expect(missing.status).toBe(404);
     expect(runtime.heartbeat.enabled).toBe(false);
     expect(runtime.heartbeat.intervalS).toBe(900);
@@ -668,11 +760,6 @@ describe("CLI command helpers", () => {
       }),
     });
     expect(fakeLoop.refreshProviderSnapshot).toHaveBeenCalled();
-    expect(publishedModelUpdate?.metadata).toMatchObject({
-      runtimeModelUpdated: true,
-      model: "gpt-x",
-      model_preset: "fast",
-    });
     expect(fakeLoop.run).toHaveBeenCalledTimes(1);
     await runtime.bus.publishInbound(new InboundMessage({
       channel: "websocket",
@@ -690,9 +777,10 @@ describe("CLI command helpers", () => {
     expect(fakeLoop.stop).toHaveBeenCalledTimes(1);
 
     const migratedBytes = fs.readFileSync(legacySessionPath);
+    const appliedBeforeRestart = JSON.parse(fs.readFileSync(migrationStatePath, "utf8")).applied;
     const secondRuntime = await gateway({ config: configPath });
     expect(fs.readFileSync(legacySessionPath)).toEqual(migratedBytes);
-    expect(JSON.parse(fs.readFileSync(migrationStatePath, "utf8")).applied).toHaveLength(1);
+    expect(JSON.parse(fs.readFileSync(migrationStatePath, "utf8")).applied).toEqual(appliedBeforeRestart);
     await secondRuntime.stop();
     expect(fakeLoop.stop).toHaveBeenCalledTimes(2);
   });
@@ -718,7 +806,7 @@ describe("CLI command helpers", () => {
     const fromConfig = vi.spyOn(AgentLoop, "fromConfig");
     vi.spyOn(console, "error").mockImplementation(() => undefined);
 
-    await expect(gateway({ config: configPath })).rejects.toMatchObject({
+    await expect(prepareStartupMigrations({ config: configPath })).rejects.toMatchObject({
       code: "migration_state_invalid",
     });
     expect(fromConfig).not.toHaveBeenCalled();
@@ -1107,6 +1195,14 @@ describe("CLI command helpers", () => {
         }),
         closeMcp: vi.fn(async () => undefined),
         config,
+        sessions: {
+          get: vi.fn(() => null),
+        },
+        resolveTurnModelSelection: vi.fn(() => ({
+          preset: "default",
+          provider: "openai",
+          model: "test-model",
+        })),
       } as any;
     });
 
@@ -1318,11 +1414,11 @@ describe("CLI command helpers", () => {
     });
     const explicitMimo = Config.fromObject({
       agents: { defaults: { provider: "xiaomi_mimo", model: "MiniMax-M1-80k" } },
-      providers: { xiaomiMimo: { apiKey: "test-key" } },
+      providers: { xiaomi_mimo: { apiKey: "test-key" } },
     });
     const inferredMimo = Config.fromObject({
       agents: { defaults: { provider: "auto", model: "mimo/MiniMax-M1-80k" } },
-      providers: { xiaomiMimo: { apiKey: "test-key" } },
+      providers: { xiaomi_mimo: { apiKey: "test-key" } },
     });
 
     expect(explicitLongcat.getProviderName()).toBe("longcat");
@@ -1337,18 +1433,18 @@ describe("CLI command helpers", () => {
   it("auto-detects local providers from configured API bases", () => {
     const ollama = Config.fromObject({
       agents: { defaults: { provider: "auto", model: "llama3.2" } },
-      providers: { ollama: { apiBase: "http://localhost:11434/v1" } },
+      providers: { ollama: currentProvider("http://localhost:11434/v1") },
     });
     const both = Config.fromObject({
       agents: { defaults: { provider: "auto", model: "llama3.2" } },
       providers: {
-        vllm: { apiBase: "http://localhost:8000" },
-        ollama: { apiBase: "http://localhost:11434/v1" },
+        vllm: currentProvider("http://localhost:8000"),
+        ollama: currentProvider("http://localhost:11434/v1"),
       },
     });
     const vllm = Config.fromObject({
       agents: { defaults: { provider: "auto", model: "llama3.2" } },
-      providers: { vllm: { apiBase: "http://localhost:8000" } },
+      providers: { vllm: currentProvider("http://localhost:8000") },
     });
 
     expect(ollama.getProviderName()).toBe("ollama");
@@ -1406,7 +1502,7 @@ describe("CLI command helpers", () => {
       providers: {
         custom: {
           apiKey: "test-key",
-          apiBase: "https://example.com/v1",
+          endpoints: currentProvider("https://example.com/v1").endpoints,
           extraHeaders: {
             "APP-Code": "demo-app",
             "x-session-affinity": "sticky-session",
@@ -1426,10 +1522,58 @@ describe("CLI command helpers", () => {
   it("reports preset names in model display strings", () => {
     const config = Config.fromObject({
       agents: { defaults: { modelPreset: "fast" } },
-      modelPresets: { fast: { model: "openai/gpt-4o-mini", provider: "openai" } },
+      providers: { openai: currentProvider("https://api.openai.com/v1", "test-key") },
+      modelPresets: {
+        fast: {
+          endpoint: "chat",
+          model: "openai/gpt-4o-mini",
+          provider: "openai",
+          source: "byok",
+          capabilities: ["agent"],
+        },
+      },
+      modelAssignments: {
+        byok: { agent: { candidates: ["fast"], default: "fast" } },
+        account: { agent: { candidates: [], default: null } },
+      },
     });
 
     expect(modelDisplay(config)).toEqual(["openai/gpt-4o-mini", " (preset: fast)"]);
+  });
+
+  it("uses the owner-bound account assignment for direct CLI model display", () => {
+    const config = Config.fromObject({
+      app: { userMode: "account", userId: "account-1" },
+      providers: {
+        memmy_account: {
+          ownerAccountId: "account-1",
+          endpoints: {
+            platform: { apiBase: "https://account.example.test/v1", protocol: "memmy-account" },
+          },
+        },
+      },
+      modelPresets: {
+        platform: {
+          endpoint: "platform",
+          model: "agent_chat",
+          provider: "memmy_account",
+          source: "account",
+          ownerAccountId: "account-1",
+          capabilities: ["agent"],
+        },
+      },
+      modelAssignments: {
+        byok: { agent: { candidates: [], default: null } },
+        account: {
+          ownerAccountId: "account-1",
+          agent: { candidates: ["platform"], default: "platform" },
+        },
+      },
+    });
+
+    expect(modelDisplay(config)).toEqual(["General text", " (preset: platform)"]);
+    config.app.userId = "account-2";
+    expect(modelDisplay(config)).toEqual(["(none configured)", ""]);
   });
 
   it("warns about deprecated memoryWindow config keys", () => {
@@ -1486,13 +1630,24 @@ describe("CLI command parity with memmy test_commands", () => {
 
   it("onboard existing config refresh", async () => {
     const root = tempRoot();
-    const configPath = writeConfig(root, { agents: { defaults: { model: "openai/test-model" } } });
+    const configPath = writeConfig(root, {
+      agents: { defaults: { model: "openai/test-model" } },
+      providers: {
+        openai: { apiKey: "openai-key" },
+        anthropic: {},
+      },
+      futureSection: { keepMe: true },
+    });
     const workspace = path.join(root, "workspace");
     vi.spyOn(console, "log").mockImplementation(() => undefined);
 
     const config = await onboard({ config: configPath, workspace });
+    const raw = YAML.parse(fs.readFileSync(configPath, "utf8"));
 
     expect(config.agents.defaults.model).toBe("openai/test-model");
+    expect(raw.providers.openai.apiKey).toBe("openai-key");
+    expect(raw.providers).toHaveProperty("anthropic");
+    expect(raw.futureSection).toEqual({ keepMe: true });
     expect(fs.existsSync(path.join(workspace, "AGENTS.md"))).toBe(true);
   });
 
@@ -1676,7 +1831,7 @@ describe("CLI command parity with memmy test_commands", () => {
   it("config explicit xiaomi mimo provider uses defaultApiBase", () => {
     const config = Config.fromObject({
       agents: { defaults: { provider: "xiaomi_mimo", model: "MiniMax-M1-80k" } },
-      providers: { xiaomiMimo: { apiKey: "test-key" } },
+      providers: { xiaomi_mimo: { apiKey: "test-key" } },
     });
     expect(config.getProviderName()).toBe("xiaomi_mimo");
     expect(config.getApiBase()).toBe("https://api.xiaomimimo.com/v1");
@@ -1685,7 +1840,7 @@ describe("CLI command parity with memmy test_commands", () => {
   it("config auto detects xiaomi mimo from model keyword", () => {
     const config = Config.fromObject({
       agents: { defaults: { provider: "auto", model: "mimo/MiniMax-M1-80k" } },
-      providers: { xiaomiMimo: { apiKey: "test-key" } },
+      providers: { xiaomi_mimo: { apiKey: "test-key" } },
     });
     expect(config.getProviderName()).toBe("xiaomi_mimo");
     expect(config.getApiBase()).toBe("https://api.xiaomimimo.com/v1");
@@ -1694,7 +1849,7 @@ describe("CLI command parity with memmy test_commands", () => {
   it("config auto detects ollama from local api base", () => {
     const config = Config.fromObject({
       agents: { defaults: { provider: "auto", model: "llama3.2" } },
-      providers: { ollama: { apiBase: "http://localhost:11434/v1" } },
+      providers: { ollama: currentProvider("http://localhost:11434/v1") },
     });
     expect(config.getProviderName()).toBe("ollama");
     expect(config.getApiBase()).toBe("http://localhost:11434/v1");
@@ -1704,8 +1859,8 @@ describe("CLI command parity with memmy test_commands", () => {
     const config = Config.fromObject({
       agents: { defaults: { provider: "auto", model: "llama3.2" } },
       providers: {
-        vllm: { apiBase: "http://localhost:8000" },
-        ollama: { apiBase: "http://localhost:11434/v1" },
+        vllm: currentProvider("http://localhost:8000"),
+        ollama: currentProvider("http://localhost:11434/v1"),
       },
     });
     expect(config.getProviderName()).toBe("ollama");
@@ -1715,7 +1870,7 @@ describe("CLI command parity with memmy test_commands", () => {
   it("config falls back to vllm when ollama not configured", () => {
     const config = Config.fromObject({
       agents: { defaults: { provider: "auto", model: "llama3.2" } },
-      providers: { vllm: { apiBase: "http://localhost:8000" } },
+      providers: { vllm: currentProvider("http://localhost:8000") },
     });
     expect(config.getProviderName()).toBe("vllm");
     expect(config.getApiBase()).toBe("http://localhost:8000");
@@ -1767,7 +1922,7 @@ describe("CLI command parity with memmy test_commands", () => {
       providers: {
         custom: {
           apiKey: "test-key",
-          apiBase: "https://example.com/v1",
+          endpoints: currentProvider("https://example.com/v1").endpoints,
           extraHeaders: { "APP-Code": "demo-app", "x-session-affinity": "sticky-session" },
         },
       },

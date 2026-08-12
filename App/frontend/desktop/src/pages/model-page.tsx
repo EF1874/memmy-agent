@@ -4,17 +4,24 @@ import { Brain, Check, CheckCircle2, ChevronLeft, Cog, Eye, EyeOff, Lightbulb, L
 import { useApiClients } from "../app/providers.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import { PAGE_CORNER_ACTION_CONTAINER_STYLE, PageCornerActionButton } from "../components/language-toggle-button.js";
+import { ModelProviderLogo } from "../components/model-provider-logo.js";
 import { Select } from "../components/Select.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { appActions } from "../state/app-actions.js";
 import { useAppState } from "../state/app-state.js";
+import {
+  assignedCatalogEndpointId,
+  assignCatalogPreset,
+  createModelWorkspace,
+  modelConfigInput,
+  upsertByokPreset
+} from "../state/model-workspace.js";
 import { createModelConfigValidationKey, type ModelConfigValidationState } from "./model-config-validation.js";
 import { API_KEY_PRIMARY_BTN_CLASS } from "./api-key-form-fields.js";
 import {
   DEFAULT_MODEL_IDS,
   PROTOCOL_OPTIONS,
   canUseModelConfig,
-  createMemmyMemoryProviderConfig,
   createModelFormValues,
   createModelProtocolPatch,
   createTestModelConnectionMessages,
@@ -120,14 +127,44 @@ export function ModelPage() {
     }
     setSaveFeedback(null);
 
-    const nextConfig = {
-      ...state.modelConfig,
-      memmyMemory: createMemmyMemoryProviderConfig(mem, skill, primaryModel)
-    };
-
     try {
+      if (!clients?.config) throw new Error("model config client unavailable");
       setSavePending(true);
-      const savedConfig = await (clients?.config.saveModelConfig(nextConfig) ?? Promise.resolve(nextConfig));
+      const latest = await clients.config.getModelConfig();
+      let workspace = createModelWorkspace(latest);
+      const memoryValues = createModelFormValues(mem, primaryModel);
+      const assignedMemoryEndpointId = assignedCatalogEndpointId(workspace, "byok", "memory_summary")
+        ?? (!memoryValues.apiKey.trim() && memoryValues.apiKeyMasked
+          ? assignedCatalogEndpointId(workspace, "byok", "agent")
+          : undefined);
+      const memory = upsertByokPreset(workspace, {
+        provider: memoryValues.provider,
+        ...(memoryValues.apiKeyMasked && assignedMemoryEndpointId ? { endpointId: assignedMemoryEndpointId } : {}),
+        endpoint: memoryValues.endpoint,
+        protocol: chatProtocol(memoryValues.provider),
+        ...(memoryValues.apiKey.trim() ? { apiKey: memoryValues.apiKey.trim() } : {}),
+        ...(memoryValues.apiKeyMasked ? { apiKeyMasked: memoryValues.apiKeyMasked } : {}),
+        model: memoryValues.model,
+        capabilities: ["memory_summary"]
+      });
+      workspace = assignCatalogPreset(memory.workspace, "byok", "memory_summary", memory.presetId);
+      const evolutionValues = createModelFormValues(skill, primaryModel);
+      const assignedEvolutionEndpointId = assignedCatalogEndpointId(workspace, "byok", "memory_evolution")
+        ?? (!evolutionValues.apiKey.trim() && evolutionValues.apiKeyMasked
+          ? assignedCatalogEndpointId(workspace, "byok", "agent")
+          : undefined);
+      const evolution = upsertByokPreset(workspace, {
+        provider: evolutionValues.provider,
+        ...(evolutionValues.apiKeyMasked && assignedEvolutionEndpointId ? { endpointId: assignedEvolutionEndpointId } : {}),
+        endpoint: evolutionValues.endpoint,
+        protocol: chatProtocol(evolutionValues.provider),
+        ...(evolutionValues.apiKey.trim() ? { apiKey: evolutionValues.apiKey.trim() } : {}),
+        ...(evolutionValues.apiKeyMasked ? { apiKeyMasked: evolutionValues.apiKeyMasked } : {}),
+        model: evolutionValues.model,
+        capabilities: ["memory_evolution"]
+      });
+      workspace = assignCatalogPreset(evolution.workspace, "byok", "memory_evolution", evolution.presetId);
+      const savedConfig = await clients.config.saveModelCatalog(modelConfigInput(workspace));
       dispatch(appActions.modelConfigUpdated(savedConfig));
       dispatch(appActions.navigate("/api-key-optional"));
       track({ name: "model_config_saved", params: { page_path: "/api-key-models" }, consentTier: "basic" });
@@ -196,6 +233,12 @@ export function ModelPage() {
       </div>
     </div>
   );
+}
+
+function chatProtocol(provider: string) {
+  if (provider === "anthropic") return "anthropic-messages" as const;
+  if (provider === "gemini" || provider === "google") return "gemini-generate-content" as const;
+  return "openai-chat-completions" as const;
 }
 
 /**
@@ -277,7 +320,8 @@ function ModelCard(props: ModelCardProps) {
             className="select-control--subtle"
             options={PROTOCOL_OPTIONS.map((option) => ({
               value: option.value,
-              label: t(option.labelKey)
+              label: t(option.labelKey),
+              icon: <ModelProviderLogo provider={option.value} size={16} />
             }))}
           />
 

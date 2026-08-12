@@ -27,7 +27,9 @@ describe("writeRuntimeConfigFile", () => {
       runtimeConfigPath
     );
 
-    expect(statSync(join(tempDir, ".memmy")).mode & 0o777).toBe(0o700);
-    expect(statSync(runtimeConfigPath).mode & 0o777).toBe(0o600);
+    if (process.platform !== "win32") {
+      expect(statSync(join(tempDir, ".memmy")).mode & 0o777).toBe(0o700);
+      expect(statSync(runtimeConfigPath).mode & 0o777).toBe(0o600);
+    }
   });
 });

@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import path from "node:path";
 import { styleText } from "node:util";
 import { SelectPrompt, settings as clackSettings, wrapTextWithPrefix } from "@clack/core";
 import {
@@ -31,11 +32,14 @@ import {
   DEFAULT_CONTEXT_WINDOW_TOKENS,
   GatewayConfig,
   MemmyMemoryConfig,
+  ModelEndpointConfig,
   ModelPresetConfig,
   ProviderConfig,
   SessionDagConfig,
   ToolsConfig,
 } from "../../config/schema.js";
+import { getWorkspacePath } from "../../config/paths.js";
+import { SessionManager } from "../../core/session/manager.js";
 import { discoverAll, getChannel } from "../../integrations/channels/registry.js";
 import { PROVIDERS } from "../../providers/registry.js";
 import { getModelContextLimit, getModelSuggestions } from "./models.js";
@@ -412,6 +416,7 @@ function setField(model: any, fieldName: string, value: any): void {
 
 function cloneValue<T>(value: T): T {
   if (value == null || typeof value !== "object") return value;
+  if (value instanceof Config) return new Config(value.toObject()) as T;
   if (Array.isArray(value)) return value.map(cloneValue) as T;
   const clone = Object.create(Object.getPrototypeOf(value));
   for (const [key, item] of Object.entries(value as Dict)) clone[key] = cloneValue(item);
@@ -803,43 +808,483 @@ export async function configureDraftModel(model: any, displayName: string, { ski
 export type PresetAction =
   | { type: "add"; name: string; preset: ModelPresetConfig | Record<string, any> }
   | { type: "edit"; name: string; preset: ModelPresetConfig | Record<string, any> }
-  | { type: "delete"; name: string };
+  | { type: "delete"; name: string; preserveSessionTombstone?: boolean };
+
+export type ProviderEndpointAction =
+  | { type: "add" | "edit"; endpointId: string; endpoint: ModelEndpointConfig | Record<string, any> }
+  | { type: "delete"; endpointId: string };
+
+const MODEL_CAPABILITIES = [
+  "agent", "memory_summary", "memory_evolution", "embedding", "asr", "image_generation",
+] as const;
+
+const ENDPOINT_PROTOCOLS = [
+  "openai-chat-completions", "openai-responses", "anthropic-messages", "gemini-generate-content",
+  "openai-embeddings", "dashscope-input-audio-chat", "openai-images",
+  "dashscope-multimodal-generation", "memmy-account",
+] as const;
+
+const CAPABILITY_DISPLAY_NAMES: Record<typeof MODEL_CAPABILITIES[number], string> = {
+  agent: "General text",
+  memory_summary: "Memory summary",
+  memory_evolution: "Memory evolution",
+  embedding: "Embedding",
+  asr: "Speech recognition",
+  image_generation: "Image generation",
+};
+
+function presetDisplayName(presetId: string, preset: ModelPresetConfig): string {
+  if (preset.source === "account") {
+    const capability = preset.capabilities.find((value) => value in CAPABILITY_DISPLAY_NAMES);
+    if (capability) return CAPABILITY_DISPLAY_NAMES[capability];
+  }
+  return preset.model.trim() || presetId;
+}
+
+const TEXT_ENDPOINT_PROTOCOLS = new Set([
+  "openai-chat-completions", "openai-responses", "anthropic-messages", "gemini-generate-content", "memmy-account",
+]);
+
+function defaultProviderProtocol(providerName: string): "openai-chat-completions" | "anthropic-messages" | "memmy-account" {
+  if (providerName === "memmy_account") return "memmy-account";
+  return PROVIDERS.find((provider) => provider.name === providerName)?.backend === "anthropic"
+    ? "anthropic-messages"
+    : "openai-chat-completions";
+}
+
+function defaultProviderApiBase(providerName: string): string {
+  const configured = PROVIDERS.find((provider) => provider.name === providerName)?.defaultApiBase;
+  if (configured) return configured;
+  if (providerName === "openai") return "https://api.openai.com/v1";
+  if (providerName === "anthropic") return "https://api.anthropic.com/v1";
+  return "";
+}
+
+function ensureTextEndpoint(config: Config, providerName: string): string {
+  const provider = (config.providers as Record<string, ProviderConfig>)[providerName] ?? new ProviderConfig();
+  const existing = Object.entries(provider.endpoints).find(([, endpoint]) => TEXT_ENDPOINT_PROTOCOLS.has(endpoint.protocol));
+  if (existing) return existing[0];
+  const apiBase = defaultProviderApiBase(providerName);
+  if (!apiBase) throw new Error(`provider '${providerName}' requires a text endpoint before creating a preset`);
+  let endpointId = "chat";
+  for (let suffix = 2; endpointId in provider.endpoints; suffix += 1) endpointId = `chat-${suffix}`;
+  provider.endpoints[endpointId] = new ModelEndpointConfig({
+    apiBase,
+    protocol: defaultProviderProtocol(providerName),
+  });
+  (config.providers as Record<string, ProviderConfig>)[providerName] = provider;
+  return endpointId;
+}
+
+function currentPreset(config: Config, preset: ModelPresetConfig | Record<string, any>): ModelPresetConfig {
+  if (preset instanceof ModelPresetConfig) return preset;
+  const model = String(preset.model ?? config.agents.defaults.model).trim();
+  const requestedProvider = String(preset.provider ?? config.agents.defaults.provider).trim();
+  const provider = requestedProvider && requestedProvider !== "auto"
+    ? requestedProvider
+    : providerFromModelPrefix(model) ?? config.getProviderName(model) ?? "openai";
+  return new ModelPresetConfig({
+    ...preset,
+    model,
+    provider,
+    endpoint: preset.endpoint ?? ensureTextEndpoint(config, provider),
+    source: preset.source ?? "byok",
+    capabilities: preset.capabilities ?? ["agent"],
+  });
+}
+
+function assignmentPresetUsable(
+  config: Config,
+  namespace: "byok" | "account",
+  presetId: string,
+  capability: "agent" | "memory_summary" | "memory_evolution" | "embedding" | "asr" | "image_generation",
+): boolean {
+  const preset = config.modelPresets[presetId];
+  if (!preset?.capabilities.includes(capability)) return false;
+  if (namespace === "byok") return preset.source === "byok" && !preset.ownerAccountId;
+  return preset.source === "byok"
+    || (preset.source === "account" && preset.ownerAccountId === config.modelAssignments.account.ownerAccountId);
+}
+
+function normalizeAssignments(config: Config): void {
+  for (const namespace of ["byok"] as const) {
+    const assignment = config.modelAssignments.byok;
+    assignment.agent.candidates = assignment.agent.candidates.filter((presetId) =>
+      assignmentPresetUsable(config, namespace, presetId, "agent")
+    );
+    if (!assignment.agent.default || !assignment.agent.candidates.includes(assignment.agent.default)) {
+      assignment.agent.default = assignment.agent.candidates[0] ?? null;
+    }
+    const fields = {
+      memorySummary: "memory_summary",
+      memoryEvolution: "memory_evolution",
+      embedding: "embedding",
+      asr: "asr",
+      imageGeneration: "image_generation",
+    } as const;
+    for (const [field, capability] of Object.entries(fields) as Array<[keyof typeof fields, typeof fields[keyof typeof fields]]>) {
+      const presetId = assignment[field];
+      if (presetId && !assignmentPresetUsable(config, namespace, presetId, capability)) assignment[field] = null;
+    }
+  }
+}
+
+function assignmentPresetReferences(config: Config, presetId: string): string[] {
+  const references: string[] = [];
+  for (const namespace of ["byok", "account"] as const) {
+    const assignment = config.modelAssignments[namespace];
+    if (assignment.agent.candidates.includes(presetId)) {
+      references.push(`modelAssignments.${namespace}.agent.candidates`);
+    }
+    if (assignment.agent.default === presetId) {
+      references.push(`modelAssignments.${namespace}.agent.default`);
+    }
+    for (const field of ["memorySummary", "memoryEvolution", "embedding", "asr", "imageGeneration"] as const) {
+      if (assignment[field] === presetId) references.push(`modelAssignments.${namespace}.${field}`);
+    }
+  }
+  if (config.agents.defaults.modelPreset === presetId) references.push("agents.defaults.modelPreset");
+  if (config.agents.defaults.fallbackModels.some((candidate) => candidate === presetId)) {
+    references.push("agents.defaults.fallbackModels");
+  }
+  return references;
+}
+
+function sessionPresetReferences(config: Config, presetId: string): string[] {
+  const sessionsDir = path.join(getWorkspacePath(config.agents.defaults.workspace), "sessions");
+  if (!fs.existsSync(sessionsDir)) return [];
+  return new SessionManager(sessionsDir).listSessionRecords().flatMap((session) => {
+    const metadata = session.metadata ?? {};
+    const selection = metadata.modelSelection;
+    return metadata.modelPreset === presetId
+      || (selection && typeof selection === "object" && selection.presetId === presetId)
+      ? [session.key]
+      : [];
+  });
+}
+
+export function assertModelPresetCanBeDeleted(
+  config: Config,
+  presetId: string,
+  options: { preserveSessionTombstone?: boolean } = {},
+): void {
+  const configReferences = assignmentPresetReferences(config, presetId);
+  if (configReferences.length) {
+    throw new Error(`model preset '${presetId}' is still referenced by ${configReferences.join(", ")}; reassign it before deleting`);
+  }
+  const sessionReferences = sessionPresetReferences(config, presetId);
+  if (sessionReferences.length && !options.preserveSessionTombstone) {
+    throw new Error(`model preset '${presetId}' is still referenced by sessions; explicitly preserve session tombstones to delete it`);
+  }
+}
+
+export function assertProviderEndpointCanBeDeleted(
+  config: Config,
+  providerName: string,
+  endpointId: string,
+): void {
+  const references = Object.entries(config.modelPresets)
+    .filter(([, preset]) => preset.provider === providerName && preset.endpoint === endpointId)
+    .map(([presetId]) => presetId);
+  if (references.length) {
+    throw new Error(`provider endpoint '${providerName}/${endpointId}' is still referenced by model presets: ${references.join(", ")}`);
+  }
+}
+
+function byokReplacementCandidates(
+  config: Config,
+  deletedPresetId: string,
+  capability: typeof MODEL_CAPABILITIES[number],
+): string[] {
+  return Object.entries(config.modelPresets).flatMap(([presetId, preset]) => (
+    presetId !== deletedPresetId
+    && preset.source === "byok"
+    && !preset.ownerAccountId
+    && preset.capabilities.includes(capability)
+      ? [presetId]
+      : []
+  ));
+}
+
+async function chooseByokReplacement(
+  config: Config,
+  deletedPresetId: string,
+  capability: typeof MODEL_CAPABILITIES[number],
+): Promise<string | null | typeof BACK_PRESSED> {
+  const choices = [...byokReplacementCandidates(config, deletedPresetId, capability), "(unassign)"];
+  const selected = await selectWithBack(
+    `Replacement preset for ${capability}:`,
+    choices,
+    choices[0],
+  );
+  return selected === "(unassign)" ? null : selected;
+}
+
+async function reassignByokPresetReferences(
+  config: Config,
+  deletedPresetId: string,
+): Promise<boolean> {
+  const target = config;
+  config = new Config(config.toObject());
+  const accountReferences = assignmentPresetReferences(config, deletedPresetId)
+    .filter((reference) => reference.startsWith("modelAssignments.account."));
+  if (accountReferences.length) {
+    throw new Error(`model preset '${deletedPresetId}' is still referenced by read-only account assignments: ${accountReferences.join(", ")}`);
+  }
+  const assignment = config.modelAssignments.byok;
+  let agentReplacement: string | null | typeof BACK_PRESSED = null;
+  const needsAgentReplacement = assignment.agent.candidates.includes(deletedPresetId)
+    || assignment.agent.default === deletedPresetId
+    || config.agents.defaults.modelPreset === deletedPresetId
+    || config.agents.defaults.fallbackModels.some((candidate) => candidate === deletedPresetId);
+  if (needsAgentReplacement) {
+    agentReplacement = await chooseByokReplacement(config, deletedPresetId, "agent");
+    if (agentReplacement === BACK_PRESSED) return false;
+    const replacement = typeof agentReplacement === "string" ? agentReplacement : null;
+    assignment.agent.candidates = assignment.agent.candidates.filter((presetId) => presetId !== deletedPresetId);
+    if (replacement && !assignment.agent.candidates.includes(replacement)) {
+      assignment.agent.candidates.push(replacement);
+    }
+    if (assignment.agent.default === deletedPresetId) {
+      assignment.agent.default = replacement ?? assignment.agent.candidates[0] ?? null;
+    }
+    if (config.agents.defaults.modelPreset === deletedPresetId) {
+      config.agents.defaults.modelPreset = replacement ?? assignment.agent.default;
+    }
+    config.agents.defaults.fallbackModels = config.agents.defaults.fallbackModels.flatMap((candidate) => (
+      candidate !== deletedPresetId
+        ? [candidate]
+        : replacement && !config.agents.defaults.fallbackModels.includes(replacement)
+          ? [replacement]
+          : []
+    ));
+  }
+  const fields = [
+    ["memorySummary", "memory_summary"],
+    ["memoryEvolution", "memory_evolution"],
+    ["embedding", "embedding"],
+    ["asr", "asr"],
+    ["imageGeneration", "image_generation"],
+  ] as const;
+  for (const [field, capability] of fields) {
+    if (assignment[field] !== deletedPresetId) continue;
+    const replacement = await chooseByokReplacement(config, deletedPresetId, capability);
+    if (replacement === BACK_PRESSED) return false;
+    assignment[field] = replacement;
+  }
+  Object.assign(target, config);
+  return true;
+}
+
+function assignNewByokPreset(config: Config, presetId: string, preset: ModelPresetConfig): void {
+  const provider = (config.providers as Record<string, ProviderConfig>)[preset.provider];
+  if (
+    preset.source !== "byok"
+    || preset.ownerAccountId
+    || preset.provider === "memmy_account"
+    || provider?.ownerAccountId
+  ) {
+    throw new Error("account model presets are read-only");
+  }
+  const assignment = config.modelAssignments.byok;
+  if (preset.capabilities.includes("agent")) {
+    if (!assignment.agent.candidates.includes(presetId)) assignment.agent.candidates.push(presetId);
+    assignment.agent.default = presetId;
+    config.agents.defaults.modelPreset = presetId;
+  }
+  const singleCapabilities = [
+    ["memorySummary", "memory_summary"],
+    ["memoryEvolution", "memory_evolution"],
+    ["embedding", "embedding"],
+    ["asr", "asr"],
+    ["imageGeneration", "image_generation"],
+  ] as const;
+  for (const [field, capability] of singleCapabilities) {
+    if (preset.capabilities.includes(capability)) assignment[field] = presetId;
+  }
+}
+
+function commitInteractivePreset(
+  config: Config,
+  presetId: string,
+  preset: ModelPresetConfig,
+  mode: "add" | "edit",
+): void {
+  const working = new Config(config.toObject());
+  working.modelPresets[presetId] = preset;
+  if (mode === "add") assignNewByokPreset(working, presetId, preset);
+  const validated = new Config(working.toObject());
+  Object.assign(config, validated);
+}
+
+function assertPresetIsUserManaged(config: Config, presetId: string): void {
+  const preset = config.modelPresets[presetId];
+  if (preset?.source === "account" || preset?.ownerAccountId) {
+    throw new Error("account model presets are read-only");
+  }
+}
+
+export function normalizeModelCatalogReferences(config: Config): void {
+  normalizeAssignments(config);
+  const names = Object.keys(config.modelPresets);
+  const defaults = config.agents.defaults;
+  if (defaults.modelPreset && !names.includes(defaults.modelPreset)) {
+    defaults.modelPreset = config.modelAssignments.byok.agent.default
+      ?? config.modelAssignments.account.agent.default
+      ?? names.find((name) => config.modelPresets[name]?.capabilities.includes("agent"))
+      ?? null;
+  }
+  defaults.fallbackModels = defaults.fallbackModels.filter((candidate) =>
+    typeof candidate !== "string" || names.includes(candidate)
+  );
+}
+
+export function validateModelCatalogForSave(config: Config): void {
+  const pairs = new Set<string>();
+  for (const [name, preset] of Object.entries(config.modelPresets)) {
+    if (name === "default") {
+      throw new Error("model preset name 'default' is reserved");
+    }
+    if (name === "memmy-account" && (
+      preset.provider !== "memmy_account"
+      || preset.model !== "agent_chat"
+    )) {
+      throw new Error("model preset name 'memmy-account' is reserved for account login");
+    }
+    const model = preset.model.trim();
+    const provider = config.getProviderName(model, { preset })
+      ?? (preset.provider !== "auto" ? preset.provider : providerFromModelPrefix(model));
+    if (!model) throw new Error(`model preset '${name}' requires a model`);
+    if (!provider) throw new Error(`model preset '${name}' requires a valid provider`);
+    const pair = `${provider}\0${preset.endpoint}\0${model}`;
+    if (pairs.has(pair)) {
+      throw new Error(`duplicate provider/endpoint/model triple: ${provider} / ${preset.endpoint} / ${model}`);
+    }
+    pairs.add(pair);
+  }
+  const defaultPreset = config.agents.defaults.modelPreset;
+  if (defaultPreset && !(defaultPreset in config.modelPresets)) {
+    throw new Error(`agents.defaults.modelPreset references missing preset '${defaultPreset}'`);
+  }
+  for (const candidate of config.agents.defaults.fallbackModels) {
+    if (typeof candidate === "string" && !(candidate in config.modelPresets)) {
+      throw new Error(`agents.defaults.fallbackModels references missing preset '${candidate}'`);
+    }
+  }
+}
+
+function providerFromModelPrefix(model: string): string | null {
+  const prefix = model.split("/", 1)[0]?.trim();
+  return prefix && PROVIDERS.some((provider) => provider.name === prefix)
+    ? prefix
+    : null;
+}
+
+async function configurePresetEndpointAndCapabilities(
+  config: Config,
+  draft: ModelPresetConfig,
+): Promise<ModelPresetConfig | null> {
+  const provider = (config.providers as Record<string, ProviderConfig>)[draft.provider];
+  if (!provider || draft.provider === "memmy_account" || provider.ownerAccountId) {
+    throw new Error("account model providers are read-only");
+  }
+  const endpointIds = Object.keys(provider.endpoints);
+  if (!endpointIds.length) {
+    throw new Error(`provider '${draft.provider}' requires an endpoint before creating a preset`);
+  }
+  const endpoint = await selectWithBack(
+    "Provider endpoint:",
+    endpointIds,
+    endpointIds.includes(draft.endpoint) ? draft.endpoint : endpointIds[0],
+  );
+  if (endpoint === BACK_PRESSED || endpoint == null) return null;
+  const capabilitiesText = await getQuestionary().text(
+    `Capabilities (${MODEL_CAPABILITIES.join(", ")}):`,
+    {
+      default: draft.capabilities.join(","),
+      validate: (value) => {
+        const capabilities = value.split(",").map((item) => item.trim()).filter(Boolean);
+        return capabilities.length > 0 && capabilities.every((item) => MODEL_CAPABILITIES.includes(item as any))
+          ? true
+          : `Choose one or more of: ${MODEL_CAPABILITIES.join(", ")}`;
+      },
+    },
+  ).ask();
+  if (capabilitiesText == null) return null;
+  return new ModelPresetConfig({
+    ...draft.toObject(),
+    endpoint,
+    source: "byok",
+    ownerAccountId: null,
+    capabilities: capabilitiesText.split(",").map((item) => item.trim()).filter(Boolean),
+  });
+}
 
 export async function configureModelPresets(config: Config, actions: PresetAction[] | null = null): Promise<Config> {
   syncPresetCache(config);
   if (actions) {
+    const target = config;
+    config = new Config(config.toObject());
     for (const action of actions) {
       if (action.type === "delete") {
+        assertPresetIsUserManaged(config, action.name);
+        assertModelPresetCanBeDeleted(config, action.name, action);
         delete config.modelPresets[action.name];
       } else {
-        if (!action.name || action.name === "default") throw new Error("model preset name is invalid or reserved");
-        config.modelPresets[action.name] =
-          action.preset instanceof ModelPresetConfig ? action.preset : new ModelPresetConfig(action.preset);
+        if (!action.name || action.name === "default" || action.name === "memmy-account") {
+          throw new Error("model preset name is invalid or reserved");
+        }
+        if (action.type === "edit") assertPresetIsUserManaged(config, action.name);
+        if (action.type === "add" && config.modelPresets[action.name]) {
+          assertPresetIsUserManaged(config, action.name);
+          throw new Error(`model preset '${action.name}' already exists`);
+        }
+        const nextPreset = currentPreset(config, action.preset);
+        const nextProvider = (config.providers as Record<string, ProviderConfig>)[nextPreset.provider];
+        if (
+          nextPreset.source !== "byok"
+          || nextPreset.ownerAccountId
+          || nextPreset.provider === "memmy_account"
+          || nextProvider?.ownerAccountId
+        ) {
+          throw new Error("account model presets are read-only");
+        }
+        config.modelPresets[action.name] = nextPreset;
+        if (action.type === "add") assignNewByokPreset(config, action.name, nextPreset);
       }
-      syncPresetCache(config);
     }
-    return config;
+    validateModelCatalogForSave(config);
+    new Config(config.toObject());
+    Object.assign(target, config);
+    syncPresetCache(target);
+    return target;
   }
 
   while (true) {
     showSectionHeader("Model Presets", "Create, edit or delete named model presets for quick switching");
-    const choices = Object.entries(config.modelPresets).map(([name, preset]) => `${name} (${preset.model})`);
+    const choices = Object.entries(config.modelPresets)
+      .map(([name, preset]) => `${name} (${presetDisplayName(name, preset)})`);
     choices.push("[+] Add new preset", "<- Back");
     const answer = await selectWithBack("Select preset:", choices);
     if (answer === BACK_PRESSED || answer == null || answer === "<- Back") break;
     if (answer === "[+] Add new preset") {
       const name = (await getQuestionary().text("Preset name:", { validate: (value) => (value.trim() ? true : "Name cannot be empty") }).ask())?.trim();
       if (!name) continue;
-      if (name === "default" || name in config.modelPresets) continue;
-      const updated = await configureDraftModel(
-        new ModelPresetConfig({
+      if (name === "default" || name === "memmy-account" || name in config.modelPresets) continue;
+      const draft = await configureDraftModel(
+        currentPreset(config, {
           model: config.agents.defaults.model,
           provider: config.agents.defaults.provider,
         }),
         `New Preset: ${name}`,
+        { skipFields: new Set(["endpoint", "source", "ownerAccountId", "capabilities"]) },
       );
+      const updated = draft ? await configurePresetEndpointAndCapabilities(config, draft) : null;
       if (updated) {
-        config.modelPresets[name] = updated;
+        if (updated.source !== "byok" || updated.ownerAccountId) {
+          throw new Error("account model presets are read-only");
+        }
+        commitInteractivePreset(config, name, updated, "add");
         syncPresetCache(config);
       }
       continue;
@@ -847,18 +1292,55 @@ export async function configureModelPresets(config: Config, actions: PresetActio
     const presetName = answer.split(" (", 1)[0];
     const preset = config.modelPresets[presetName];
     if (!preset) continue;
-    const actionChoices = presetName === "default" ? ["Edit", "Cancel"] : ["Edit", "Delete", "Cancel"];
+    const accountManaged = preset.source === "account" || Boolean(preset.ownerAccountId);
+    const actionChoices = accountManaged
+      ? ["Cancel"]
+      : presetName === "default" ? ["Edit", "Cancel"] : ["Edit", "Delete", "Cancel"];
     const action = await selectWithBack(`Preset: ${presetName}`, actionChoices, "Edit");
     if (action === "Delete") {
       if (await getQuestionary().confirm(`Delete preset '${presetName}'?`, { default: false }).ask()) {
+        try {
+          assertModelPresetCanBeDeleted(config, presetName);
+        } catch (error) {
+          if (!(error instanceof Error)) throw error;
+          if (error.message.includes("reassign it before deleting")) {
+            const reassign = await getQuestionary().confirm(
+              `Reassign BYOK references before deleting '${presetName}'?`,
+              { default: false },
+            ).ask();
+            if (!reassign || !await reassignByokPresetReferences(config, presetName)) continue;
+          } else if (!error.message.includes("referenced by sessions")) {
+            throw error;
+          }
+          try {
+            assertModelPresetCanBeDeleted(config, presetName);
+          } catch (sessionError) {
+            if (!(sessionError instanceof Error) || !sessionError.message.includes("referenced by sessions")) {
+              throw sessionError;
+            }
+            const preserve = await getQuestionary().confirm(
+              `Keep existing sessions as explicit '${presetName}' tombstones and delete the preset?`,
+              { default: false },
+            ).ask();
+            if (!preserve) continue;
+            assertModelPresetCanBeDeleted(config, presetName, { preserveSessionTombstone: true });
+          }
+        }
         delete config.modelPresets[presetName];
         syncPresetCache(config);
       }
     } else if (action === "Edit") {
-      const updated = await configureDraftModel(preset, `Edit Preset: ${presetName}`);
-      if (updated) config.modelPresets[presetName] = updated;
+      const draft = await configureDraftModel(
+        preset,
+        `Edit Preset: ${presetName}`,
+        { skipFields: new Set(["endpoint", "source", "ownerAccountId", "capabilities"]) },
+      );
+      const updated = draft ? await configurePresetEndpointAndCapabilities(config, draft) : null;
+      if (updated) commitInteractivePreset(config, presetName, updated, "edit");
     }
   }
+  validateModelCatalogForSave(config);
+  new Config(config.toObject());
   return config;
 }
 
@@ -875,14 +1357,115 @@ export function getProviderNames(): Record<string, string> {
   return Object.fromEntries(Object.entries(getProviderInfo()).map(([name, info]) => [name, info[0]]));
 }
 
-export async function configureProvider(config: Config, providerName: string): Promise<void> {
-  const provider = (config.providers as any)[providerName] ?? new ProviderConfig();
+export async function configureProvider(
+  config: Config,
+  providerName: string,
+  endpointActions: ProviderEndpointAction[] | null = null,
+): Promise<void> {
+  const target = config;
+  if (endpointActions) config = new Config(config.toObject());
+  let provider = (config.providers as Record<string, ProviderConfig>)[providerName] ?? new ProviderConfig();
+  if (providerName === "memmy_account" || provider.ownerAccountId) {
+    throw new Error("account model providers are read-only");
+  }
+  (config.providers as Record<string, ProviderConfig>)[providerName] = provider;
+  if (endpointActions) {
+    for (const action of endpointActions) {
+      if (!action.endpointId.trim()) throw new Error("provider endpoint ID is required");
+      if (action.type === "delete") {
+        assertProviderEndpointCanBeDeleted(config, providerName, action.endpointId);
+        delete provider.endpoints[action.endpointId];
+        continue;
+      }
+      if (action.type === "add" && provider.endpoints[action.endpointId]) {
+        throw new Error(`provider endpoint '${providerName}/${action.endpointId}' already exists`);
+      }
+      if (action.type === "edit" && !provider.endpoints[action.endpointId]) {
+        throw new Error(`provider endpoint '${providerName}/${action.endpointId}' does not exist`);
+      }
+      const endpoint = action.endpoint instanceof ModelEndpointConfig
+        ? action.endpoint
+        : new ModelEndpointConfig(action.endpoint);
+      if (endpoint.protocol === "memmy-account") {
+        throw new Error("account model providers are read-only");
+      }
+      provider.endpoints[action.endpointId] = endpoint;
+    }
+    new Config(config.toObject());
+    Object.assign(target, config);
+    return;
+  }
   const info = getProviderInfo()[providerName];
   const displayName = info?.[0] ?? providerName;
   const defaultApiBase = info?.[3];
-  if (defaultApiBase && !provider.apiBase) provider.apiBase = defaultApiBase;
-  const updated = await configureDraftModel(provider, displayName);
-  if (updated) (config.providers as any)[providerName] = updated;
+  if (defaultApiBase && !provider.apiBase) ensureTextEndpoint(config, providerName);
+  provider = (config.providers as Record<string, ProviderConfig>)[providerName];
+  const updated = await configureDraftModel(
+    provider,
+    displayName,
+    { skipFields: new Set(["ownerAccountId", "endpoints"]) },
+  );
+  if (!updated) return;
+  provider = updated;
+  (config.providers as Record<string, ProviderConfig>)[providerName] = provider;
+  await configureProviderEndpointsInteractive(config, providerName, provider);
+  new Config(config.toObject());
+}
+
+async function configureProviderEndpointsInteractive(
+  config: Config,
+  providerName: string,
+  provider: ProviderConfig,
+): Promise<void> {
+  while (true) {
+    showSectionHeader("Provider Endpoints", `Configure Chat, Embedding, ASR and Image endpoints for ${providerName}`);
+    const choices = Object.entries(provider.endpoints)
+      .map(([endpointId, endpoint]) => `${endpointId} (${endpoint.protocol})`);
+    choices.push("[+] Add endpoint", "<- Back");
+    const answer = await selectWithBack("Select endpoint:", choices);
+    if (answer === BACK_PRESSED || answer == null || answer === "<- Back") return;
+    if (answer === "[+] Add endpoint") {
+      const endpointId = (await getQuestionary().text("Endpoint ID:", {
+        validate: (value) => value.trim() && !provider.endpoints[value.trim()] ? true : "Endpoint ID must be unique",
+      }).ask())?.trim();
+      if (!endpointId) continue;
+      const protocol = await selectWithBack(
+        "Endpoint protocol:",
+        ENDPOINT_PROTOCOLS.filter((value) => value !== "memmy-account"),
+        defaultProviderProtocol(providerName),
+      );
+      if (protocol === BACK_PRESSED || protocol == null) continue;
+      const apiBase = (await getQuestionary().text("Endpoint API Base:", {
+        default: defaultProviderApiBase(providerName),
+        validate: (value) => value.trim() ? true : "API Base is required",
+      }).ask())?.trim();
+      if (!apiBase) continue;
+      provider.endpoints[endpointId] = new ModelEndpointConfig({ apiBase, protocol });
+      continue;
+    }
+    const endpointId = answer.split(" (", 1)[0];
+    const endpoint = provider.endpoints[endpointId];
+    if (!endpoint) continue;
+    const action = await selectWithBack(`Endpoint: ${endpointId}`, ["Edit", "Delete", "Cancel"], "Edit");
+    if (action === "Edit") {
+      const next = await configureDraftModel(endpoint, `Edit Endpoint: ${endpointId}`);
+      if (next) {
+        const previous = provider.endpoints[endpointId];
+        provider.endpoints[endpointId] = next;
+        try {
+          new Config(config.toObject());
+        } catch (error) {
+          provider.endpoints[endpointId] = previous;
+          throw error;
+        }
+      }
+    } else if (action === "Delete") {
+      assertProviderEndpointCanBeDeleted(config, providerName, endpointId);
+      if (await getQuestionary().confirm(`Delete endpoint '${providerName}/${endpointId}'?`, { default: false }).ask()) {
+        delete provider.endpoints[endpointId];
+      }
+    }
+  }
 }
 
 export async function configureProviders(config: Config): Promise<void> {
@@ -1171,6 +1754,7 @@ export async function promptMainMenuExit(hasChanges: boolean): Promise<string> {
 
 function finishExit(original: Config, current: Config, answer: string): OnboardResult | null {
   if (answer === "[S] Save and Exit") {
+    validateModelCatalogForSave(current);
     if (shouldUseClackPromptUi()) clackOutro("Configuration saved.");
     return new OnboardResult({ config: current, shouldSave: true, changed: hasUnsavedChanges(original, current) });
   }
@@ -1193,6 +1777,7 @@ export async function runOnboard(
   const config = cloneValue(options.initialConfig ?? new Config());
   if (options.actions) {
     await configureModelPresets(config, options.actions);
+    validateModelCatalogForSave(config);
     return new OnboardResult({ config, shouldSave: options.shouldSave ?? true, changed: options.actions.length > 0 });
   }
   syncPresetCache(config);

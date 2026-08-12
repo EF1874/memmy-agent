@@ -147,17 +147,28 @@ describe("AgentThreadMessages", () => {
     expect(byokHtml).toContain("Error: API returned empty choices.");
   });
 
-  it("shows login-expired copy for auth errors in account mode and keeps API-key copy for BYOK", () => {
-    const message = { id: "error", role: "assistant" as const, content: "Error calling LLM: 401 Unauthorized" };
+  it("uses the actual model source for auth copy instead of the global app mode", () => {
+    const accountMessage = {
+      id: "account-error",
+      role: "assistant" as const,
+      content: "Error calling LLM: 401 Unauthorized",
+      modelError: { category: "model_failed" as const, source: "account" as const }
+    };
+    const byokMessage = {
+      id: "byok-error",
+      role: "assistant" as const,
+      content: "Error calling LLM: 401 Unauthorized",
+      modelError: { category: "model_failed" as const, source: "byok" as const }
+    };
 
     const accountHtml = renderToString(
       <I18nProvider language="zh-CN">
-        <AgentThreadMessages chatScopeKey="chat-account-auth-error" messages={[message]} accountMode />
+        <AgentThreadMessages chatScopeKey="chat-account-auth-error" messages={[accountMessage]} />
       </I18nProvider>
     );
     const byokHtml = renderToString(
       <I18nProvider language="zh-CN">
-        <AgentThreadMessages chatScopeKey="chat-byok-auth-error" messages={[message]} />
+        <AgentThreadMessages chatScopeKey="chat-byok-auth-error" messages={[byokMessage]} />
       </I18nProvider>
     );
 
@@ -1197,6 +1208,59 @@ describe("AgentThreadMessages", () => {
     expect(html).toContain('data-icon="chevron-right"');
     expect(html).not.toContain("Completed write_file");
     expect(html).not.toContain("Edited /tmp/a.txt");
+  });
+
+  it("renders confirmed no-op files as unchanged without a diff or edited summary", () => {
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages
+          chatScopeKey="chat-file-noop"
+          messages={[
+            {
+              id: "file-noop",
+              role: "tool",
+              kind: "trace",
+              content: "",
+              traces: [],
+              fileEdits: [
+                {
+                  call_id: "call-noop",
+                  ui_tool_call_id: "ui-noop",
+                  tool: "apply_patch",
+                  path: "src/a.ts",
+                  phase: "end",
+                  status: "done",
+                  added: 0,
+                  deleted: 0,
+                  unchanged: true,
+                },
+                {
+                  call_id: "call-noop",
+                  ui_tool_call_id: "ui-noop",
+                  tool: "apply_patch",
+                  path: "src/b.ts",
+                  phase: "end",
+                  status: "done",
+                  added: 0,
+                  deleted: 0,
+                  unchanged: true,
+                },
+              ],
+              activitySegmentId: "activity-file-noop",
+              isStreaming: true,
+              stoppedByUser: true,
+            },
+          ]}
+        />
+      </I18nProvider>,
+    );
+
+    expect(html).toContain("文件未修改");
+    expect(html).toContain("未修改 src/a.ts");
+    expect(html).toContain("未修改 src/b.ts");
+    expect(html).not.toContain("编辑了 2 个文件");
+    expect(html).not.toContain("+0");
+    expect(html).not.toContain("Edited src/a.ts");
   });
 
   it.each(["write_file", "edit_file", "apply_patch"] as const)("does not render %s file edit content fallback", (toolName) => {

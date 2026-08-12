@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { normalizeByokTokenUsage } from "./normalizer.js";
-import type { ByokTokenUsageClient, ByokTokenUsageEvent, JsonRecord } from "./types.js";
+import type { ByokTokenUsageClient, ByokTokenUsageEvent, ByokUsageActualModelContext, JsonRecord } from "./types.js";
 
 const ACCOUNT_PROVIDER = "memmy_account";
 
@@ -13,11 +13,11 @@ export type ByokTokenUsageRecordInput = {
   modelId?: string | null;
   operation?: string | null;
   metadata?: JsonRecord | null;
+  actualModelContext?: ByokUsageActualModelContext | null;
 };
 
 export type ByokTokenUsageRecorderOptions = {
   client: ByokTokenUsageClient;
-  resolveProviderName?: (modelId: string | null) => string | null;
 };
 
 export interface ByokTokenUsageRecorderLike {
@@ -36,9 +36,11 @@ export class ByokTokenUsageRecorder implements ByokTokenUsageRecorderLike {
       const usage = normalizeByokTokenUsage(input.usage);
       if (!usage) return false;
 
-      const modelId = stringOrNull(input.modelId);
-      const provider = stringOrNull(input.provider) ?? stringOrNull(this.options.resolveProviderName?.(modelId)) ?? "";
-      if (provider === ACCOUNT_PROVIDER) return false;
+      const context = input.actualModelContext;
+      if (!context || context.source !== "byok") return false;
+      const modelId = context.model;
+      const provider = context.provider;
+      if (!provider || provider === ACCOUNT_PROVIDER) return false;
 
       const operationId = stringOrNull(input.operationId) ?? randomUUID();
       const event: ByokTokenUsageEvent = {
@@ -46,6 +48,10 @@ export class ByokTokenUsageRecorder implements ByokTokenUsageRecorderLike {
         kind: "agent_chat",
         source: "agent",
         operationId,
+        presetId: context.presetId,
+        provider,
+        model: modelId,
+        capability: "agent",
         ...usage,
         metadata: {
           ...(input.metadata ?? {}),

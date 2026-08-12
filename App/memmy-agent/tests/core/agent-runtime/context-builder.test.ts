@@ -358,21 +358,43 @@ describe("Build Messages", () => {
     expect(systemPrompt).toContain("reasoning/thinking/思考内容");
   });
 
-  it("injects active goalState from session metadata", () => {
-    const meta = { [GOAL_STATE_KEY]: { status: "active", objective: "Finish docs migration." } };
+  it("does not inject Goal state through the generic context builder", () => {
+    const meta = {
+      [GOAL_STATE_KEY]: {
+        goalId: "8f59f58a-7295-4c34-8e03-55e7035a5a8d",
+        status: "active",
+        objective: "Finish docs migration.",
+        tokenBudget: 12_000,
+        tokensUsed: 500,
+        timeUsedSeconds: 30,
+        createdAt: "2026-08-04T08:00:00.000Z",
+        updatedAt: "2026-08-04T08:00:30.000Z",
+      },
+    };
     const messages = builder().buildMessages([], "hi", { channel: "cli", chatId: "x", sessionMetadata: meta });
     const userMsg = String(messages.at(-1)?.content);
-    expect(userMsg).toContain("Goal (active):");
-    expect(userMsg).toContain("Finish docs migration.");
+    expect(userMsg).not.toContain("Goal (active):");
+    expect(userMsg).not.toContain("Finish docs migration.");
   });
 
   it("does not leak goalState without session metadata", () => {
-    const meta = { [GOAL_STATE_KEY]: { status: "active", objective: "Other chat goal." } };
+    const meta = {
+      [GOAL_STATE_KEY]: {
+        goalId: "8f59f58a-7295-4c34-8e03-55e7035a5a8d",
+        status: "active",
+        objective: "Other chat goal.",
+        tokenBudget: null,
+        tokensUsed: 0,
+        timeUsedSeconds: 0,
+        createdAt: "2026-08-04T08:00:00.000Z",
+        updatedAt: "2026-08-04T08:00:00.000Z",
+      },
+    };
     const b = builder();
     const withGoal = b.buildMessages([], "hi", { channel: "websocket", chatId: "chat-a", sessionMetadata: meta });
     const withoutGoal = b.buildMessages([], "hi", { channel: "websocket", chatId: "chat-b", sessionMetadata: {} });
 
-    expect(String(withGoal.at(-1)?.content)).toContain("Other chat goal.");
+    expect(String(withGoal.at(-1)?.content)).not.toContain("Other chat goal.");
     expect(String(withoutGoal.at(-1)?.content)).not.toContain("Other chat goal.");
     expect(String(withoutGoal.at(-1)?.content)).not.toContain("Goal (active):");
   });

@@ -17,7 +17,8 @@ const childProcessMocks = vi.hoisted(() => ({
   spawnSync: vi.fn(() => ({ status: 0, stderr: "" })),
 }));
 
-vi.mock("node:child_process", () => ({
+vi.mock("node:child_process", async (importOriginal: () => Promise<typeof import("node:child_process")>) => ({
+  ...await importOriginal(),
   spawn: childProcessMocks.spawn,
   spawnSync: childProcessMocks.spawnSync,
 }));
@@ -61,6 +62,12 @@ describe("WebSocket HTTP route helpers", () => {
     return ["xdg-open", [path.dirname(filePath)]];
   }
 
+  function bindWebuiSession(session: Session, workspace: string): void {
+    session.metadata.webui = true;
+    session.metadata.webuiProjectId = null;
+    session.metadata.webuiWorkspaceCwd = fs.realpathSync(workspace);
+  }
+
   function seedSession(
     root: string,
     key = "websocket:test",
@@ -98,6 +105,7 @@ describe("WebSocket HTTP route helpers", () => {
     sessionManager = null,
     staticDistPath = null,
     runtimeModelName = null,
+    runtimeToolNames = null,
     workspacePath = null,
     fileMemoryEnabled = false,
     cancelActiveTasks = undefined,
@@ -107,6 +115,7 @@ describe("WebSocket HTTP route helpers", () => {
     sessionManager?: SessionManager | null;
     staticDistPath?: string | null;
     runtimeModelName?: (() => string | null | undefined) | null;
+    runtimeToolNames?: (() => string[] | null | undefined) | null;
     workspacePath?: string | null;
     fileMemoryEnabled?: boolean;
     cancelActiveTasks?: (sessionKey: string) => Promise<number>;
@@ -128,6 +137,7 @@ describe("WebSocket HTTP route helpers", () => {
         sessionManager,
         staticDistPath,
         runtimeModelName,
+        runtimeToolNames,
         workspacePath,
         fileMemoryEnabled,
         cancelActiveTasks,
@@ -167,6 +177,40 @@ describe("WebSocket HTTP route helpers", () => {
     process.env.MEMMY_CONFIG = configPath;
   }
 
+  function configImageModel(root: string): void {
+    const configPath = path.join(root, "config.yaml");
+    fs.writeFileSync(configPath, [
+      "app:",
+      "  userMode: byok",
+      "providers:",
+      "  openai:",
+      "    apiKey: sk-route-secret",
+      "    endpoints:",
+      "      image:",
+      "        apiBase: https://api.openai.com/v1",
+      "        protocol: openai-images",
+      "modelPresets:",
+      "  image:",
+      "    provider: openai",
+      "    endpoint: image",
+      "    model: gpt-image-2",
+      "    source: byok",
+      "    capabilities: [image_generation]",
+      "modelAssignments:",
+      "  byok:",
+      "    agent: { candidates: [], default: null }",
+      "    memorySummary: null",
+      "    memoryEvolution: null",
+      "    embedding: null",
+      "    asr: null",
+      "    imageGeneration: image",
+      "  account:",
+      "    agent: { candidates: [], default: null }",
+      "",
+    ].join("\n"), "utf8");
+    process.env.MEMMY_CONFIG = configPath;
+  }
+
   const localConnection = { remoteAddress: "127.0.0.1" };
   const remoteConnection = { remoteAddress: "192.168.1.5" };
   const noHeaders = { headers: {} };
@@ -197,6 +241,7 @@ describe("WebSocket HTTP route helpers", () => {
         sessionManager,
         workspacePath: root,
         webuiRuntimeModelName: () => "openai/gpt-4.1",
+        webuiRuntimeToolNames: () => ["exec", "read_file"],
       },
     );
 
@@ -206,6 +251,7 @@ describe("WebSocket HTTP route helpers", () => {
     expect((channel as WebSocketChannel).sessionManager).toBe(sessionManager);
     expect((channel as WebSocketChannel).workspacePath).toBe(path.resolve(root));
     expect((channel as WebSocketChannel).runtimeModelName?.()).toBe("openai/gpt-4.1");
+    expect((channel as WebSocketChannel).runtimeToolNames?.()).toEqual(["exec", "read_file"]);
   });
 
   it("routes channel admin HTTP requests to the injected admin API", async () => {
@@ -271,7 +317,11 @@ describe("WebSocket HTTP route helpers", () => {
     const channel = new WebSocketChannel(
       { enabled: true, allowFrom: ["*"], host: "127.0.0.1", port: 0, path: "/", websocketRequiresToken: false },
       new MessageBus(),
-      { sessionManager: manager, runtimeModelName: () => "openai/gpt-4.1" },
+      {
+        sessionManager: manager,
+        runtimeModelName: () => "openai/gpt-4.1",
+        runtimeToolNames: () => ["exec", "read_file"],
+      },
     );
     running.push(channel);
     await channel.start();
@@ -286,6 +336,7 @@ describe("WebSocket HTTP route helpers", () => {
     expect(body.token).toMatch(/^nbwt_/);
     expect(body.ws_path).toBe("/");
     expect(body.model_name).toBe("openai/gpt-4.1");
+    expect(body.tool_names).toEqual(["exec", "read_file"]);
 
     const headers = { Authorization: `Bearer ${body.token}` };
     const listing = await fetch(`http://127.0.0.1:${port}/api/sessions`, { headers });
@@ -503,38 +554,33 @@ describe("WebSocket HTTP route helpers", () => {
     expect(((await tools.json()) as any).last_action.message).toBe("tools:docs MCP config reloaded.");
   });
 
-  it("serves image generation settings routes with independent tool config", async () => {
+  it("serves image generation tool settings without accepting retired catalog fields", async () => {
     const root = tmpRoot();
-    process.env.MEMMY_CONFIG = path.join(root, "config.yaml");
+    configImageModel(root);
     const channel = makeChannel({ sessionManager: seedSession(root) });
     const port = await startChannel(channel);
     const headers = await authHeaders(port);
 
     const params = new URLSearchParams({
-      provider: "openai",
       enabled: "true",
-      model: "gpt-image-2",
-      apiKey: "sk-route-secret",
-      apiBase: "https://api.openai.com/v1",
-      maxImagesPerTurn: "24",
-      extraBody: JSON.stringify({ quality: "low" }),
+      max_images_per_turn: "24",
     });
     const updated = await fetch(`http://127.0.0.1:${port}/api/settings/image-generation/update?${params}`, { headers });
 
-    expect(updated.status).toBe(200);
-    const body = (await updated.json()) as Record<string, any>;
-    expect(body.image_generation.provider_configured).toBe(true);
-    expect(body.image_generation.api_key_hint).toBe("sk-r....cret");
+    const updatedText = await updated.text();
+    expect(updated.status, updatedText).toBe(200);
+    const body = JSON.parse(updatedText) as Record<string, any>;
     expect(body.image_generation.max_images_per_turn).toBe(24);
-    expect(JSON.stringify(body)).not.toContain("sk-route-secret");
     expect(loadConfig(process.env.MEMMY_CONFIG).tools.imageGeneration).toMatchObject({
-      provider: "openai",
-      model: "gpt-image-2",
-      apiKey: "sk-route-secret",
-      apiBase: "https://api.openai.com/v1",
+      enabled: true,
       maxImagesPerTurn: 24,
-      extraBody: { quality: "low" },
     });
+
+    const retired = await fetch(
+      `http://127.0.0.1:${port}/api/settings/image-generation/update?provider=openai&model=gpt-image-2`,
+      { headers },
+    );
+    expect(retired.status).toBe(400);
 
     const unlimited = await fetch(
       `http://127.0.0.1:${port}/api/settings/image-generation/update?max_images_per_turn=null`,
@@ -548,16 +594,14 @@ describe("WebSocket HTTP route helpers", () => {
     expect(settings.status).toBe(200);
     const settingsBody = (await settings.json()) as Record<string, any>;
     expect(settingsBody.image_generation.max_images_per_turn).toBeNull();
-    expect(settingsBody.image_generation.providers.map((row: any) => row.name)).not.toEqual(
-      expect.arrayContaining(["doubao", "baidu", "qwen"]),
-    );
+    expect(settingsBody.image_generation).not.toHaveProperty("providers");
 
     const rejected = await fetch(
       `http://127.0.0.1:${port}/api/settings/image-generation/update?apiKey=sk-after&unexpected=value`,
       { headers },
     );
     expect(rejected.status).toBe(400);
-    expect(loadConfig(process.env.MEMMY_CONFIG).tools.imageGeneration.apiKey).toBe("sk-route-secret");
+    expect(loadConfig(process.env.MEMMY_CONFIG).tools.imageGeneration.toObject()).not.toHaveProperty("apiKey");
   });
 
   it("lists only websocket sessions on the WebUI sessions route", async () => {
@@ -575,6 +619,7 @@ describe("WebSocket HTTP route helpers", () => {
     process.env.MEMMY_AGENT_DATA_DIR = root;
     const manager = new SessionManager(root);
     const session = new Session({ key: "websocket:timed" });
+    bindWebuiSession(session, root);
     session.addMessage("user", "你好", { timestamp: "2026-06-19T08:07:00.000Z" });
     session.addMessage("assistant", "你好！", { timestamp: "2026-06-19T08:07:03.000Z" });
     manager.save(session);
@@ -597,6 +642,7 @@ describe("WebSocket HTTP route helpers", () => {
     process.env.MEMMY_AGENT_DATA_DIR = root;
     const manager = new SessionManager(root);
     const session = new Session({ key: "websocket:compact" });
+    bindWebuiSession(session, root);
     session.addMessage("user", "继续");
     manager.save(session);
     appendTranscriptObject("websocket:compact", { event: "user", chat_id: "compact", text: "继续" });
@@ -640,9 +686,11 @@ describe("WebSocket HTTP route helpers", () => {
     const root = tmpRoot();
     const manager = new SessionManager(root);
     const legacy = new Session({ key: "websocket:legacy-summary" });
+    bindWebuiSession(legacy, root);
     legacy.metadata.lastSummary = "legacy text summary";
     manager.save(legacy);
     const dag = new Session({ key: "websocket:dag-summary" });
+    bindWebuiSession(dag, root);
     dag.metadata.lastSummary = {
       text: "DAG snapshot summary",
       mode: "dag",
@@ -651,6 +699,7 @@ describe("WebSocket HTTP route helpers", () => {
     };
     manager.save(dag);
     const empty = new Session({ key: "websocket:no-summary" });
+    bindWebuiSession(empty, root);
     empty.metadata.lastSummary = { text: "" };
     manager.save(empty);
     const cli = new Session({ key: "cli:direct" });
@@ -1101,16 +1150,16 @@ describe("WebSocket HTTP route helpers", () => {
     expect(responseJson(response).model_name).toBe("live/model");
   });
 
-  it("falls back to config model name when runtime returns empty", () => {
+  it("does not infer a global model name when runtime returns empty", () => {
     const root = tmpRoot();
     configModel(root, "from-disk");
     const channel = makeChannel({ runtimeModelName: () => "   " });
     const response = (channel as any).handleBootstrap(localConnection, noHeaders);
     expect(response.status).toBe(200);
-    expect(responseJson(response).model_name).toBe("from-disk");
+    expect(responseJson(response).model_name).toBeNull();
   });
 
-  it("falls back to config model name when runtime resolver throws", () => {
+  it("does not infer a global model name when runtime resolver throws", () => {
     const root = tmpRoot();
     configModel(root, "from-disk");
     const channel = makeChannel({
@@ -1120,7 +1169,7 @@ describe("WebSocket HTTP route helpers", () => {
     });
     const response = (channel as any).handleBootstrap(localConnection, noHeaders);
     expect(response.status).toBe(200);
-    expect(responseJson(response).model_name).toBe("from-disk");
+    expect(responseJson(response).model_name).toBeNull();
   });
 
   it("rejects bootstrap with the wrong issue secret", () => {

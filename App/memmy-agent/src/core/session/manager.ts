@@ -1,8 +1,10 @@
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
+import { modelSelectionWire } from "../../providers/model-catalog.js";
 import { scrubSubagentAnnounceBody } from "../../utils/subagent-channel-display.js";
 import { findLegalMessageStart, imagePlaceholderText, stripThink } from "../../utils/helpers.js";
+import { visibleWebuiUserContent } from "./webui-user-content.js";
 
 export const FILE_MAX_MESSAGES = 2_000;
 const WEBUI_SESSION_METADATA_KEY = "webui";
@@ -74,7 +76,7 @@ function messagePreviewText(message: Record<string, any>): string {
     : message.content;
   let text = "";
   if (typeof content === "string") {
-    text = content;
+    text = message.role === "user" ? visibleWebuiUserContent(content) : content;
   } else if (Array.isArray(content)) {
     const parts: string[] = [];
     for (const block of content) {
@@ -87,9 +89,12 @@ function messagePreviewText(message: Record<string, any>): string {
 }
 
 function sessionSummary(session: Session, filePath: string, options: { repairPreview?: boolean } = {}): Record<string, any> {
-  const scan = session.messages.slice(0, 200);
+  const visibleMessages = session.messages.filter(
+    (message) => message.internal_context !== "goal_continuation",
+  );
+  const scan = visibleMessages.slice(0, 200);
   const previewMessage = options.repairPreview
-    ? session.messages.find((m) => messagePreviewText(m)) ?? {}
+    ? visibleMessages.find((m) => messagePreviewText(m)) ?? {}
     : scan.find((m) => m.role === "user") ?? scan[0] ?? {};
   const summary: Record<string, any> = {
     key: session.key,
@@ -97,6 +102,10 @@ function sessionSummary(session: Session, filePath: string, options: { repairPre
     preview: messagePreviewText(previewMessage),
     updatedAt: session.updatedAt,
     path: filePath,
+    model_preset: typeof session.metadata?.modelPreset === "string"
+      ? session.metadata.modelPreset
+      : null,
+    model_selection: modelSelectionWire(session.metadata?.modelSelection),
   };
   if (session.metadata?.[WEBUI_SESSION_METADATA_KEY] === true) {
     const binding = readWebuiSessionBinding(session);
@@ -156,6 +165,35 @@ function synthesizeContent(message: Record<string, any>, includeTimestamps: bool
   return entry;
 }
 
+function sanitizeCrossProviderReplay(
+  message: Record<string, any>,
+  targetProvider: string | null | undefined,
+): Record<string, any> {
+  if (
+    message.role !== "assistant"
+    || !targetProvider
+    || message.model_provider === targetProvider
+  ) {
+    return message;
+  }
+  const sanitized = { ...message };
+  delete sanitized.reasoning_content;
+  delete sanitized.thinking_blocks;
+  delete sanitized.extra_content;
+  if (Array.isArray(sanitized.tool_calls)) {
+    sanitized.tool_calls = sanitized.tool_calls.map((call: Record<string, any>) => {
+      const next = { ...call };
+      delete next.provider_specific_fields;
+      if (next.function && typeof next.function === "object") {
+        next.function = { ...next.function };
+        delete next.function.provider_specific_fields;
+      }
+      return next;
+    });
+  }
+  return sanitized;
+}
+
 export class Session {
   key: string;
   messages: Record<string, any>[];
@@ -191,10 +229,12 @@ export class Session {
       maxMessages?: number;
       maxTokens?: number;
       includeTimestamps?: boolean;
+      targetProvider?: string | null;
     } = {},
     options: {
       maxTokens?: number;
       includeTimestamps?: boolean;
+      targetProvider?: string | null;
     } = {},
   ): Record<string, any>[] {
     const historyOptions = typeof maxMessagesOrOptions === "number"
@@ -204,6 +244,7 @@ export class Session {
       maxMessages = 120,
       maxTokens,
       includeTimestamps = false,
+      targetProvider = null,
     } = historyOptions ?? {};
     const visibleMessages = this.messages.slice(this.lastConsolidated);
     const effectiveMsgLimit = maxMessages > 0 ? maxMessages : 120;
@@ -212,7 +253,10 @@ export class Session {
     const legalStart = findLegalMessageStart(window);
     if (legalStart) window = window.slice(legalStart);
     window = window.filter((message) => !message.commandMessage);
-    const synthesized = window.map((msg) => synthesizeContent(msg, includeTimestamps));
+    const synthesized = window.map((msg) => synthesizeContent(
+      sanitizeCrossProviderReplay(msg, targetProvider),
+      includeTimestamps,
+    ));
     let out = synthesized.filter((message): message is Record<string, any> => message != null);
     if (maxTokens != null && maxTokens > 0 && out.length) {
       const selected: Record<string, any>[] = [];
@@ -433,6 +477,11 @@ export class SessionManager {
     this.sessions.delete(key);
   }
 
+  reload(key: string): Session | null {
+    this.invalidate(key);
+    return this.get(key);
+  }
+
   private parseDate(value: any): string | undefined {
     if (typeof value !== "string" || !value) return undefined;
     const time = Date.parse(value);
@@ -595,9 +644,10 @@ export class SessionManager {
     this.sessions.set(session.key, session);
   }
 
-  flushAll(): number {
+  flushAll(options: { exclude?: (session: Session) => boolean } = {}): number {
     let flushed = 0;
     for (const session of this.sessions.values()) {
+      if (options.exclude?.(session)) continue;
       try {
         this.save(session, { fsync: true });
         flushed += 1;
@@ -644,7 +694,7 @@ export class SessionManager {
   }
 
   renameSession(key: string, title: string): Record<string, any> | null {
-    const session = this.loadSession(key);
+    const session = this.sessions.get(key) ?? this.loadSession(key);
     if (!session) {
       return null;
     }
@@ -680,6 +730,7 @@ export class SessionManager {
 
   listSessions(): Record<string, any>[] {
     const rows: Record<string, any>[] = [];
+    if (!fs.existsSync(this.root)) return rows;
     for (const file of fs.readdirSync(this.root).filter((name) => name.endsWith(".jsonl"))) {
       const fullPath = path.join(this.root, file);
       const fallbackKey = path.basename(file, ".jsonl").replace("_", ":");
@@ -701,12 +752,25 @@ export class SessionManager {
     return rows;
   }
 
+  listSessionRecords(): Session[] {
+    const records = new Map<string, Session>();
+    for (const session of this.sessions.values()) records.set(session.key, session);
+    if (!fs.existsSync(this.root)) return [...records.values()];
+    for (const file of fs.readdirSync(this.root).filter((name) => name.endsWith(".jsonl"))) {
+      const fallbackKey = path.basename(file, ".jsonl").replace("_", ":");
+      const session = this.loadSession(fallbackKey);
+      if (session) records.set(session.key, session);
+    }
+    return [...records.values()].sort((left, right) => left.key.localeCompare(right.key));
+  }
+
   webuiSessionSummary(session: Session): Record<string, any> {
     return sessionSummary(session, this.pathFor(session.key));
   }
 
   listWebuiSessionRecords(): Session[] {
     const records = new Map<string, Session>();
+    if (!fs.existsSync(this.root)) return [];
     for (const file of fs.readdirSync(this.root).filter((name) => name.endsWith(".jsonl"))) {
       const fallbackKey = path.basename(file, ".jsonl").replace("_", ":");
       const session = this.loadSession(fallbackKey);
@@ -714,7 +778,9 @@ export class SessionManager {
       records.set(session.key, session);
     }
     for (const [key, session] of this.sessions) {
-      if (isWebuiSession(session)) records.set(key, session);
+      if (!isWebuiSession(session)) continue;
+      const disk = records.get(key);
+      if (!disk || session.updatedAt > disk.updatedAt) records.set(key, session);
     }
     return [...records.values()]
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
@@ -734,6 +800,5 @@ function normalizeWebuiSessionBinding(binding: WebuiSessionBinding): WebuiSessio
 }
 
 function isWebuiSession(session: Session): boolean {
-  return session.key.startsWith("websocket:")
-    && session.metadata?.[WEBUI_SESSION_METADATA_KEY] === true;
+  return session.metadata?.[WEBUI_SESSION_METADATA_KEY] === true;
 }

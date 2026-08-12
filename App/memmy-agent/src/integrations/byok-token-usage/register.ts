@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Config } from "../../config/schema.js";
 import { HttpByokTokenUsageClient } from "./client.js";
 import { ByokTokenUsageHook } from "./hook.js";
 import { ByokTokenUsageRecorder } from "./recorder.js";
@@ -14,57 +13,38 @@ export type ByokTokenUsageIntegration = {
 };
 
 export function installByokTokenUsage(
-  config: Config | Record<string, any> | null | undefined,
+  _config: unknown,
   options: ByokTokenUsageInstallOptions = {},
 ): ByokTokenUsageIntegration {
   const env = options.env ?? process.env;
   if (isTestRuntime(env)) return { enabled: false };
 
   const runtimeConfigPath = resolveRuntimeConfigPath(options);
-  const resolvedConfig = config instanceof Config ? config : new Config(config ?? {});
   const client = new HttpByokTokenUsageClient({
     runtimeConfigProvider: () => readRuntimeConfig(runtimeConfigPath),
     timeoutMs: options.timeoutMs,
     fetchImpl: options.fetchImpl,
   });
-  const hook = new ByokTokenUsageHook({
-    client,
-    resolveProviderName: createProviderNameResolver(resolvedConfig),
-  });
+  const hook = new ByokTokenUsageHook({ client });
   if (Array.isArray(options.hooks)) options.hooks.push(hook);
   return { enabled: true, client, hook };
 }
 
 export function createByokTokenUsageRecorder(
-  config: Config | Record<string, any> | null | undefined,
+  _config: unknown,
   options: ByokTokenUsageInstallOptions = {},
 ): ByokTokenUsageRecorder {
   const runtimeConfigPath = resolveRuntimeConfigPath(options);
-  const resolvedConfig = config instanceof Config ? config : new Config(config ?? {});
   const client = new HttpByokTokenUsageClient({
     runtimeConfigProvider: () => readRuntimeConfig(runtimeConfigPath),
     timeoutMs: options.timeoutMs,
     fetchImpl: options.fetchImpl,
   });
-  return new ByokTokenUsageRecorder({
-    client,
-    resolveProviderName: createProviderNameResolver(resolvedConfig),
-  });
+  return new ByokTokenUsageRecorder({ client });
 }
 
 function isTestRuntime(env: Record<string, string | undefined>): boolean {
   return env.NODE_ENV === "test" || Boolean(env.VITEST_WORKER_ID);
-}
-
-function createProviderNameResolver(config: Config): (modelId: string | null) => string | null {
-  return (modelId: string | null): string | null => {
-    try {
-      const preset = config.resolvePreset();
-      return config.getProviderName(modelId, { preset });
-    } catch {
-      return null;
-    }
-  };
 }
 
 function resolveRuntimeConfigPath(options: ByokTokenUsageInstallOptions): string {

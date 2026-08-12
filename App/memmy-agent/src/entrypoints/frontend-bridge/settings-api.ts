@@ -1,19 +1,14 @@
 import { loadConfig, saveConfig, getConfigPath } from "../../config/loader.js";
+import { randomUUID } from "node:crypto";
 import {
   Config,
-  ImageGenerationProfileConfig,
+  ModelEndpointConfig,
   ModelPresetConfig,
   ProviderConfig,
   isValidImageGenerationMaxImagesPerTurn,
 } from "../../config/schema.js";
-import {
-  getImageGenProvider,
-  imageGenProviderConfigured,
-  imageGenProviderDefaultBase,
-  imageGenProviderLabel,
-  imageGenProviderNames,
-} from "../../providers/image-generation.js";
 import { findByName, PROVIDERS } from "../../providers/registry.js";
+import { readModelCatalog } from "../../providers/model-catalog.js";
 import { normalizeTimeZoneOffset } from "../../utils/time-zone.js";
 
 type QueryParams = Record<string, string[]>;
@@ -54,7 +49,6 @@ const IMAGE_GENERATION_UPDATE_FIELDS = new Set([
   "extraBody",
   "token",
 ]);
-const MODEL_CONFIGURATION_SLUG_RE = /[^a-z0-9_-]+/g;
 
 export class WebUISettingsError extends Error {
   status: number;
@@ -92,21 +86,15 @@ function providerRequiresApiKey(spec: any): boolean {
 
 function providerConfiguredForSettings(spec: any, providerConfig: any): boolean {
   if (spec.isOauth) return true;
-  if (providerRequiresApiKey(spec)) return Boolean(providerConfig?.apiKey);
+  if (providerRequiresApiKey(spec)) {
+    return Boolean(providerConfig?.apiKey || Object.values(providerConfig?.endpoints ?? {}).some((endpoint: any) => endpoint?.apiKey));
+  }
   return Boolean(
     providerConfig?.apiKey
     ?? providerConfig?.apiBase
     ?? providerConfig?.region
     ?? providerConfig?.profile
   );
-}
-
-function modelConfigurationSlug(label: string): string {
-  let normalized = label.trim().toLowerCase().replace(MODEL_CONFIGURATION_SLUG_RE, "-").replace(/^[-_]+|[-_]+$/g, "");
-  if (!normalized) throw new WebUISettingsError("configuration name is required");
-  if (normalized === "default") throw new WebUISettingsError("configuration name is reserved");
-  if (normalized.length > 48) normalized = normalized.slice(0, 48).replace(/[-_]+$/g, "");
-  return normalized;
 }
 
 function validateConfiguredProvider(config: Config, provider: string): void {
@@ -142,88 +130,57 @@ function setConfigValue(target: any, key: string, value: any): boolean {
   return true;
 }
 
-function imageGenerationProviderRows(config: Config): Record<string, any>[] {
-  const imageConfig = config.tools.imageGeneration;
-  const effectiveConfig = imageConfig.effectiveImageGenerationConfig();
-  return imageGenProviderNames().map((name) => {
-    return {
-      name,
-      label: imageGenProviderLabel(name),
-      implemented: true,
-      configured: name === effectiveConfig.provider ? imageGenProviderConfigured(name, effectiveConfig as any) : false,
-      default_api_base: imageGenProviderDefaultBase(name),
-    };
-  });
-}
-
 function assertKnownFields(query: QueryParams, allowed: Set<string>): void {
   const unknown = Object.keys(query).filter((key) => !allowed.has(key));
   if (unknown.length) throw new WebUISettingsError(`unknown image generation setting: ${unknown[0]}`);
 }
 
-function parseJsonObject(value: string, field: string): Record<string, any> {
-  if (!value.trim()) return {};
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(value);
-  } catch {
-    throw new WebUISettingsError(`${field} must be a JSON object`);
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new WebUISettingsError(`${field} must be a JSON object`);
-  }
-  return parsed as Record<string, any>;
-}
-
-function parseStringRecord(value: string, field: string): Record<string, string> {
-  const parsed = parseJsonObject(value, field);
-  for (const [key, item] of Object.entries(parsed)) {
-    if (typeof item !== "string") throw new WebUISettingsError(`${field}.${key} must be a string`);
-  }
-  return parsed as Record<string, string>;
+function assignedImagePreset(config: Config): { presetId: string | null; preset: ModelPresetConfig | null; endpoint: ModelEndpointConfig | null } {
+  const account = config.modelAssignments.account;
+  const activeOwner = String(config.app.userId ?? config.app.cloudUuid ?? "").trim();
+  const useAccount = config.app.userMode === "account"
+    && Boolean(activeOwner && account.ownerAccountId === activeOwner);
+  const presetId = config.app.userMode === "account" && !useAccount
+    ? null
+    : (useAccount ? account : config.modelAssignments.byok).imageGeneration;
+  const preset = presetId ? config.modelPresets[presetId] ?? null : null;
+  const provider = preset ? (config.providers as any)[preset.provider] as ProviderConfig | undefined : undefined;
+  return { presetId, preset, endpoint: preset ? provider?.endpoints[preset.endpoint] ?? null : null };
 }
 
 export function settingsPayload({ requiresRestart = false }: { requiresRestart?: boolean } = {}): Record<string, any> {
   const config = loadConfig();
   const defaults = config.agents.defaults;
-  let activePresetName = defaults.modelPreset ?? "default";
-  let effectivePreset: ModelPresetConfig;
-  try {
-    effectivePreset = config.resolvePreset();
-  } catch {
-    effectivePreset = config.resolvePreset("default");
-    activePresetName = "default";
-  }
-  const providerName = config.getProviderName(effectivePreset.model, { preset: effectivePreset }) ?? effectivePreset.provider;
-  const provider = config.getProvider(effectivePreset.model, { preset: effectivePreset });
-  const selectedProvider = effectivePreset.provider === "auto" ? providerName : findByName(effectivePreset.provider)?.name ?? providerName;
+  const catalog = readModelCatalog();
+  const configuredActivePreset = defaults.modelPreset ?? "default";
+  const activeItem = catalog.items.find((item) => item.preset === configuredActivePreset) ?? null;
+  const activePresetName = activeItem ? configuredActivePreset : null;
+  const effectivePreset = activePresetName
+    ? activePresetName === "default"
+      ? config.resolvePreset("default")
+      : config.modelPresets[activePresetName] ?? null
+    : null;
+  const provider = effectivePreset
+    ? config.getProvider(effectivePreset.model, { preset: effectivePreset })
+    : null;
 
-  const modelPresets = [
-    {
-      name: "default",
-      label: "Default",
-      active: activePresetName === "default",
-      is_default: true,
-      model: defaults.model,
-      provider: defaults.provider,
-      max_tokens: defaults.maxTokens,
-      context_window_tokens: defaults.contextWindowTokens,
-      temperature: defaults.temperature,
-      reasoning_effort: defaults.reasoningEffort,
-    },
-    ...Object.entries(config.modelPresets).map(([name, preset]) => ({
-      name,
-      label: preset.label ?? name,
-      active: activePresetName === name,
-      is_default: false,
-      model: preset.model,
-      provider: preset.provider,
-      max_tokens: preset.maxTokens,
-      context_window_tokens: preset.contextWindowTokens,
-      temperature: preset.temperature,
-      reasoning_effort: preset.reasoningEffort,
-    })),
-  ];
+  const modelPresets = catalog.items.map((item) => {
+    const preset = item.preset === "default"
+      ? config.resolvePreset("default")
+      : config.modelPresets[item.preset];
+    return {
+      name: item.preset,
+      active: item.preset === activePresetName,
+      is_default: item.isDefault,
+      available: item.available,
+      model: item.model,
+      provider: item.provider,
+      max_tokens: preset?.maxTokens ?? null,
+      context_window_tokens: preset?.contextWindowTokens ?? null,
+      temperature: preset?.temperature ?? null,
+      reasoning_effort: preset?.reasoningEffort ?? null,
+    };
+  });
 
   const providers = PROVIDERS
     .map((spec) => {
@@ -235,9 +192,12 @@ export function settingsPayload({ requiresRestart = false }: { requiresRestart?:
         configured: providerConfiguredForSettings(spec, providerConfig),
         api_key_required: providerRequiresApiKey(spec),
         api_key_hint: maskSecretHint(providerConfig.apiKey),
-        api_base: providerConfig.apiBase,
-        default_api_base: spec.defaultApiBase || null,
-        ...(spec.name === "openai" ? { api_type: providerConfig.apiType } : {}),
+        endpoints: Object.entries(providerConfig.endpoints).map(([endpointId, endpoint]: [string, any]) => ({
+          endpoint_id: endpointId,
+          api_base: endpoint.apiBase,
+          protocol: endpoint.protocol,
+          has_api_key: Boolean(endpoint.apiKey),
+        })),
       };
     })
     .filter(Boolean);
@@ -245,21 +205,20 @@ export function settingsPayload({ requiresRestart = false }: { requiresRestart?:
   const searchConfig = config.tools.webSearch;
   const fetchConfig = config.tools.webFetch;
   const imageConfig = config.tools.imageGeneration;
-  const effectiveImageConfig = imageConfig.effectiveImageGenerationConfig();
+  const assignedImage = assignedImagePreset(config);
   const searchProvider = WEB_SEARCH_PROVIDER_BY_NAME.has(searchConfig.provider) ? searchConfig.provider : "duckduckgo";
-  const imageProviders = imageGenerationProviderRows(config);
 
   return {
     agent: {
-      model: effectivePreset.model,
-      provider: selectedProvider,
-      resolved_provider: providerName,
+      model: activeItem?.model ?? "",
+      provider: activeItem?.provider ?? "",
+      resolved_provider: activeItem?.provider ?? "",
       has_api_key: Boolean(provider?.apiKey),
       model_preset: activePresetName,
-      max_tokens: effectivePreset.maxTokens,
-      context_window_tokens: effectivePreset.contextWindowTokens,
-      temperature: effectivePreset.temperature,
-      reasoning_effort: effectivePreset.reasoningEffort,
+      max_tokens: effectivePreset?.maxTokens ?? null,
+      context_window_tokens: effectivePreset?.contextWindowTokens ?? null,
+      temperature: effectivePreset?.temperature ?? null,
+      reasoning_effort: effectivePreset?.reasoningEffort ?? null,
       timezone: defaults.timezone,
       bot_name: defaults.botName,
       bot_icon: defaults.botIcon,
@@ -289,19 +248,16 @@ export function settingsPayload({ requiresRestart = false }: { requiresRestart?:
     },
     image_generation: {
       enabled: imageConfig.enabled,
-      active_profile: imageConfig.activeProfile,
-      provider: effectiveImageConfig.provider,
-      provider_configured: imageGenProviderConfigured(effectiveImageConfig.provider, effectiveImageConfig as any),
-      model: effectiveImageConfig.model,
-      api_key_hint: maskSecretHint(effectiveImageConfig.apiKey),
-      api_base: effectiveImageConfig.apiBase || null,
+      preset_id: assignedImage.presetId,
+      provider: assignedImage.preset?.provider ?? null,
+      endpoint_id: assignedImage.preset?.endpoint ?? null,
+      protocol: assignedImage.endpoint?.protocol ?? null,
+      provider_configured: Boolean(assignedImage.preset && assignedImage.endpoint),
+      model: assignedImage.preset?.model ?? null,
       default_aspect_ratio: imageConfig.defaultAspectRatio,
       default_image_size: imageConfig.defaultImageSize,
       max_images_per_turn: imageConfig.maxImagesPerTurn,
       save_dir: imageConfig.saveDir,
-      extra_headers: effectiveImageConfig.extraHeaders,
-      extra_body: effectiveImageConfig.extraBody,
-      providers: imageProviders,
     },
     runtime: {
       config_path: getConfigPath(),
@@ -419,32 +375,51 @@ export function updateAgentSettings(query: QueryParams): Record<string, any> {
 }
 
 export function createModelConfiguration(query: QueryParams): Record<string, any> {
-  let label = (queryFirstAlias(query, "label", "displayName") ?? "").trim();
-  const rawName = (queryFirst(query, "name") ?? label).trim();
+  if (hasQuery(query, "label", "displayName") || hasQuery(query, "name")) {
+    throw new WebUISettingsError("model labels and client-generated names are not supported");
+  }
   const model = (queryFirst(query, "model") ?? "").trim();
   const provider = (queryFirst(query, "provider") ?? "").trim();
+  const endpointId = (queryFirstAlias(query, "endpoint_id", "endpointId") ?? "").trim();
+  const requestedPresetId = (queryFirstAlias(query, "preset_id", "presetId") ?? "").trim();
+  const capabilities = (query.capability ?? query.capabilities ?? ["agent"])
+    .flatMap((value) => value.split(","))
+    .map((value) => value.trim())
+    .filter(Boolean);
 
-  if (!label) label = rawName;
   if (!model) throw new WebUISettingsError("model is required");
   if (!provider) throw new WebUISettingsError("provider is required");
+  if (!endpointId) throw new WebUISettingsError("endpoint_id is required");
 
-  const name = modelConfigurationSlug(rawName || label);
   const config = loadConfig();
-  if (name in config.modelPresets) throw new WebUISettingsError("configuration already exists", { status: 409 });
   validateConfiguredProvider(config, provider);
+  const providerConfig = (config.providers as any)[provider] as ProviderConfig;
+  if (!providerConfig.endpoints[endpointId]) throw new WebUISettingsError("provider endpoint is not configured");
+  const existing = requestedPresetId ? config.modelPresets[requestedPresetId] : null;
+  if (requestedPresetId && !existing) throw new WebUISettingsError("unknown preset ID", { status: 404 });
+  if (existing?.source === "account") throw new WebUISettingsError("account presets are managed by account login", { status: 409 });
+  const presetId = requestedPresetId || randomUUID();
 
   const base = config.resolvePreset("default");
   const preset = new ModelPresetConfig({
-    label,
+    ...(existing?.toObject() ?? {}),
+    endpoint: endpointId,
     model,
     provider,
+    source: "byok",
+    capabilities,
     maxTokens: base.maxTokens,
     contextWindowTokens: base.contextWindowTokens,
     temperature: base.temperature,
     reasoningEffort: base.reasoningEffort,
   });
-  config.modelPresets[name] = preset;
-  config.agents.defaults.modelPreset = name;
+  config.modelPresets[presetId] = preset;
+  if (capabilities.includes("agent")) {
+    const candidates = config.modelAssignments.byok.agent.candidates;
+    if (!candidates.includes(presetId)) candidates.push(presetId);
+    config.modelAssignments.byok.agent.default = presetId;
+    config.agents.defaults.modelPreset = presetId;
+  }
   saveConfig(config);
   return settingsPayload();
 }
@@ -473,25 +448,21 @@ export function updateProviderSettings(
 
   let changed = false;
   if (hasQuery(query, "api_key", "apiKey")) {
-    const apiKey = (queryFirstAlias(query, "api_key", "apiKey") ?? "").trim() || null;
-    if (setConfigValue(providerConfig, "apiKey", apiKey)) changed = true;
+    const apiKey = (queryFirstAlias(query, "api_key", "apiKey") ?? "").trim();
+    if (apiKey && setConfigValue(providerConfig, "apiKey", apiKey)) changed = true;
   }
   if (hasQuery(query, "api_base", "apiBase")) {
     const apiBase = (queryFirstAlias(query, "api_base", "apiBase") ?? "").trim() || null;
-    if (setConfigValue(providerConfig, "apiBase", apiBase)) changed = true;
+    const endpointId = (queryFirstAlias(query, "endpoint_id", "endpointId") ?? "").trim();
+    if (!endpointId) throw new WebUISettingsError("endpoint_id is required");
+    const existing = providerConfig.endpoints[endpointId];
+    const protocol = (queryFirst(query, "protocol") ?? existing?.protocol ?? "").trim();
+    if (!apiBase || !protocol) throw new WebUISettingsError("endpoint api_base and protocol are required");
+    const endpoint = new ModelEndpointConfig({ ...(existing?.toObject() ?? {}), apiBase, protocol });
+    providerConfig.endpoints[endpointId] = endpoint;
+    changed = true;
   }
-  if (hasQuery(query, "api_type")) {
-    if (spec.name === "openai") {
-      const apiType = (queryFirst(query, "api_type") ?? "").trim();
-      let parsed: ProviderConfig["apiType"];
-      try {
-        parsed = new ProviderConfig({ apiType }).apiType;
-      } catch {
-        throw new WebUISettingsError("api_type must be auto, chatCompletions, or responses");
-      }
-      if (setConfigValue(providerConfig, "apiType", parsed)) changed = true;
-    }
-  }
+  if (hasQuery(query, "api_type")) throw new WebUISettingsError("api_type moved to endpoint protocol");
 
   if (changed) saveConfig(config);
   return settingsPayload({ requiresRestart: false });
@@ -577,36 +548,15 @@ export function updateImageGenerationSettings(query: QueryParams): Record<string
   const config = loadConfig();
   const imageConfig = config.tools.imageGeneration;
   let changed = false;
-  const activeProfile = imageConfig.activeProfile;
-  const profileFieldsTouched =
+  const catalogFieldsTouched =
     hasQuery(query, "provider") ||
     hasQuery(query, "model") ||
     hasQuery(query, "api_key", "apiKey") ||
     hasQuery(query, "api_base", "apiBase") ||
     hasQuery(query, "extra_headers", "extraHeaders") ||
     hasQuery(query, "extra_body", "extraBody");
-  if (activeProfile === "account" && profileFieldsTouched) {
-    throw new WebUISettingsError("account image profile is managed by account login");
-  }
-  const profileTarget =
-    activeProfile === "byok"
-      ? new ImageGenerationProfileConfig(imageConfig.profiles.byok?.toObject() ?? {})
-      : null;
-
-  const setImageConfigValue = (key: string, value: any): void => {
-    if (profileTarget) {
-      if (setConfigValue(profileTarget, key, value)) changed = true;
-      return;
-    }
-    if (setConfigValue(imageConfig, key, value)) changed = true;
-  };
-
-  const providerName = queryFirst(query, "provider");
-  if (providerName !== null) {
-    const value = providerName.trim().toLowerCase();
-    if (!value) throw new WebUISettingsError("image generation provider is required");
-    if (getImageGenProvider(value) === null) throw new WebUISettingsError("unknown image generation provider");
-    setImageConfigValue("provider", value);
+  if (catalogFieldsTouched) {
+    throw new WebUISettingsError("image generation model settings moved to the model catalog");
   }
 
   const enabled = queryFirst(query, "enabled");
@@ -616,24 +566,6 @@ export function updateImageGenerationSettings(query: QueryParams): Record<string
       imageConfig.enabled = value;
       changed = true;
     }
-  }
-
-  const model = queryFirst(query, "model");
-  if (model !== null) {
-    const value = model.trim();
-    if (!value) throw new WebUISettingsError("image generation model is required");
-    if (value.length > 200) throw new WebUISettingsError("image generation model is too long");
-    setImageConfigValue("model", value);
-  }
-
-  if (hasQuery(query, "api_key", "apiKey")) {
-    const value = (queryFirstAlias(query, "api_key", "apiKey") ?? "").trim();
-    setImageConfigValue("apiKey", value);
-  }
-
-  if (hasQuery(query, "api_base", "apiBase")) {
-    const value = (queryFirstAlias(query, "api_base", "apiBase") ?? "").trim();
-    setImageConfigValue("apiBase", value);
   }
 
   const aspectRatio = queryFirstAlias(query, "default_aspect_ratio", "defaultAspectRatio");
@@ -675,26 +607,8 @@ export function updateImageGenerationSettings(query: QueryParams): Record<string
     if (setConfigValue(imageConfig, "saveDir", value)) changed = true;
   }
 
-  const extraHeaders = queryFirstAlias(query, "extra_headers", "extraHeaders");
-  if (extraHeaders !== null) {
-    setImageConfigValue("extraHeaders", parseStringRecord(extraHeaders, "extra_headers"));
-  }
-
-  const extraBody = queryFirstAlias(query, "extra_body", "extraBody");
-  if (extraBody !== null) {
-    setImageConfigValue("extraBody", parseJsonObject(extraBody, "extra_body"));
-  }
-
-  if (profileTarget) {
-    imageConfig.profiles.byok = profileTarget;
-    imageConfig.profileMode = true;
-  }
-
-  if (imageConfig.enabled) {
-    const effectiveConfig = imageConfig.effectiveImageGenerationConfig();
-    if (!imageConfig.hasCompleteEffectiveProfile() || !imageGenProviderConfigured(effectiveConfig.provider, effectiveConfig as any)) {
-      throw new WebUISettingsError("image generation provider is not configured");
-    }
+  if (imageConfig.enabled && !assignedImagePreset(config).preset) {
+    throw new WebUISettingsError("image generation model is not assigned");
   }
 
   if (changed) saveConfig(config);

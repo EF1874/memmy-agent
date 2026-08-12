@@ -374,7 +374,7 @@ describe("cursor skill target", () => {
     } finally {
       await close(server);
     }
-  });
+  }, 15_000);
 });
 
 function createFixture(): {

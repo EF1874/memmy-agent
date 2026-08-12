@@ -39,7 +39,7 @@ const testEnv = {
 export default defineConfig({
   test: {
     environment: "node",
-    include: ["tests/**/*.test.ts"],
+    include: ["tests/**/*.test.{ts,tsx}"],
     testTimeout: 30_000,
     hookTimeout: 30_000,
     restoreMocks: true,
@@ -47,7 +47,7 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      "memmy-agent": new URL("./src/index.ts", import.meta.url).pathname,
+      "memmy-agent": fileURLToPath(new URL("./src/index.ts", import.meta.url)),
     },
   },
 });

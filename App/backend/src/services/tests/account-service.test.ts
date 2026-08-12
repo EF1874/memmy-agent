@@ -569,6 +569,68 @@ describe("AccountService", () => {
     await expect(service.logout()).resolves.toEqual({ ok: true });
     expect(calls).toEqual(["cloud-logout:cloud.login.uuid", "clear-account-config", "clear"]);
   });
+
+  it("clears the owner-scoped account projection when cloud authentication expires", async () => {
+    const calls: string[] = [];
+    const service = createAccountService({
+      cloudClient: {
+        ...createCloudClientStub(),
+        async getAccountInfo() {
+          throw Object.assign(new Error("session expired"), { code: "unauthorized" as const });
+        }
+      },
+      accountSessionRepository: {
+        ...createAccountSessionRepositoryStub(),
+        get() {
+          return {
+            authenticated: true,
+            isNewUser: false,
+            profile: {
+              userId: "user-1",
+              email: "hello@example.com",
+              phoneNumber: null,
+              nickname: "hello",
+              avatarUrl: null,
+              planType: "free",
+              hasFinishedGuide: true,
+              region: null,
+              registeredAt: "2026-06-02T10:00:00.000Z"
+            }
+          };
+        },
+        getCloudUuid() {
+          return "cloud.login.uuid";
+        },
+        clear() {
+          calls.push("clear-session");
+        }
+      },
+      memmyConfigWriter: {
+        async writeAccountModelProjection() {
+          return projectionResult();
+        },
+        async clearAccountModelProjection(input) {
+          calls.push(`clear-account-config:${input.ownerAccountId ?? "none"}`);
+          return projectionResult();
+        },
+        async writeByokModelProjection() {
+          return projectionResult();
+        },
+        async writeActiveMemoryProfile() {
+          return projectionResult();
+        },
+        async patchChannelConfig() {
+          return undefined;
+        }
+      }
+    });
+
+    await expect(service.getSession()).rejects.toMatchObject({
+      message: "session expired",
+      code: "unauthorized"
+    });
+    expect(calls).toEqual(["clear-account-config:user-1", "clear-session"]);
+  });
 });
 
 function createCloudClientStub() {

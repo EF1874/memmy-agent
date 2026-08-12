@@ -234,6 +234,8 @@ export interface OpenAiCompatibleOnboardingInsightGeneratorOptions {
   model: string;
   providerName?: string;
   apiType?: "auto" | "chatCompletions" | "responses";
+  extraHeaders?: Readonly<Record<string, string>>;
+  extraBody?: Readonly<Record<string, unknown>>;
   timeoutMs?: number;
   maxTokens?: number;
   fetch?: FetchLike;
@@ -245,6 +247,8 @@ export interface OnboardingInsightAgentTaskModelConfig {
   apiBase: string;
   apiKey: string;
   apiType?: "auto" | "chatCompletions" | "responses";
+  extraHeaders?: Readonly<Record<string, string>>;
+  extraBody?: Readonly<Record<string, unknown>>;
 }
 
 export interface OnboardingInsightAgentTaskModelResolver {
@@ -346,6 +350,8 @@ function createAgentTaskRuntimeGenerator(
     baseUrl: config.apiBase,
     apiKey: config.apiKey,
     model: config.model,
+    extraHeaders: config.extraHeaders,
+    extraBody: config.extraBody,
     timeoutMs: options.timeoutMs,
     maxTokens: options.maxTokens,
     fetch: options.fetch
@@ -380,16 +386,17 @@ export function createOpenAiCompatibleOnboardingInsightReportGenerator(
           method: "POST",
           headers: {
             "authorization": `Bearer ${options.apiKey}`,
-            "content-type": "application/json"
+            "content-type": "application/json",
+            ...(options.extraHeaders ?? {})
           },
-          body: JSON.stringify(useResponsesApi ? buildResponsesRequestBody(input, options, maxTokens, false) : {
+          body: JSON.stringify(withExtraBody(useResponsesApi ? buildResponsesRequestBody(input, options, maxTokens, false) : {
             model: options.model,
             messages: buildLlmMessages(input),
             ...openAiCompatibleTemperatureFields(options, 0.2),
             max_tokens: maxTokens,
             stream: false,
             ...openAiCompatibleThinkingControlFields(options)
-          }),
+          }, options.extraBody)),
           signal: timeoutSignal(timeoutMs, input.signal)
         });
 
@@ -407,16 +414,17 @@ export function createOpenAiCompatibleOnboardingInsightReportGenerator(
         method: "POST",
         headers: {
           "authorization": `Bearer ${options.apiKey}`,
-          "content-type": "application/json"
+          "content-type": "application/json",
+          ...(options.extraHeaders ?? {})
         },
-        body: JSON.stringify(useResponsesApi ? buildResponsesRequestBody(input, options, maxTokens, true) : {
+        body: JSON.stringify(withExtraBody(useResponsesApi ? buildResponsesRequestBody(input, options, maxTokens, true) : {
           model: options.model,
           messages: buildLlmMessages(input),
           ...openAiCompatibleTemperatureFields(options, 0.2),
           max_tokens: maxTokens,
           stream: true,
           ...openAiCompatibleThinkingControlFields(options)
-        }),
+        }, options.extraBody)),
         signal: timeoutSignal(timeoutMs, input.signal)
       });
 
@@ -444,9 +452,13 @@ function createAnthropicOnboardingInsightReportGenerator(
           headers: {
             "content-type": "application/json",
             "x-api-key": options.apiKey,
-            "anthropic-version": "2023-06-01"
+            "anthropic-version": "2023-06-01",
+            ...(options.extraHeaders ?? {})
           },
-          body: JSON.stringify(buildAnthropicRequestBody(input, options.model, maxTokens, false)),
+          body: JSON.stringify(withExtraBody(
+            buildAnthropicRequestBody(input, options.model, maxTokens, false),
+            options.extraBody
+          )),
           signal: timeoutSignal(timeoutMs, input.signal)
         });
 
@@ -465,9 +477,13 @@ function createAnthropicOnboardingInsightReportGenerator(
         headers: {
           "content-type": "application/json",
           "x-api-key": options.apiKey,
-          "anthropic-version": "2023-06-01"
+          "anthropic-version": "2023-06-01",
+          ...(options.extraHeaders ?? {})
         },
-        body: JSON.stringify(buildAnthropicRequestBody(input, options.model, maxTokens, true)),
+        body: JSON.stringify(withExtraBody(
+          buildAnthropicRequestBody(input, options.model, maxTokens, true),
+          options.extraBody
+        )),
         signal: timeoutSignal(timeoutMs, input.signal)
       });
 
@@ -494,9 +510,10 @@ function createGoogleOnboardingInsightReportGenerator(
           method: "POST",
           headers: {
             "content-type": "application/json",
-            "x-goog-api-key": options.apiKey
+            "x-goog-api-key": options.apiKey,
+            ...(options.extraHeaders ?? {})
           },
-          body: JSON.stringify(buildGoogleRequestBody(input, maxTokens)),
+          body: JSON.stringify(withExtraBody(buildGoogleRequestBody(input, maxTokens), options.extraBody)),
           signal: timeoutSignal(timeoutMs, input.signal)
         });
 
@@ -510,6 +527,13 @@ function createGoogleOnboardingInsightReportGenerator(
       }
     }
   };
+}
+
+function withExtraBody(
+  body: Record<string, unknown>,
+  extraBody: Readonly<Record<string, unknown>> | undefined
+): Record<string, unknown> {
+  return { ...body, ...(extraBody ?? {}) };
 }
 
 async function sampleRecentQueries(

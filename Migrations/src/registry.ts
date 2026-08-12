@@ -1,13 +1,31 @@
 import { addWebuiSessionBindingV104 } from "./migrations/v1.0.4/0001-add-webui-session-binding.js";
+import { flattenMemoryModelConfigV105 } from "./migrations/v1.0.5/0001-flatten-memory-model-config.js";
+import { normalizeGoalStateV105 } from "./migrations/v1.0.5/0002-normalize-goal-state.js";
+import { addGoalDagBoundaryV105 } from "./migrations/v1.0.5/0003-add-goal-dag-boundary.js";
+import { normalizeRuntimeModelCatalogV107 } from "./migrations/v1.0.7/0001-normalize-runtime-model-catalog.js";
+import { importLegacyAppStateModelConfigV107 } from "./migrations/v1.0.7/0002-import-legacy-app-state-model-config.js";
+import { removeLegacyRuntimeModelFieldsV107 } from "./migrations/v1.0.7/0003-remove-legacy-runtime-model-fields.js";
 import { MigrationError, type MigrationDefinition } from "./types.js";
 
 const STABLE_SEMVER_PATTERN =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const MIGRATION_ID_PATTERN =
   /^v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))\/(\d{4})-[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const MIGRATION_TARGETS = new Set([
+  "agentWorkspace",
+  "runtimeConfigFile",
+  "sessionDagDir",
+  "appDatabaseFile",
+]);
 
 export const migrations: readonly MigrationDefinition[] = [
   addWebuiSessionBindingV104,
+  flattenMemoryModelConfigV105,
+  normalizeGoalStateV105,
+  addGoalDagBoundaryV105,
+  normalizeRuntimeModelCatalogV107,
+  importLegacyAppStateModelConfigV107,
+  removeLegacyRuntimeModelFieldsV107,
 ];
 
 function definitionError(message: string, migrationId: string | null = null): never {
@@ -55,7 +73,11 @@ export function validateMigrationRegistry(
         definition.id,
       );
     }
-    if (definition.scope !== "agent-workspace") {
+    if (
+      definition.scope !== "agent-workspace"
+      && definition.scope !== "runtime-config"
+      && definition.scope !== "session-dag"
+    ) {
       definitionError(`Unsupported migration scope: ${definition.id}`, definition.id);
     }
     if (
@@ -64,6 +86,15 @@ export function validateMigrationRegistry(
       typeof definition.up !== "function"
     ) {
       definitionError(`Incomplete migration definition: ${definition.id}`, definition.id);
+    }
+    if (definition.requiredTargets) {
+      const targets = new Set<string>();
+      for (const target of definition.requiredTargets) {
+        if (!MIGRATION_TARGETS.has(target) || targets.has(target)) {
+          definitionError(`Invalid required target for migration: ${definition.id}`, definition.id);
+        }
+        targets.add(target);
+      }
     }
 
     const idMatch = MIGRATION_ID_PATTERN.exec(definition.id);

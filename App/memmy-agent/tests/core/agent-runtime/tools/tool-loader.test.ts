@@ -333,7 +333,6 @@ describe("Exec, web, and image tools", () => {
   it("creates ImageGenerationTool from tool config only", () => {
     const imageGeneration = new ImageGenerationToolConfig({
       enabled: true,
-      apiKey: "sk-image-test",
     });
     const tool = ImageGenerationTool.create(
       new ToolContext({
@@ -353,12 +352,12 @@ describe("Exec, web, and image tools", () => {
 });
 
 describe("Config round-trip", () => {
-  it("serializes moved tool config classes with camelCase fields", () => {
+  it("serializes current tool config classes with camelCase fields", () => {
     const config = Config.fromObject({
       tools: {
         web: { enable: true, search: { provider: "brave", apiKey: "test" } },
         exec: { enable: false, timeout: 120 },
-        imageGeneration: { enabled: true, provider: "openrouter" },
+        imageGeneration: { enabled: true },
       },
     });
     const dumped = config.toObject();
@@ -381,20 +380,16 @@ describe("Config round-trip", () => {
     expect(["cli", "Apps"].join("") in config.tools).toBe(false);
   });
 
-  it("ignores retired my tool config fields", () => {
-    const config = Config.fromObject({
-      tools: {
-        my: { enable: true, allowSet: true },
-        myEnabled: true,
-        mySet: true,
-        webSearch: { provider: "brave" },
-      },
-    });
-
-    expect(Object.prototype.hasOwnProperty.call(config.tools, "my")).toBe(false);
-    expect(Object.prototype.hasOwnProperty.call(config.tools, "myEnabled")).toBe(false);
-    expect(Object.prototype.hasOwnProperty.call(config.tools, "mySet")).toBe(false);
-    expect(config.tools.webSearch.provider).toBe("brave");
+  it("rejects retired my tool config fields", () => {
+    for (const [field, value] of [
+      ["my", { enable: true, allowSet: true }],
+      ["myEnabled", true],
+      ["mySet", true],
+    ] as const) {
+      expect(() => Config.fromObject({ tools: { [field]: value } })).toThrow(
+        `config current contract does not accept legacy tools.${field}`,
+      );
+    }
   });
 });
 

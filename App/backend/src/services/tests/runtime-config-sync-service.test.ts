@@ -1,12 +1,12 @@
 /** Runtime config sync service tests. */
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import YAML from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
-import { LOCAL_BYOK_ACCOUNT_UUID } from "../../infrastructure/app-state-store/account-context.js";
 import { createAppStateStore, type AppStateStore } from "../../infrastructure/app-state-store/index.js";
-import { systemUtcOffset } from "../../utils/time-zone.js";
+import { createMemmyConfigWriter } from "../../infrastructure/memmy-config/index.js";
+import { createAppConfigService } from "../app-config-service.js";
 import { syncRuntimeConfigWithAppState } from "../runtime-config-sync-service.js";
 
 let tempDir: string | undefined;
@@ -15,253 +15,236 @@ let store: AppStateStore | undefined;
 afterEach(() => {
   store?.close();
   store = undefined;
-  if (tempDir) {
-    rmSync(tempDir, { recursive: true, force: true });
-    tempDir = undefined;
-  }
+  if (tempDir) rmSync(tempDir, { recursive: true, force: true });
+  tempDir = undefined;
 });
 
 describe("syncRuntimeConfigWithAppState", () => {
-  it("hydrates BYOK app-state from valid runtime YAML", async () => {
+  it("hydrates BYOK mode without projecting the catalog into legacy SQLite model config", async () => {
     const context = createContext();
-    context.writeConfig([
-      "agents:",
-      "  defaults:",
-      "    provider: openai",
-      "    model: gpt-4o",
-      "providers:",
-      "  openai:",
-      "    apiBase: https://api.openai.example/v1",
-      "    apiKey: sk-main",
-      "memmyMemory:",
-      "  activeProfile: byok",
-      "  profiles:",
-      "    byok:",
-      "      summary:",
-      "        provider: anthropic",
-      "        endpoint: https://api.anthropic.example",
-      "        model: claude-3-5-haiku",
-      "        apiKey: sk-memory",
-      "      evolution:",
-      "        provider: openai_compatible",
-      "        endpoint: https://dashscope.example/v1",
-      "        model: qwen-plus",
-      "        apiKey: sk-skill",
-      "tools:",
-      "  imageGeneration:",
-      "    activeProfile: byok",
-      "    profiles:",
-      "      byok:",
-      "        provider: dashscope",
-      "        apiBase: https://dashscope.aliyuncs.com",
-      "        model: qwen-image",
-      "        apiKey: sk-image",
-      ""
-    ]);
+    context.writeConfig(currentByokCatalog());
     context.store.repositories.bootstrap.updateAppSettings({ userMode: "account" });
+    const legacyBefore = context.store.db.prepare("SELECT * FROM account_model_config ORDER BY uuid").all();
 
     await expect(syncRuntimeConfigWithAppState(context)).resolves.toMatchObject({
       source: "runtime_config",
       mode: "byok",
+      provider: "openai",
+      model: "gpt-5",
       hydratedAppState: true,
       wroteConfig: false
     });
 
-    const settings = context.store.repositories.bootstrap.getAppSettings();
-    const modelConfig = context.store.repositories.modelConfig.get();
-    const activeUuid = context.store.db.prepare("SELECT active_uuid FROM app_settings WHERE id = 'default'").get() as {
-      active_uuid: string | null;
-    };
-    const refs = context.store.db
-      .prepare("SELECT api_key_ref, memory_api_key_ref, skill_api_key_ref, image_api_key_ref FROM account_model_config WHERE uuid = ?")
-      .get(LOCAL_BYOK_ACCOUNT_UUID) as Record<string, unknown>;
-
-    expect(settings.userMode).toBe("byok");
-    expect(activeUuid.active_uuid).toBeNull();
-    expect(modelConfig).toMatchObject({
-      provider: "openai_compatible",
-      baseUrl: "https://api.openai.example/v1",
-      modelId: "gpt-4o",
-      hasApiKey: true,
-      imageGen: {
-        provider: "qwen",
-        baseUrl: "https://dashscope.aliyuncs.com",
-        modelId: "qwen-image",
-        hasApiKey: true
-      },
-      memmyMemory: {
-        summary: {
-          provider: "anthropic",
-          baseUrl: "https://api.anthropic.example",
-          modelId: "claude-3-5-haiku",
-          hasApiKey: true
-        },
-        evolution: {
-          provider: "openai_compatible",
-          baseUrl: "https://dashscope.example/v1",
-          modelId: "qwen-plus",
-          hasApiKey: true
-        }
-      }
-    });
-    expect(refs).toEqual({
-      api_key_ref: `account:${LOCAL_BYOK_ACCOUNT_UUID}:model-api-key`,
-      memory_api_key_ref: `account:${LOCAL_BYOK_ACCOUNT_UUID}:memory-summary-api-key`,
-      skill_api_key_ref: `account:${LOCAL_BYOK_ACCOUNT_UUID}:memory-evolution-api-key`,
-      image_api_key_ref: `account:${LOCAL_BYOK_ACCOUNT_UUID}:image-gen-api-key`
-    });
+    expect(context.store.db.prepare("SELECT * FROM account_model_config ORDER BY uuid").all()).toEqual(legacyBefore);
   });
 
-  it("hydrates account mode without fabricating a cloud account profile", async () => {
+  it("hydrates account mode only from a current owner-bound projection", async () => {
     const context = createContext();
     context.store.repositories.accountSession.upsert({
       profile: {
-        userId: "user-2",
-        email: "other@example.com",
-        phoneNumber: null,
-        nickname: "other",
-        avatarUrl: null,
-        planType: "free",
-        hasFinishedGuide: false,
-        region: null,
-        registeredAt: "2026-06-03T10:00:00.000Z",
-        rawProfile: {
-          id: "user-2",
-          email: "other@example.com",
-          userName: "other"
-        }
+        userId: "owner-a", email: "a@example.test", phoneNumber: null, nickname: "a", avatarUrl: null,
+        planType: "free", hasFinishedGuide: false, region: null, registeredAt: "2026-06-02T10:00:00.000Z",
+        rawProfile: { id: "owner-a", email: "a@example.test", userName: "a" }
       },
-      uuid: "cloud-account-b",
-      cloudUuid: "cloud.login.uuid.b"
+      uuid: "account-a",
+      cloudUuid: "cloud-token-a"
     });
-    context.store.repositories.bootstrap.updateAppSettings({ userMode: "byok" });
-    context.writeConfig([
-      "app:",
-      "  cloudUuid: cloud.login.uuid.a",
-      "  userId: user-1",
-      "agents:",
-      "  defaults:",
-      "    provider: memmy_account",
-      "    model: agent_chat",
-      "providers:",
-      "  memmy_account:",
-      `    apiBase: ${process.env.MEMMY_CLOUD_SERVICE}/api/agentExternal/v1`,
-      "    apiKey: cloud.login.uuid.a",
-      "memmyMemory:",
-      "  activeProfile: account",
-      ""
-    ]);
+    context.store.repositories.accountSession.upsert({
+      profile: {
+        userId: "user-b", email: "b@example.test", phoneNumber: null, nickname: "b", avatarUrl: null,
+        planType: "free", hasFinishedGuide: false, region: null, registeredAt: "2026-06-03T10:00:00.000Z",
+        rawProfile: { id: "user-b", email: "b@example.test", userName: "b" }
+      },
+      uuid: "account-b",
+      cloudUuid: "cloud-token-b"
+    });
+    context.writeConfig(currentAccountCatalog());
+
+    await expect(syncRuntimeConfigWithAppState(context)).resolves.toMatchObject({
+      source: "runtime_config", mode: "account", hydratedAppState: true, wroteConfig: false
+    });
+    expect(context.store.repositories.bootstrap.getAppSettings().userMode).toBe("account");
+    expect(context.store.repositories.accountSession.get()).toMatchObject({
+      authenticated: true,
+      profile: { userId: "owner-a" }
+    });
+    expect(context.store.db.prepare("SELECT uuid FROM cloud_accounts WHERE uuid = ?").get("cloud-token-a")).toBeUndefined();
+  });
+
+  it("keeps BYOK active when a dormant account projection is also present", async () => {
+    const context = createContext();
+    const byok = currentByokCatalog() as any;
+    const account = currentAccountCatalog() as any;
+    context.writeConfig({
+      ...byok,
+      app: { ...account.app, userMode: "byok" },
+      providers: { ...byok.providers, ...account.providers },
+      modelPresets: { ...byok.modelPresets, ...account.modelPresets },
+      modelAssignments: {
+        byok: byok.modelAssignments.byok,
+        account: account.modelAssignments.account
+      }
+    });
 
     await expect(syncRuntimeConfigWithAppState(context)).resolves.toMatchObject({
       source: "runtime_config",
-      mode: "account",
-      hydratedAppState: true
+      mode: "byok",
+      provider: "openai",
+      model: "gpt-5"
     });
-
-    const settings = context.store.repositories.bootstrap.getAppSettings();
-    const activeUuid = context.store.db.prepare("SELECT active_uuid FROM app_settings WHERE id = 'default'").get() as {
-      active_uuid: string | null;
-    };
-    const fabricatedAccount = context.store.db.prepare("SELECT uuid FROM cloud_accounts WHERE uuid = ?").get("cloud.login.uuid.a");
-
-    expect(settings.userMode).toBe("account");
-    expect(activeUuid.active_uuid).toBeNull();
-    expect(fabricatedAccount).toBeUndefined();
+    expect(context.store.repositories.bootstrap.getAppSettings().userMode).toBe("byok");
   });
 
-  it("initializes missing runtime YAML from valid BYOK app-state", async () => {
+  it("persists account/BYOK mode switches through settings and honors them after restart", async () => {
     const context = createContext();
-    context.store.repositories.modelConfig.upsert({
-      provider: "openai_compatible",
-      baseUrl: "https://api.example.com/v1",
-      modelId: "gpt-4.1-mini",
-      apiKey: "sk-main",
-      memmyMemory: {
-        summary: {
-          provider: "openai_compatible",
-          baseUrl: "https://memory.example.com/v1",
-          modelId: "memory-model",
-          apiKey: "sk-memory"
-        },
-        evolution: {
-          provider: "openai_compatible",
-          baseUrl: "https://skill.example.com/v1",
-          modelId: "skill-model",
-          apiKey: "sk-skill"
-        }
+    context.store.repositories.accountSession.upsert({
+      profile: {
+        userId: "owner-a", email: "a@example.test", phoneNumber: null, nickname: "a", avatarUrl: null,
+        planType: "free", hasFinishedGuide: false, region: null, registeredAt: "2026-06-02T10:00:00.000Z",
+        rawProfile: { id: "owner-a", email: "a@example.test", userName: "a" }
       },
-      imageGen: {
-        provider: "doubao",
-        baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
-        modelId: "doubao-seedream-4-0-250828",
-        apiKey: "sk-image"
-      }
+      uuid: "account-a",
+      cloudUuid: "cloud-token-a"
     });
+    const byok = currentByokCatalog() as any;
+    const account = currentAccountCatalog() as any;
+    const byokSnapshot = {
+      providers: byok.providers,
+      modelPresets: byok.modelPresets,
+      modelAssignments: byok.modelAssignments.byok,
+    };
+    context.writeConfig({
+      ...byok,
+      app: { ...account.app, userMode: "account" },
+      providers: { ...byok.providers, ...account.providers },
+      modelPresets: { ...byok.modelPresets, ...account.modelPresets },
+      modelAssignments: {
+        byok: byok.modelAssignments.byok,
+        account: account.modelAssignments.account,
+      },
+    });
+    context.store.repositories.bootstrap.updateAppSettings({ userMode: "account" });
+    const service = createAppConfigService({
+      bootstrapRepository: context.store.repositories.bootstrap,
+      memmyConfigWriter: createMemmyConfigWriter({ configPath: context.memmyConfigPath }),
+    });
+
+    await service.updateSettings({ userMode: "byok" });
+    let saved = YAML.parse(readFileSync(context.memmyConfigPath, "utf8"));
+    expect(saved.app.userMode).toBe("byok");
+    expect({
+      providers: { openai: saved.providers.openai, dashscope: saved.providers.dashscope },
+      modelPresets: { agent: saved.modelPresets.agent, summary: saved.modelPresets.summary, image: saved.modelPresets.image },
+      modelAssignments: saved.modelAssignments.byok,
+    }).toEqual(byokSnapshot);
+    await expect(syncRuntimeConfigWithAppState(context)).resolves.toMatchObject({ mode: "byok", provider: "openai" });
+    expect(context.store.repositories.bootstrap.getAppSettings().userMode).toBe("byok");
+
+    await service.updateSettings({ userMode: "account" });
+    saved = YAML.parse(readFileSync(context.memmyConfigPath, "utf8"));
+    expect(saved.app.userMode).toBe("account");
+    await expect(syncRuntimeConfigWithAppState(context)).resolves.toMatchObject({ mode: "account", provider: "memmy_account" });
+    expect(context.store.repositories.bootstrap.getAppSettings().userMode).toBe("account");
+  });
+
+  it("never recreates missing YAML from legacy SQLite app-state", async () => {
+    const context = createContext();
     context.store.repositories.bootstrap.updateAppSettings({ userMode: "byok" });
+    context.store.db.prepare(
+      `UPDATE account_model_config
+       SET provider = 'openai_compatible', base_url = 'https://legacy.example.test/v1', model_id = 'legacy-model'
+       WHERE uuid = 'local-byok-onboarding'`
+    ).run();
 
-    await expect(syncRuntimeConfigWithAppState(context)).resolves.toMatchObject({
-      source: "app_state_fallback",
+    await expect(syncRuntimeConfigWithAppState(context)).resolves.toEqual({
+      source: "none",
       mode: "byok",
-      wroteConfig: true
+      hydratedAppState: false,
+      wroteConfig: false,
+      reason: "missing_runtime_config_requires_startup_migration"
     });
-
-    const parsed = YAML.parse(readFileSync(context.memmyConfigPath, "utf8")) as any;
-    expect(parsed.agents.defaults).toEqual({
-      provider: "openai",
-      model: "gpt-4.1-mini",
-      timezone: systemUtcOffset()
-    });
-    expect(parsed.providers.openai).toMatchObject({
-      apiBase: "https://api.example.com/v1",
-      apiKey: "sk-main"
-    });
-    expect(parsed.memmyMemory.activeProfile).toBe("byok");
-    expect(parsed.memmyMemory.profiles.byok.summary).toMatchObject({
-      endpoint: "https://memory.example.com/v1",
-      model: "memory-model",
-      apiKey: "sk-memory"
-    });
-    expect(parsed.tools.imageGeneration).toMatchObject({
-      activeProfile: "byok",
-      profiles: {
-        byok: {
-          provider: "volcengine",
-          model: "doubao-seedream-4-0-250828",
-          apiBase: "https://ark.cn-beijing.volces.com/api/v3",
-          apiKey: "sk-image"
-        }
-      }
-    });
+    expect(existsSync(context.memmyConfigPath)).toBe(false);
   });
 
   it("rejects invalid runtime YAML without overwriting app-state", async () => {
     const context = createContext();
     context.store.repositories.bootstrap.updateAppSettings({ userMode: "byok" });
-    context.writeConfig(["agents: ["]);
-
-    await expect(syncRuntimeConfigWithAppState(context)).rejects.toMatchObject({
-      code: "invalid_runtime_config"
-    });
+    context.writeRaw("agents: [");
+    await expect(syncRuntimeConfigWithAppState(context)).rejects.toMatchObject({ code: "invalid_runtime_config" });
     expect(context.store.repositories.bootstrap.getAppSettings().userMode).toBe("byok");
   });
 });
+
+function currentByokCatalog(): Record<string, unknown> {
+  return {
+    app: { userMode: "byok" },
+    agents: { defaults: { modelPreset: "agent" } },
+    providers: {
+      openai: {
+        apiKey: "sk-main",
+        endpoints: { chat: { apiBase: "https://api.example.test/v1", protocol: "openai-chat-completions" } }
+      },
+      dashscope: {
+        endpoints: { image: { apiBase: "https://image.example.test/v1", protocol: "dashscope-multimodal-generation", apiKey: "sk-image" } }
+      }
+    },
+    modelPresets: {
+      agent: { provider: "openai", endpoint: "chat", model: "gpt-5", source: "byok", capabilities: ["agent", "memory_evolution"] },
+      summary: { provider: "openai", endpoint: "chat", model: "gpt-5-mini", source: "byok", capabilities: ["memory_summary"] },
+      image: { provider: "dashscope", endpoint: "image", model: "qwen-image", source: "byok", capabilities: ["image_generation"] }
+    },
+    modelAssignments: {
+      byok: {
+        agent: { candidates: ["agent"], default: "agent" },
+        memorySummary: "summary", memoryEvolution: "agent", embedding: null, asr: null, imageGeneration: "image"
+      },
+      account: { agent: { candidates: [], default: null } }
+    }
+  };
+}
+
+function currentAccountCatalog(): Record<string, unknown> {
+  return {
+    app: { cloudUuid: "cloud-token-a", userId: "owner-a", userMode: "account" },
+    providers: {
+      memmy_account: {
+        ownerAccountId: "owner-a",
+        apiKey: "cloud-token-a",
+        endpoints: { platform: { apiBase: "https://cloud.example.test/api/agentExternal/v1", protocol: "memmy-account" } }
+      }
+    },
+    modelPresets: {
+      platform: {
+        provider: "memmy_account", endpoint: "platform", model: "agent_chat", source: "account",
+        ownerAccountId: "owner-a", capabilities: ["agent"]
+      }
+    },
+    modelAssignments: {
+      byok: { agent: { candidates: [], default: null } },
+      account: { ownerAccountId: "owner-a", agent: { candidates: ["platform"], default: "platform" } }
+    }
+  };
+}
 
 function createContext(): {
   appStateStore: AppStateStore;
   store: AppStateStore;
   memmyConfigPath: string;
-  writeConfig(lines: string[]): void;
+  writeConfig(config: Record<string, unknown>): void;
+  writeRaw(content: string): void;
 } {
   tempDir = mkdtempSync(join(tmpdir(), "memmy-runtime-sync-"));
   store = createAppStateStore({ databasePath: join(tempDir, "app.sqlite") });
   const memmyConfigPath = join(tempDir, ".memmy", "config.yaml");
+  const writeRaw = (content: string): void => {
+    mkdirSync(dirname(memmyConfigPath), { recursive: true });
+    writeFileSync(memmyConfigPath, content, "utf8");
+  };
   return {
     appStateStore: store,
     store,
     memmyConfigPath,
-    writeConfig(lines) {
-      mkdirSync(dirname(memmyConfigPath), { recursive: true });
-      writeFileSync(memmyConfigPath, lines.join("\n"), "utf8");
-    }
+    writeConfig(config) { writeRaw(YAML.stringify(config)); },
+    writeRaw
   };
 }

@@ -1,6 +1,7 @@
 import { createRequire } from "node:module";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { BaseChannel } from "./base.js";
 import { DingtalkChannel } from "./dingtalk.js";
 import { DiscordChannel } from "./discord.js";
@@ -90,7 +91,7 @@ function packageSearchRoots(): string[] {
   const roots = [
     ...envRoots,
     path.join(process.cwd(), "node_modules"),
-    path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "..", "node_modules"),
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "node_modules"),
   ];
   return [...new Set(roots.map((root) => path.resolve(root)))];
 }

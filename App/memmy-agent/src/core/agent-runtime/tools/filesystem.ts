@@ -742,6 +742,21 @@ export class WriteFileTool extends Tool {
     let writeStarted = false;
     try {
       throwIfAborted(signal);
+      const finalBytes = Buffer.from(params.content, "utf8");
+      try {
+        const stat = await fs.stat(target);
+        if (stat.isFile()) {
+          const beforeBytes = await fs.readFile(target, { signal: signal ?? undefined });
+          throwIfAborted(signal);
+          if (beforeBytes.equals(finalBytes)) {
+            context?.reportFileMutation?.({ path: target, changed: false });
+            return `No changes made to ${target}: existing content is identical.`;
+          }
+        }
+      } catch (error) {
+        if (isToolAbortError(error)) throw error;
+        // Preserve the existing write/error boundary when the target cannot be inspected.
+      }
       await fs.mkdir(path.dirname(target), { recursive: true });
       throwIfAborted(signal);
       writeStarted = true;
@@ -871,8 +886,14 @@ export class EditFileTool extends Tool {
         const exists = fsSync.existsSync(target);
         if (exists) {
           throwIfAborted(signal);
-          const existing = await fs.readFile(target, { encoding: "utf8", signal: signal ?? undefined });
+          const existingBytes = await fs.readFile(target, { signal: signal ?? undefined });
+          const existing = existingBytes.toString("utf8");
           if (existing.trim()) return `Error editing file: cannot create file; ${params.path} already exists and is not empty.`;
+          throwIfAborted(signal);
+          if (existingBytes.equals(Buffer.from(newText, "utf8"))) {
+            context?.reportFileMutation?.({ path: target, changed: false });
+            return `No changes made to ${target}: replacement produced identical content.`;
+          }
         }
         throwIfAborted(signal);
         await fs.mkdir(path.dirname(target), { recursive: true });
@@ -943,6 +964,11 @@ export class EditFileTool extends Tool {
       }
       updated = updated.replace(/\n/g, lineEnding);
       throwIfAborted(signal);
+      if (raw.equals(Buffer.from(updated, "utf8"))) {
+        context?.reportFileMutation?.({ path: target, changed: false });
+        const noChange = `No changes made to ${target}: replacement produced identical content.`;
+        return warning ? `${warning}\n${noChange}` : noChange;
+      }
       writeStarted = true;
       await fs.writeFile(target, updated, { encoding: "utf8", signal: signal ?? undefined });
       this.fileStates().recordWrite(target);

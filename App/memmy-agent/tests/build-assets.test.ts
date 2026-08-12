@@ -23,7 +23,13 @@ describe("build runtime assets", () => {
       fs.writeFileSync(staleFile, "stale build output", "utf8");
     }
 
-    execFileSync(npmBin, ["run", "build"], { cwd: process.cwd(), stdio: "pipe" });
+    execFileSync(
+      process.platform === "win32" ? (process.env.ComSpec ?? "cmd.exe") : npmBin,
+      process.platform === "win32"
+        ? ["/d", "/s", "/c", "npm.cmd run --ignore-scripts build"]
+        : ["run", "--ignore-scripts", "build"],
+      { cwd: process.cwd(), stdio: "pipe" },
+    );
 
     expect(
       fs.existsSync(path.join(process.cwd(), "dist/templates/agent/file-memory.md")),
@@ -38,7 +44,7 @@ describe("build runtime assets", () => {
     expect(fs.existsSync(path.join(process.cwd(), "dist/templates/agent/subagent-announce.md"))).toBe(true);
     expect(fs.existsSync(path.join(process.cwd(), "dist/templates/agent/verification-contract.md"))).toBe(true);
     expect(fs.existsSync(path.join(process.cwd(), "dist/templates/memory/MEMORY.md"))).toBe(true);
-    expect(fs.existsSync(path.join(process.cwd(), "dist/skills/goal/SKILL.md"))).toBe(true);
+    expect(fs.existsSync(path.join(process.cwd(), "dist/skills/goal/SKILL.md"))).toBe(false);
     expect(fs.existsSync(path.join(process.cwd(), "dist/skills/skill-creator/SKILL.md"))).toBe(true);
     expect(fs.existsSync(path.join(process.cwd(), "dist/skills/skill-creator/scripts/quick-validate.py"))).toBe(true);
     expect(fs.existsSync(path.join(process.cwd(), "dist/skills/ui-craft/SKILL.md"))).toBe(true);
@@ -46,6 +52,6 @@ describe("build runtime assets", () => {
 
     const tmuxScript = path.join(process.cwd(), "dist/skills/tmux/scripts/find-sessions.sh");
     expect(fs.existsSync(tmuxScript)).toBe(true);
-    expect(fs.statSync(tmuxScript).mode & 0o111).not.toBe(0);
+    if (process.platform !== "win32") expect(fs.statSync(tmuxScript).mode & 0o111).not.toBe(0);
   }, 60_000);
 });

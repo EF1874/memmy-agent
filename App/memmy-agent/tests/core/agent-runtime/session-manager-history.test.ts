@@ -53,6 +53,43 @@ describe("SessionManager history and previews", () => {
     expect(rows[0]).toMatchObject({ key: "websocket:chat-title", title: "自动生成标题" });
   });
 
+  it("persists and bootstraps the complete committed model selection", () => {
+    const root = tempRoot();
+    const manager = new SessionManager(root);
+    const session = manager.getOrCreate("websocket:chat-model");
+    session.metadata.modelPreset = "work-gpt";
+    session.metadata.modelSelection = {
+      presetId: "work-gpt",
+      provider: "openai",
+      endpointId: "responses",
+      protocol: "openai-responses",
+      model: "gpt-5",
+      source: "byok",
+      ownerAccountId: null,
+      capability: "agent",
+      capabilities: ["agent"],
+    };
+    manager.save(session);
+
+    const reopened = new SessionManager(root);
+    expect(reopened.loadSession("websocket:chat-model")?.metadata.modelSelection).toEqual(
+      session.metadata.modelSelection,
+    );
+    expect(reopened.listSessions()[0]).toMatchObject({
+      model_preset: "work-gpt",
+      model_selection: {
+        preset_id: "work-gpt",
+        provider: "openai",
+        endpoint_id: "responses",
+        protocol: "openai-responses",
+        model: "gpt-5",
+        source: "byok",
+        owner_account_id: null,
+        capabilities: ["agent"],
+      },
+    });
+  });
+
   it("renames a session title and marks it as user edited", () => {
     const manager = new SessionManager(tempRoot());
     const session = manager.getOrCreate("websocket:chat-rename");
@@ -96,6 +133,18 @@ describe("SessionManager history and previews", () => {
     expect(rows[0]).toMatchObject({
       key: "websocket:chat-preview",
       preview: "帮我总结一下 OpenAI 的最新硬件计划",
+    });
+  });
+
+  it("uses the Goal objective instead of its command wrapper in previews", () => {
+    const manager = new SessionManager(tempRoot());
+    const session = manager.getOrCreate("websocket:chat-goal-preview");
+    session.addMessage("user", "/goal 编写亚洲流行文化网页", { commandMessage: true });
+    manager.save(session);
+
+    expect(manager.listSessions()[0]).toMatchObject({
+      key: "websocket:chat-goal-preview",
+      preview: "编写亚洲流行文化网页",
     });
   });
 
@@ -361,6 +410,50 @@ describe("SessionManager history and previews", () => {
         reasoning_content: "hidden chain of thought",
         thinking_blocks: [{ type: "thinking", thinking: "hidden chain of thought", signature: "sig" }],
         extra_content: { cache_control: { type: "ephemeral" } },
+      },
+    ]);
+  });
+
+  it("removes provider-specific reasoning state after a Session switches providers", () => {
+    const session = new Session({ key: "test:cross-provider-replay" });
+    session.messages.push({ role: "user", content: "hi" });
+    session.messages.push({
+      role: "assistant",
+      content: "done",
+      model_provider: "anthropic",
+      reasoning_content: "anthropic reasoning",
+      thinking_blocks: [{ type: "thinking", thinking: "anthropic reasoning", signature: "sig" }],
+      extra_content: { cache_control: { type: "ephemeral" } },
+      tool_calls: [{
+        id: "tc_1",
+        type: "function",
+        provider_specific_fields: { signature: "anthropic" },
+        function: {
+          name: "read_file",
+          arguments: "{}",
+          provider_specific_fields: { signature: "anthropic" },
+        },
+      }],
+    });
+
+    const history = session.getHistory({
+      maxMessages: 500,
+      targetProvider: "openai",
+    });
+
+    expect(history).toEqual([
+      { role: "user", content: "hi" },
+      {
+        role: "assistant",
+        content: "done",
+        tool_calls: [{
+          id: "tc_1",
+          type: "function",
+          function: {
+            name: "read_file",
+            arguments: "{}",
+          },
+        }],
       },
     ]);
   });

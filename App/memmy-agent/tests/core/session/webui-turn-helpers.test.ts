@@ -120,12 +120,12 @@ describe("webui turn helpers", () => {
       webui: true,
       turnEnd: true,
       latencyMs: 42,
-      goalState: expect.any(Object),
     });
+    expect(turnEnd.metadata).not.toHaveProperty("goalState");
     expect(idle.metadata).toMatchObject({
       webui: true,
-      goalStatusEvent: true,
-      goalStatus: "idle",
+      runStatusEvent: true,
+      runStatus: "idle",
     });
     expect(websocketTurnWallStartedAt("chat-finish")).toBeNull();
   });

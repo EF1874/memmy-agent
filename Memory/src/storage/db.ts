@@ -29,10 +29,15 @@ export class MemoryDb {
       this.db.close();
       throw new Error(`sqlite-vec version mismatch: expected v${SQLITE_VEC_VERSION}, got ${loadedVersion}`);
     }
-    this.configure();
-    if (!options.readonly) {
-      this.createPreMigrationBackup();
-      migrate(this.db);
+    try {
+      this.configure();
+      if (!options.readonly) {
+        this.createPreMigrationBackup();
+        migrate(this.db);
+      }
+    } catch (error) {
+      this.db.close();
+      throw error;
     }
   }
 

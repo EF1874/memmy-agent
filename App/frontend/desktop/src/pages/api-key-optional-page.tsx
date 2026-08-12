@@ -1,15 +1,22 @@
 import { useState } from "react";
 import { ChevronLeft, Image as ImageIcon, Mic } from "lucide-react";
-import type { ModelProviderConfig } from "../api/config-client.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import { persistLoginModeSelection } from "../app/login-mode.js";
 import { useApiClients } from "../app/providers.js";
 import { buildByokOnboardingGuidePatch, resolveByokModelCompletion } from "../app/routes.js";
 import { PAGE_CORNER_ACTION_CONTAINER_STYLE, PageCornerActionButton } from "../components/language-toggle-button.js";
+import { ModelProviderLogo } from "../components/model-provider-logo.js";
 import { Select } from "../components/Select.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { appActions } from "../state/app-actions.js";
 import { useAppState } from "../state/app-state.js";
+import {
+  assignedCatalogEndpointId,
+  assignCatalogPreset,
+  createModelWorkspace,
+  modelConfigInput,
+  upsertByokPreset
+} from "../state/model-workspace.js";
 import {
   API_KEY_CARD_CLASS,
   API_KEY_PRIMARY_BTN_CLASS,
@@ -36,9 +43,7 @@ import {
   IMAGE_DEFAULT_MODEL_IDS,
   IMAGE_PROTOCOL_OPTIONS,
   createAsrModelFormValues,
-  createAsrProviderConfig,
   createImageGenModelFormValues,
-  createImageGenProviderConfig,
   createTestModelConnectionMessages,
   hydrateModelConfigForm,
   testModelConnection,
@@ -124,33 +129,55 @@ export function ApiKeyOptionalPage() {
     void continueAfterWarning();
   }
 
-  function createModelConfigDraft(): ModelProviderConfig {
-    return {
-      ...state.modelConfig,
-      asr: isAsrUsable ? createAsrProviderConfig(asrModel, asrEndpoint, asrApiKey, asrApiKeyMasked) : null,
-      imageGen: isImageGenUsable
-        ? createImageGenProviderConfig(imageGenProtocol, imageGenModel, imageGenEndpoint, imageGenApiKey, imageGenApiKeyMasked)
-        : null
-    };
-  }
-
   async function continueAfterWarning() {
-    if (modePersistencePending) {
+    if (modePersistencePending || !clients?.config) {
       return;
     }
 
-    const configDraft = createModelConfigDraft();
-    dispatch(appActions.modelConfigUpdated(configDraft));
-
     try {
       setModePersistencePending(true);
-      const savedConfig = await (clients?.config.saveModelConfig(configDraft) ?? Promise.resolve(configDraft));
+      const latest = await clients.config.getModelConfig();
+      let workspace = createModelWorkspace(latest);
+      if (isAsrUsable) {
+        const assignedAsrEndpointId = assignedCatalogEndpointId(workspace, "byok", "asr");
+        const asr = upsertByokPreset(workspace, {
+          provider: "qwen",
+          ...(asrApiKeyMasked && assignedAsrEndpointId ? { endpointId: assignedAsrEndpointId } : {}),
+          endpoint: asrEndpoint,
+          protocol: "dashscope-input-audio-chat",
+          ...(asrApiKey.trim() ? { apiKey: asrApiKey.trim() } : {}),
+          ...(asrApiKeyMasked ? { apiKeyMasked: asrApiKeyMasked } : {}),
+          model: asrModel || ASR_MODEL_ID,
+          capabilities: ["asr"]
+        });
+        workspace = assignCatalogPreset(asr.workspace, "byok", "asr", asr.presetId);
+      }
+      if (isImageGenUsable) {
+        const assignedImageEndpointId = assignedCatalogEndpointId(workspace, "byok", "image_generation");
+        const image = upsertByokPreset(workspace, {
+          provider: imageGenProtocol,
+          ...(imageGenApiKeyMasked && assignedImageEndpointId ? { endpointId: assignedImageEndpointId } : {}),
+          endpoint: imageGenEndpoint,
+          protocol: imageGenProtocol === "qwen"
+            ? "dashscope-multimodal-generation"
+            : "openai-images",
+          ...(imageGenApiKey.trim() ? { apiKey: imageGenApiKey.trim() } : {}),
+          ...(imageGenApiKeyMasked ? { apiKeyMasked: imageGenApiKeyMasked } : {}),
+          model: imageGenModel,
+          capabilities: ["image_generation"]
+        });
+        workspace = assignCatalogPreset(image.workspace, "byok", "image_generation", image.presetId);
+      }
+      const savedConfig = await clients.config.saveModelCatalog(modelConfigInput(workspace));
+      if (!savedConfig.catalog?.modelAssignments.byok.agent.candidates.length) {
+        throw new Error("persisted BYOK Agent assignment is empty");
+      }
       dispatch(appActions.modelConfigUpdated(savedConfig));
       const byokCompletion = resolveByokModelCompletion({
         onboarding: state.bootstrap?.onboarding ?? buildByokOnboardingGuidePatch()
       });
       await persistLoginModeSelection({
-        configClient: clients?.config,
+        configClient: clients.config,
         dispatch,
         userMode: "byok",
         onboarding: byokCompletion.onboardingPatch
@@ -284,7 +311,8 @@ export function ApiKeyOptionalPage() {
               className="select-control--subtle"
               options={IMAGE_PROTOCOL_OPTIONS.map((option) => ({
                 value: option.value,
-                label: t(option.labelKey)
+                label: t(option.labelKey),
+                icon: <ModelProviderLogo provider={option.value} size={16} />
               }))}
             />
             <ConfigField

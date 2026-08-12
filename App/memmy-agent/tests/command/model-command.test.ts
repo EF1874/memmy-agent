@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentLoop } from "../../src/core/agent-runtime/loop.js";
 import { InboundMessage } from "../../src/core/runtime-messages/events.js";
 import { MessageBus } from "../../src/core/runtime-messages/queue.js";
@@ -14,73 +14,282 @@ import {
 } from "../../src/command/builtin.js";
 import { CommandContext, CommandRouter } from "../../src/command/router.js";
 import { Config, ModelPresetConfig } from "../../src/config/schema.js";
+import { resolveModelSelection } from "../../src/providers/model-catalog.js";
 
 function provider(defaultModel: string, maxTokens = 123): any {
   return {
     getDefaultModel: () => defaultModel,
+    spec: { name: "openai" },
     generation: { max_tokens: maxTokens, maxTokens, temperature: 0.1, reasoning_effort: null, reasoningEffort: null },
   };
 }
 
-function makeLoop(): AgentLoop {
+const temporaryRoots: string[] = [];
+
+afterEach(() => {
+  delete process.env.MEMMY_CONFIG;
+  for (const root of temporaryRoots.splice(0)) {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function makeLoop(userMode: "byok" | "account" = "byok"): AgentLoop {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-model-command-"));
+  temporaryRoots.push(root);
+  const configPath = path.join(root, "config.yaml");
+  fs.writeFileSync(configPath, [
+    "providers:",
+    "  openai:",
+    "    apiKey: test-key",
+    "    endpoints:",
+    "      chat:",
+    "        apiBase: https://api.openai.com/v1",
+    "        protocol: openai-chat-completions",
+    "  memmy_account:",
+    "    ownerAccountId: account-1",
+    "    apiKey: account-secret",
+    "    endpoints:",
+    "      platform:",
+    "        apiBase: https://account.example.test/v1",
+    "        protocol: memmy-account",
+    "modelPresets:",
+    "  base:",
+    "    endpoint: chat",
+    "    provider: openai",
+    "    model: base-model",
+    "    source: byok",
+    "    capabilities: [agent]",
+    "  platform:",
+    "    endpoint: platform",
+    "    provider: memmy_account",
+    "    model: agent_chat",
+    "    source: account",
+    "    ownerAccountId: account-1",
+    "    capabilities: [agent]",
+    "  fast:",
+    "    endpoint: chat",
+    "    provider: openai",
+    "    model: openai/gpt-4.1",
+    "    source: byok",
+    "    capabilities: [agent]",
+    "    maxTokens: 4096",
+    "    contextWindowTokens: 32768",
+    "modelAssignments:",
+    "  byok:",
+    "    agent:",
+    "      candidates: [base, fast]",
+    "      default: base",
+    "  account:",
+    "    ownerAccountId: account-1",
+    "    agent:",
+    "      candidates: [platform, fast]",
+    "      default: platform",
+    "app:",
+    `  userMode: ${userMode}`,
+    "  userId: account-1",
+    "agents:",
+    "  defaults:",
+    "    modelPreset: base",
+    "    provider: openai",
+    "    model: base-model",
+    "",
+  ].join("\n"));
+  process.env.MEMMY_CONFIG = configPath;
+  const config = new Config({
+    providers: {
+      openai: {
+        apiKey: "test-key",
+        endpoints: {
+          chat: { apiBase: "https://api.openai.com/v1", protocol: "openai-chat-completions" },
+        },
+      },
+      memmy_account: {
+        ownerAccountId: "account-1",
+        apiKey: "account-secret",
+        endpoints: {
+          platform: { apiBase: "https://account.example.test/v1", protocol: "memmy-account" },
+        },
+      },
+    },
+    modelPresets: {
+      base: { endpoint: "chat", provider: "openai", model: "base-model", source: "byok", capabilities: ["agent"] },
+      fast: { endpoint: "chat", provider: "openai", model: "openai/gpt-4.1", source: "byok", capabilities: ["agent"] },
+      platform: {
+        endpoint: "platform",
+        provider: "memmy_account",
+        model: "agent_chat",
+        source: "account",
+        ownerAccountId: "account-1",
+        capabilities: ["agent"],
+      },
+    },
+    modelAssignments: {
+      byok: { agent: { candidates: ["base", "fast"], default: "base" } },
+      account: {
+        ownerAccountId: "account-1",
+        agent: { candidates: ["platform", "fast"], default: "platform" },
+      },
+    },
+    app: { userMode, userId: "account-1" },
+    agents: {
+      defaults: {
+        modelPreset: "base",
+        provider: "openai",
+        model: "base-model",
+      },
+    },
+    fileMemory: { enabled: true },
+  });
   return new AgentLoop({
-    config: new Config({ fileMemory: { enabled: true } }),
+    config,
     bus: new MessageBus(),
     provider: provider("base-model", 123),
     workspace: root,
     model: "base-model",
     contextWindowTokens: 1000,
+    modelSelectionResolver: (input) => resolveModelSelection(input),
     modelPresets: {
-      fast: new ModelPresetConfig({ model: "openai/gpt-4.1", maxTokens: 4096, contextWindowTokens: 32_768 }),
+      base: new ModelPresetConfig({
+        endpoint: "chat",
+        provider: "openai",
+        model: "base-model",
+        source: "byok",
+        capabilities: ["agent"],
+        maxTokens: 123,
+        contextWindowTokens: 1000,
+      }),
+      fast: new ModelPresetConfig({
+        endpoint: "chat",
+        provider: "openai",
+        model: "openai/gpt-4.1",
+        source: "byok",
+        capabilities: ["agent"],
+        maxTokens: 4096,
+        contextWindowTokens: 32_768,
+      }),
     },
   });
 }
 
-function ctx(loop: AgentLoop, raw: string, args = "", session: any = null): CommandContext {
+function ctx(
+  loop: AgentLoop,
+  raw: string,
+  args = "",
+  sessionInput: any = null,
+  turnId: string | null = null,
+): CommandContext {
   const msg = new InboundMessage({ channel: "cli", senderId: "user", chatId: "direct", content: raw });
-  return new CommandContext({ msg, session, key: msg.sessionKey, raw, args, loop });
+  const session = sessionInput === true
+    ? loop.sessions.getOrCreate(msg.sessionKey)
+    : sessionInput;
+  return new CommandContext({ msg, session, key: msg.sessionKey, raw, args, loop, turnId });
 }
 
 describe("model command", () => {
   it("lists current and available presets", async () => {
     const loop = makeLoop();
     const out = await cmdModel(ctx(loop, "/model"));
-    expect(out.content).toContain("Current model: `base-model`");
-    expect(out.content).toContain("Current preset: `default`");
-    expect(out.content).toContain("Available presets: `default`, `fast`");
+    expect(out.content).toContain("Current model: `openai / base-model`");
+    expect(out.content).toContain("Current preset: `base`");
+    expect(out.content).toContain("Available presets: `base`, `fast`");
     expect(out.metadata).toEqual({ renderAs: "text" });
   });
 
-  it("switches preset and runtime dependents", async () => {
+  it("lists preset to Provider/model mappings", async () => {
     const loop = makeLoop();
-    const out = await cmdModel(ctx(loop, "/model fast", "fast"));
-    expect(out.content).toContain("Switched model preset to `fast`.");
-    expect(out.content).toContain("Model: `openai/gpt-4.1`");
-    expect(loop.modelPreset).toBe("fast");
-    expect(loop.model).toBe("openai/gpt-4.1");
-    expect((loop.subagents as any).model).toBe("openai/gpt-4.1");
-    expect((loop.consolidator as any).model).toBe("openai/gpt-4.1");
-    expect((loop.dream as any).model).toBe("openai/gpt-4.1");
+    const out = await cmdModel(ctx(loop, "/model list", "list"));
+    expect(out.content).toContain("`base` -> `openai / base-model`");
+    expect(out.content).toContain("`fast` -> `openai / openai/gpt-4.1`");
   });
 
-  it("switches back to default", async () => {
+  it("lists only current account-mode assignments and resolves the owner-bound default", async () => {
+    const loop = makeLoop("account");
+
+    const status = await cmdModel(ctx(loop, "/model"));
+    const list = await cmdModel(ctx(loop, "/model list", "list"));
+
+    expect(status.content).toContain("Current model: `memmy_account / General text`");
+    expect(status.content).toContain("Current preset: `platform`");
+    expect(list.content).toContain("`platform` -> `memmy_account / General text`");
+    expect(list.content).toContain("`fast` -> `openai / openai/gpt-4.1`");
+    expect(list.content).not.toContain("`base`");
+  });
+
+  it("switches only the current Session and not the process-wide model", async () => {
     const loop = makeLoop();
-    loop.setModelPreset("fast");
-    const out = await cmdModel(ctx(loop, "/model default", "default"));
-    expect(out.content).toContain("Switched model preset to `default`.");
-    expect(loop.modelPreset).toBe("default");
+    const mirrorUpdated = vi.fn();
+    loop.guiTranscriptMirror = { sessionUpdated: mirrorUpdated } as any;
+    const context = ctx(loop, "/model fast", "fast", true);
+    const other = loop.sessions.getOrCreate("cli:other");
+
+    const out = await cmdModel(context);
+
+    expect(out.content).toContain("Switched this Session to `fast`.");
+    expect(out.content).toContain("Model: `openai / openai/gpt-4.1`");
+    expect(context.session?.metadata.modelPreset).toBe("fast");
+    expect(loop.sessions.reload(context.key)?.metadata.modelPreset).toBe("fast");
+    expect(other.metadata.modelPreset).toBeUndefined();
+    expect(loop.modelPreset).toBe("base");
     expect(loop.model).toBe("base-model");
     expect(loop.contextWindowTokens).toBe(1000);
+    expect(mirrorUpdated).toHaveBeenCalledWith(context.key);
+  });
+
+  it("publishes a safe request-scoped selection update for websocket TUI switches", async () => {
+    const loop = makeLoop();
+    const requestId = "77777777-7777-4777-8777-777777777777";
+    const msg = new InboundMessage({
+      channel: "websocket",
+      senderId: "tui",
+      chatId: "chat-model",
+      content: "/model fast",
+      metadata: { client_request_id: requestId },
+    });
+    const session = loop.sessions.getOrCreate(msg.sessionKey);
+    const context = new CommandContext({
+      msg,
+      session,
+      key: msg.sessionKey,
+      raw: "/model fast",
+      args: "fast",
+      loop,
+    });
+
+    await cmdModel(context);
+
+    const update = loop.bus.outbound.getNowait();
+    expect(update).toMatchObject({
+      channel: "websocket",
+      chatId: "chat-model",
+      metadata: {
+        runtimeModelUpdated: true,
+        webuiRequestSessionKey: "websocket:chat-model",
+        clientRequestId: requestId,
+        modelSelection: {
+          preset_id: "fast",
+          provider: "openai",
+          endpoint_id: "chat",
+          protocol: "openai-chat-completions",
+          model: "openai/gpt-4.1",
+          source: "byok",
+          owner_account_id: null,
+          capabilities: ["agent"],
+        },
+      },
+    });
+    expect(JSON.stringify(update)).not.toContain("test-key");
   });
 
   it("keeps old state for unknown preset", async () => {
     const loop = makeLoop();
-    const out = await cmdModel(ctx(loop, "/model missing", "missing"));
+    const context = ctx(loop, "/model missing", "missing", true);
+    const out = await cmdModel(context);
     expect(out.content).toContain("Could not switch model preset");
     expect(out.content).not.toContain('"modelPreset');
-    expect(out.content).toContain("Available presets: `default`, `fast`");
-    expect(loop.modelPreset).toBeNull();
+    expect(out.content).toContain("model_selection_unavailable");
+    expect(out.content).toContain("Available presets: `base`, `fast`");
+    expect(context.session?.metadata.modelPreset).toBeUndefined();
+    expect(loop.modelPreset).toBe("base");
     expect(loop.model).toBe("base-model");
   });
 
@@ -88,74 +297,83 @@ describe("model command", () => {
     const router = new CommandRouter();
     registerBuiltinCommands(router);
     const loop = makeLoop();
-    const out = await router.dispatch(ctx(loop, "/model fast"));
-    expect(out?.content).toContain("Switched model preset");
-    expect(loop.modelPreset).toBe("fast");
-    expect(builtinCommandPalette()).toEqual(expect.arrayContaining([expect.objectContaining({ command: "/model", arg_hint: "[preset]" })]));
-    expect(buildHelpText()).toContain("/model [preset]");
+    const out = await router.dispatch(ctx(loop, "/model fast", "", true));
+    expect(out?.content).toContain("Switched this Session");
+    expect(loop.modelPreset).toBe("base");
+    expect(builtinCommandPalette()).toEqual(expect.arrayContaining([expect.objectContaining({ command: "/model", arg_hint: "[list|preset]" })]));
+    expect(buildHelpText()).toContain("/model [list|preset]");
   });
 
   it("appears in help and command palette", () => {
-    expect(builtinCommandPalette()).toEqual(expect.arrayContaining([expect.objectContaining({ command: "/model", arg_hint: "[preset]" })]));
-    expect(buildHelpText()).toContain("/model [preset]");
+    expect(builtinCommandPalette()).toEqual(expect.arrayContaining([expect.objectContaining({ command: "/model", arg_hint: "[list|preset]" })]));
+    expect(buildHelpText()).toContain("/model [list|preset]");
   });
 });
 
 describe("goal command", () => {
-  it("shows usage without args and rejects mid-turn without session", async () => {
+  it("shows the empty Goal state without args", async () => {
     const loop = makeLoop();
-    expect((await cmdGoal(ctx(loop, "/goal")))?.content).toContain("Usage: /goal");
-    expect((await cmdGoal(ctx(loop, "/goal do work", "do work")))?.content).toContain("/stop");
+    const content = (await cmdGoal(ctx(loop, "/goal")))?.content ?? "";
+    expect(content).toContain('"goal_id": null');
+    expect(content).toContain("Available: create <objective>");
   });
 
-  it("shows usage without args", async () => {
+  it("shows the Goal control help", async () => {
     const loop = makeLoop();
-    expect((await cmdGoal(ctx(loop, "/goal")))?.content).toContain("Usage: /goal");
+    const content = (await cmdGoal(ctx(loop, "/goal help", "help")))?.content ?? "";
+    expect(content).toContain("/goal create <objective>");
+    expect(content).toContain("/goal budget <positive-int|none>");
   });
 
-  it("rejects mid-turn starts when no session is available", async () => {
+  it("rejects Goal creation when the command has no top-level turn identity", async () => {
     const loop = makeLoop();
-    expect((await cmdGoal(ctx(loop, "/goal do work", "do work")))?.content).toContain("/stop");
+    expect((await cmdGoal(ctx(loop, "/goal do work", "do work")))?.content)
+      .toContain("goal_route_unavailable");
   });
 
-  it("rewrites to an agent prompt when a session is available", async () => {
+  it("creates persistent Goal state instead of rewriting the model prompt", async () => {
     const loop = makeLoop();
-    const commandCtx = ctx(loop, "/goal audit the repo", "audit the repo", {});
+    const schedule = vi.spyOn(loop, "scheduleGoalWork");
+    const commandCtx = ctx(loop, "/goal audit the repo", "audit the repo", true, "turn-goal-1");
     const out = await cmdGoal(commandCtx);
-    expect(out).toBeNull();
-    expect(commandCtx.msg.content).toContain("audit the repo");
-    expect(commandCtx.msg.content).toContain("long_task");
-    expect(commandCtx.msg.metadata.originalCommand).toBe("/goal");
-    expect(commandCtx.msg.metadata.originalContent).toBe("/goal audit the repo");
-    expect(typeof commandCtx.msg.metadata.goalStartedAt).toBe("number");
+    expect(out.content).toContain("Goal created.");
+    expect(loop.goalRuntime.get(commandCtx.key)).toMatchObject({
+      objective: "audit the repo",
+      status: "active",
+    });
+    expect(schedule).toHaveBeenCalledOnce();
+    expect(commandCtx.msg.content).toBe("/goal audit the repo");
   });
 
   it("is registered and appears in help and palette", async () => {
     const router = new CommandRouter();
     registerBuiltinCommands(router);
     const loop = makeLoop();
-    const commandCtx = ctx(loop, "/goal ship it", "ship it", {});
+    const commandCtx = ctx(loop, "/goal ship it", "ship it", true, "turn-goal-2");
     const out = await router.dispatch(commandCtx);
-    expect(out).toBeNull();
-    expect(commandCtx.msg.content).toContain("ship it");
-    expect(builtinCommandPalette()).toEqual(expect.arrayContaining([expect.objectContaining({ command: "/goal", arg_hint: "<goal>" })]));
-    expect(buildHelpText()).toContain("/goal <goal>");
+    expect(out?.content).toContain("Goal created.");
+    expect(loop.goalRuntime.get(commandCtx.key)?.objective).toBe("ship it");
+    expect(builtinCommandPalette()).toEqual(expect.arrayContaining([expect.objectContaining({
+      command: "/goal",
+      arg_hint: "[status|help|create <objective>|pause|resume|edit <objective>|budget <n|none>|clear]",
+    })]));
+    expect(buildHelpText()).toContain("/goal [status|help|create <objective>|pause|resume|edit <objective>|budget <n|none>|clear]");
   });
 
   it("dispatches through the command router", async () => {
     const router = new CommandRouter();
     registerBuiltinCommands(router);
     const loop = makeLoop();
-    const commandCtx = ctx(loop, "/goal ship it", "ship it", {});
+    const commandCtx = ctx(loop, "/goal ship it", "ship it", true, "turn-goal-3");
 
     const out = await router.dispatch(commandCtx);
 
-    expect(out).toBeNull();
-    expect(commandCtx.msg.content).toContain("ship it");
+    expect(out?.content).toContain("Goal created.");
+    expect(loop.goalRuntime.get(commandCtx.key)?.objective).toBe("ship it");
   });
 
   it("appears in help and command palette", () => {
-    expect(builtinCommandPalette()).toEqual(expect.arrayContaining([expect.objectContaining({ command: "/goal", arg_hint: "<goal>" })]));
-    expect(buildHelpText()).toContain("/goal <goal>");
+    expect(builtinCommandPalette()).toEqual(expect.arrayContaining([expect.objectContaining({ command: "/goal" })]));
+    expect(buildHelpText()).toContain("/goal [status|help|create <objective>|pause|resume|edit <objective>|budget <n|none>|clear]");
   });
 });

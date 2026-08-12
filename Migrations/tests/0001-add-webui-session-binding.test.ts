@@ -50,7 +50,13 @@ async function runMigration(
   hooks: Parameters<typeof migrateWebuiSessionBindings>[1] = {},
 ) {
   return migrateWebuiSessionBindings(
-    { profileWorkspace: workspace, sessionsDir, logger },
+    {
+      profileWorkspace: workspace,
+      sessionsDir,
+      runtimeConfigFile: path.join(workspace, "config.yaml"),
+      sessionDagDir: path.join(workspace, "session-dag"),
+      logger,
+    },
     hooks,
   );
 }

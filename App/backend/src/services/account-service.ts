@@ -168,6 +168,7 @@ export function createAccountService(options: CreateAccountServiceOptions): Acco
 
     async logout() {
       const uuid = options.accountSessionRepository.getCloudUuid();
+      const session = options.accountSessionRepository.get();
       if (uuid) {
         try {
           await options.cloudClient.logout({ uuid });
@@ -176,9 +177,10 @@ export function createAccountService(options: CreateAccountServiceOptions): Acco
         }
       }
 
-      const projection = await options.memmyConfigWriter?.clearAccountModelProjection?.();
-      options.accountSessionRepository.clear();
-      await reloadMemoryConfigIfNeeded(projection, options);
+      await clearLocalAccountState(
+        options,
+        session.authenticated ? session.profile.userId : undefined
+      );
       return { ok: true };
     },
 
@@ -187,7 +189,11 @@ export function createAccountService(options: CreateAccountServiceOptions): Acco
       return refreshCloudGuideState({
         cloudClient: options.cloudClient,
         accountSessionRepository: options.accountSessionRepository,
-        session
+        session,
+        onAuthenticationInvalid: () => clearLocalAccountState(
+          options,
+          session.authenticated ? session.profile.userId : undefined
+        )
       });
     }
   };
@@ -197,7 +203,7 @@ async function reloadMemoryConfigIfNeeded(
   projection: RuntimeProjectionResult | undefined,
   options: CreateAccountServiceOptions
 ): Promise<void> {
-  if (!projection?.changed || !projection.activeProfileAffected || !options.memoryClient) {
+  if (!projection?.changed || !projection.memoryConfigAffected || !options.memoryClient) {
     return;
   }
 
@@ -208,12 +214,22 @@ async function reloadMemoryConfigIfNeeded(
   }
 }
 
+async function clearLocalAccountState(
+  options: CreateAccountServiceOptions,
+  ownerAccountId?: string
+): Promise<void> {
+  const projection = await options.memmyConfigWriter?.clearAccountModelProjection?.({ ownerAccountId });
+  options.accountSessionRepository.clear();
+  await reloadMemoryConfigIfNeeded(projection, options);
+}
+
 /** Handles refresh cloud guide state. */
 async function refreshCloudGuideState(input: {
   cloudClient: CloudClient;
   accountSessionRepository: AccountSessionRepository;
   session: AccountSessionView;
   cloudUuid?: string;
+  onAuthenticationInvalid?: () => Promise<void>;
 }): Promise<AccountSessionView> {
   if (!input.session.authenticated) {
     return input.session;
@@ -224,13 +240,25 @@ async function refreshCloudGuideState(input: {
     return input.session;
   }
 
-  const cloudProfile = await input.cloudClient.getAccountInfo({ uuid: cloudUuid });
+  let cloudProfile: CloudAccountProfile;
+  try {
+    cloudProfile = await input.cloudClient.getAccountInfo({ uuid: cloudUuid });
+  } catch (error) {
+    if (isUnauthorized(error) && input.onAuthenticationInvalid) {
+      await input.onAuthenticationInvalid();
+    }
+    throw error;
+  }
   return AccountSessionViewSchema.parse(
     input.accountSessionRepository.upsert({
       profile: toSessionProfileInput(cloudProfile),
       isNewUser: input.session.isNewUser
     })
   );
+}
+
+function isUnauthorized(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && "code" in error && error.code === "unauthorized");
 }
 
 /** Handles to code key. */
