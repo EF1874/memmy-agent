@@ -805,8 +805,9 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
                     <button
                       type="button"
                       onClick={() => setDeleteTarget(connection)}
+                      disabled={props.mode === "byok" && space.connections.length <= 1}
                       aria-label={t("settings.modelWorkspace.deleteConnection", { provider: connection.provider })}
-                      className="rounded-btn p-1.5 text-text-ink/45 hover:bg-status-error-soft hover:text-status-error"
+                      className="rounded-btn p-1.5 text-text-ink/45 hover:bg-status-error-soft hover:text-status-error disabled:cursor-not-allowed disabled:opacity-35"
                     >
                       <Trash2 size={13} aria-hidden="true" />
                     </button>
