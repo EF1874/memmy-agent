@@ -1,5 +1,5 @@
-import { useEffect, useState, type ReactNode } from "react";
-import { ExternalLink } from "lucide-react";
+import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { Check, ChevronDown, ExternalLink } from "lucide-react";
 import {
   MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH,
   type AgentSourceScanMode,
@@ -19,7 +19,6 @@ import { openExternalUrl } from "../utils/open-url.js";
 import { Button } from "../components/button.js";
 import { Banner } from "../components/banner.js";
 import { Modal } from "../components/modal.js";
-import { Select } from "../components/Select.js";
 import {
   AGENT_SOURCE_SCAN_COMPLETION_FEEDBACK_MS,
   agentActions,
@@ -1042,11 +1041,9 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
         <p className="text-xs leading-relaxed text-text-ink/55">{t("memory.manualAgentAiHint")}</p>
         <ManualAgentNameField
           label={t("memory.name")}
-          customLabel={t("memory.manualCustomName")}
           value={manualName}
           onChange={(value) => { setManualName(value); setManualError(""); }}
           placeholder={t("memory.manualNamePlaceholder")}
-          selectPlaceholder={t("memory.manualPresetPlaceholder")}
           options={MANUAL_AGENT_NAME_PRESETS}
         />
         <div>
@@ -1754,41 +1751,158 @@ function Divider() {
  * @param props.value The field value.
  * @param props.onChange The value-change callback.
  * @param props.placeholder The placeholder text.
- * @param props.mono Whether to use a monospace font.
- * @param props.hint The field description.
+ * @param props.options The preset Agent names.
  * @returns The manual-add field node.
  */
-function ManualAgentNameField(props: {
+export function ManualAgentNameField(props: {
   label: string;
-  customLabel: string;
   value: string;
   onChange: (value: string) => void;
   placeholder: string;
-  selectPlaceholder: string;
   options: readonly string[];
 }) {
-  const selectedPreset = props.options.includes(props.value) ? props.value : "";
+  const generatedId = useId();
+  const inputId = `${generatedId}-input`;
+  const labelId = `${generatedId}-label`;
+  const listboxId = `${generatedId}-listbox`;
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const [open, setOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const selectedIndex = props.options.indexOf(props.value);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+
+    document.addEventListener("mousedown", closeOnOutsideClick);
+    return () => document.removeEventListener("mousedown", closeOnOutsideClick);
+  }, [open]);
+
+  function showOptions() {
+    setActiveIndex(selectedIndex >= 0 ? selectedIndex : 0);
+    setOpen(true);
+  }
+
+  function selectOption(index: number) {
+    const option = props.options[index];
+    if (!option) {
+      return;
+    }
+
+    props.onChange(option);
+    setActiveIndex(index);
+    setOpen(false);
+    inputRef.current?.focus();
+  }
+
+  function handleKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const direction = event.key === "ArrowDown" ? 1 : -1;
+      if (!open) {
+        showOptions();
+        return;
+      }
+      setActiveIndex((current) => (current + direction + props.options.length) % props.options.length);
+      return;
+    }
+
+    if (event.key === "Enter" && open) {
+      event.preventDefault();
+      selectOption(activeIndex);
+      return;
+    }
+
+    if (event.key === "Escape" && open) {
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen(false);
+    }
+  }
 
   return (
-    <div className="space-y-3.5">
-      <Select
-        label={props.label}
-        value={selectedPreset}
-        placeholder={props.selectPlaceholder}
-        onValueChange={props.onChange}
-        className="select-control--subtle"
-        options={props.options.map((option) => ({ value: option, label: option }))}
-      />
-      <div>
-        <label className="block text-xs text-text-ink/65 mb-1.5 font-normal">{props.customLabel}</label>
+    <div ref={rootRef} className="manual-agent-combobox">
+      <label id={labelId} htmlFor={inputId} className="block text-xs text-text-ink/65 mb-1.5 font-normal">
+        {props.label}
+      </label>
+      <div className="manual-agent-combobox__control">
         <input
+          ref={inputRef}
+          id={inputId}
           type="text"
           placeholder={props.placeholder}
           value={props.value}
-          onChange={(event) => props.onChange(event.target.value)}
-          className="w-full px-4 py-2.5 border border-border-stone rounded-input text-sm bg-background-paper focus:outline-none placeholder:text-text-ink/40"
+          autoComplete="off"
+          spellCheck={false}
+          role="combobox"
+          aria-autocomplete="list"
+          aria-expanded={open}
+          aria-controls={listboxId}
+          aria-labelledby={labelId}
+          aria-activedescendant={open ? `${generatedId}-option-${activeIndex}` : undefined}
+          onBlur={(event) => {
+            if (!rootRef.current?.contains(event.relatedTarget as Node | null)) {
+              setOpen(false);
+            }
+          }}
+          onChange={(event) => {
+            props.onChange(event.target.value);
+            setActiveIndex(0);
+          }}
+          onKeyDown={handleKeyDown}
+          className="manual-agent-combobox__input"
         />
+        <button
+          type="button"
+          tabIndex={-1}
+          aria-label={props.placeholder}
+          aria-expanded={open}
+          className="manual-agent-combobox__toggle"
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => {
+            if (open) {
+              setOpen(false);
+            } else {
+              inputRef.current?.focus();
+              showOptions();
+            }
+          }}
+        >
+          <ChevronDown size={16} strokeWidth={2.2} aria-hidden="true" />
+        </button>
       </div>
+      {open && (
+        <div id={listboxId} className="manual-agent-combobox__menu" role="listbox" aria-labelledby={labelId}>
+          {props.options.map((option, index) => {
+            const selected = option === props.value;
+            return (
+              <button
+                id={`${generatedId}-option-${index}`}
+                key={option}
+                type="button"
+                role="option"
+                tabIndex={-1}
+                aria-selected={selected}
+                className={`manual-agent-combobox__option ${index === activeIndex ? "manual-agent-combobox__option--active" : ""}`}
+                onMouseDown={(event) => event.preventDefault()}
+                onMouseEnter={() => setActiveIndex(index)}
+                onClick={() => selectOption(index)}
+              >
+                <span>{option}</span>
+                {selected && <Check size={14} strokeWidth={2.6} aria-hidden="true" />}
+              </button>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

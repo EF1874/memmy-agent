@@ -7860,6 +7860,96 @@ input[type="checkbox"].check-sky:checked::after {
   min-height: 40px;
 }
 
+.manual-agent-combobox {
+  position: relative;
+}
+
+.manual-agent-combobox__control {
+  position: relative;
+}
+
+.manual-agent-combobox__input {
+  width: 100%;
+  min-height: 40px;
+  border: 1px solid var(--color-border-stone);
+  border-radius: var(--radius-input);
+  outline: none;
+  padding: 10px 42px 10px 14px;
+  background: var(--color-background-paper);
+  color: var(--color-text-ink);
+  cursor: text;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.25;
+}
+
+.manual-agent-combobox__input::placeholder {
+  color: color-mix(in srgb, var(--color-text-ink) 44%, transparent);
+}
+
+.manual-agent-combobox__toggle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: grid;
+  width: 42px;
+  height: 100%;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: color-mix(in srgb, var(--color-text-ink) 48%, transparent);
+  cursor: pointer;
+}
+
+.manual-agent-combobox__toggle svg {
+  transition: transform var(--duration-fast);
+}
+
+.manual-agent-combobox__toggle[aria-expanded="true"] svg {
+  transform: rotate(180deg);
+}
+
+.manual-agent-combobox__menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  left: 0;
+  z-index: 80;
+  overflow: auto;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 72%, transparent);
+  border-radius: var(--radius-input);
+  padding: 6px;
+  background: var(--color-background-paper);
+  box-shadow: var(--shadow-popover);
+}
+
+.manual-agent-combobox__option {
+  display: flex;
+  width: 100%;
+  min-height: 34px;
+  align-items: center;
+  justify-content: space-between;
+  border: 0;
+  border-radius: 7px;
+  padding: 8px 9px;
+  background: transparent;
+  color: color-mix(in srgb, var(--color-text-ink) 76%, transparent);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+}
+
+.manual-agent-combobox__option--active {
+  background: color-mix(in srgb, var(--color-canvas-oat) 72%, transparent);
+  color: var(--color-text-ink);
+}
+
+.manual-agent-combobox__option svg {
+  flex: 0 0 auto;
+  color: var(--color-action-sky);
+}
+
 .confirm-dialog {
   display: flex;
   max-height: calc(100dvh - 48px);

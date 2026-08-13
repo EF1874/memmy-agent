@@ -133,8 +133,10 @@ describe("SourcesSubPage", () => {
     expect(source).toContain('variant="soft"');
     expect(source).toContain("manual-source-modal__footer");
     expect(source).toContain("options={MANUAL_AGENT_NAME_PRESETS}");
-    expect(source).toContain('import { Select } from "../components/Select.js";');
-    expect(source).toContain('className="select-control--subtle"');
+    expect(source).toContain('role="combobox"');
+    expect(source).toContain('aria-autocomplete="list"');
+    expect(source).toContain("manual-agent-combobox__menu");
+    expect(source).not.toContain('import { Select } from "../components/Select.js";');
     expect(source).not.toContain("<datalist");
     expect(source).not.toContain("fixed inset-0 z-50 flex items-center justify-center bg-text-ink/25 backdrop-blur-sm");
   });
