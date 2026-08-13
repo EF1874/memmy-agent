@@ -87,6 +87,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
           tier2TopK: 2,
           tier3TopK: 4,
           relativeThresholdFloor: 0,
+          minRecallScore: 0,
           smartSeed: false,
           llmFilterEnabled: false,
           llmFilterFallbackMaxKeep: 20
@@ -414,6 +415,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
           retrieval: {
             ...config.algorithm.retrieval,
             relativeThresholdFloor: 0,
+            minRecallScore: 0,
             smartSeed: false,
             llmFilterEnabled: false,
             llmFilterMinCandidates: 1,
