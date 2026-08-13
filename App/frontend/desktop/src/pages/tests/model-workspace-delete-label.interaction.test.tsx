@@ -32,7 +32,7 @@ describe("ModelWorkspaceSection delete confirmation provider labels", () => {
     act(() => {
       root.render(
         <I18nProvider language="zh-CN">
-          <ModelWorkspaceSection mode="byok" seedConfig={createSeedConfig(provider)} />
+          <ModelWorkspaceSection mode="account" seedConfig={createSeedConfig(provider)} />
         </I18nProvider>
       );
     });
