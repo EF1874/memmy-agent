@@ -2067,6 +2067,7 @@ export class RetrievalService {
     mmrLambda: number;
     rrfConstant: number;
     relativeThresholdFloor: number;
+    minRecallScore: number;
     minSkillEta: number;
     minTraceSim: number;
     episodeGoalMinSim: number;
@@ -2095,6 +2096,7 @@ export class RetrievalService {
       mmrLambda: retrieval.mmrLambda,
       rrfConstant: retrieval.rrfConstant,
       relativeThresholdFloor: retrieval.relativeThresholdFloor,
+      minRecallScore: retrieval.minRecallScore,
       minSkillEta: retrieval.minSkillEta,
       minTraceSim: retrieval.minTraceSim,
       episodeGoalMinSim: retrieval.episodeGoalMinSim,
