@@ -1143,7 +1143,9 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
       <ConfirmDialog
         open={Boolean(deleteTarget)}
         title={t("settings.modelWorkspace.deleteTitle")}
-        message={t("settings.modelWorkspace.deleteConfirm", { provider: deleteTarget?.provider ?? "" })}
+        message={t("settings.modelWorkspace.deleteConfirm", {
+          provider: deleteTarget ? connectionProtocolLabel(deleteTarget.provider, t) : ""
+        })}
         cancelLabel={t("common.cancel")}
         closeLabel={t("common.close")}
         confirmLabel={t("common.delete")}
