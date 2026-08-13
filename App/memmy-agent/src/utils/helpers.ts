@@ -3,7 +3,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { get_encoding } from "tiktoken";
-import { CONTEXT_SAFETY_BUFFER_TOKENS, DEFAULT_MAX_TOKENS } from "../token-budget.js";
 import { GitStore } from "./gitstore.js";
 
 const THINK_BLOCK_RE = /<(think|thought)>([\s\S]*?)<\/\1>/gi;
@@ -377,55 +376,95 @@ export function estimatePromptTokensChain(
   return [Math.max(1, estimated), tiktokenEncoder ? "tiktoken" : "rough_estimate"];
 }
 
-export function buildStatusContent(
-  input:
-    | string[]
+export type StatusValue<T, E extends string> =
+  | { state: "ok"; value: T }
+  | { state: "error"; reason: E };
+
+export type RuntimeStatusSnapshot = {
+  version: string;
+  model: StatusValue<
+    { provider: string; displayModel: string },
+    "session_model_selection_unavailable"
+  >;
+  usage:
     | {
-        version: string;
-        model: string | null;
-        startTime?: number;
-        lastUsage?: Record<string, number>;
-        contextWindowTokens?: number;
-        sessionMsgCount?: number;
-        contextTokensEstimate?: number;
-        searchUsageText?: string | null;
-        activeTaskCount?: number;
-        maxCompletionTokens?: number;
-      },
+        state: "reported";
+        promptTokens: number;
+        completionTokens: number;
+        cachedTokens: number;
+      }
+    | { state: "missing" };
+  context: StatusValue<
+    { estimatedTokens: number; windowTokens: number },
+    | "session_model_selection_unavailable"
+    | "token_estimation_failed"
+    | "invalid_model_context_window"
+  >;
+  conversationUserTurns: number;
+  agentStartTime: number;
+  searchUsageText: string | null;
+};
+
+function normalizeStatusInteger(value: number): number {
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
+function formatStatusTokenCount(value: number): string {
+  const tokens = normalizeStatusInteger(value);
+  return tokens >= 1000 ? `${Math.floor(tokens / 1000)}k` : String(tokens);
+}
+
+function formatAgentUptime(startTime: number): string {
+  const uptimeS = Math.max(0, Math.floor(Date.now() / 1000 - startTime));
+  return uptimeS >= 3600
+    ? `${Math.floor(uptimeS / 3600)}h ${Math.floor((uptimeS % 3600) / 60)}m`
+    : `${Math.floor(uptimeS / 60)}m ${uptimeS % 60}s`;
+}
+
+function formatModelStatus(model: RuntimeStatusSnapshot["model"]): string {
+  if (model.state === "error") {
+    return "Model: error (session model selection cannot be resolved)";
+  }
+  return `Model: ${model.value.provider} / ${model.value.displayModel}`;
+}
+
+function formatUsageStatus(usage: RuntimeStatusSnapshot["usage"]): string {
+  if (usage.state === "missing") return "Last run tokens: unavailable";
+  const promptTokens = normalizeStatusInteger(usage.promptTokens);
+  const completionTokens = normalizeStatusInteger(usage.completionTokens);
+  const cachedTokens = normalizeStatusInteger(usage.cachedTokens);
+  let line = `Last run tokens: ${promptTokens} in / ${completionTokens} out`;
+  if (cachedTokens > 0 && promptTokens > 0) {
+    line += ` (${Math.floor((cachedTokens * 100) / promptTokens)}% cached)`;
+  }
+  return line;
+}
+
+function formatContextStatus(context: RuntimeStatusSnapshot["context"]): string {
+  if (context.state === "ok") {
+    return `Context: ~${formatStatusTokenCount(context.value.estimatedTokens)} / ${formatStatusTokenCount(context.value.windowTokens)}`;
+  }
+  if (context.reason === "session_model_selection_unavailable") {
+    return "Context: error (session model selection cannot be resolved)";
+  }
+  if (context.reason === "invalid_model_context_window") {
+    return "Context: error (invalid model context window)";
+  }
+  return "Context: error (token estimation failed)";
+}
+
+export function buildStatusContent(
+  input: string[] | RuntimeStatusSnapshot,
 ): string {
   if (Array.isArray(input)) return input.filter(Boolean).join("\n");
-  const startTime = input.startTime ?? Date.now() / 1000;
-  const uptimeS = Math.max(0, Math.floor(Date.now() / 1000 - startTime));
-  const uptime =
-    uptimeS >= 3600
-      ? `${Math.floor(uptimeS / 3600)}h ${Math.floor((uptimeS % 3600) / 60)}m`
-      : `${Math.floor(uptimeS / 60)}m ${uptimeS % 60}s`;
-  const usage = input.lastUsage ?? {};
-  const lastIn = usage.prompt_tokens ?? 0;
-  const lastOut = usage.completion_tokens ?? 0;
-  const cached = usage.cached_tokens ?? 0;
-  const contextTotal = Math.max(input.contextWindowTokens ?? 0, 0);
-  const maxCompletion = input.maxCompletionTokens ?? DEFAULT_MAX_TOKENS;
-  const contextBudget = Math.max(
-    contextTotal - Math.floor(maxCompletion) - CONTEXT_SAFETY_BUFFER_TOKENS,
-    1,
-  );
-  const contextEstimate = input.contextTokensEstimate ?? 0;
-  const contextPct =
-    contextBudget > 0 ? Math.min(Math.floor((contextEstimate / contextBudget) * 100), 999) : 0;
-  const contextUsed =
-    contextEstimate >= 1000 ? `${Math.floor(contextEstimate / 1000)}k` : String(contextEstimate);
-  const contextWindow = contextTotal > 0 ? `${Math.floor(contextTotal / 1000)}k` : "n/a";
-  let tokenLine = `Tokens: ${lastIn} in / ${lastOut} out`;
-  if (cached && lastIn) tokenLine += ` (${Math.floor((cached * 100) / lastIn)}% cached)`;
+  const conversationUserTurns = normalizeStatusInteger(input.conversationUserTurns);
   const lines = [
     `memmy v${input.version}`,
-    `Model: ${input.model ?? "unknown"}`,
-    tokenLine,
-    `Context: ${contextUsed}/${contextWindow} (${contextPct}% of input budget)`,
-    `Session: ${input.sessionMsgCount ?? 0} messages`,
-    `Uptime: ${uptime}`,
-    `Tasks: ${input.activeTaskCount ?? 0} active`,
+    formatModelStatus(input.model),
+    formatUsageStatus(input.usage),
+    formatContextStatus(input.context),
+    `Conversation: ${conversationUserTurns} user ${conversationUserTurns === 1 ? "turn" : "turns"}`,
+    `Agent uptime: ${formatAgentUptime(input.agentStartTime)}`,
   ];
   const searchUsageText = input.searchUsageText;
   if (searchUsageText) lines.push(searchUsageText);

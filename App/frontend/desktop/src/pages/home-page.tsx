@@ -165,6 +165,7 @@ const TRANSLATABLE_AGENT_ERROR_KEYS = new Set<MessageKey>([
   "home.agent.messageNotRecorded",
   "home.agent.executionInterrupted",
   "home.agent.recoveryTimeout",
+  "home.composer.emptyMessage",
   "home.goal.controlUnknown",
   "home.modelSelector.unavailable",
   "home.project.desktopRequired",
@@ -620,7 +621,16 @@ export function requestNewSessionReset(input: RequestNewSessionResetInput): bool
 
 export async function submitAgentComposerMessage(input: SubmitAgentComposerMessageInput): Promise<boolean> {
   const text = input.content.trim();
-  const displayText = input.displayContent?.trim() || text;
+  const trimmedDisplayContent = input.displayContent?.trim();
+  const displayText = trimmedDisplayContent || text;
+  if (
+    text === COMPOSER_GOAL_COMMAND
+    && trimmedDisplayContent !== undefined
+    && !trimmedDisplayContent
+  ) {
+    input.setComposerMediaError?.("home.composer.emptyMessage");
+    return false;
+  }
   if ((!text && !input.pendingAttachments.length) || !input.connection) {
     return false;
   }
@@ -2803,7 +2813,7 @@ export function HomePage() {
                       }}
                       onKeyDown={handleComposerKeyDown}
                       onPaste={handleComposerPaste}
-                      className={`${isComposerSingleLine ? "agent-composer-input--single " : ""}${selectedComposerCommand ? "agent-composer-input--command-selected " : ""}block w-full pl-4 pr-36 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40`}
+                      className={`${isComposerSingleLine ? "agent-composer-input--single " : ""}${selectedComposerCommand ? "agent-composer-input--command-selected " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40`}
                     />
                     <div className={`composer-actions absolute right-2.5 z-50 ${centerComposerControls ? "top-1/2 -translate-y-1/2" : "bottom-2"}`}>
                       <AgentModelSelector

@@ -137,7 +137,7 @@ export const AgentMessageContent = memo(function AgentMessageContent(props: Agen
       )}
       style={props.style}
     >
-      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath, remarkBreaks]} rehypePlugins={[rehypeKatex]} components={components}>
+      <ReactMarkdown remarkPlugins={[[remarkGfm, { singleTilde: false }], remarkMath, remarkBreaks]} rehypePlugins={[rehypeKatex]} components={components}>
         {source}
       </ReactMarkdown>
       {props.isStreaming ? <span className="agent-streaming-cursor" aria-hidden="true" /> : null}
