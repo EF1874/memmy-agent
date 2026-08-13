@@ -291,6 +291,7 @@ describe("AgentGoalBar", () => {
       action: "edit",
       objective: "Updated objective"
     });
+    expect(container.querySelector(".agent-goal-bar__form")).toBeNull();
   });
 
   it("binds a form to the chat and Goal identity that opened it and discards stale drafts", () => {
