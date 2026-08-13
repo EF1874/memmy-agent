@@ -21,6 +21,7 @@ export type ModelWorkspaceMutationError =
   | "duplicate_model"
   | "invalid_connection"
   | "invalid_model"
+  | "incompatible_model_capabilities"
   | "connection_not_found";
 
 export interface ModelConnection {
@@ -402,7 +403,7 @@ export function upsertModelConnection(
   }
   const protocol = input.protocol ?? protocolFor(providerId, entries[0]!.capabilities[0]!);
   if (!protocolSupportsModelCapabilities(protocol, entries.flatMap((entry) => entry.capabilities))) {
-    return { workspace, error: "invalid_model" };
+    return { workspace, error: "incompatible_model_capabilities" };
   }
 
   const previousEndpointId = existingConnection?.endpointId;

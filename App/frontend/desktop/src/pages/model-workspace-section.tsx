@@ -158,7 +158,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
           props.onConfigSaved?.(saved);
           onSaved?.(savedWorkspace);
         } catch (error) {
-          setSaveError(error instanceof Error && error.message ? error.message : t("settings.modelWorkspace.saveFailed"));
+          setSaveError(modelWorkspaceErrorText(error, t));
           try {
             const latest = await props.configClient!.getModelConfig();
             setWorkspace(createModelWorkspace(latest));
@@ -204,7 +204,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
       if (!active || hasMutatedRef.current) return;
       setWorkspace(createModelWorkspace(saved));
       props.onConfigSaved?.(saved);
-    }).catch((error) => setSaveError(error instanceof Error && error.message ? error.message : t("settings.modelWorkspace.saveFailed")));
+    }).catch((error) => setSaveError(modelWorkspaceErrorText(error, t)));
     return () => { active = false; };
   }, [props.configClient]);
 
@@ -518,7 +518,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
     const deletedConnectionId = deleteTarget.id;
     const result = deleteModelConnection(workspace, props.mode, deleteTarget.id);
     if (result.error) {
-      setSaveError(t("settings.modelWorkspace.saveFailed"));
+      setSaveError(mutationErrorText(result.error, t));
       return;
     }
     if (commitWorkspace(result.workspace, () => removeConnectionTestState(
@@ -696,6 +696,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
           </button>
         </div>
       )}
+      <div>
       <section>
         <div className="mb-3 flex items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-2">
@@ -844,7 +845,14 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
         </div>
       </section>
 
-      <section>
+      {saveError && (
+        <div className="mt-2 mb-5 flex items-center gap-2 rounded-card bg-status-error-soft px-3 py-2 text-xs text-status-error" role="alert">
+          <AlertTriangle size={13} aria-hidden="true" />
+          {saveError}
+        </div>
+      )}
+
+      <section className={saveError ? undefined : "mt-8"}>
         <div className="mb-3 flex items-center gap-2">
           <Wrench size={16} className="text-text-ink/60" aria-hidden="true" />
           <h3 className="text-sm font-semibold text-text-ink">{t("settings.modelWorkspace.bindingTitle")}</h3>
@@ -992,13 +1000,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
           </div>
         </div>
       </section>
-
-      {saveError && (
-        <div className="flex items-center gap-2 rounded-card bg-status-error-soft px-3 py-2 text-xs text-status-error" role="alert">
-          <AlertTriangle size={13} aria-hidden="true" />
-          {saveError}
-        </div>
-      )}
+      </div>
 
       {editor && (
         <Modal
@@ -1113,7 +1115,9 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
                   onClick={() => setEditor({
                     ...editor,
                     modelDraft: "",
-                    capabilityDrafts: [...DEFAULT_TEXT_CAPABILITIES],
+                    capabilityDrafts: editorExistingConnection
+                      ? editorCapabilitiesForProtocol(editorExistingConnection.protocol)
+                      : [...DEFAULT_TEXT_CAPABILITIES],
                     addingModel: true,
                     editingModelIndex: null
                   })}
@@ -1456,6 +1460,13 @@ function protocolForEditor(provider: Protocol, capability: ModelCapability): Mod
   return "openai-chat-completions";
 }
 
+function editorCapabilitiesForProtocol(protocol: ModelEndpointProtocol): ModelCapability[] {
+  if (protocol === "openai-embeddings") return ["embedding"];
+  if (protocol === "dashscope-input-audio-chat") return ["asr"];
+  if (protocol === "openai-images" || protocol === "dashscope-multimodal-generation") return ["image"];
+  return [...DEFAULT_TEXT_CAPABILITIES];
+}
+
 export function editorProtocolForCapabilities(
   provider: Protocol,
   capabilities: ModelCapability[],
@@ -1558,8 +1569,21 @@ function mutationErrorText(
   if (error === "duplicate_provider") return t("settings.modelWorkspace.duplicateProvider");
   if (error === "duplicate_model") return t("settings.modelWorkspace.duplicateModel");
   if (error === "invalid_model") return t("settings.modelWorkspace.invalidModel");
+  if (error === "incompatible_model_capabilities") return t("settings.modelWorkspace.incompatibleModelCapabilities");
   if (error === "connection_not_found") return t("settings.modelWorkspace.connectionMissing");
   return t("settings.modelWorkspace.invalidConnection");
+}
+
+function modelWorkspaceErrorText(
+  error: unknown,
+  t: ReturnType<typeof useTranslation>["t"]
+): string {
+  const code = error && typeof error === "object" && "code" in error ? error.code : null;
+  if (code === "model_config_changed") return t("settings.model.configChanged");
+  if (code === "config_write_busy") return t("settings.modelWorkspace.saveBusy");
+  return error instanceof Error && error.message
+    ? error.message
+    : t("settings.modelWorkspace.saveFailed");
 }
 
 async function simulateConnectionTest(): Promise<{ ok: boolean }> {

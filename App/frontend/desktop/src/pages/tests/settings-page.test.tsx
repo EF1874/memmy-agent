@@ -806,10 +806,12 @@ describe("SettingsPageView", () => {
   it("catalog 读取或保存失败时在模型工作区展示错误", () => {
     const source = readFileSync(modelWorkspaceSourcePath, "utf8");
 
-    expect(source).toContain("error instanceof Error && error.message");
-    expect(source).toContain("{saveError && (");
+    expect(source).toContain("modelWorkspaceErrorText(error, t)");
+    expect(source).not.toContain("MessageToast");
     expect(source).toContain('role="alert"');
     expect(source).toContain("{saveError}");
+    expect(source).toContain("mutationErrorText(result.error, t)");
+    expect(source.indexOf("{saveError}")).toBeLessThan(source.indexOf('t("settings.modelWorkspace.bindingTitle")'));
   });
 
   it("模型工作区用同步 busy gate 阻止快速连续 PUT，且迟到的初始 GET 不覆盖本地 mutation", () => {
