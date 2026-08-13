@@ -10475,32 +10475,13 @@ input[type="checkbox"].check-sky:checked::after {
   }
 }
 
-.agent-goal-bar__usage,
-.agent-goal-bar__usage-full,
-.agent-goal-bar__usage-compact {
-  align-items: center;
-  white-space: nowrap;
-}
-
-.agent-goal-bar__usage {
+.agent-goal-bar__time {
   display: inline-flex;
+  align-items: center;
   flex: 0 0 auto;
   color: color-mix(in srgb, var(--color-text-ink) 58%, transparent);
   font-size: 0.72rem;
-}
-
-.agent-goal-bar__usage-full {
-  display: inline-flex;
-  gap: 0.3rem;
-}
-
-.agent-goal-bar__usage-compact {
-  display: none;
-  gap: 0.25rem;
-}
-
-.agent-goal-bar__separator {
-  color: color-mix(in srgb, var(--color-text-ink) 34%, transparent);
+  white-space: nowrap;
 }
 
 .agent-goal-bar__actions {
@@ -10572,8 +10553,7 @@ input[type="checkbox"].check-sky:checked::after {
   padding: 0.75rem;
 }
 
-.agent-goal-bar__form textarea,
-.agent-goal-bar__form input {
+.agent-goal-bar__form textarea {
   width: 100%;
   border: 1px solid color-mix(in srgb, var(--color-border-stone) 45%, transparent);
   border-radius: 0.5rem;
@@ -10628,14 +10608,6 @@ input[type="checkbox"].check-sky:checked::after {
 
   .agent-goal-bar__objective-viewport {
     flex-basis: 7rem;
-  }
-
-  .agent-goal-bar__usage-full {
-    display: none;
-  }
-
-  .agent-goal-bar__usage-compact {
-    display: inline-flex;
   }
 
   .agent-goal-bar__actions {

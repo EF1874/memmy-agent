@@ -1943,8 +1943,7 @@ export function HomePage() {
         goalId: request.goalId,
         action: request.action,
         requestId,
-        ...(request.objective === undefined ? {} : { objective: request.objective }),
-        ...(request.tokenBudget === undefined ? {} : { tokenBudget: request.tokenBudget })
+        ...(request.objective === undefined ? {} : { objective: request.objective })
       }, expectedGeneration);
     } catch (error) {
       dispatch(agentActions.operationFailed("chat", createAgentOperationError({
