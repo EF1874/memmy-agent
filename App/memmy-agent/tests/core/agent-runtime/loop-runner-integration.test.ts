@@ -179,7 +179,7 @@ describe("AgentLoop direct processing", () => {
   it("attaches each turn's accumulated usage to its own outbound message", async () => {
     const agent = loop();
     const usages = [
-      { prompt_tokens: 120, completion_tokens: 45, total_tokens: 165 },
+      { prompt_tokens: 120, completion_tokens: 45, total_tokens: 165, cached_tokens: 90 },
       { prompt_tokens: 30, completion_tokens: 8, total_tokens: 38 },
     ];
     let calls = 0;
@@ -195,9 +195,12 @@ describe("AgentLoop direct processing", () => {
     const second = await agent.processDirect("second", { sessionKey: "cli:usage-b" });
 
     expect(first?.metadata.usage).toEqual(usages[0]);
-    expect(second?.metadata.usage).toEqual(usages[1]);
+    expect(second?.metadata.usage).toEqual({ ...usages[1], cached_tokens: 0 });
     expect(agent.lastUsageBySession.get("cli:usage-a")).toEqual(usages[0]);
-    expect(agent.lastUsageBySession.get("cli:usage-b")).toEqual(usages[1]);
+    expect(agent.lastUsageBySession.get("cli:usage-b")).toEqual({
+      ...usages[1],
+      cached_tokens: 0,
+    });
   });
 
   it("publishes a thread session update after early-persisting WebUI user messages", async () => {

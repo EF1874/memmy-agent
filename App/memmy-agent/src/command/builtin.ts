@@ -16,13 +16,15 @@ import {
   type ResolvedModelSelection,
 } from "../providers/model-catalog.js";
 import { handlePairingCommand } from "../integrations/channel-auth/store.js";
-import { DEFAULT_MAX_TOKENS } from "../token-budget.js";
-import { buildStatusContent } from "../utils/helpers.js";
+import { buildStatusContent, type RuntimeStatusSnapshot } from "../utils/helpers.js";
 import { fetchSearchUsage } from "../utils/searchusage.js";
 import { buildHistoryDagPayload, renderHistoryDagSummary, SessionDagStore } from "../session-dag/index.js";
 import { GoalRuntimeError } from "../core/agent-runtime/goal-runtime.js";
 import { publicGoalState, type GoalState } from "../core/session/goal-state.js";
-import { GOAL_COMMAND_SUBCOMMANDS } from "../core/session/webui-user-content.js";
+import {
+  GOAL_COMMAND_SUBCOMMANDS,
+  goalObjectiveFromCommand,
+} from "../core/session/webui-user-content.js";
 import { VERSION } from "../version.js";
 import { CommandContext, CommandRouter } from "./router.js";
 
@@ -293,22 +295,30 @@ function catalogModelName(selection: {
   return selection.model.trim() || selection.presetId || selection.preset || "(unavailable)";
 }
 
-function sessionModelPreset(ctx: CommandContext): string | null {
-  const session = ctx.session ?? ctx.loop?.sessions?.get?.(ctx.key);
-  return typeof session?.metadata?.modelPreset === "string"
-    ? session.metadata.modelPreset
-    : null;
-}
-
-function modelCommandStatus(ctx: CommandContext): string {
-  const session = ctx.session ?? ctx.loop?.sessions?.get?.(ctx.key);
+function resolveCurrentSessionModel(
+  ctx: CommandContext,
+  sessionOverride: any | null = null,
+): ResolvedModelSelection | null {
+  const session = sessionOverride ?? ctx.session ?? ctx.loop?.sessions?.get?.(ctx.key);
   const committedSelection = committedSelectionFromMetadata(session?.metadata);
   const input = committedSelection
     ? { committedSelection }
-    : { sessionPreset: sessionModelPreset(ctx) };
-  const selection = typeof ctx.loop?.resolveTurnModelSelection === "function"
-    ? ctx.loop.resolveTurnModelSelection(input)
-    : resolveModelSelection(input);
+    : {
+        sessionPreset: typeof session?.metadata?.modelPreset === "string"
+          ? session.metadata.modelPreset
+          : null,
+      };
+  try {
+    return typeof ctx.loop?.resolveTurnModelSelection === "function"
+      ? ctx.loop.resolveTurnModelSelection(input)
+      : resolveModelSelection(input);
+  } catch {
+    return null;
+  }
+}
+
+function modelCommandStatus(ctx: CommandContext): string {
+  const selection = resolveCurrentSessionModel(ctx);
   return [
     "## Model",
     `- Current model: \`${selection ? `${selection.provider} / ${catalogModelName(selection)}` : "(none configured)"}\``,
@@ -588,18 +598,80 @@ export async function cmdHelp(ctx: CommandContext): Promise<OutboundMessage> {
   );
 }
 
+function countConversationUserTurns(session: any | null | undefined): number {
+  if (!Array.isArray(session?.messages)) return 0;
+  return session.messages.reduce((count: number, message: any) => {
+    if (message?.role !== "user" || message.internal_context === "goal_continuation") {
+      return count;
+    }
+    const content = typeof message.content === "string" ? message.content.trim() : "";
+    if (message.commandMessage === true) {
+      return goalObjectiveFromCommand(content) ? count + 1 : count;
+    }
+    const hasMedia = Array.isArray(message.media) && message.media.length > 0;
+    return content || hasMedia ? count + 1 : count;
+  }, 0);
+}
+
 export async function cmdStatus(ctx: CommandContext): Promise<OutboundMessage> {
   const loop = ctx.loop;
   const session = ctx.session ?? loop?.sessions?.getOrCreate?.(ctx.key);
-  let contextEstimate = 0;
-  try {
-    const estimated = loop?.consolidator?.estimateSessionPromptTokens?.(session);
-    contextEstimate = Array.isArray(estimated) ? estimated[0] : Number(estimated ?? 0);
-  } catch {
-    contextEstimate = 0;
+  const selection = resolveCurrentSessionModel(ctx, session);
+  const model: RuntimeStatusSnapshot["model"] = selection
+    ? {
+        state: "ok",
+        value: {
+          provider: selection.provider,
+          displayModel: catalogModelName(selection),
+        },
+      }
+    : { state: "error", reason: "session_model_selection_unavailable" };
+
+  let context: RuntimeStatusSnapshot["context"];
+  if (!selection) {
+    context = { state: "error", reason: "session_model_selection_unavailable" };
+  } else if (
+    !Number.isFinite(selection.snapshot.contextWindowTokens)
+    || selection.snapshot.contextWindowTokens <= 0
+  ) {
+    context = { state: "error", reason: "invalid_model_context_window" };
+  } else {
+    try {
+      const scopedConsolidator = loop?.consolidator?.withProviderSnapshot?.(
+        selection.snapshot.provider,
+        selection.snapshot.model,
+        selection.snapshot.contextWindowTokens,
+      );
+      if (!scopedConsolidator?.estimateSessionPromptTokens) {
+        throw new Error("status_token_estimator_unavailable");
+      }
+      const estimated = scopedConsolidator.estimateSessionPromptTokens(session);
+      const estimatedTokens = Number(Array.isArray(estimated) ? estimated[0] : estimated);
+      if (!Number.isFinite(estimatedTokens) || estimatedTokens < 0) {
+        throw new Error("status_token_estimate_invalid");
+      }
+      context = {
+        state: "ok",
+        value: {
+          estimatedTokens: Math.floor(estimatedTokens),
+          windowTokens: Math.floor(selection.snapshot.contextWindowTokens),
+        },
+      };
+    } catch {
+      context = { state: "error", reason: "token_estimation_failed" };
+    }
   }
-  const lastUsage = loop?.lastUsageBySession?.get?.(ctx.key) ?? {};
-  if (contextEstimate <= 0) contextEstimate = Number(lastUsage.prompt_tokens ?? 0);
+
+  const hasUsage = loop?.lastUsageBySession?.has?.(ctx.key) === true;
+  const lastUsage = hasUsage ? loop.lastUsageBySession.get(ctx.key) : null;
+  const usage: RuntimeStatusSnapshot["usage"] = hasUsage
+    ? {
+        state: "reported",
+        promptTokens: Number(lastUsage?.prompt_tokens ?? 0),
+        completionTokens: Number(lastUsage?.completion_tokens ?? 0),
+        cachedTokens: Number(lastUsage?.cached_tokens ?? 0),
+      }
+    : { state: "missing" };
 
   let searchUsageText: string | null = null;
   try {
@@ -612,38 +684,16 @@ export async function cmdStatus(ctx: CommandContext): Promise<OutboundMessage> {
     searchUsageText = null;
   }
 
-  const activeTasks = loop?.activeTasks;
-  const pending = activeTasks instanceof Map ? activeTasks.get(ctx.key) ?? [] : activeTasks?.[ctx.key] ?? [];
-  const isDone = (task: any): boolean => (typeof task?.done === "function" ? Boolean(task.done()) : Boolean(task?.done));
-  let taskCount = Array.isArray(pending) ? pending.filter((task: any) => !isDone(task)).length : 0;
-  try {
-    taskCount += Number(loop?.subagents?.getRunningCountBySession?.(ctx.key) ?? 0);
-  } catch {
-    // Status should never fail just because an optional subsystem is absent.
-  }
-
-  const sessionCount =
-    typeof session?.getHistory === "function"
-      ? session.getHistory({ maxMessages: 0 }).length
-      : session?.messages?.filter((message: any) => !message.commandMessage).length ?? 0;
-  const maxCompletionTokens = loop?.provider?.generation?.max_tokens
-    ?? loop?.provider?.generation?.maxTokens
-    ?? loop?.config?.agents?.defaults?.maxTokens
-    ?? DEFAULT_MAX_TOKENS;
-
   return reply(
     ctx,
     buildStatusContent({
       version: VERSION,
-      model: loop?.model ?? loop?.provider?.getDefaultModel?.() ?? null,
-      startTime: loop?.startTime ?? Date.now() / 1000,
-      lastUsage,
-      contextWindowTokens: loop?.contextWindowTokens ?? 0,
-      sessionMsgCount: sessionCount,
-      contextTokensEstimate: contextEstimate,
+      model,
+      usage,
+      context,
+      conversationUserTurns: countConversationUserTurns(session),
+      agentStartTime: loop?.startTime ?? Date.now() / 1000,
       searchUsageText,
-      activeTaskCount: taskCount,
-      maxCompletionTokens,
     }),
     { renderAs: "text" },
   );

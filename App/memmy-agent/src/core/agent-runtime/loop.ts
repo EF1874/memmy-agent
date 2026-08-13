@@ -483,7 +483,7 @@ export function normalizeUsageRecord(
   usage: Record<string, unknown> | null | undefined,
 ): Record<string, number> {
   const normalize = (value: unknown): number => (
-    typeof value === "number" && Number.isFinite(value) && value > 0
+    typeof value === "number" && Number.isFinite(value) && value >= 0
       ? Math.floor(value)
       : 0
   );
@@ -491,7 +491,20 @@ export function normalizeUsageRecord(
     prompt_tokens: normalize(usage?.prompt_tokens),
     completion_tokens: normalize(usage?.completion_tokens),
     total_tokens: normalize(usage?.total_tokens),
+    cached_tokens: normalize(usage?.cached_tokens),
   };
+}
+
+export function hasReportedInOutUsage(
+  usage: Record<string, unknown> | null | undefined,
+): boolean {
+  return ["prompt_tokens", "completion_tokens"].every((field) => {
+    const value = usage?.[field];
+    return Object.prototype.hasOwnProperty.call(usage ?? {}, field)
+      && typeof value === "number"
+      && Number.isFinite(value)
+      && value >= 0;
+  });
 }
 
 class AsyncMutex {
@@ -3337,8 +3350,12 @@ export class AgentLoop {
         onMaxFinalizationStarting,
       }),
     );
-    const usage = normalizeUsageRecord(result.usage ?? result.response?.usage);
-    if (activeSessionKey) this.lastUsageBySession.set(activeSessionKey, usage);
+    const rawUsage = result.usage ?? result.response?.usage;
+    const usage = normalizeUsageRecord(rawUsage);
+    if (activeSessionKey) {
+      if (hasReportedInOutUsage(rawUsage)) this.lastUsageBySession.set(activeSessionKey, usage);
+      else this.lastUsageBySession.delete(activeSessionKey);
+    }
     const toolsUsed = (result.toolCalls ?? []).map((call: any) => call?.function?.name ?? call?.name).filter(Boolean);
     return [
       result.finalContent ?? result.content ?? EMPTY_FINAL_RESPONSE_MESSAGE,

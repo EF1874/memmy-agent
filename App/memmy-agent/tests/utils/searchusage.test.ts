@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildStatusContent } from "../../src/utils/helpers.js";
+import {
+  buildStatusContent,
+  type RuntimeStatusSnapshot,
+} from "../../src/utils/helpers.js";
 import {
   SearchUsageInfo,
   parseTavilyUsage,
@@ -263,27 +266,32 @@ describe("fetchSearchUsage", () => {
 });
 
 describe("buildStatusContent search usage integration", () => {
-  const base = {
+  const base: RuntimeStatusSnapshot = {
     version: "test-version",
-    model: "claude-opus-4-5",
-    startTime: 1_000_000,
-    lastUsage: { prompt_tokens: 1000, completion_tokens: 200 },
-    contextWindowTokens: 200_000,
-    sessionMsgCount: 5,
-    contextTokensEstimate: 3000,
+    model: {
+      state: "ok",
+      value: { provider: "anthropic", displayModel: "claude-opus-4-5" },
+    },
+    usage: {
+      state: "reported",
+      promptTokens: 1000,
+      completionTokens: 200,
+      cachedTokens: 0,
+    },
+    context: {
+      state: "ok",
+      value: { estimatedTokens: 3000, windowTokens: 200_000 },
+    },
+    conversationUserTurns: 5,
+    agentStartTime: Date.now() / 1000,
+    searchUsageText: null,
   };
 
-  it("leaves status unchanged when search usage is omitted", () => {
+  it("does not append a search block when usage text is null", () => {
     const content = buildStatusContent(base);
 
     expect(content).not.toContain("🔍");
     expect(content).not.toContain("Web Search");
-  });
-
-  it("leaves status unchanged when search usage is null", () => {
-    const content = buildStatusContent({ ...base, searchUsageText: null });
-
-    expect(content).not.toContain("🔍");
   });
 
   it("appends provided search usage text", () => {
