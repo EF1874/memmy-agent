@@ -1405,6 +1405,44 @@ describe("HomePage", () => {
     });
   });
 
+  it("rejects an empty Goal objective with a localized toast before any Agent call", async () => {
+    const newChat = vi.fn();
+    const submitMessage = vi.fn(async () => ({ status: "accepted" as const }));
+    const dispatch = vi.fn();
+    const setComposerMediaError = vi.fn();
+    const clearComposer = vi.fn();
+    const track = vi.fn();
+    const uploadAgentMedia = vi.fn(async () => []);
+
+    await expect(submitAgentComposerMessage({
+      chatId: "chat-goal",
+      connection: {
+        getReadyGeneration: () => 1,
+        newChat,
+        submitMessage
+      },
+      content: "/goal ",
+      displayContent: "",
+      pendingAttachments: [],
+      uploadAgentMedia,
+      dispatch,
+      track,
+      clearComposer,
+      setComposerMediaError
+    })).resolves.toBe(false);
+
+    expect(setComposerMediaError).toHaveBeenCalledWith("home.composer.emptyMessage");
+    const toastMessage = agentErrorText("home.composer.emptyMessage");
+    expect(toastMessage).toBe("输入消息，点击发送以开始使用");
+    expect(renderToString(<AgentOperationErrorSlot message={toastMessage} />)).toContain('role="alert"');
+    expect(newChat).not.toHaveBeenCalled();
+    expect(submitMessage).not.toHaveBeenCalled();
+    expect(uploadAgentMedia).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(track).not.toHaveBeenCalled();
+    expect(clearComposer).not.toHaveBeenCalled();
+  });
+
   it("newChat failure keeps composer input for retry", async () => {
     const sendMessage = vi.fn();
     const dispatch = vi.fn();

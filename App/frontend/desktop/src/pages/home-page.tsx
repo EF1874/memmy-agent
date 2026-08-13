@@ -165,6 +165,7 @@ const TRANSLATABLE_AGENT_ERROR_KEYS = new Set<MessageKey>([
   "home.agent.messageNotRecorded",
   "home.agent.executionInterrupted",
   "home.agent.recoveryTimeout",
+  "home.composer.emptyMessage",
   "home.goal.controlUnknown",
   "home.modelSelector.unavailable",
   "home.project.desktopRequired",
@@ -620,7 +621,16 @@ export function requestNewSessionReset(input: RequestNewSessionResetInput): bool
 
 export async function submitAgentComposerMessage(input: SubmitAgentComposerMessageInput): Promise<boolean> {
   const text = input.content.trim();
-  const displayText = input.displayContent?.trim() || text;
+  const trimmedDisplayContent = input.displayContent?.trim();
+  const displayText = trimmedDisplayContent || text;
+  if (
+    text === COMPOSER_GOAL_COMMAND
+    && trimmedDisplayContent !== undefined
+    && !trimmedDisplayContent
+  ) {
+    input.setComposerMediaError?.("home.composer.emptyMessage");
+    return false;
+  }
   if ((!text && !input.pendingAttachments.length) || !input.connection) {
     return false;
   }
