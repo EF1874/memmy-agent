@@ -103,7 +103,8 @@ describe("SourcesSubPage", () => {
     expect(html).toContain("同步新增");
     expect(html).toContain("点击“同步新增”按钮后，只会读取上次同步后产生的新对话");
     expect(html).not.toContain("上次扫描水位");
-    expect(html).toContain("高级操作");
+    expect(html).toContain("高级");
+    expect(html).not.toContain("高级操作");
     expect(html).not.toContain("添加其他 Agent");
     expect(html).toContain("本地数据存储位置");
     expect(html).toContain("清除所有本地数据");
@@ -139,6 +140,16 @@ describe("SourcesSubPage", () => {
     expect(enUSMessages["memory.addOtherAgentDescription"]).toContain("Choose or enter");
   });
 
+  it("手动添加 Agent 可以提供可选的历史会话路径", () => {
+    const source = readFileSync(resolve(__dirname, "..", "..", "memory-sources-page.tsx"), "utf8");
+
+    expect(zhCNMessages["memory.manualHistoryPathLabel"]).toBe("历史会话路径（可选）");
+    expect(enUSMessages["memory.manualHistoryPathLabel"]).toBe("Conversation history path (optional)");
+    expect(source).toContain('id="manual-agent-history-path"');
+    expect(source).toContain("value={manualHistoryPath}");
+    expect(source).toContain('launchManagedAgentTask(source, "connect", userProvidedDataPath || undefined)');
+  });
+
   it("新增 Agent 立即写入页面状态，并在重新进入页面时从后端刷新", () => {
     const source = readFileSync(resolve(__dirname, "..", "..", "memory-sources-page.tsx"), "utf8");
 
@@ -164,6 +175,20 @@ describe("SourcesSubPage", () => {
     expect(prompt).not.toContain("sync_boundary_at");
   });
 
+  it("把用户填写的历史会话路径作为候选路径交给 Memmy 验证", () => {
+    const prompt = buildManagedAgentTaskPrompt({
+      sourceId: "manual-1",
+      displayName: "Aider",
+      dataPath: MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH
+    }, "connect", "  ~/.aider/history  ");
+
+    expect(prompt).toContain('"data_path": "~/.aider/history"');
+    expect(prompt).toContain("explicitly supplied by the user in the GUI");
+    expect(prompt).toContain("inspect this scoped candidate first, and verify it before use");
+    expect(prompt).toContain("ask for a corrected path instead of silently replacing it");
+    expect(prompt).not.toMatch(/[\u3400-\u9fff]/u);
+  });
+
   it("未知 Agent 后续同步直接调用后端配方，不再启动 Agent 会话", () => {
     const source = readFileSync(resolve(__dirname, "..", "..", "memory-sources-page.tsx"), "utf8");
 
@@ -179,6 +204,8 @@ describe("SourcesSubPage", () => {
       "memory.addTitle",
       "memory.confirmAndStart",
       "memory.manualAgentAiHint",
+      "memory.manualHistoryPathLabel",
+      "memory.manualPathHint",
       "memory.deleteAgent"
     ] as const;
 
