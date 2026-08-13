@@ -117,6 +117,12 @@ export function AgentGoalBar(props: AgentGoalBarProps) {
     });
   };
 
+  const submitControl = (request: AgentGoalControlRequest) => {
+    setForm(null);
+    setValidationError(null);
+    props.onControl(request);
+  };
+
   const submitForm = () => {
     if (!form) return;
     const objective = form.value.trim();
@@ -124,7 +130,7 @@ export function AgentGoalBar(props: AgentGoalBarProps) {
       setValidationError(t("home.goal.objectiveInvalid"));
       return;
     }
-    props.onControl({
+    submitControl({
       chatId: form.chatId,
       goalId: form.goalId,
       action: "edit",

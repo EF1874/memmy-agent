@@ -11,6 +11,7 @@ import {
   type MemmyAgentProject,
   type MemmyAgentSessionSummary,
   type MemmyAgentSlashCommand,
+  type AgentTurnSource,
   type MemmyAgentUiLanguage,
   type MemmyAgentWebSocketConnection,
   type UploadAgentMediaInput,
@@ -178,6 +179,11 @@ const TRANSLATABLE_AGENT_ERROR_KEYS = new Set<MessageKey>([
 ]);
 export const AGENT_ATTACHMENT_ACCEPT = agentAttachmentAccept();
 export const AGENT_MEDIA_ACCEPT = AGENT_ATTACHMENT_ACCEPT;
+
+export function isSteerableCurrentTurn(source: AgentTurnSource | null, isGoalActive: boolean): boolean {
+  if (!source) return isGoalActive;
+  return source.kind === "gui" && source.channel === "websocket";
+}
 export const AGENT_RESTART_STATE_STORAGE_KEY = "memmy-agent-restart-state";
 
 export interface ComposerSubmitButtonProps {
@@ -883,6 +889,8 @@ export function HomePage() {
   const currentQueuedMessages = state.agent.currentChatId
     ? state.agent.queuedMessagesByChatId[state.agent.currentChatId] ?? []
     : [];
+  const currentGoal = state.agent.goalState?.goal_id ? state.agent.goalState : null;
+  const isCurrentGoalActive = currentGoal?.status === "active";
   const currentActiveTurnId = state.agent.currentChatId
     ? state.agent.activeTurnIdByChatId[state.agent.currentChatId] ?? null
     : null;
@@ -895,8 +903,7 @@ export function HomePage() {
     && state.agent.recoveringGeneration === null
     && state.agent.runStartedAtByChatId[state.agent.currentChatId]
     && currentActiveTurnId
-    && currentActiveTurnSource?.kind === "gui"
-    && currentActiveTurnSource.channel === "websocket"
+    && isSteerableCurrentTurn(currentActiveTurnSource, Boolean(isCurrentGoalActive))
     && !currentQueuedMessages.some((item) => item.status === "steering")
   );
   const hasActiveConversation = hasActiveAgentConversation(state.agent.currentChatId, state.agent.messages.length);
@@ -924,8 +931,6 @@ export function HomePage() {
       state.agent.optimisticSendingByChatId[state.agent.currentChatId]
     )
   );
-  const currentGoal = state.agent.goalState?.goal_id ? state.agent.goalState : null;
-  const isCurrentGoalActive = currentGoal?.status === "active";
   const goalMutationPending = state.agent.currentChatId
     ? state.agent.goalMutationPendingByChatId[state.agent.currentChatId] ?? null
     : null;
@@ -1764,8 +1769,7 @@ export function HomePage() {
       || !connection
       || generation === null
       || !turnId
-      || source?.kind !== "gui"
-      || source.channel !== "websocket"
+      || !isSteerableCurrentTurn(source, Boolean(isCurrentGoalActive))
       || item?.source.kind !== "gui"
       || item.queueSurface !== "chat_composer"
       || item.content.trimStart().startsWith("/")

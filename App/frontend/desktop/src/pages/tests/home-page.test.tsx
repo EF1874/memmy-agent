@@ -31,6 +31,7 @@ import {
   isAgentConversationAtBottom,
   isComposingKeyboardEvent,
   isSingleLineComposerInput,
+  isSteerableCurrentTurn,
   parseStoredAgentRestartState,
   parseComposerCommandDraft,
   readFocusedAgentChatId,
@@ -66,6 +67,14 @@ function mockCallOrder(fn: { mock: { invocationCallOrder: readonly number[] } },
 }
 
 describe("HomePage", () => {
+  it("allows Goal steering when source metadata is missing without opening TUI or IM turns", () => {
+    expect(isSteerableCurrentTurn(null, true)).toBe(true);
+    expect(isSteerableCurrentTurn(null, false)).toBe(false);
+    expect(isSteerableCurrentTurn({ kind: "gui", channel: "websocket" }, false)).toBe(true);
+    expect(isSteerableCurrentTurn({ kind: "tui", channel: "websocket" }, true)).toBe(false);
+    expect(isSteerableCurrentTurn({ kind: "im", channel: "slack" }, true)).toBe(false);
+  });
+
   it("renders the first-phase agent input controls", () => {
     const html = renderToString(
       <AppProviders>
