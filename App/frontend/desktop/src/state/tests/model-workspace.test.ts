@@ -701,7 +701,7 @@ describe("canonical model workspace adapter", () => {
       models: ["text-embedding-3-large"],
       modelCapabilities: { "text-embedding-3-large": "embedding" }
     });
-    expect(invalid.error).toBe("invalid_model");
+    expect(invalid.error).toBe("incompatible_model_capabilities");
   });
 
   it("编辑连接切换 Provider 会从旧 Provider 原子移除 endpoint/preset 并保留服务端 presetId", () => {
