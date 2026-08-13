@@ -39,6 +39,14 @@ import {
   settingsTabHash,
   shouldOpenAddModelFromHash
 } from "./settings-nav.js";
+import {
+  connectionTestSignature,
+  readConnectionTestStates,
+  removeConnectionTestState,
+  writeConnectionTestState,
+  type StoredConnectionTestState,
+  type StoredConnectionTestStatus
+} from "./model-workspace-connection-test-state.js";
 
 type TestStatus = "idle" | "testing" | "success" | "error";
 export type ModelKind = "text" | "embedding" | "asr" | "image";
@@ -110,8 +118,12 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
   const [savePending, setSavePending] = useState(false);
   const saveInFlightRef = useRef(false);
   const hasMutatedRef = useRef(false);
-  const [testStates, setTestStates] = useState<Record<string, ConnectionTestState>>({});
+  const [testStates, setTestStates] = useState<Record<string, StoredConnectionTestState>>({});
   const space = workspace.spaces[props.mode];
+  const connectionTestIdentity = space.connections
+    .map((connection) => `${connection.id}:${connectionTestSignature(connection)}`)
+    .sort()
+    .join("|");
   const textCandidates = getModelCandidates(workspace, props.mode, "chat");
   const memorySummaryCandidates = getModelCandidates(workspace, props.mode, "memorySummary");
   const memoryEvolutionCandidates = getModelCandidates(workspace, props.mode, "memoryEvolution");
@@ -130,7 +142,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
   const nextAvailableProvider = availableProviders[0];
   const canAddConnection = Boolean(nextAvailableProvider);
 
-  function commitWorkspace(next: typeof workspace): boolean {
+  function commitWorkspace(next: typeof workspace, onSaved?: (savedWorkspace: typeof workspace) => void): boolean {
     if (saveInFlightRef.current) return false;
     setWorkspace(next);
     setSaveError(null);
@@ -141,8 +153,10 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
       void (async () => {
         try {
           const saved = await props.configClient!.saveModelCatalog(modelConfigInput(next));
-          setWorkspace(createModelWorkspace(saved));
+          const savedWorkspace = createModelWorkspace(saved);
+          setWorkspace(savedWorkspace);
           props.onConfigSaved?.(saved);
+          onSaved?.(savedWorkspace);
         } catch (error) {
           setSaveError(error instanceof Error && error.message ? error.message : t("settings.modelWorkspace.saveFailed"));
           try {
@@ -157,6 +171,8 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
           setSavePending(false);
         }
       })();
+    } else {
+      onSaved?.(next);
     }
     return true;
   }
@@ -164,6 +180,22 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
   useEffect(() => {
     if (!saveInFlightRef.current) setWorkspace(createModelWorkspace(props.seedConfig));
   }, [props.seedConfig]);
+
+  useEffect(() => {
+    const restored = readConnectionTestStates(
+      space.connections,
+      modelConnectionTestStorage()
+    );
+    setTestStates((current) => {
+      const currentValid = Object.fromEntries(space.connections.flatMap((connection) => {
+        const state = current[connection.id];
+        return state?.signature === connectionTestSignature(connection)
+          ? [[connection.id, state]]
+          : [];
+      }));
+      return { ...restored, ...currentValid };
+    });
+  }, [connectionTestIdentity]);
 
   useEffect(() => {
     if (!props.configClient) return;
@@ -234,8 +266,11 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
 
   function openEditConnection(connection: ModelConnection) {
     const provider = protocolFromConnection(connection.provider);
+    const savedTest = connectionTestState(connection, testStates);
     setFormError(null);
-    setEditorTest(testStates[connection.id] ?? { status: "idle", message: null });
+    setEditorTest(savedTest
+      ? { status: savedTest, message: connectionTestMessage(savedTest, t) }
+      : { status: "idle", message: null });
     setShowEditorApiKey(false);
     setEditor({
       connectionId: connection.id,
@@ -361,10 +396,35 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
           [...new Set([...existingTaskIds, ...savedTaskIds])]
         )
       : workspaceWithAvailability;
-    if (commitWorkspace(nextWorkspace)) {
-      if (savedConnection && editorTest.status !== "idle") {
-        setTestStates((current) => ({ ...current, [savedConnection.id]: editorTest }));
+    const savedTestStatus: StoredConnectionTestStatus | null = editorTest.status === "success" || editorTest.status === "error"
+      ? editorTest.status
+      : null;
+    const persistTestState = (savedWorkspace: typeof workspace) => {
+      const storage = modelConnectionTestStorage();
+      if (editor.connectionId && editor.connectionId !== savedConnection?.id) {
+        removeConnectionTestState(editor.connectionId, storage);
       }
+      if (!savedConnection) return;
+      const canonicalConnection = savedWorkspace.spaces[props.mode].connections
+        .find((connection) => connection.id === savedConnection.id);
+      if (savedTestStatus && canonicalConnection) {
+        writeConnectionTestState(canonicalConnection, savedTestStatus, storage);
+      } else {
+        removeConnectionTestState(savedConnection.id, storage);
+      }
+    };
+    if (commitWorkspace(nextWorkspace, persistTestState)) {
+      setTestStates((current) => {
+        const next = { ...current };
+        if (editor.connectionId) delete next[editor.connectionId];
+        if (savedConnection && savedTestStatus) {
+          next[savedConnection.id] = {
+            status: savedTestStatus,
+            signature: connectionTestSignature(savedConnection)
+          };
+        }
+        return next;
+      });
       closeEditor();
     }
   }
@@ -455,12 +515,21 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
 
   function confirmDeleteConnection() {
     if (!deleteTarget) return;
+    const deletedConnectionId = deleteTarget.id;
     const result = deleteModelConnection(workspace, props.mode, deleteTarget.id);
     if (result.error) {
       setSaveError(t("settings.modelWorkspace.saveFailed"));
       return;
     }
-    if (commitWorkspace(result.workspace)) {
+    if (commitWorkspace(result.workspace, () => removeConnectionTestState(
+      deletedConnectionId,
+      modelConnectionTestStorage()
+    ))) {
+      setTestStates((current) => {
+        const next = { ...current };
+        delete next[deletedConnectionId];
+        return next;
+      });
       setDeleteTarget(null);
     }
   }
@@ -706,11 +775,14 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
           )}
 
           {space.connections.map((connection) => {
-            const test = testStates[connection.id] ?? (
+            const storedTestStatus = connectionTestState(connection, testStates);
+            const test = storedTestStatus
+              ? { status: storedTestStatus, message: connectionTestMessage(storedTestStatus, t) }
+              : (
               connection.available === false
                 ? { status: "error" as const, message: t("settings.modelWorkspace.testFailed") }
                 : { status: "idle" as const, message: null }
-            );
+              );
             return (
               <article key={connection.id} className="rounded-card border-content-panel bg-canvas-oat/40 p-4">
                 <div className="flex items-start justify-between gap-3">
@@ -1305,6 +1377,32 @@ function ConnectionStatus(props: { status: TestStatus }) {
       )}
     </span>
   );
+}
+
+function connectionTestState(
+  connection: ModelConnection,
+  states: Record<string, StoredConnectionTestState>
+): StoredConnectionTestStatus | null {
+  const state = states[connection.id];
+  return state?.signature === connectionTestSignature(connection) ? state.status : null;
+}
+
+function connectionTestMessage(
+  status: StoredConnectionTestStatus,
+  t: ReturnType<typeof useTranslation>["t"]
+): string {
+  return t(status === "success"
+    ? "settings.modelWorkspace.testSuccess"
+    : "settings.modelWorkspace.testFailed");
+}
+
+function modelConnectionTestStorage(): Storage | undefined {
+  if (typeof window === "undefined") return undefined;
+  try {
+    return window.sessionStorage;
+  } catch {
+    return undefined;
+  }
 }
 
 function candidateOption(
