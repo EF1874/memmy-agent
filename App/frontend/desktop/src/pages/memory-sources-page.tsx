@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { ExternalLink } from "lucide-react";
 import {
   MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH,
   type AgentSourceScanMode,
@@ -14,6 +15,7 @@ import {
 import { useApiClients } from "../app/providers.js";
 import type { MessageKey } from "../i18n/messages.js";
 import { useTranslation } from "../i18n/use-translation.js";
+import { openExternalUrl } from "../utils/open-url.js";
 import { Button } from "../components/button.js";
 import { Banner } from "../components/banner.js";
 import { Modal } from "../components/modal.js";
@@ -54,6 +56,11 @@ import {
 } from "./memory/memory-prototype-icons.js";
 
 type MemoryServiceStatus = "checking" | "ok" | "unavailable";
+
+const MEMORY_DOCS_URLS = {
+  cn: "https://memmy.cn/docs/memory/overview/",
+  intl: "https://memmy.bot/docs/memory/overview/"
+} as const;
 
 export interface MemorySourcesContentProps {
   embedded?: boolean;
@@ -641,12 +648,25 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
           <InfrastructureItem
             icon={<Server size={14} className="text-text-ink/60" />}
             title={t("memory.daemon")}
+            description={t("memory.daemonDescription")}
+            descriptionAccessory={(
+              <button
+                type="button"
+                aria-label={t("memory.openDocs")}
+                onClick={() => void openExternalUrl(resolveMemoryDocsUrl())}
+                className="ml-1 inline-flex items-center gap-0.5 text-[10px] text-text-ink/40 transition-colors hover:text-text-ink/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-action-sky/25 cursor-pointer"
+              >
+                <span style={{ textDecoration: "underline", textUnderlineOffset: "2px" }}>
+                  {t("memory.learnMore")}
+                </span>
+                <ExternalLink size={9} strokeWidth={1.75} aria-hidden="true" />
+              </button>
+            )}
             status={memoryServiceStatus}
             okLabel={t("memory.daemonRunning")}
             errLabel={t("memory.daemonStopped")}
             checkingLabel={t("common.loading")}
             value={memoryServiceAddress ?? t("memory.daemonAddressUnavailable")}
-            description={t("memory.daemonDescription")}
             actionLabel={t(memoryServiceBusy ? "memory.restartServiceBusy" : "memory.restartService")}
             actionTone="success"
             onAction={restartMemoryService}
@@ -1192,6 +1212,7 @@ function InfrastructureItem(props: {
   checkingLabel?: string;
   value: string;
   description: string;
+  descriptionAccessory?: ReactNode;
   actionLabel: string;
   actionTone?: "sky" | "success" | "muted";
   bordered?: boolean;
@@ -1218,7 +1239,10 @@ function InfrastructureItem(props: {
         <StatusBadge status={status} okLabel={props.okLabel} errLabel={props.errLabel} checkingLabel={props.checkingLabel} />
       </div>
       <code className="block text-[11px] text-text-ink/55 font-mono truncate mb-2">{props.value}</code>
-      <p className="text-[11px] text-text-ink/45 mb-2">{props.description}</p>
+      <p className="text-[11px] text-text-ink/45 mb-2">
+        {props.description}
+        {props.descriptionAccessory}
+      </p>
       <button
         type="button"
         className={props.actionDisabled ? disabledActionClass : actionClass}
@@ -1454,6 +1478,14 @@ export function formatMemoryServiceAddress(baseUrl: string | undefined): string 
   } catch {
     return undefined;
   }
+}
+
+export function resolveMemoryDocsUrl(
+  rawEdition = import.meta.env.MEMMY_APP_EDITION as string | undefined
+): string {
+  return rawEdition?.trim().toLowerCase() === "intl"
+    ? MEMORY_DOCS_URLS.intl
+    : MEMORY_DOCS_URLS.cn;
 }
 
 function formatCliProfilePaths(profilePaths: string[]): string {

@@ -20,6 +20,7 @@ import {
   resolveAgentSourceScanButtonState,
   resolveAgentSourceConnectionAction,
   resolveManagedAgentSourceSyncButtonState,
+  resolveMemoryDocsUrl,
   resolveAgentSourceStatusLabelKey,
   resolveScanContinueSourceId,
   MANUAL_AGENT_NAME_PRESETS,
@@ -95,6 +96,10 @@ describe("SourcesSubPage", () => {
     expect(html).toContain("发现新 Agent 时自动接入");
     expect(html).toContain("自动安装接入组件；关闭后只出现在下方列表，由你手动接入");
     expect(html).toContain("~/.local/bin/memmy-memory");
+    expect(html).toContain('aria-label="查看记忆服务文档"');
+    expect(html).toContain(">了解更多</span>");
+    expect(html).toContain("lucide-external-link");
+    expect(html).not.toContain('data-icon="codex-help-circle"');
     expect(html).not.toContain("或安装原生插件接入记忆");
     expect(html).toContain("memory-panel__header memory-panel__header--single-line");
     expect(html).toContain("memory-panel__title");
@@ -261,6 +266,20 @@ describe("SourcesSubPage", () => {
     expect(formatMemoryServiceAddress(undefined)).toBeUndefined();
     expect(zhCNMessages["memory.restartService"]).toBe("重启服务");
     expect(zhCNMessages).not.toHaveProperty("memory.daemonAddress");
+  });
+
+  it("记忆服务帮助入口按应用版本打开对应官网文档", () => {
+    expect(resolveMemoryDocsUrl("intl")).toBe("https://memmy.bot/docs/memory/overview/");
+    expect(resolveMemoryDocsUrl("INTL")).toBe("https://memmy.bot/docs/memory/overview/");
+    expect(resolveMemoryDocsUrl("cn")).toBe("https://memmy.cn/docs/memory/overview/");
+    expect(resolveMemoryDocsUrl(undefined)).toBe("https://memmy.cn/docs/memory/overview/");
+
+    const source = readFileSync(resolve(__dirname, "..", "..", "memory-sources-page.tsx"), "utf8");
+    expect(source).toContain("openExternalUrl(resolveMemoryDocsUrl())");
+    expect(zhCNMessages["memory.openDocs"]).toBe("查看记忆服务文档");
+    expect(enUSMessages["memory.openDocs"]).toBe("View memory service documentation");
+    expect(zhCNMessages["memory.learnMore"]).toBe("了解更多");
+    expect(enUSMessages["memory.learnMore"]).toBe("Learn more");
   });
 
   it("接入源不可用时展示用户文案而不是 HTTP 调试信息", () => {
