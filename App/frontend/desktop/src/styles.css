@@ -9826,6 +9826,10 @@ input[type="checkbox"].check-sky:checked::after {
   color: var(--color-text-ink);
 }
 
+.settings-page > .app-frame-page-content {
+  padding-top: calc(var(--codex-toolbar-height) + 10px);
+}
+
 .model-workspace-layout {
   display: grid;
   gap: calc(var(--space-4) * 2);
