@@ -1030,6 +1030,7 @@ export class AgentLoop {
         contextWindowTokens: selection.snapshot.contextWindowTokens,
         modelPreset: selection.preset,
         modelProvider: selection.provider,
+        actualModelContext: persistedModelSelection(selection),
       }),
     };
   }

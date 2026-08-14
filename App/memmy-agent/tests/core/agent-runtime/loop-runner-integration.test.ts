@@ -435,7 +435,7 @@ describe("AgentLoop direct processing", () => {
     const agent = new AgentLoop({
       provider: p,
       workspace: root,
-      model: "test-model",
+      model: "gpt-4.1",
       contextWindowTokens: 4096,
       sessionDir: path.join(root, "sessions"),
     });
