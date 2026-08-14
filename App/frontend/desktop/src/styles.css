@@ -3870,6 +3870,12 @@ code {
   gap: 10px;
 }
 
+.memory-log-tour-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
 .memory-card {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
