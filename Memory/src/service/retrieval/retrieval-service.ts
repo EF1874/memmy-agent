@@ -2002,9 +2002,9 @@ export class RetrievalService {
 
   private async extractRetrievalQuery(rawQuery: string, timeZone: string): Promise<RetrievalQueryExtract | null> {
     const raw = rawQuery.trim();
-    if (!raw || !this.deps.skillLlm.isConfigured()) return null;
+    if (!raw || !this.deps.llm.isConfigured()) return null;
     try {
-      const result = await this.deps.skillLlm.completeJson<{
+      const result = await this.deps.llm.completeJson<{
         queryVecText?: unknown;
         keywords?: unknown;
         timeFilter?: unknown;
