@@ -1,16 +1,40 @@
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import YAML from "yaml";
 
-const workflowPath = resolve(import.meta.dirname, "../.github/workflows/github-release.yml");
 const repoRoot = resolve(import.meta.dirname, "..");
-const source = readFileSync(workflowPath, "utf8");
-const workflow = YAML.parse(source);
-const releaseJob = workflow.jobs.release;
-const steps = releaseJob.steps as Array<Record<string, unknown>>;
-const script = (name: string) => String(steps.find((step) => step.name === name)?.run ?? "");
+const legacyWorkflowPath = resolve(repoRoot, ".github/workflows/github-release.yml");
+const draftWorkflowPath = resolve(repoRoot, ".github/workflows/github-draft-release-v2.yml");
+const draftSource = readFileSync(draftWorkflowPath, "utf8");
+const draftWorkflow = YAML.parse(draftSource);
+const draftJob = draftWorkflow.jobs.release;
+const draftSteps = draftJob.steps as Array<Record<string, unknown>>;
+const draftScript = (name: string) =>
+  String(draftSteps.find((step) => step.name === name)?.run ?? "");
+const heredocBodies = (script: string, marker: string) => {
+  const lines = script.split(/\r?\n/);
+  const bodies: string[] = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!lines[index].includes(`<<'${marker}'`)) continue;
+
+    const body: string[] = [];
+    let cursor = index + 1;
+    for (; cursor < lines.length; cursor += 1) {
+      if (lines[cursor] === marker) break;
+      body.push(lines[cursor]);
+    }
+
+    expect(cursor, `unterminated heredoc ${marker}`).toBeLessThan(lines.length);
+    bodies.push(body.join("\n"));
+    index = cursor;
+  }
+
+  return bodies;
+};
 const packagingConfigs = [
   "electron-builder.yml",
   "electron-builder.unsigned.yml",
@@ -31,7 +55,7 @@ function readJson(relativePath: string): {
   return JSON.parse(readFileSync(resolve(repoRoot, relativePath), "utf8"));
 }
 
-describe("GitHub release workflow", () => {
+describe("Memmy release workflow metadata", () => {
   it("keeps every release manifest and lockfile aligned to the root version", () => {
     const version = readJson("package.json").version;
 
@@ -50,93 +74,18 @@ describe("GitHub release workflow", () => {
     expect(agentLock.packages?.[""].version).toBe(version);
   });
 
-  it("uses the trusted base workflow for merged release/vX.Y.Z PRs targeting main", () => {
-    expect(workflow.on.pull_request_target).toEqual({ types: ["closed"], branches: ["main"] });
-    expect(workflow.on.pull_request).toBeUndefined();
-    expect(releaseJob.if).toContain("github.event.pull_request.merged == true");
-    expect(releaseJob.if).toContain("startsWith(github.event.pull_request.head.ref, 'release/v')");
-    const resolveScript = script("Resolve and validate release");
-    expect(resolveScript).toContain('if [[ "$EVENT_NAME" == "pull_request_target" ]]');
-    expect(resolveScript).toContain(
-      "^release/v((0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*))$",
+  it("removes the legacy workflow that published releases automatically", () => {
+    expect(existsSync(legacyWorkflowPath)).toBe(false);
+  });
+
+  it("tracks release notes whose title matches the current project version", () => {
+    const version = readJson("package.json").version;
+    const notes = readFileSync(
+      resolve(repoRoot, `.github/release-notes/v${version}.md`),
+      "utf8",
     );
-  });
 
-  it("supports a strictly validated manual version and resolves main", () => {
-    expect(workflow.on.workflow_dispatch.inputs.version.required).toBe(true);
-    const resolveScript = script("Resolve and validate release");
-    expect(resolveScript).toContain('version="$MANUAL_VERSION"');
-    expect(resolveScript).toContain("git/ref/heads/main");
-    expect(resolveScript).toContain(
-      "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
-    );
-  });
-
-  it("binds the tag to the merged commit and refuses existing releases", () => {
-    const resolveScript = script("Resolve and validate release");
-    expect(resolveScript).toContain('target_sha="$PR_MERGE_SHA"');
-    expect(script("Create draft release and upload every asset")).toContain(
-      '--target "$TARGET_SHA"',
-    );
-    const duplicateCheck = script("Check for an existing tag or release");
-    expect(duplicateCheck).toContain("git ls-remote --exit-code --tags");
-    expect(duplicateCheck).toContain('gh release view "$TAG"');
-    expect(duplicateCheck).not.toContain("--force");
-  });
-
-  it("keeps merged fork code out of the trusted release checkout", () => {
-    const checkout = steps.find((step) => step.name === "Check out trusted base history");
-    expect(checkout?.uses).toBe("actions/checkout@v4");
-    expect(checkout?.with).toEqual({
-      "fetch-depth": 0,
-      "persist-credentials": false,
-    });
-    expect(checkout?.with).not.toHaveProperty("ref");
-    expect(JSON.stringify(checkout)).not.toContain("github.event.pull_request");
-    expect(source).not.toContain("refs/pull/");
-    expect(source).not.toContain("allow-unsafe-pr-checkout");
-
-    const verifyScript = script("Verify target is on main");
-    expect(verifyScript).toContain("git fetch --no-tags origin main");
-    expect(verifyScript).toContain('git cat-file -e "$TARGET_SHA^{commit}"');
-    const ancestorCheck = 'git merge-base --is-ancestor "$TARGET_SHA" origin/main';
-    const detachTarget = 'git checkout --detach "$TARGET_SHA"';
-    const verifyHead = 'test "$(git rev-parse HEAD)" = "$TARGET_SHA"';
-    expect(verifyScript).toContain(ancestorCheck);
-    expect(verifyScript).toContain(detachTarget);
-    expect(verifyScript).toContain(verifyHead);
-    expect(verifyScript.indexOf(detachTarget)).toBeGreaterThan(verifyScript.indexOf(ancestorCheck));
-    expect(verifyScript.indexOf(verifyHead)).toBeGreaterThan(verifyScript.indexOf(detachTarget));
-
-    const notesScript = script("Build release notes");
-    expect(notesScript).toContain('manual_object="${TARGET_SHA}:${manual_notes}"');
-    expect(notesScript).toContain('git show "$manual_object" > "$notes"');
-  });
-
-  it("downloads all four OSS artifacts and verifies Content-MD5", () => {
-    const download = script("Download and verify OSS artifacts");
-    expect(download).toContain("curl --fail --location --retry 5 --retry-all-errors");
-    expect(download).toContain("Content-MD5");
-    expect(download).toContain('test -s "release-assets/$artifact"');
-    expect(download.match(/Memmy-\$VERSION-/g)).toHaveLength(4);
-    expect(download).toContain("MD5SUMS.txt");
-    expect(download).toContain("SHA256SUMS.txt");
-  });
-
-  it("composes notes and only publishes after the draft assets upload", () => {
-    const notes = script("Build release notes");
-    expect(notes).toContain('.github/release-notes/$TAG.md');
-    expect(notes).toContain("releases/generate-notes");
-    expect(notes).toContain("## Downloads");
-    expect(notes).toContain("## Installation");
-    expect(notes).toContain("## Checksums");
-
-    const createIndex = steps.findIndex((step) => step.name === "Create draft release and upload every asset");
-    const publishIndex = steps.findIndex((step) => step.name === "Publish release as latest");
-    expect(script("Create draft release and upload every asset")).toContain("--draft");
-    expect(script("Create draft release and upload every asset")).toContain("gh release upload");
-    expect(script("Publish release as latest")).toContain("--draft=false --latest");
-    expect(publishIndex).toBeGreaterThan(createIndex);
+    expect(notes.split(/\r?\n/, 1)[0]).toBe(`# Memmy v${version}`);
   });
 
   it("allows versioned manual release notes to be tracked", () => {
@@ -150,22 +99,313 @@ describe("GitHub release workflow", () => {
     expect(result.status).toBe(1);
   });
 
-  it("uses the release environment, minimal permissions, and per-version concurrency", () => {
-    expect(workflow.permissions).toEqual({ contents: "write" });
-    expect(releaseJob.environment).toBe("release");
-    expect(workflow.concurrency["cancel-in-progress"]).toBe(false);
-    expect(workflow.concurrency.group).toContain("inputs.version");
-    expect(workflow.concurrency.group).toContain("pull_request.head.ref");
-  });
-
   it("embeds the repository .env required by packaged desktop runtimes", () => {
     for (const config of packagingConfigs) {
       const packagingSource = readFileSync(
-        resolve(import.meta.dirname, `../App/shell/desktop/${config}`),
+        resolve(repoRoot, `App/shell/desktop/${config}`),
         "utf8",
       );
       expect(packagingSource).toMatch(/from:\s+\.\.\/\.\.\/\.\.\/\.env(?:\s|$)/);
       expect(packagingSource).toMatch(/to:\s+\.env(?:\s|$)/);
     }
+  });
+});
+
+describe("GitHub Draft Release v2 workflow", () => {
+  it("keeps every shell block syntactically valid", () => {
+    const tempDir = mkdtempSync(resolve(tmpdir(), "memmy-release-workflow-"));
+
+    for (const [index, step] of draftSteps.entries()) {
+      const script = String(step.run ?? "");
+      if (!script) continue;
+
+      const scriptPath = resolve(tempDir, `step-${index}.sh`);
+      writeFileSync(scriptPath, script);
+      const result = spawnSync("bash", ["-n", scriptPath], {
+        cwd: repoRoot,
+        encoding: "utf8",
+      });
+
+      expect(result.status, `${String(step.name)}\n${result.stderr}`).toBe(0);
+    }
+  });
+
+  it("keeps embedded Node heredocs syntactically valid", () => {
+    const tempDir = mkdtempSync(resolve(tmpdir(), "memmy-release-workflow-node-"));
+    const nodeHeredocs = draftSteps.flatMap((step) =>
+      heredocBodies(String(step.run ?? ""), "NODE").map((body, index) => ({
+        body,
+        name: `${String(step.name)} heredoc ${index + 1}`,
+      })),
+    );
+
+    expect(nodeHeredocs.length).toBeGreaterThan(0);
+
+    for (const [index, heredoc] of nodeHeredocs.entries()) {
+      const scriptPath = resolve(tempDir, `node-heredoc-${index}.cjs`);
+      writeFileSync(scriptPath, heredoc.body);
+      const result = spawnSync("node", ["--check", scriptPath], {
+        cwd: repoRoot,
+        encoding: "utf8",
+      });
+
+      expect(result.status, `${heredoc.name}\n${result.stderr}`).toBe(0);
+    }
+  });
+
+  it("creates Draft Releases from merged vX.Y.Z PRs and keeps manual fallback", () => {
+    expect(draftWorkflow.on.pull_request_target).toEqual({
+      types: ["closed"],
+      branches: ["main"],
+    });
+    expect(draftWorkflow.on.pull_request).toBeUndefined();
+    expect(draftWorkflow.on.workflow_dispatch.inputs.version.required).toBe(true);
+    expect(draftWorkflow.on.workflow_dispatch.inputs.target_sha.required).toBe(false);
+    expect(draftWorkflow.on.workflow_dispatch.inputs.preflight_level.default).toBe("smoke");
+    expect(draftWorkflow.on.workflow_dispatch.inputs.preflight_level.options).toEqual([
+      "smoke",
+      "full",
+    ]);
+    expect(draftWorkflow.on.workflow_dispatch.inputs.create_draft.default).toBe(false);
+    expect(draftJob.if).toContain("github.event.pull_request.merged == true");
+    expect(draftJob.if).toContain("startsWith(github.event.pull_request.head.ref, 'v')");
+    expect(draftJob.if).toContain("startsWith(github.event.pull_request.head.ref, 'release/v')");
+
+    const resolve = draftScript("Resolve and validate release");
+    expect(resolve).toContain('if [[ "$EVENT_NAME" == "pull_request_target" ]]');
+    expect(resolve).toContain(
+      "^(release/)?v((0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*))$",
+    );
+    expect(resolve).toContain("vX.Y.Z or release/vX.Y.Z");
+    expect(resolve).toContain('version="${BASH_REMATCH[2]}"');
+    expect(resolve).toContain('target_sha="$PR_MERGE_SHA"');
+    expect(resolve).toContain('preflight_level="full"');
+    expect(resolve).toContain('create_draft="true"');
+    expect(resolve).toContain('version="$MANUAL_VERSION"');
+    expect(resolve).toContain('if [[ "$CREATE_DRAFT_INPUT" == "true" ]]');
+    expect(resolve).toContain('if [[ -n "$MANUAL_TARGET_SHA" ]]');
+    expect(resolve).toContain('manual_target_sha_supplied="true"');
+    expect(resolve).toContain("manual_target_sha_supplied=$manual_target_sha_supplied");
+    expect(resolve).toContain("preflight_level=$preflight_level");
+    expect(resolve).toContain("create_draft=$create_draft");
+    expect(resolve).toContain("git/ref/heads/main");
+  });
+
+  it("uses trusted base code and checks out the merged main commit", () => {
+    const checkout = draftSteps.find((step) => step.name === "Check out trusted base history");
+    expect(checkout?.uses).toBe("actions/checkout@v4");
+    expect(checkout?.with).toEqual({
+      "fetch-depth": 0,
+      "persist-credentials": false,
+    });
+    expect(checkout?.with).not.toHaveProperty("ref");
+    expect(JSON.stringify(checkout)).not.toContain("github.event.pull_request");
+    expect(draftSource).not.toContain("refs/pull/");
+    expect(draftSource).not.toContain("allow-unsafe-pr-checkout");
+
+    const verify = draftScript("Verify target is on main");
+    expect(verify).toContain("git fetch --no-tags origin main");
+    expect(verify).toContain('git cat-file -e "$TARGET_SHA^{commit}"');
+    expect(verify).toContain('git merge-base --is-ancestor "$TARGET_SHA" origin/main');
+    expect(verify).toContain("Release target missing");
+    expect(verify).toContain("Release target is not on main");
+    expect(verify).toContain('git checkout --detach "$TARGET_SHA"');
+    expect(verify).toContain('test "$(git rev-parse HEAD)" = "$TARGET_SHA"');
+  });
+
+  it("requires the requested version to match every release manifest", () => {
+    const verify = draftScript("Verify repository version metadata");
+    expect(draftSteps.find((step) => step.name === "Verify repository version metadata")?.if).toBe(
+      "${{ steps.release.outputs.preflight_level == 'full' }}",
+    );
+    expect(verify).toContain("require('./package.json').version");
+    expect(verify).toContain('= "$VERSION"');
+    expect(verify).toContain("npm run version:check");
+    expect(verify).toContain("Root version mismatch");
+    expect(verify).toContain("Release version metadata mismatch");
+  });
+
+  it("smoke-checks the Doc Agent draft endpoint before release branches are merged", () => {
+    const preflight = draftSteps.find(
+      (step) => step.name === "Preflight Doc Agent draft endpoint",
+    );
+    expect(preflight).toBeDefined();
+    expect(preflight?.if).toBeUndefined();
+    const script = draftScript("Preflight Doc Agent draft endpoint");
+
+    expect(script).toContain("DOC_AGENT_RELEASE_NOTES_DRAFT_URL");
+    expect(script).toContain("DOC_AGENT_RELEASE_NOTES_DRAFT_TOKEN");
+    expect(script).toContain("Doc Agent draft URL is missing");
+    expect(script).toContain("Doc Agent draft token is missing");
+    expect(script).toContain("/internal/(memmy-)?release-notes/draft");
+    expect(script).toContain("--data-binary '[]'");
+    expect(script).toContain("400|422");
+    expect(script).toContain("Doc Agent smoke contract mismatch");
+    expect(script).toContain("Doc Agent draft token rejected");
+    expect(script).toContain("Doc Agent draft endpoint disabled or wrong path");
+    expect(script).toContain("Doc Agent draft endpoint unavailable");
+    expect(script).toContain("Doc Agent smoke response contract mismatch");
+    expect(script).toContain("LLM generation: not invoked by smoke");
+  });
+
+  it("reuses a pre-existing tag only when it points at the target commit", () => {
+    expect(
+      draftSteps.find((step) => step.name === "Check for an existing tag or release")?.if,
+    ).toBe("${{ steps.release.outputs.preflight_level == 'full' }}");
+    const duplicateCheck = draftScript("Check for an existing tag or release");
+    expect(duplicateCheck).toContain("git ls-remote --tags");
+    expect(duplicateCheck).toContain('"refs/tags/$TAG^{}"');
+    expect(duplicateCheck).toContain("tag_preexists=true");
+    expect(duplicateCheck).toContain("tag_preexists=false");
+    expect(duplicateCheck).toContain("Release tag points to a different commit");
+    expect(duplicateCheck).toContain("create the missing Draft Release without moving the tag");
+    expect(duplicateCheck).toContain("Manual recovery target requires an existing tag");
+    expect(duplicateCheck).toContain("A target_sha was supplied");
+    expect(duplicateCheck).toContain("tag-exists/release-missing recovery");
+    expect(duplicateCheck).toContain('gh release view "$TAG"');
+    expect(duplicateCheck).toContain("Release already exists");
+    expect(duplicateCheck).not.toContain("--force");
+    expect(draftSource).toContain("gh release create");
+    expect(draftSource).toContain("--draft");
+    expect(draftSource).not.toContain("--draft=false");
+    expect(draftSource).not.toContain("Publish release as latest");
+  });
+
+  it("downloads all four OSS artifacts and verifies Content-MD5", () => {
+    expect(draftSteps.find((step) => step.name === "Download and verify OSS artifacts")?.if).toBe(
+      "${{ steps.release.outputs.preflight_level == 'full' }}",
+    );
+    const download = draftScript("Download and verify OSS artifacts");
+    expect(download).toContain("curl --fail --location --retry 5 --retry-all-errors");
+    expect(download).toContain("Content-MD5");
+    expect(download).toContain("Installer asset is missing");
+    expect(download).toContain("Installer checksum header missing");
+    expect(download).toContain("Installer download failed");
+    expect(download).toContain("Installer checksum mismatch");
+    expect(download).toContain('[[ ! -s "release-assets/$artifact" ]]');
+    expect(download).toContain("Installer download is empty");
+    expect(download.match(/Memmy-\$VERSION-/g)).toHaveLength(4);
+    expect(download).toContain("MD5SUMS.txt");
+    expect(download).toContain("SHA256SUMS.txt");
+  });
+
+  it("records independently auditable commits, PRs, files, versions, and assets", () => {
+    for (const stepName of [
+      "Build release notes",
+      "Build auditable release evidence",
+    ]) {
+      expect(draftSteps.find((step) => step.name === stepName)?.if).toBe(
+        "${{ steps.release.outputs.preflight_level == 'full' }}",
+      );
+    }
+
+    expect(
+      draftSteps.find((step) => step.name === "Create draft release and upload every asset")?.if,
+    ).toBe("${{ steps.release.outputs.create_draft == 'true' }}");
+    expect(draftSteps.find((step) => step.name === "Record the manual publish boundary")?.if).toBe(
+      "${{ steps.release.outputs.create_draft == 'true' }}",
+    );
+
+    expect(draftScript("Resolve previous stable release tag")).toContain(
+      'git fetch --force origin "refs/tags/v*:refs/tags/v*"',
+    );
+    expect(draftScript("Resolve previous stable release tag")).toContain(
+      "Release version is not newer",
+    );
+    const releaseNotes = draftScript("Build release notes");
+    expect(releaseNotes).toContain("DOC_AGENT_RELEASE_NOTES_DRAFT_URL");
+    expect(releaseNotes).toContain("DOC_AGENT_RELEASE_NOTES_DRAFT_TOKEN");
+    expect(releaseNotes).toContain("DOC_AGENT_RELEASE_NOTES_REQUEST.json");
+    expect(releaseNotes).toContain("MEMMY_RELEASE_STYLE_EXAMPLES.json");
+    expect(releaseNotes).toContain("candidate_count: 3");
+    expect(releaseNotes).toContain(".release_notes_md // .release_notes_markdown");
+    expect(releaseNotes).toContain("Doc Agent draft configuration missing");
+    expect(releaseNotes).toContain("Doc Agent draft generation failed");
+    expect(releaseNotes).toContain("do not fall back silently");
+    expect(releaseNotes).toContain("Doc Agent returned invalid release notes");
+    expect(releaseNotes).toContain("Doc Agent quality report missing");
+    expect(releaseNotes).toContain("Doc Agent candidate selection missing");
+    expect(releaseNotes).toContain("Doc Agent release notes need review");
+    expect(releaseNotes).toContain("requested_candidate_count");
+    expect(releaseNotes).toContain("Release notes generation produced an empty body");
+    expect(releaseNotes).toContain("RELEASE_NOTES_SOURCE.json");
+    expect(releaseNotes).toContain("QUALITY_REPORT.json");
+    expect(releaseNotes).not.toContain("releases/generate-notes");
+    expect(releaseNotes).not.toContain("github-generated");
+    const evidence = draftScript("Build auditable release evidence");
+    expect(evidence).toContain("compare/${compare_base}...${TARGET_SHA}");
+    expect(evidence).toContain("commits/${commit_sha}/pulls");
+    expect(evidence).toContain("Release compare failed");
+    expect(evidence).toContain("Release compare is truncated");
+    expect(evidence).toContain("Release diff is too large");
+    expect(evidence).toContain("Release compare target mismatch");
+    expect(evidence).toContain("Pull request evidence failed");
+    expect(evidence).toContain("memmy.release.evidence.v2");
+    expect(evidence).toContain("changedFiles");
+    expect(evidence).toContain("versionFiles");
+    expect(evidence).toContain("releaseNotesSha256");
+    expect(evidence).toContain("releaseNotesSource");
+    expect(evidence).toContain("releaseNotesNeedsReview");
+    expect(evidence).toContain("artifacts");
+    expect(releaseNotes).toContain(
+      "doc-agent: source-id=memmy-official-changelog-v2",
+    );
+    const uploadAudit = draftSteps.find((step) => step.name === "Upload release audit artifact");
+    expect(uploadAudit?.uses).toBe("actions/upload-artifact@v4");
+    expect(JSON.stringify(uploadAudit)).toContain("RELEASE_NOTES.md");
+    expect(JSON.stringify(uploadAudit)).toContain("RELEASE_NOTES_SOURCE.json");
+    expect(JSON.stringify(uploadAudit)).toContain("QUALITY_REPORT.json");
+    expect(draftScript("Create draft release and upload every asset")).toContain(
+      "RELEASE_EVIDENCE.json",
+    );
+    expect(draftScript("Create draft release and upload every asset")).toContain(
+      "RELEASE_NOTES_SOURCE.json",
+    );
+  });
+
+  it("cleans up a half-created Draft Release if asset upload fails", () => {
+    const create = draftScript("Create draft release and upload every asset");
+    expect(create).toContain("cleanup_draft_release()");
+    expect(create).toContain("TAG_PREEXISTS");
+    expect(create).toContain('draft_created=1');
+    expect(create).toContain("preserving the pre-existing tag");
+    expect(create).toContain('gh release delete "$TAG" --cleanup-tag --yes');
+    expect(create).toContain('gh release delete "$TAG" --yes');
+    expect(create).toContain("Draft Release creation failed");
+    expect(create).toContain("Draft asset upload failed");
+    expect(create).toContain("Automatic recovery");
+    expect(create.indexOf("gh release create")).toBeLessThan(create.indexOf("draft_created=1"));
+    expect(create.indexOf("draft_created=1")).toBeLessThan(create.indexOf("gh release upload"));
+    expect(create).toContain("trap - EXIT");
+  });
+
+  it("uses the release environment, minimal permissions, and per-version concurrency", () => {
+    expect(draftWorkflow.permissions).toEqual({
+      contents: "write",
+      "pull-requests": "read",
+    });
+    expect(draftJob.environment).toBe("release");
+    expect(draftWorkflow.concurrency["cancel-in-progress"]).toBe(false);
+    expect(draftWorkflow.concurrency.group).toContain("inputs.version");
+    expect(draftWorkflow.concurrency.group).toContain("pull_request.head.ref");
+  });
+
+  it("records the manual Publish boundary in the workflow summary", () => {
+    const boundary = draftScript("Record the manual publish boundary");
+    expect(boundary).toContain("This workflow intentionally stops before Publish.");
+    expect(boundary).toContain("A human must audit");
+    expect(boundary).toContain("|| printf");
+  });
+
+  it("keeps fork manual testing side-effect free unless create_draft is explicit", () => {
+    const preflight = draftScript("Record preflight result");
+    expect(draftSteps.find((step) => step.name === "Record preflight result")?.if).toBe(
+      "${{ steps.release.outputs.create_draft != 'true' }}",
+    );
+    expect(preflight).toContain("No tag, Release, assets, or external publication was created.");
+    expect(preflight).toContain("Smoke validates the target commit and Doc Agent draft endpoint configuration.");
+    expect(preflight).toContain("It intentionally skips release version metadata");
+    expect(preflight).toContain("Run full preflight before creating a Draft Release.");
+    expect(preflight).toContain("Set create_draft=true only when intentionally creating a Draft Release.");
   });
 });
