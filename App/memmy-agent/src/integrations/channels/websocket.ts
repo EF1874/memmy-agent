@@ -14,7 +14,6 @@ import { requestMcpReload } from "../../core/agent-runtime/tools/mcp.js";
 import { BaseChannel, type ChannelHandleMessageOptions } from "./base.js";
 import {
   OUTBOUND_META_AGENT_UI,
-  MessageBus,
   OutboundMessage,
   parseTurnSource,
   type TurnSource,
@@ -41,7 +40,6 @@ import type {
 import { getMediaDir, getWorkspacePath } from "../../config/paths.js";
 import type { CronService } from "../../cron/service.js";
 import {
-  GOAL_TURN_INBOX_KEY,
   goalStateWsBlob,
   type GoalStatus,
 } from "../../core/session/goal-state.js";

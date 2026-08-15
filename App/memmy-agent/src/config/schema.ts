@@ -75,14 +75,6 @@ function assertPlainObject(field: string, value: any): Dict {
   return value;
 }
 
-function assertStringRecord(field: string, value: any): Dict<string> {
-  const record = assertPlainObject(field, value);
-  for (const [key, item] of Object.entries(record)) {
-    if (typeof item !== "string") throw new ValueError(`${field}.${key} must be a string`);
-  }
-  return record as Dict<string>;
-}
-
 function assertBoolean(field: string, value: any): boolean {
   if (typeof value !== "boolean") throw new ValueError(`${field} must be a boolean`);
   return value;
@@ -1284,6 +1276,7 @@ export class Config extends Base {
     assignment: ModelAssignmentConfig,
     _protocols: Readonly<Record<ModelCapability, ReadonlySet<ModelEndpointProtocol>>>,
   ): void {
+    void _protocols;
     const validate = (presetId: string | null, capability: ModelCapability): void => {
       if (!presetId) return;
       const preset = this.modelPresets[presetId];

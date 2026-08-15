@@ -78,6 +78,7 @@ export class BaseChannel {
   }
 
   async login(force = false): Promise<boolean> {
+    void force;
     return true;
   }
 
@@ -93,15 +94,21 @@ export class BaseChannel {
     chatId: string,
     delta: string,
     metadata: Record<string, any> = {},
-  ): Promise<void> {}
+  ): Promise<void> {
+    void metadata;
+  }
 
   async sendReasoningDelta(
     chatId: string,
     delta: string,
     metadata: Record<string, any> = {},
-  ): Promise<void> {}
+  ): Promise<void> {
+    void metadata;
+  }
 
-  async sendReasoningEnd(chatId: string, metadata: Record<string, any> = {}): Promise<void> {}
+  async sendReasoningEnd(chatId: string, metadata: Record<string, any> = {}): Promise<void> {
+    void metadata;
+  }
 
   async sendReasoning(msg: OutboundMessage): Promise<void> {
     if (!msg.content) return;
@@ -207,6 +214,7 @@ export class BaseChannel {
    * Subclasses may override this to turn channel API permission errors into a Chinese user-action hint; non-permission errors return null.
    */
   permissionErrorHint(error: unknown): string | null {
+    void error;
     return null;
   }
 

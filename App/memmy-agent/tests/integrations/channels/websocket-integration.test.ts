@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { MessageBus } from "../../../src/core/runtime-messages/queue.js";
 import { OutboundMessage } from "../../../src/core/runtime-messages/events.js";
 import { WebSocketChannel } from "../../../src/integrations/channels/websocket.js";

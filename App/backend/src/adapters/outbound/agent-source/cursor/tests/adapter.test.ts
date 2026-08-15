@@ -9,6 +9,13 @@ import { createCursorSourceAdapter } from "../index.js";
 import { readCursorVscdb } from "../vscdb-reader.js";
 import { discoverCursorWorkspaces } from "../workspace-discovery.js";
 
+const FAKE_OPENAI_API_KEY = [
+  "sk-proj-",
+  "abcdefghijklmnopqrstuvwxyz",
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+  "0123456789ABCD"
+].join("");
+
 let tempDir: string | undefined;
 
 afterEach(() => {
@@ -192,7 +199,7 @@ function createCursorGlobalStateFixture(): {
       composerId: "composer-1",
       bubbleId: "bubble-user-1",
       type: 1,
-      text: "Please remember OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCD",
+      text: `Please remember OPENAI_API_KEY=${FAKE_OPENAI_API_KEY}`,
       createdAt: "2026-06-01T09:04:35.523Z"
     });
     insertCursorBubble(db, {

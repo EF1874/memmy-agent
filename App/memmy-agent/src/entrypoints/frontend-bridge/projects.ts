@@ -132,7 +132,9 @@ function fsyncDirectoryBestEffort(directory: string): void {
     if (fd !== null) {
       try {
         fs.closeSync(fd);
-      } catch {}
+      } catch {
+        // Ignore close errors during best-effort cleanup.
+      }
     }
   }
 }
@@ -274,7 +276,9 @@ export class ProjectStore {
       if (fd !== null) {
         try {
           fs.closeSync(fd);
-        } catch {}
+        } catch {
+          // Ignore close errors during best-effort cleanup.
+        }
       }
       if (fs.existsSync(tempPath)) fs.rmSync(tempPath, { force: true });
     }

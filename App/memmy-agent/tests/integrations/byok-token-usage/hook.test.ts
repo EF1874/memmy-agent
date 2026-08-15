@@ -5,7 +5,7 @@ import type { ByokTokenUsageEvent } from "../../../src/integrations/byok-token-u
 
 describe("ByokTokenUsageHook", () => {
   it("records stable model dimensions from the committed BYOK context", async () => {
-    const client = { recordEvent: vi.fn(async (_event: ByokTokenUsageEvent) => undefined) };
+    const client = { recordEvent: vi.fn(async () => undefined) };
     const hook = new ByokTokenUsageHook({ client });
     const ctx = context("byok");
 
@@ -40,7 +40,7 @@ describe("ByokTokenUsageHook", () => {
   });
 
   it("does not count platform-account usage as BYOK", async () => {
-    const client = { recordEvent: vi.fn(async (_event: ByokTokenUsageEvent) => undefined) };
+    const client = { recordEvent: vi.fn(async () => undefined) };
     const hook = new ByokTokenUsageHook({ client });
     const ctx = context("account");
     await hook.beforeRun(ctx);
@@ -49,7 +49,7 @@ describe("ByokTokenUsageHook", () => {
   });
 
   it("does not infer BYOK provenance when the actual context is absent", async () => {
-    const client = { recordEvent: vi.fn(async (_event: ByokTokenUsageEvent) => undefined) };
+    const client = { recordEvent: vi.fn(async () => undefined) };
     const hook = new ByokTokenUsageHook({ client });
     const ctx = new AgentHookContext({ spec: { sessionKey: "cli:direct", model: "gpt-4.1-mini" } });
     await hook.beforeRun(ctx);
@@ -59,7 +59,7 @@ describe("ByokTokenUsageHook", () => {
 
   it("does not throw when recording fails", async () => {
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    const client = { recordEvent: vi.fn(async (_event: ByokTokenUsageEvent) => { throw new Error("backend down"); }) };
+    const client = { recordEvent: vi.fn(async () => { throw new Error("backend down"); }) };
     const hook = new ByokTokenUsageHook({ client });
     const ctx = context("byok");
     await hook.beforeRun(ctx);

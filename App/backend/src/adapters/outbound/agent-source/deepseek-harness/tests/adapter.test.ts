@@ -5,6 +5,12 @@ import { zstdCompressSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 import { createDeepseekHarnessSourceAdapter, readDeepseekHarnessSession } from "../index.js";
 
+const FAKE_OPENAI_API_KEY = [
+  "sk-",
+  "abcdefghijklmnopqrstuvwxyz",
+  "ABCDEFGHIJKLMN"
+].join("");
+
 let tempDir: string | undefined;
 
 afterEach(() => {
@@ -25,7 +31,7 @@ describe("DeepSeek Harness source adapter", () => {
         messageId: "user-1",
         conversationId: "dsh-session-1",
         role: "user",
-        content: "Remember OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN",
+        content: `Remember OPENAI_API_KEY=${FAKE_OPENAI_API_KEY}`,
         workspacePath: fixture.workspacePath
       }),
       expect.objectContaining({
@@ -105,7 +111,7 @@ function createFixture(fileName: "session.jsonl" | "session.jsonl.zstd"): {
         id: "user-1",
         role: "user",
         source: { kind: "user" },
-        content: [{ type: "text", text: "Remember OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN" }]
+        content: [{ type: "text", text: `Remember OPENAI_API_KEY=${FAKE_OPENAI_API_KEY}` }]
       }
     },
     {

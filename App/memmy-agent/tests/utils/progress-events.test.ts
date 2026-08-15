@@ -12,7 +12,10 @@ import {
 describe("progress event capabilities", () => {
   it("does not infer structured support from callback arity", () => {
     const zeroArg = vi.fn();
-    const twoArg = (_content: string, _opts?: Record<string, any>) => {};
+    const twoArg = (_content: string, _opts?: Record<string, any>) => {
+      void _content;
+      void _opts;
+    };
 
     expect(onProgressAcceptsToolEvents(zeroArg)).toBe(false);
     expect(onProgressAcceptsFileEditEvents(twoArg)).toBe(false);
