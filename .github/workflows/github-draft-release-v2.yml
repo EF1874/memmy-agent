@@ -307,6 +307,14 @@ jobs:
             echo "::error title=Release compare metadata failed::Could not validate ${base_sha}...${TARGET_SHA} against GitHub. Manual recovery: confirm both commits are reachable in the repository, then retry." >&2
             exit 1
           fi
+          # GitHub Compare metadata has no top-level head_commit field. Validate
+          # the remote target through the exact commit endpoint instead.
+          if ! gh api --method GET \
+            "repos/${GITHUB_REPOSITORY}/commits/${TARGET_SHA}" \
+            > release-assets/TARGET_COMMIT_METADATA.json; then
+            echo "::error title=Release target metadata failed::Could not validate target commit ${TARGET_SHA} against GitHub. Manual recovery: confirm the merged main commit is reachable in the repository, then retry." >&2
+            exit 1
+          fi
 
           node scripts/build-release-compare.mjs \
             --base "$base_sha" \
@@ -316,7 +324,7 @@ jobs:
 
           api_base="$(jq -r '.base_commit.sha // empty' release-assets/COMPARE_METADATA.json)"
           api_merge_base="$(jq -r '.merge_base_commit.sha // empty' release-assets/COMPARE_METADATA.json)"
-          api_head="$(jq -r '.head_commit.sha // empty' release-assets/COMPARE_METADATA.json)"
+          api_target="$(jq -r '.sha // empty' release-assets/TARGET_COMMIT_METADATA.json)"
           api_status="$(jq -r '.status // empty' release-assets/COMPARE_METADATA.json)"
           api_ahead="$(jq -r '.ahead_by // -1' release-assets/COMPARE_METADATA.json)"
           api_behind="$(jq -r '.behind_by // -1' release-assets/COMPARE_METADATA.json)"
@@ -325,7 +333,7 @@ jobs:
           local_files="$(jq -r '.files | length' release-assets/COMPARE.json)"
           local_head="$(jq -r '.head_commit.sha // empty' release-assets/COMPARE.json)"
 
-          if [[ "$api_base" != "$base_sha" || "$api_merge_base" != "$base_sha" || "$api_head" != "$TARGET_SHA" || "$local_head" != "$TARGET_SHA" ]]; then
+          if [[ "$api_base" != "$base_sha" || "$api_merge_base" != "$base_sha" || "$api_target" != "$TARGET_SHA" || "$local_head" != "$TARGET_SHA" ]]; then
             echo "::error title=Release comparison identity mismatch::GitHub and the trusted checkout do not agree on the base, merge base, or target. Manual recovery: refresh the target checkout and retry without changing the tag." >&2
             exit 1
           fi
@@ -853,6 +861,7 @@ jobs:
             release-assets/RELEASE_NOTES_SOURCE.json
             release-assets/QUALITY_REPORT.json
             release-assets/COMPARE_METADATA.json
+            release-assets/TARGET_COMMIT_METADATA.json
             release-assets/COMPARE.json
             release-assets/PULL_REQUESTS.json
             release-assets/RELEASE_EVIDENCE.json

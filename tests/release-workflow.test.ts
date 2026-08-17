@@ -359,6 +359,34 @@ describe("GitHub Draft Release v2 workflow", () => {
     expect(download).toContain("SHA256SUMS.txt");
   });
 
+  it("does not expect a nonexistent head_commit in GitHub Compare metadata", () => {
+    const realCompareMetadataShape = {
+      base_commit: { sha: "base-sha" },
+      merge_base_commit: { sha: "base-sha" },
+      status: "ahead",
+      ahead_by: 2,
+      behind_by: 0,
+      total_commits: 2,
+      commits: [{ sha: "first-commit" }],
+      files: [],
+    };
+    expect(realCompareMetadataShape).not.toHaveProperty("head_commit");
+
+    const snapshot = draftScript("Build complete release change snapshot");
+    expect(snapshot).not.toContain("api_head=");
+    expect(snapshot).not.toContain(
+      "'.head_commit.sha // empty' release-assets/COMPARE_METADATA.json",
+    );
+    expect(snapshot).toContain('"repos/${GITHUB_REPOSITORY}/commits/${TARGET_SHA}"');
+    expect(snapshot).toContain("TARGET_COMMIT_METADATA.json");
+    expect(snapshot).toContain("Release target metadata failed");
+    expect(snapshot).toContain("api_target");
+    expect(snapshot).toContain('"$api_target" != "$TARGET_SHA"');
+    expect(snapshot).toContain(
+      "'.head_commit.sha // empty' release-assets/COMPARE.json",
+    );
+  });
+
   it("records independently auditable commits, PRs, files, versions, and assets", () => {
     for (const stepName of [
       "Build complete release change snapshot",
@@ -432,6 +460,7 @@ describe("GitHub Draft Release v2 workflow", () => {
     expect(JSON.stringify(uploadAudit)).toContain("RELEASE_NOTES_SOURCE.json");
     expect(JSON.stringify(uploadAudit)).toContain("QUALITY_REPORT.json");
     expect(JSON.stringify(uploadAudit)).toContain("COMPARE_METADATA.json");
+    expect(JSON.stringify(uploadAudit)).toContain("TARGET_COMMIT_METADATA.json");
     expect(JSON.stringify(uploadAudit)).toContain("COMPARE.json");
     expect(JSON.stringify(uploadAudit)).toContain("PULL_REQUESTS.json");
     expect(draftScript("Create draft release and upload every asset")).toContain(
