@@ -519,12 +519,26 @@ export type AgentTurnSource = {
   channel: string;
 };
 
+export function parseAgentTurnSource(value: unknown): AgentTurnSource | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const source = value as Record<string, unknown>;
+  if (
+    (source.kind !== "gui" && source.kind !== "tui" && source.kind !== "im")
+    || typeof source.channel !== "string"
+    || !source.channel
+  ) return null;
+  return { kind: source.kind, channel: source.channel };
+}
+
 export type WebuiQueuedMessage = {
   client_request_id: string;
   text: string;
   media_urls: MemmyAgentMediaAttachment[];
   queued_at: string;
   source?: AgentTurnSource;
+  queue_surface?: "chat_composer" | null;
+  turn_admission?: "steer";
+  turn_id?: string;
 };
 
 export type MemmyAgentMessageSubmissionResult = {
@@ -534,6 +548,12 @@ export type MemmyAgentMessageSubmissionResult = {
 export type MemmyAgentQueueRemovalResult = {
   outcome: "removed" | "already_dequeued";
   revision: number;
+};
+
+export type MemmyAgentQueueSteerResult = {
+  outcome: "steered" | "not_steerable" | "already_dequeued" | "missing";
+  revision: number;
+  turnId: string | null;
 };
 
 export type WebuiSessionTarget =
@@ -557,13 +577,15 @@ export interface MemmyAgentNewChatResult {
 }
 
 export type MemmyAgentModelError = {
-  category: "quota_exhausted" | "model_failed";
+  category: "quota_exhausted" | "image_input_unsupported" | "image_analysis_failed" | "model_failed";
   detail?: string;
   presetId?: string;
   source?: "account" | "byok";
   provider?: string;
   model?: string;
   capability?: "agent" | "memory_summary" | "memory_evolution" | "embedding" | "asr" | "image_generation";
+  failedProvider?: string;
+  failedModel?: string;
 };
 
 export type MemmyAgentWsEvent = {
@@ -688,6 +710,13 @@ export interface MemmyAgentWebSocketConnection {
     expectedGeneration: number,
     timeoutMs?: number
   ): Promise<MemmyAgentQueueRemovalResult>;
+  steerQueuedMessage(
+    chatId: string,
+    clientRequestId: string,
+    expectedTurnId: string,
+    expectedGeneration: number,
+    timeoutMs?: number
+  ): Promise<MemmyAgentQueueSteerResult>;
   requestQueueSnapshot(chatId: string, expectedGeneration: number): void;
   controlGoal(
     input: AgentGoalControlInput,
@@ -715,6 +744,7 @@ export type MemmyAgentRunStatusSnapshot = {
   status: "running" | "idle";
   startedAt: number | null;
   turnId: string | null;
+  source: AgentTurnSource | null;
   connectionGeneration: number;
 };
 
@@ -1236,6 +1266,7 @@ const MAX_AUTOMATIC_MESSAGE_CONFIRMATIONS = 3;
 const GOAL_CONTROL_TIMEOUT_MS = 15_000;
 const GOAL_CONTROL_HYDRATE_TIMEOUT_MS = 5_000;
 const QUEUE_REMOVE_TIMEOUT_MS = 15_000;
+const QUEUE_STEER_TIMEOUT_MS = 15_000;
 
 interface MemmyAgentWebSocketSessionInput {
   bootstrap(options?: { force?: boolean }): Promise<MemmyAgentBootstrap>;
@@ -1294,6 +1325,15 @@ interface PendingQueueRemoval {
   timer: ReturnType<typeof setTimeout>;
 }
 
+interface PendingQueueSteer {
+  chatId: string;
+  clientRequestId: string;
+  expectedTurnId: string;
+  resolve: (result: MemmyAgentQueueSteerResult) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
 interface PendingInitialReady {
   resolve: () => void;
   reject: (error: Error) => void;
@@ -1309,6 +1349,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
   private readonly pendingRunStatusSnapshots = new Map<string, PendingRunStatusSnapshot>();
   private readonly pendingMessageAttempts = new Map<string, PendingMessageAttempt>();
   private readonly pendingQueueRemovals = new Map<string, PendingQueueRemoval>();
+  private readonly pendingQueueSteers = new Map<string, PendingQueueSteer>();
   private readonly pendingGoalControls = new Map<string, PendingGoalControl>();
   private connectionGeneration = 0;
   private transportOpenGeneration: number | null = null;
@@ -1474,6 +1515,46 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
         this.pendingQueueRemovals.delete(requestId);
         clearTimeout(pending.timer);
         reject(asError(error, "Unable to remove queued message"));
+      }
+    });
+  }
+
+  steerQueuedMessage(
+    chatId: string,
+    clientRequestId: string,
+    expectedTurnId: string,
+    expectedGeneration: number,
+    timeoutMs = QUEUE_STEER_TIMEOUT_MS
+  ): Promise<MemmyAgentQueueSteerResult> {
+    this.assertReadyGeneration(expectedGeneration);
+    const requestId = crypto.randomUUID();
+    return new Promise<MemmyAgentQueueSteerResult>((resolve, reject) => {
+      const pending: PendingQueueSteer = {
+        chatId,
+        clientRequestId,
+        expectedTurnId,
+        resolve,
+        reject,
+        timer: setTimeout(() => {
+          if (this.pendingQueueSteers.get(requestId) === pending) {
+            this.pendingQueueSteers.delete(requestId);
+          }
+          reject(new Error("Queue steer timed out"));
+        }, timeoutMs)
+      };
+      this.pendingQueueSteers.set(requestId, pending);
+      try {
+        this.sendOrdinaryFrame({
+          type: "queue_steer",
+          chat_id: chatId,
+          request_id: requestId,
+          client_request_id: clientRequestId,
+          expected_turn_id: expectedTurnId
+        }, expectedGeneration);
+      } catch (error) {
+        this.pendingQueueSteers.delete(requestId);
+        clearTimeout(pending.timer);
+        reject(asError(error, "Unable to steer queued message"));
       }
     });
   }
@@ -1773,6 +1854,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     this.rejectPendingRunStatusSnapshots(new Error("run status snapshot cancelled"));
     this.rejectPendingMessageAttempts(new Error("message confirmation cancelled"));
     this.rejectPendingQueueRemovals(new Error("queue removal cancelled"));
+    this.rejectPendingQueueSteers(new Error("queue steer cancelled"));
     this.rejectPendingGoalControls(new Error("Goal control cancelled"));
     this.rejectInitialReady(new Error("Agent gateway connection cancelled"));
     this.clearReadyHandshakeTimer();
@@ -1859,14 +1941,22 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
       this.markPendingMessageQueued(normalized);
     } else if (normalized.event === "message_accepted") {
       this.resolvePendingMessageAttempt(normalized);
+    } else if (
+      normalized.event === "message_steered"
+      || (normalized.event === "message_dequeued" && normalized.turn_admission === "steer")
+    ) {
+      this.resolvePendingMessageAttempt(normalized);
     } else if (normalized.event === "message_queue_removed") {
       this.resolveRemovedMessageAttempt(normalized);
     } else if (normalized.event === "error") {
+      this.rejectPendingNewChatAttempt(normalized, generation);
       this.rejectPendingMessageAttempt(normalized);
     } else if (normalized.event === "goal_control_result") {
       this.resolvePendingGoalControl(normalized);
     } else if (normalized.event === "queue_remove_result") {
       this.resolvePendingQueueRemoval(normalized);
+    } else if (normalized.event === "queue_steer_result") {
+      this.resolvePendingQueueSteer(normalized);
     }
 
     if (normalized.event === "attached") {
@@ -1957,6 +2047,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     this.rejectPendingNewChat(new Error("newChat failed because websocket closed"));
     this.rejectPendingRunStatusSnapshots(new Error("run status snapshot failed because websocket closed"), generation);
     this.rejectPendingQueueRemovals(new Error("queue removal failed because websocket closed"));
+    this.rejectPendingQueueSteers(new Error("queue steer failed because websocket closed"));
     if (this.intentionallyClosed) {
       return;
     }
@@ -2282,6 +2373,22 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
     pending.reject(error);
   }
 
+  private rejectPendingNewChatAttempt(event: MemmyAgentWsEvent, generation: number): void {
+    const pending = this.pendingNewChat;
+    if (
+      !pending
+      || pending.generation !== generation
+      || event.client_request_id !== pending.clientRequestId
+      || event.detail !== "new_chat_rejected"
+    ) {
+      return;
+    }
+    this.rejectPendingNewChat(new MemmyAgentMessageRejectedError(
+      typeof event.detail === "string" ? event.detail : "new_chat_rejected",
+      typeof event.reason === "string" ? event.reason : "message_rejected"
+    ));
+  }
+
   private resolveRunStatusSnapshot(chatId: string, event: MemmyAgentWsEvent, generation: number): void {
     if (event.event !== "run_status_snapshot") {
       return;
@@ -2300,6 +2407,7 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
       status,
       startedAt: typeof event.started_at === "number" ? event.started_at : null,
       turnId: typeof event.turn_id === "string" ? event.turn_id : typeof event.turnId === "string" ? event.turnId : null,
+      source: parseAgentTurnSource(event.source),
       connectionGeneration: generation
     });
   }
@@ -2453,6 +2561,50 @@ class MemmyAgentWebSocketSession implements MemmyAgentWebSocketConnection {
   private rejectPendingQueueRemovals(error: Error): void {
     for (const [requestId, pending] of this.pendingQueueRemovals) {
       this.pendingQueueRemovals.delete(requestId);
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+  }
+
+  private resolvePendingQueueSteer(event: MemmyAgentWsEvent): void {
+    const requestId = typeof event.request_id === "string" ? event.request_id : null;
+    if (!requestId) return;
+    const pending = this.pendingQueueSteers.get(requestId);
+    if (!pending) return;
+    if (
+      event.chat_id !== pending.chatId
+      || event.client_request_id !== pending.clientRequestId
+    ) return;
+    this.pendingQueueSteers.delete(requestId);
+    clearTimeout(pending.timer);
+    const validOutcome = event.outcome === "steered"
+      || event.outcome === "not_steerable"
+      || event.outcome === "already_dequeued"
+      || event.outcome === "missing";
+    const turnId = typeof event.turn_id === "string" ? event.turn_id : null;
+    if (
+      event.ok === true
+      && validOutcome
+      && typeof event.revision === "number"
+      && Number.isSafeInteger(event.revision)
+      && event.revision >= 0
+      && (event.outcome !== "steered" || turnId === pending.expectedTurnId)
+    ) {
+      pending.resolve({
+        outcome: event.outcome as MemmyAgentQueueSteerResult["outcome"],
+        revision: event.revision,
+        turnId
+      });
+      return;
+    }
+    pending.reject(new Error(
+      typeof event.error === "string" ? event.error : "Unable to steer queued message"
+    ));
+  }
+
+  private rejectPendingQueueSteers(error: Error): void {
+    for (const [requestId, pending] of this.pendingQueueSteers) {
+      this.pendingQueueSteers.delete(requestId);
       clearTimeout(pending.timer);
       pending.reject(error);
     }

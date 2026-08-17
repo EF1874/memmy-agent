@@ -120,7 +120,6 @@ describe("packaged desktop runtime config", () => {
     process.env.MEMMY_MIGRATIONS_READY_APP_DATABASE = "/stale/app.sqlite";
 
     await runPackagedMigrationCommand({
-      executablePath: "/opt/memmy/node",
       agentEntry: "/runtime/memmy-agent/dist/main.js",
       configPath: join(root, "config.yaml"),
       agentWorkspace: join(root, "workspace"),
@@ -130,7 +129,7 @@ describe("packaged desktop runtime config", () => {
       spawnProcess: spawnProcess as typeof import("node:child_process").spawn
     });
     expect(spawnProcess).toHaveBeenCalledWith(
-      "/opt/memmy/node",
+      process.execPath,
       [
         "/runtime/memmy-agent/dist/main.js",
         "migrate",

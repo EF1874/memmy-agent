@@ -175,6 +175,130 @@ describe("agent chat slice", () => {
       .toEqual({ kind: "gui", channel: "websocket" });
   });
 
+  it("promotes a queue-origin steer once and removes the temporary user on requeue", () => {
+    const item = {
+      ...queuedWire("queue-steer", "补充约束", "2026-08-10T12:00:00.000Z"),
+      queue_surface: "chat_composer" as const
+    };
+    let state = agentReducer(initialAgentState, {
+      type: "agent/wsEvent",
+      event: {
+        event: "run_status",
+        chat_id: "chat-1",
+        status: "running",
+        started_at: 1_780_732_800,
+        turn_id: "turn-steer",
+        source: { kind: "gui", channel: "websocket" }
+      }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message_queued",
+        chat_id: "chat-1",
+        client_request_id: "queue-steer",
+        item
+      }
+    });
+    state = agentReducer(state, {
+      type: "agent/queueItemSteerStarted",
+      chatId: "chat-1",
+      clientRequestId: "queue-steer"
+    });
+    expect(state.queuedMessagesByChatId["chat-1"]?.[0]).toMatchObject({
+      queueSurface: "chat_composer",
+      status: "steering"
+    });
+    state = agentReducer(state, {
+      type: "agent/queueItemSteerReset",
+      chatId: "chat-1",
+      clientRequestId: "queue-steer"
+    });
+    expect(state.queuedMessagesByChatId["chat-1"]?.[0]?.status).toBe("queued");
+    state = agentReducer(state, {
+      type: "agent/queueItemSteerStarted",
+      chatId: "chat-1",
+      clientRequestId: "queue-steer"
+    });
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message_dequeued",
+        chat_id: "chat-1",
+        client_request_id: "queue-steer",
+        turn_admission: "steer",
+        turn_id: "turn-steer",
+        item: {
+          ...item,
+          turn_admission: "steer",
+          turn_id: "turn-steer"
+        }
+      }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message_steered",
+        chat_id: "chat-1",
+        client_request_id: "queue-steer",
+        turn_id: "turn-steer"
+      }
+    });
+    expect(state.queuedMessagesByChatId["chat-1"]).toBeUndefined();
+    expect(state.messagesByChatId["chat-1"]).toEqual([
+      expect.objectContaining({
+        role: "user",
+        content: "补充约束",
+        clientRequestId: "queue-steer",
+        turnId: "turn-steer",
+        queueSteerPending: true
+      })
+    ]);
+
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message_queued",
+        chat_id: "chat-1",
+        client_request_id: "queue-steer",
+        item: { ...item, queued_at: "2026-08-10T12:00:01.000Z" }
+      }
+    });
+    expect(state.messagesByChatId["chat-1"]).toEqual([]);
+    expect(state.queuedMessagesByChatId["chat-1"]?.[0]).toMatchObject({
+      clientRequestId: "queue-steer",
+      status: "queued"
+    });
+  });
+
+  it("tracks active Turn source without guessing GUI for legacy snapshots", () => {
+    let state = agentReducer(initialAgentState, {
+      type: "agent/wsEvent",
+      event: {
+        event: "run_status_snapshot",
+        chat_id: "chat-1",
+        status: "running",
+        started_at: 1_780_732_800,
+        turn_id: "turn-source"
+      }
+    });
+    expect(state.activeTurnSourceByChatId["chat-1"]).toBeNull();
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "run_status",
+        chat_id: "chat-1",
+        status: "running",
+        started_at: 1_780_732_801,
+        turn_id: "turn-source",
+        source: { kind: "gui", channel: "websocket" }
+      }
+    });
+    expect(state.activeTurnSourceByChatId["chat-1"])
+      .toEqual({ kind: "gui", channel: "websocket" });
+  });
+
   it("applies consecutive queue revisions, ignores duplicates, and requests snapshot reconciliation on gaps", () => {
     let state = agentReducer(initialAgentState, {
       type: "agent/wsEvent",
@@ -1117,6 +1241,90 @@ describe("agent chat slice", () => {
       category: "model_failed",
       detail: "Error: raw provider failure"
     });
+  });
+
+  it("preserves image analysis failure context from live events and history", () => {
+    const modelError = {
+      category: "image_analysis_failed" as const,
+      detail: "Error: internal vision failure",
+      presetId: "account-agent",
+      source: "account" as const,
+      provider: "memmy_account",
+      model: "agent_chat",
+      capability: "agent" as const,
+      failedProvider: "memmy_account",
+      failedModel: "image2text"
+    };
+    const ready = agentReducer(initialAgentState, {
+      type: "agent/wsEvent",
+      event: { event: "ready", chat_id: "chat-image-error" }
+    });
+    const live = agentReducer(ready, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message",
+        chat_id: "chat-image-error",
+        text: "图片解析失败，请稍后重试",
+        model_error: modelError
+      }
+    });
+
+    expect(live.messages[0]?.modelError).toEqual(modelError);
+
+    const restored = loadHistory(initialAgentState, "websocket:chat-image-error", [{
+      role: "assistant",
+      content: "图片解析失败，请稍后重试",
+      model_error: modelError
+    }]);
+    expect(restored.messages[0]?.modelError).toEqual(modelError);
+  });
+
+  it("accepts image input unsupported as a terminal model error", () => {
+    const ready = agentReducer(initialAgentState, {
+      type: "agent/wsEvent",
+      event: { event: "ready", chat_id: "chat-image-unsupported" }
+    });
+    const state = agentReducer(ready, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message",
+        chat_id: "chat-image-unsupported",
+        text: "当前模型不支持图片输入，请切换到支持多模态能力的模型后重试",
+        model_error: { category: "image_input_unsupported" }
+      }
+    });
+
+    expect(state.messages[0]?.modelError).toEqual({ category: "image_input_unsupported" });
+  });
+
+  it("keeps a partial image response and appends the terminal error card", () => {
+    let state = agentReducer(initialAgentState, {
+      type: "agent/wsEvent",
+      event: { event: "ready", chat_id: "chat-image-partial" }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "delta", chat_id: "chat-image-partial", turn_id: "turn-1", text: "partial answer" }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: { event: "stream_end", chat_id: "chat-image-partial", turn_id: "turn-1", text: "partial answer" }
+    });
+    state = agentReducer(state, {
+      type: "agent/wsEvent",
+      event: {
+        event: "message",
+        chat_id: "chat-image-partial",
+        turn_id: "turn-1",
+        text: "当前模型不支持图片输入，请切换到支持多模态能力的模型后重试",
+        model_error: { category: "image_input_unsupported", detail: "image_url is not supported" }
+      }
+    });
+
+    const assistant = state.messages.filter((message) => message.role === "assistant");
+    expect(assistant).toHaveLength(2);
+    expect(assistant[0]).toMatchObject({ content: "partial answer", isStreaming: false });
+    expect(assistant[1]).toMatchObject({ modelError: { category: "image_input_unsupported" } });
   });
 
   it("ignores unknown model error categories", () => {

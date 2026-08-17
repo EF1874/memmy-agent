@@ -223,6 +223,34 @@ describe("AgentThreadMessages", () => {
     expect(html).not.toContain("agent-chat-bubble--assistant");
   });
 
+  it("renders a partial answer followed by an image capability error card", () => {
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages
+          chatScopeKey="chat-image-partial"
+          messages={[
+            { id: "partial", role: "assistant", content: "模型已经输出的部分内容" },
+            {
+              id: "image-error",
+              role: "assistant",
+              content: "当前模型不支持图片输入，请切换到支持多模态能力的模型后重试",
+              modelError: {
+                category: "image_input_unsupported",
+                source: "byok",
+                detail: "Error: image_url is not supported"
+              }
+            }
+          ]}
+        />
+      </I18nProvider>
+    );
+
+    expect(html).toContain("模型已经输出的部分内容");
+    expect(html).toContain("当前模型不支持图片输入，请切换到支持多模态能力的模型后重试");
+    expect(html).toContain("Error: image_url is not supported");
+    expect(html).toContain("agent-model-error-notice");
+  });
+
   it("renders quota-like normal answers as ordinary assistant content", () => {
     const content = "The quota, balance, credit and 额度 values are all healthy.";
     const html = renderToString(

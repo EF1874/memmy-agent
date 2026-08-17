@@ -140,7 +140,6 @@ export async function startManagedRuntimeServices(
   const entries = resolveRuntimeEntryPaths(options);
   const migrationTargets = await resolvePackagedRuntimeMigrationTargets();
   await runPackagedMigrationCommand({
-    executablePath: options.runtimeExecutable,
     agentEntry: entries.agentEntry,
     configPath: migrationTargets.configPath,
     agentWorkspace: migrationTargets.agentWorkspace,
@@ -347,7 +346,6 @@ export async function resolvePackagedRuntimeMigrationTargets(
 }
 
 export async function runPackagedMigrationCommand(options: {
-  executablePath?: string;
   agentEntry: string;
   configPath: string;
   agentWorkspace?: string;
@@ -385,7 +383,7 @@ export async function runPackagedMigrationCommand(options: {
       options.appDatabaseFile
     ];
     child = (options.spawnProcess ?? spawn)(
-      options.executablePath ?? process.execPath,
+      process.execPath,
       migrationArgs,
       {
         env,

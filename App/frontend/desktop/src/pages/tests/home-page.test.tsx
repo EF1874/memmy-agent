@@ -8,7 +8,7 @@ import { MemmyAgentMessageRejectedError, MemmyAgentRequestError } from "../../ap
 import { AgentRuntimeBridge } from "../../app/agent-runtime-bridge.js";
 import { AppProviders } from "../../app/providers.js";
 import { FOCUSED_AGENT_CHAT_STORAGE_KEY } from "../../app/routes.js";
-import type { SlashCommandStorageLike } from "../agent-command-palette.js";
+import type { SlashCommandPaletteItem, SlashCommandStorageLike } from "../agent-command-palette.js";
 import { buildAgentDisplayUnits } from "../agent-thread-messages.js";
 import { resolveWorkspaceEnvironmentScope } from "../use-workspace-environment.js";
 import {
@@ -32,17 +32,20 @@ import {
   isAgentConversationAtBottom,
   isComposingKeyboardEvent,
   isSingleLineComposerInput,
+  isSteerableCurrentTurn,
   parseStoredAgentRestartState,
   parseComposerCommandDraft,
   readFocusedAgentChatId,
   requestNewSessionReset,
   requestAgentRestart,
   requestAgentStop,
+  resolveComposerCommandDraft,
   shouldAcceptAgentStatusResult,
   submitAgentComposerMessage,
   updateAgentComposerOverlayHeight,
   updateComposerDraftForScope,
   fileToPendingAttachment,
+  filterGoalModeSlashCommands,
   filterProjectTargetPickerProjects,
   resolveProjectTargetPickerActiveIndex,
   validateAgentMediaFiles,
@@ -67,13 +70,12 @@ function mockCallOrder(fn: { mock: { invocationCallOrder: readonly number[] } },
 }
 
 describe("HomePage", () => {
-  it("resolves a selected project before a Session exists and prioritizes an active Session", () => {
-    expect(resolveWorkspaceEnvironmentScope(null, "project-1")).toEqual({ kind: "project", key: "project-1" });
-    expect(resolveWorkspaceEnvironmentScope("websocket:chat-1", "project-1")).toEqual({
-      kind: "session",
-      key: "websocket:chat-1",
-    });
-    expect(resolveWorkspaceEnvironmentScope(null, null)).toBeNull();
+  it("allows Goal steering when source metadata is missing without opening TUI or IM turns", () => {
+    expect(isSteerableCurrentTurn(null, true)).toBe(true);
+    expect(isSteerableCurrentTurn(null, false)).toBe(false);
+    expect(isSteerableCurrentTurn({ kind: "gui", channel: "websocket" }, false)).toBe(true);
+    expect(isSteerableCurrentTurn({ kind: "tui", channel: "websocket" }, true)).toBe(false);
+    expect(isSteerableCurrentTurn({ kind: "im", channel: "slack" }, true)).toBe(false);
   });
 
   it("renders the first-phase agent input controls", () => {
@@ -110,7 +112,7 @@ describe("HomePage", () => {
 
   it("renders Goal as a removable composer token without changing its wire-format command", () => {
     const html = renderToString(
-      <ComposerCommandChip command="/goal" removeLabel="移除" onRemove={() => undefined} />
+      <ComposerCommandChip command="/goal" label="目标" removeLabel="移除" onRemove={() => undefined} />
     );
     const source = readFileSync(homePageSourcePath, "utf8");
     const styles = readFileSync(stylesSourcePath, "utf8");
@@ -122,21 +124,57 @@ describe("HomePage", () => {
     expect(parseComposerCommandDraft("/goal ")).toEqual({ command: "/goal", text: "" });
     expect(parseComposerCommandDraft("/goal 完成目标")).toEqual({ command: "/goal", text: "完成目标" });
     expect(parseComposerCommandDraft("/goalkeeper")).toEqual({ command: null, text: "/goalkeeper" });
+    expect(resolveComposerCommandDraft("/goal", null)).toEqual({ command: null, text: "/goal" });
+    expect(resolveComposerCommandDraft("/goal ", "/goal")).toEqual({ command: "/goal", text: "" });
+    expect(resolveComposerCommandDraft("/goal 完成目标", "/goal")).toEqual({ command: "/goal", text: "完成目标" });
     expect(buildComposerCommandDraft("/goal", "完成目标")).toBe("/goal 完成目标");
     expect(buildComposerCommandDraft(null, "普通消息")).toBe("普通消息");
     expect(html).toContain('class="composer-command-chip"');
-    expect(html).toContain(">goal</span>");
-    expect(html).toContain('aria-label="移除 goal"');
-    expect(html).toContain("lucide-circle-x");
-    expect(chipStyles).toContain("height: 30px;");
-    expect(chipStyles).toContain("border-radius: 10px;");
+    expect(html).toContain(">目标</span>");
+    expect(html).toContain('aria-label="移除 目标"');
+    expect(html).toContain("lucide-target");
+    expect(html).toContain("lucide-x");
+    expect(chipStyles).toContain("height: 32px;");
+    expect(chipStyles).toContain("border-radius: 9px;");
+    expect(chipStyles).toContain("bottom: 12px;");
     expect(chipStyles).toContain(".composer-command-chip:hover");
+    expect(chipStyles).toContain("border: 0;");
     expect(chipStyles).toContain("opacity: 0;");
     expect(chipStyles).toContain("opacity: 1;");
+    expect(chipStyles).toContain("font-weight: 500;");
     expect(source.match(/<ComposerCommandChip/g)).toHaveLength(2);
     expect(source.match(/value=\{composerInput\}/g)).toHaveLength(2);
     expect(source).toContain("setCurrentComposerDraft(buildComposerCommandDraft(selectedComposerCommand, value));");
-    expect(styles).toContain(".agent-composer-shell textarea.agent-composer-input--command-selected");
+    expect(source).toContain("selectedComposerCommandsByScope[chatScopeKey] ?? null");
+    expect(source).toContain("setSelectedComposerCommandForScope(chatScopeKey, COMPOSER_GOAL_COMMAND);");
+    expect(source).toContain('label={t("home.command.goalChip")}');
+    expect(source).toContain('placeholder={selectedComposerCommand ? t("home.goal.input") : t("home.input")}');
+    expect(styles).toContain(".agent-composer-shell--expanded textarea.agent-composer-input--conversation");
+  });
+
+  it("allows only non-destructive slash actions while composing a Goal", () => {
+    const command = (value: string): SlashCommandPaletteItem => ({
+      command: value,
+      title: value,
+      description: value,
+      icon: "terminal",
+      argHint: "",
+      synthetic: true
+    });
+    const commands = ["/goal", "/new", "/status", "/history-dag", "/last-compaction"].map(command);
+    const source = readFileSync(homePageSourcePath, "utf8");
+
+    expect(filterGoalModeSlashCommands(commands, true).map((item) => item.command)).toEqual([
+      "/status",
+      "/history-dag",
+      "/last-compaction"
+    ]);
+    expect(filterGoalModeSlashCommands(commands, false).map((item) => item.command)).toEqual([
+      "/last-compaction"
+    ]);
+    expect(source).toContain("const slashQuery = slashMenuDismissed ? null : slashQueryFromInput(composerInput);");
+    expect(source).toContain("clearAuxiliarySlashQuery();");
+    expect(source).toContain('setCurrentComposerDraft(buildComposerCommandDraft(selectedComposerCommand, ""));');
   });
 
   it("在空白和已有会话 composer 都展示由 Agent state 隔离的 catalog preset 选择器", () => {
@@ -174,6 +212,13 @@ describe("HomePage", () => {
     expect(agentStatusText("connecting", null, (key) => key)).toBe("home.agent.connecting");
     expect(agentStatusText("reconnecting", null, (key) => key)).toBe("home.agent.reconnecting");
     expect(agentStatusText("error", null, (key) => key)).toBe("home.agent.failed");
+  });
+
+  it("shows the specific queue steer failure messages", () => {
+    expect(agentErrorText("home.queue.steerFailed", (key) => key))
+      .toBe("home.queue.steerFailed");
+    expect(agentErrorText("home.queue.steerUnavailable", (key) => key))
+      .toBe("home.queue.steerUnavailable");
   });
 
   it("recovers slash commands after the initial command snapshot fails", () => {
@@ -214,6 +259,7 @@ describe("HomePage", () => {
     expect(source).toContain("const lastCompactionSlashCommand: SlashCommandPaletteItem = {");
     expect(source).toContain('command: "/last-compaction"');
     expect(source).toContain("const slashCommandsWithLocal = [");
+    expect(source).toContain("lastCompactionSlashCommand,");
     expect(source).toContain('...localizedSlashCommands.filter((command) => command.command !== "/last-compaction")');
     expect(source).toContain("buildVisibleSlashCommands(slashCommandsWithLocal, state.agent.isSending, stopSlashCommand)");
     expect(source).toContain("{statusPanel.open && !slashMenuOpen && (");
@@ -233,10 +279,10 @@ describe("HomePage", () => {
     expect(source).toContain("const activeImTitleDisplay = imChannelTitleDisplay(activeConversationTitle);");
     expect(source).toContain("formatConversationTitleForDisplay(activeImTitleDisplay?.title ?? activeConversationTitle)");
     expect(source).toContain("topBar={hasActiveConversation || environmentScope ? (");
-    expect(source).toContain('<h1 className="agent-conversation-title" title={hasActiveConversation ? activeConversationTitle : selectedDraftProject?.name}>');
+    expect(source).toContain('<div className="agent-conversation-topbar">');
+    expect(source).toContain('title={hasActiveConversation ? activeConversationTitle : selectedDraftProject?.name}');
     expect(source).toContain("{hasActiveConversation ? activeConversationTitleDisplay : selectedDraftProject?.name}");
-    expect(source).toContain('<ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} />');
-    expect(source).toContain("activeConversationTitleDisplay");
+    expect(source).toContain('{hasActiveConversation && activeImTitleDisplay ? <ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} /> : null}');
     expect(source).toContain("topBarBorder={Boolean(hasActiveConversation || environmentScope)}");
     expect(source).not.toContain("agent-conversation-titlebar");
     expect(source).toContain("app-frame-page-content agent-conversation-scroll flex-1 overflow-y-auto");
@@ -487,6 +533,10 @@ describe("HomePage", () => {
     expect(finishVoiceInput).toContain("setCurrentComposerMediaError(toReadableAsrError(error, t))");
     expect(startVoiceInput).not.toContain("agentActions.failed");
     expect(finishVoiceInput).not.toContain("agentActions.failed");
+    expect(source).toContain("MicrophonePermissionError");
+    expect(source).toContain("microphonePermissionDeniedMessageKey");
+    expect(source).toContain("asr.error.microphonePermissionDenied.mac");
+    expect(source).toContain("asr.error.microphonePermissionDenied.windows");
   });
 
   it("uses the send button disabled state when handling Enter submit", () => {
@@ -527,12 +577,42 @@ describe("HomePage", () => {
     expect(isComposingKeyboardEvent({ nativeEvent: { isComposing: false, keyCode: 13 } } as any)).toBe(false);
   });
 
-  it("centers the composer controls only while the session composer is one line", () => {
+  it("keeps the conversation composer on the same expanded two-row layout as a new chat", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
 
-    expect(source).toContain('${isComposerSingleLine ? "agent-composer-input--single " : ""}${selectedComposerCommand ? "agent-composer-input--command-selected " : ""}block w-full pl-4 pr-36 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40');
-    expect(source).toContain('centerComposerControls ? "top-1/2 -translate-y-1/2" : "bottom-2"');
+    expect(source).toContain('${isComposerSingleLine ? "agent-composer-input--single " : ""}${selectedComposerCommand ? "agent-composer-input--command-selected " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40');
+    expect(source).toContain('className="relative agent-composer-shell agent-composer-shell--expanded rounded-card-lg"');
+    expect(source).toContain('className="agent-composer-toolbar"');
+    expect(source).toContain('<div className="max-w-2xl mx-auto">');
     expect(source).toContain("COMPOSER_SINGLE_LINE_HEIGHT_PX = 52");
+  });
+
+  it("lets expanded conversation text use the full width above the action footer", () => {
+    const source = readFileSync(homePageSourcePath, "utf8");
+    const composerStart = source.indexOf('className="agent-conversation-composer"');
+    const textareaStart = source.indexOf("<textarea", composerStart);
+    const toolbarStart = source.indexOf('className="agent-composer-toolbar"', textareaStart);
+    const textareaSource = source.slice(textareaStart, toolbarStart);
+
+    expect(composerStart).toBeGreaterThan(0);
+    expect(textareaStart).toBeGreaterThan(composerStart);
+    expect(toolbarStart).toBeGreaterThan(textareaStart);
+    expect(textareaSource).toContain("agent-composer-input--conversation");
+    expect(textareaSource).not.toContain("pr-36");
+
+    const window = new Window();
+    const style = window.document.createElement("style");
+    style.textContent = readFileSync(stylesSourcePath, "utf8").replace(/^@import[^;]+;$/gm, "");
+    window.document.head.append(style);
+
+    const shell = window.document.createElement("div");
+    shell.className = "agent-composer-shell agent-composer-shell--expanded";
+    const textarea = window.document.createElement("textarea");
+    textarea.className = "agent-composer-input--conversation";
+    shell.append(textarea);
+    window.document.body.append(shell);
+
+    expect(window.getComputedStyle(textarea).paddingRight).toBe("16px");
   });
 
   it("keeps the single-line composer text and caret vertically centered", () => {
@@ -666,7 +746,7 @@ describe("HomePage", () => {
     const normalizedSource = source.replace(/\r\n/g, "\n");
     const submitDisabledBlock = normalizedSource.slice(
       normalizedSource.indexOf("const composerSubmitDisabled"),
-      normalizedSource.indexOf("const centerComposerControls")
+      normalizedSource.indexOf("\n\n  useEffect", normalizedSource.indexOf("const composerSubmitDisabled"))
     );
 
     expect(source).toContain("const stopInFlight = state.agent.currentChatId ? Boolean(state.agent.stopInFlightByChatId[state.agent.currentChatId]) : false;");
@@ -1042,7 +1122,14 @@ describe("HomePage", () => {
     expect(agentErrorText("home.media.error.sendUnsupported")).toBe("当前不支持此文件格式。请上传图片、PDF、Office 文档或文本文件。");
     expect(agentErrorText("home.media.error.sendTooManyAttachments")).toBe("最多 4 个附件。");
     expect(agentErrorText("home.media.error.sendFileSize")).toBe("单个文件不能超过 10 MB。");
+    expect(agentErrorText("home.modelSelector.unavailable")).toBe("当前模型或连接已失效，无法继续调用，需要切换模型。");
     expect(agentErrorText("message_request_rejected:model_selection_unavailable")).toBe("当前模型或连接已失效，无法继续调用，需要切换模型。");
+    expect(agentErrorText("asr.error.microphonePermissionDenied.mac")).toBe(
+      "麦克风权限未开启。请到 系统设置 › 隐私与安全性 › 麦克风 中开启 Memmy"
+    );
+    expect(agentErrorText("asr.error.microphonePermissionDenied.windows")).toBe(
+      "麦克风权限未开启。请到 设置 › 隐私和安全性 › 麦克风 中开启 Memmy"
+    );
     expect(agentErrorText("plain error")).toBe("操作未完成，请重试");
     expect(agentErrorText(null)).toBeNull();
   });
@@ -1307,24 +1394,39 @@ describe("HomePage", () => {
     expect(clearComposer).toHaveBeenCalledOnce();
   });
 
-  it("anchors composer popovers above the queue and measures the complete overlay", () => {
+  it("anchors composer popovers above the queue and keeps Goal next to the composer", () => {
     const source = readFileSync(homePageSourcePath, "utf8").replace(/\r\n/g, "\n");
     const flowStart = source.indexOf('<div className="agent-composer-flow">');
     const slashStart = source.indexOf("{slashMenuOpen && (", flowStart);
     const stackStart = source.indexOf('<div className="agent-composer-stack">', slashStart);
     const queueStart = source.indexOf("<AgentQueuedMessageList", stackStart);
-    const shellStart = source.indexOf('className="relative agent-composer-shell rounded-card-lg"', stackStart);
+    const goalStart = source.indexOf("<AgentGoalBar", stackStart);
+    const shellStart = source.indexOf('className="relative agent-composer-shell agent-composer-shell--expanded rounded-card-lg"', stackStart);
 
     expect(flowStart).toBeGreaterThan(0);
     expect(slashStart).toBeGreaterThan(flowStart);
     expect(stackStart).toBeGreaterThan(slashStart);
     expect(queueStart).toBeGreaterThan(stackStart);
-    expect(shellStart).toBeGreaterThan(queueStart);
+    expect(goalStart).toBeGreaterThan(queueStart);
+    expect(shellStart).toBeGreaterThan(goalStart);
     expect(source).toContain('ref={conversationPanelRef} className="agent-conversation-panel flex flex-col h-full"');
     expect(source).toContain('ref={composerOverlayRef} className="agent-conversation-composer"');
     expect(source).toContain("updateAgentComposerOverlayHeight(panel, composer, measuredHeight)");
     expect(source).toContain('if (typeof ResizeObserver !== "undefined") return;');
     expect(source).toContain("currentQueuedMessages.length");
+  });
+
+  it("requests a queue snapshot after every unsuccessful queue steer", () => {
+    const source = readFileSync(homePageSourcePath, "utf8");
+    const steerBlock = source.slice(
+      source.indexOf("async function steerQueuedMessage"),
+      source.indexOf("  function selectDraftTarget")
+    );
+
+    expect(steerBlock.match(/connection\.requestQueueSnapshot\(chatId, readyGeneration\);/g))
+      .toHaveLength(2);
+    expect(steerBlock).toContain('if (result.outcome === "already_dequeued")');
+    expect(steerBlock).toContain("agentActions.queueItemSteerReset(chatId, clientRequestId)");
   });
 
   it("writes the measured composer height and ignores sub-pixel-equivalent changes", () => {
@@ -1380,6 +1482,44 @@ describe("HomePage", () => {
       focus: true,
       clientRequestId: expect.any(String)
     });
+  });
+
+  it("rejects an empty Goal objective with a localized toast before any Agent call", async () => {
+    const newChat = vi.fn();
+    const submitMessage = vi.fn(async () => ({ status: "accepted" as const }));
+    const dispatch = vi.fn();
+    const setComposerMediaError = vi.fn();
+    const clearComposer = vi.fn();
+    const track = vi.fn();
+    const uploadAgentMedia = vi.fn(async () => []);
+
+    await expect(submitAgentComposerMessage({
+      chatId: "chat-goal",
+      connection: {
+        getReadyGeneration: () => 1,
+        newChat,
+        submitMessage
+      },
+      content: "/goal ",
+      displayContent: "",
+      pendingAttachments: [],
+      uploadAgentMedia,
+      dispatch,
+      track,
+      clearComposer,
+      setComposerMediaError
+    })).resolves.toBe(false);
+
+    expect(setComposerMediaError).toHaveBeenCalledWith("home.composer.emptyMessage");
+    const toastMessage = agentErrorText("home.composer.emptyMessage");
+    expect(toastMessage).toBe("输入消息，点击发送以开始使用");
+    expect(renderToString(<AgentOperationErrorSlot message={toastMessage} />)).toContain('role="alert"');
+    expect(newChat).not.toHaveBeenCalled();
+    expect(submitMessage).not.toHaveBeenCalled();
+    expect(uploadAgentMedia).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(track).not.toHaveBeenCalled();
+    expect(clearComposer).not.toHaveBeenCalled();
   });
 
   it("newChat failure keeps composer input for retry", async () => {

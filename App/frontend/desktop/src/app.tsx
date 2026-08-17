@@ -2,7 +2,7 @@
 import { SseEventSchema, type AccountSessionView, type SseEvent } from "@memmy/local-api-contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { setAnalyticsUserMode } from "./analytics/analytics-context.js";
-import { gtagEvent } from "./analytics/gtag-init.js";
+import { trackCloudAnalyticsEvent } from "./analytics/cloud-analytics.js";
 import { trackAgentSourceScanOutcome } from "./analytics/memory-ui-analytics.js";
 import { useAnalytics } from "./analytics/use-analytics.js";
 import { buildInvitationToastEvent } from "./app/invitation-analytics.js";
@@ -194,7 +194,7 @@ function RuntimeApp() {
         dispatch(appActions.bootstrapLoaded(effectiveBootstrap, initialPath));
         if (bootstrap.tokenUsage.totalTokens > 0) {
           const u = bootstrap.tokenUsage;
-          gtagEvent("token_usage_snapshot", {
+          trackCloudAnalyticsEvent("token_usage_snapshot", {
             plan_name: u.planName,
             total_tokens: u.totalTokens,
             used_tokens: u.usedTokens,

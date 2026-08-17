@@ -12,7 +12,12 @@ describe("custom provider", () => {
         providers: {
           custom: {
             apiKey: "test-key",
-            apiBase: "https://example.com/v1",
+            endpoints: {
+              chat: {
+                apiBase: "https://example.com/v1",
+                protocol: "openai-chat-completions",
+              },
+            },
             extraHeaders: { "APP-Code": "demo-app" },
             extraBody: { user: "memmy" },
           },
@@ -27,14 +32,19 @@ describe("custom provider", () => {
     expect(provider.extraBody).toEqual({ user: "memmy" });
   });
 
-  it("allows non-auto API type only for the OpenAI provider", () => {
-    expect(() => new Config({ providers: { custom: { apiBase: "https://example.test/v1", apiType: "responses" } } })).toThrow(
-      "providers.custom.apiType is only supported for providers.openai",
-    );
-    expect(() => new Config({ providers: { custom: { apiBase: "https://example.test/v1", apiType: "chatCompletions" } } })).toThrow(
-      "providers.custom.apiType is only supported for providers.openai",
-    );
-    expect(() => new Config({ providers: { openai: { apiType: "response" } } })).toThrow();
+  it("derives the compatibility API type from the endpoint protocol", () => {
+    const responses = new Config({ providers: { custom: { endpoints: {
+      chat: { apiBase: "https://example.test/v1", protocol: "openai-responses" },
+    } } } });
+    const chatCompletions = new Config({ providers: { custom: { endpoints: {
+      chat: { apiBase: "https://example.test/v1", protocol: "openai-chat-completions" },
+    } } } });
+
+    expect(responses.providers.custom.apiType).toBe("responses");
+    expect(chatCompletions.providers.custom.apiType).toBe("chatCompletions");
+    expect(() => new Config({ providers: { custom: { endpoints: {
+      chat: { apiBase: "https://example.test/v1", protocol: "response" },
+    } } } })).toThrow();
   });
 
   it("parses empty choices as an error response", () => {

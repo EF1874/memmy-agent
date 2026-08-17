@@ -711,8 +711,8 @@ describe("CLI command helpers", () => {
         introducedIn: "1.0.4",
       }),
       expect.objectContaining({
-        id: "v1.0.5/0001-flatten-memory-model-config",
-        introducedIn: "1.0.5",
+        id: "v1.0.7/0001-normalize-runtime-model-catalog",
+        introducedIn: "1.0.7",
       }),
     ]));
     expect(missing.status).toBe(404);

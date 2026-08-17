@@ -31,7 +31,7 @@ describe("Ant Ling provider", () => {
   it("auto-matches Ling models with the default API base", () => {
     const config = Config.fromObject({
       providers: {
-        antLing: {
+        ant_ling: {
           apiKey: "ling-key",
         },
       },

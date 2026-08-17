@@ -110,3 +110,82 @@ describe("Memmy Account quota errors", () => {
     expect(response.errorCategory).toBeNull();
   });
 });
+
+describe("Memmy Account image-to-text fallback", () => {
+  it("is enabled only for the account provider", () => {
+    const account = new OpenAICompatProvider({
+      apiKey: "account-token",
+      defaultModel: "agent_chat",
+      spec: findByName("memmy_account"),
+    });
+    const openai = new OpenAICompatProvider({
+      apiKey: "sk-test",
+      defaultModel: "gpt-4o-mini",
+      spec: findByName("openai"),
+    });
+
+    expect(account.supportsAccountImageTextFallback()).toBe(true);
+    expect(openai.supportsAccountImageTextFallback()).toBe(false);
+  });
+
+  it("uses the existing client with fixed image2text request settings", async () => {
+    const create = vi.fn(async () => ({
+      choices: [{ message: { content: "a chart" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
+    }));
+    const provider = new OpenAICompatProvider({
+      apiKey: "account-token",
+      apiBase: "https://account.example.test/v1",
+      defaultModel: "agent_chat",
+      spec: findByName("memmy_account"),
+      extraHeaders: { "X-Test": "same-client" },
+      extraBody: { tenant: "same-body" },
+    });
+    provider.client = {
+      responses: { create: vi.fn() },
+      chat: { completions: { create } },
+    };
+    const signal = new AbortController().signal;
+    const messages = [{
+      role: "user",
+      content: [
+        { type: "text", text: "Describe Image 1" },
+        { type: "image_url", image_url: { url: "data:image/png;base64,abc" } },
+      ],
+    }];
+
+    const response = await provider.runAccountImageTextFallback({ messages, signal });
+
+    expect(response?.content).toBe("a chart");
+    expect(create).toHaveBeenCalledOnce();
+    const [body, options] = create.mock.calls[0] as unknown as [
+      Record<string, any>,
+      Record<string, any>,
+    ];
+    expect(body).toMatchObject({
+      model: "image2text",
+      messages,
+      temperature: 0,
+      max_tokens: 2048,
+      tenant: "same-body",
+    });
+    expect(body).not.toHaveProperty("tools");
+    expect(options).toEqual({ signal });
+    expect(provider.defaultHeaders).toMatchObject({
+      "X-Agent-Region": expect.any(String),
+      "X-Test": "same-client",
+    });
+  });
+
+  it("returns null without an SDK request for non-account providers", async () => {
+    const provider = new OpenAICompatProvider({
+      apiKey: "sk-test",
+      defaultModel: "gpt-4o-mini",
+      spec: findByName("openai"),
+    });
+    const ensureClient = vi.spyOn(provider, "ensureClient");
+
+    await expect(provider.runAccountImageTextFallback({ messages: [] })).resolves.toBeNull();
+    expect(ensureClient).not.toHaveBeenCalled();
+  });
+});

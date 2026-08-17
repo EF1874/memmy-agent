@@ -1,4 +1,5 @@
 import { resolveMigrationTargets, runMigrations } from "@memmy/migrations";
+import fs from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { getConfigPath, setConfigPath } from "../../config/loader.js";
@@ -39,7 +40,7 @@ const migrationLogger = {
 function expandHome(value: string, env: NodeJS.ProcessEnv): string {
   if (value !== "~" && !value.startsWith("~/") && !value.startsWith("~\\")) return value;
   const home = env.HOME ?? env.USERPROFILE ?? homedir();
-  return value === "~" ? home : path.join(home, value.slice(2));
+  return value === "~" ? home : path.join(home, ...value.slice(2).split(/[\\/]+/u));
 }
 
 function normalizeConfigPath(value: string, env: NodeJS.ProcessEnv): string {
@@ -74,8 +75,9 @@ function preparedTargetMatches(
   const preparedAppDatabase = env[MIGRATIONS_READY_APP_DATABASE_ENV];
   if (!preparedConfig || !preparedWorkspace || !preparedSessionDag) return false;
   try {
+    const normalizedPreparedWorkspace = normalizeConfigPath(preparedWorkspace, env);
     return normalizeConfigPath(preparedConfig, env) === target.runtimeConfigFile
-      && normalizeConfigPath(preparedWorkspace, env) === target.agentWorkspace
+      && fs.realpathSync(normalizedPreparedWorkspace) === target.agentWorkspace
       && path.normalize(path.resolve(preparedSessionDag)) === target.sessionDagDir
       && (preparedAppDatabase ? normalizeConfigPath(preparedAppDatabase, env) : undefined)
         === target.appDatabaseFile;

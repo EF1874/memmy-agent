@@ -122,6 +122,20 @@ describe("TasksSubPage", () => {
     expect(html).not.toContain("|---|---|---|");
   });
 
+  it("任务历史聊天保留温度区间中的单波浪号", () => {
+    const baseTask = createTaskFixture();
+    const task = {
+      ...baseTask,
+      chat: baseTask.chat.map((message) => message.role === "assistant"
+        ? { ...message, text: "🌡️ 26~28°C，体感 29~32°C；天气：~~阵雨~~多云" }
+        : message)
+    };
+    const html = renderTasks({ status: "ready", data: tasksOutput([task]) }, task);
+
+    expect(html).toContain("26~28°C，体感 29~32°C");
+    expect(html).toContain("<del>阵雨</del>");
+  });
+
   it("统一展示技能沉淀状态文案", () => {
     const tasks: MemoryTask[] = [
       { ...createTaskFixture(), id: "queued", skillStatus: "queued" },

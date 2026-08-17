@@ -10,7 +10,7 @@ import type {
   MemoryUiSourceScanFailedEvent,
   MemoryUiSourceScanStartedEvent
 } from "./analytics-events.js";
-import { gtagEvent } from "./gtag-init.js";
+import { trackCloudAnalyticsEvent } from "./cloud-analytics.js";
 import { resolveMemorySubPagePath } from "./page-view.js";
 import type { MemorySubPageId } from "../pages/memory-page.js";
 
@@ -239,7 +239,10 @@ export function buildMemorySourceScanFailedEvent(input: {
 }
 
 export function trackMemoryUiEvent(event: MemoryUiAnalyticsEvent): void {
-  gtagEvent(event.name, event.params as unknown as Record<string, string | number | boolean>);
+  trackCloudAnalyticsEvent(
+    event.name,
+    event.params as unknown as Record<string, string | number | boolean>
+  );
 }
 
 export function trackAgentSourceScanOutcome(input: {

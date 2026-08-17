@@ -102,12 +102,32 @@ describe("AgentLoop image generation turn quota", () => {
     const loop = new AgentLoop({
       config: new Config({
         memmyMemory: { enabled: false },
+        providers: {
+          openai: {
+            apiKey: "sk-image-test",
+            endpoints: {
+              images: {
+                apiBase: "https://api.openai.com/v1",
+                protocol: "openai-images",
+              },
+            },
+          },
+        },
+        modelPresets: {
+          image: {
+            endpoint: "images",
+            model: "gpt-image-2",
+            provider: "openai",
+            source: "byok",
+            capabilities: ["image_generation"],
+          },
+        },
+        modelAssignments: {
+          byok: { imageGeneration: "image" },
+        },
         tools: {
           imageGeneration: {
             enabled: true,
-            provider: "openai",
-            model: "gpt-image-2",
-            apiKey: "sk-image-test",
             maxImagesPerTurn: 4,
           },
         },

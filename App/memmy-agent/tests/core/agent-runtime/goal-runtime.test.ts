@@ -11,7 +11,7 @@ import {
 } from "../../../src/core/agent-runtime/goal-runtime.js";
 import { InboundMessage } from "../../../src/core/runtime-messages/events.js";
 import { MessageBus } from "../../../src/core/runtime-messages/queue.js";
-import { Session, SessionManager } from "../../../src/core/session/manager.js";
+import { SessionManager } from "../../../src/core/session/manager.js";
 
 const SESSION_KEY = "websocket:goal-runtime";
 const ROUTE = { channel: "websocket", chatId: "goal-runtime" } as const;
@@ -57,18 +57,6 @@ async function expectGoalError(promise: Promise<unknown>, code: string): Promise
 }
 
 describe("GoalRuntime state transitions", () => {
-  it("captures the workspace baseline before persisting a new Goal", async () => {
-    const captureWorkspaceBaseline = vi.fn((session: Session, goalId: string) => {
-      session.metadata.workspaceBaselineGoalId = goalId;
-    });
-    const { runtime, sessions } = createRuntime({ captureWorkspaceBaseline });
-
-    const goal = await createGoal(runtime);
-
-    expect(captureWorkspaceBaseline).toHaveBeenCalledTimes(1);
-    expect(sessions.get(SESSION_KEY)?.metadata.workspaceBaselineGoalId).toBe(goal.goalId);
-  });
-
   it("enforces lifecycle transitions and goal identity", async () => {
     const { runtime } = createRuntime();
     const created = await createGoal(runtime);
@@ -160,6 +148,26 @@ describe("GoalRuntime state transitions", () => {
     });
 
     expect(result.goal?.status).toBe("blocked");
+  });
+
+  it.each([
+    "image_input_unsupported",
+    "image_analysis_failed",
+  ] as const)("settles %s as a blocked Goal instead of completion", async (errorCategory) => {
+    const { runtime } = createRuntime();
+    const goal = await createGoal(runtime, { turnId: `turn-${errorCategory}` });
+    const result = await runtime.settleTurn({
+      sessionKey: SESSION_KEY,
+      turnId: `turn-${errorCategory}`,
+      goalId: goal.goalId,
+      usage: {},
+      latencyMs: 0,
+      stopReason: "error",
+      errorCategory,
+    });
+
+    expect(result.goal?.status).toBe("blocked");
+    expect(result.shouldContinue).toBe(false);
   });
 
   it("keeps updatedAt strictly increasing when the clock stalls or moves backward", async () => {
@@ -621,6 +629,107 @@ describe("GoalRuntime control and inbox arbitration", () => {
     await expect(runtime.removeUnreservedInboxEntry(SESSION_KEY, "keep-me")).resolves.toBe("reserved");
     await expect(runtime.removeUnreservedInboxEntry(SESSION_KEY, "missing")).resolves.toBe("missing");
     expect(runtime.inbox(SESSION_KEY)).toHaveLength(1);
+  });
+
+  it("journals, restores, and re-transfers one eligible Goal inbox queue item", async () => {
+    const { runtime, root } = createRuntime();
+    await createGoal(runtime);
+    const clientRequestId = "12121212-1212-4212-8212-121212121212";
+    await runtime.enqueueUserMessage(SESSION_KEY, new InboundMessage({
+      channel: "websocket",
+      chatId: ROUTE.chatId,
+      senderId: "user",
+      content: "adjust the active goal turn",
+      metadata: {
+        client_request_id: clientRequestId,
+        webui_request_digest: "goal-steer-digest",
+        webui_queue_surface: "chat_composer",
+        webui: true,
+        queued_at: "2026-08-10T12:00:00.000Z",
+      },
+      sessionKeyOverride: SESSION_KEY,
+      turnSource: { kind: "gui", channel: "websocket" },
+    }));
+
+    expect(runtime.inbox(SESSION_KEY)[0]?.metadata.turn_source).toEqual({
+      kind: "gui",
+      channel: "websocket",
+    });
+
+    await expect(runtime.beginQueueSteerTransfer(
+      SESSION_KEY,
+      clientRequestId,
+      "turn-active",
+      "chat_composer",
+      ROUTE,
+    )).resolves.toMatchObject({
+      outcome: "transferred",
+      transfer: {
+        clientRequestId,
+        expectedTurnId: "turn-active",
+        store: "goal",
+      },
+    });
+    expect(runtime.inbox(SESSION_KEY)).toEqual([]);
+    expect(new SessionManager(root).get(SESSION_KEY)?.metadata.webui_queue_steer_transfers)
+      .toEqual([expect.objectContaining({ clientRequestId, expectedTurnId: "turn-active" })]);
+
+    await expect(runtime.restoreGoalQueueSteerTransfer(
+      SESSION_KEY,
+      clientRequestId,
+      "2026-08-10T12:00:01.000Z",
+    )).resolves.toMatchObject({ id: clientRequestId, turnId: null });
+    await expect(runtime.beginQueueSteerTransfer(
+      SESSION_KEY,
+      clientRequestId,
+      "turn-next",
+      "chat_composer",
+      ROUTE,
+    )).resolves.toMatchObject({
+      outcome: "transferred",
+      transfer: { expectedTurnId: "turn-next" },
+    });
+    await runtime.completeQueueSteerTransfer(SESSION_KEY, clientRequestId);
+    expect(runtime.queueSteerTransfers(SESSION_KEY)).toEqual([]);
+  });
+
+  it("recovers a legacy WebUI Goal inbox source while transferring it", async () => {
+    const { runtime } = createRuntime();
+    await createGoal(runtime);
+    const clientRequestId = "23232323-2323-4232-8232-232323232323";
+    await runtime.enqueueUserMessage(SESSION_KEY, new InboundMessage({
+      channel: "websocket",
+      chatId: ROUTE.chatId,
+      senderId: "user",
+      content: "legacy GUI adjustment",
+      metadata: {
+        client_request_id: clientRequestId,
+        webui_request_digest: "legacy-goal-steer-digest",
+        webui_queue_surface: "chat_composer",
+        webui: true,
+        queued_at: "2026-08-10T12:00:00.000Z",
+      },
+      sessionKeyOverride: SESSION_KEY,
+    }));
+
+    await expect(runtime.beginQueueSteerTransfer(
+      SESSION_KEY,
+      clientRequestId,
+      "turn-active",
+      "chat_composer",
+      ROUTE,
+    )).resolves.toMatchObject({
+      outcome: "transferred",
+      transfer: {
+        descriptor: {
+          source: { kind: "gui", channel: "websocket" },
+        },
+      },
+    });
+    expect(runtime.route(SESSION_KEY)).toEqual({
+      ...ROUTE,
+      source: { kind: "gui", channel: "websocket" },
+    });
   });
 
   it("rejects missing WebUI dedupe fields and drops unsupported metadata", () => {

@@ -107,23 +107,19 @@ describe("migration runner", () => {
 
     expect(first.applied.map((item) => item.id)).toEqual([
       "v1.0.4/0001-add-webui-session-binding",
-      "v1.0.5/0001-flatten-memory-model-config",
-      "v1.0.5/0002-normalize-goal-state",
-      "v1.0.5/0003-add-goal-dag-boundary",
       "v1.0.7/0001-normalize-runtime-model-catalog",
-      "v1.0.7/0003-remove-legacy-runtime-model-fields",
+      "v1.0.7/0003-normalize-goal-state",
+      "v1.0.7/0004-add-goal-dag-boundary",
     ]);
     expect(first.deferred).toEqual(["v1.0.7/0002-import-legacy-app-state-model-config"]);
-    expect(first.results).toEqual({ scanned: 5, changed: 3, ignored: 2 });
+    expect(first.results).toEqual({ scanned: 3, changed: 2, ignored: 1 });
     expect(second).toEqual({
       applied: [],
       skipped: [
         "v1.0.4/0001-add-webui-session-binding",
-        "v1.0.5/0001-flatten-memory-model-config",
-        "v1.0.5/0002-normalize-goal-state",
-        "v1.0.5/0003-add-goal-dag-boundary",
         "v1.0.7/0001-normalize-runtime-model-catalog",
-        "v1.0.7/0003-remove-legacy-runtime-model-fields",
+        "v1.0.7/0003-normalize-goal-state",
+        "v1.0.7/0004-add-goal-dag-boundary",
       ],
       deferred: ["v1.0.7/0002-import-legacy-app-state-model-config"],
       results: { scanned: 0, changed: 0, ignored: 0 },
@@ -142,30 +138,6 @@ describe("migration runner", () => {
         target: { type: "agent-workspace" },
       },
       {
-        id: "v1.0.5/0001-flatten-memory-model-config",
-        introducedIn: "1.0.5",
-        appliedAt: expect.stringMatching(/Z$/),
-        target: {
-          type: "runtime-config",
-          key: runtimeConfigTargetKey(configPath),
-        },
-      },
-      {
-        id: "v1.0.5/0002-normalize-goal-state",
-        introducedIn: "1.0.5",
-        appliedAt: expect.stringMatching(/Z$/),
-        target: { type: "agent-workspace" },
-      },
-      {
-        id: "v1.0.5/0003-add-goal-dag-boundary",
-        introducedIn: "1.0.5",
-        appliedAt: expect.stringMatching(/Z$/),
-        target: {
-          type: "session-dag",
-          key: expect.stringMatching(/^[a-f0-9]{64}$/),
-        },
-      },
-      {
         id: "v1.0.7/0001-normalize-runtime-model-catalog",
         introducedIn: "1.0.7",
         appliedAt: expect.stringMatching(/Z$/),
@@ -175,12 +147,18 @@ describe("migration runner", () => {
         },
       },
       {
-        id: "v1.0.7/0003-remove-legacy-runtime-model-fields",
+        id: "v1.0.7/0003-normalize-goal-state",
+        introducedIn: "1.0.7",
+        appliedAt: expect.stringMatching(/Z$/),
+        target: { type: "agent-workspace" },
+      },
+      {
+        id: "v1.0.7/0004-add-goal-dag-boundary",
         introducedIn: "1.0.7",
         appliedAt: expect.stringMatching(/Z$/),
         target: {
-          type: "runtime-config",
-          key: runtimeConfigTargetKey(configPath),
+          type: "session-dag",
+          key: expect.stringMatching(/^[a-f0-9]{64}$/),
         },
       },
     ]);

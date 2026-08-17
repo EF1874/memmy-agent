@@ -253,6 +253,8 @@ export class GuiTranscriptMirror {
       provider?: string;
       model?: string;
       capability?: string;
+      failedProvider?: string;
+      failedModel?: string;
     } | null = null,
   ): void {
     this.appendTurn(turn, {
@@ -263,7 +265,7 @@ export class GuiTranscriptMirror {
       turn_id: turn.turnId,
       ...(latencyMs == null ? {} : { latency_ms: latencyMs }),
       ...(agentUi != null ? { agent_ui: agentUi } : {}),
-      ...(modelError || errorCategory === "quota_exhausted"
+      ...(modelError || errorCategory
         ? { model_error: modelError ?? { category: errorCategory } }
         : {}),
     });

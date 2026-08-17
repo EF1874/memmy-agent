@@ -5,6 +5,7 @@ import {
   type RuntimeConfigDocument,
 } from "../../runtime-config-writer.js";
 import { MigrationError, type AgentWorkspaceMigrationContext, type MigrationDefinition, type MigrationResult } from "../../types.js";
+import { flattenLegacyMemoryModelConfig } from "./legacy-memory-model-config.js";
 
 const MIGRATION_ID = "v1.0.7/0001-normalize-runtime-model-catalog";
 
@@ -777,20 +778,23 @@ export function removeLegacyRuntimeModelFields(config: RuntimeConfigDocument): v
   removeInvalidByokAccountProjection(config);
 }
 
+function removeInvalidByokAccountPresets(config: RuntimeConfigDocument): void {
+  const presets = objectAt(config, "modelPresets");
+  if (!presets) return;
+  for (const [presetId, value] of Object.entries(presets)) {
+    if (isObject(value) && value.source === "byok" && value.provider === "memmy_account") {
+      delete presets[presetId];
+    }
+  }
+}
+
 /**
  * Removes a broken legacy projection where the managed account provider was
  * copied into the BYOK catalog. Besides being unusable, that projection makes
  * every later catalog PUT fail because account presets are read-only.
  */
 function removeInvalidByokAccountProjection(config: RuntimeConfigDocument): void {
-  const presets = objectAt(config, "modelPresets");
-  if (presets) {
-    for (const [presetId, value] of Object.entries(presets)) {
-      if (isObject(value) && value.source === "byok" && value.provider === "memmy_account") {
-        delete presets[presetId];
-      }
-    }
-  }
+  removeInvalidByokAccountPresets(config);
 
   const assignments = objectAt(config, "modelAssignments");
   const byok = assignments ? objectAt(assignments, "byok") : null;
@@ -965,6 +969,7 @@ function hasCurrentAccountCatalog(config: RuntimeConfigDocument): boolean {
 }
 
 function normalizeRuntimeCatalog(config: RuntimeConfigDocument): void {
+  flattenLegacyMemoryModelConfig(config);
   liftLegacyRoots(config);
   const legacy = captureLegacyConnections(config);
   const assignmentsBefore = objectAt(config, "modelAssignments");
@@ -982,6 +987,7 @@ function normalizeRuntimeCatalog(config: RuntimeConfigDocument): void {
     accountBefore && accountOwnerBefore && currentOwner && accountOwnerBefore !== currentOwner,
   );
 
+  removeInvalidByokAccountPresets(config);
   const normalization = normalizeProviderCatalog(config);
   normalizePresets(config, normalization);
   ensureAccountCatalog(config);
@@ -1002,7 +1008,14 @@ function normalizeRuntimeCatalog(config: RuntimeConfigDocument): void {
 }
 
 function wrapError(error: unknown): never {
-  if (error instanceof MigrationError) throw error;
+  if (error instanceof MigrationError) {
+    if (error.migrationId !== null) throw error;
+    throw new MigrationError(error.code, error.message, {
+      migrationId: MIGRATION_ID,
+      scope: "runtime-config",
+      cause: error.cause,
+    });
+  }
   throw new MigrationError("migration_config_invalid", "Unable to normalize runtime model catalog", {
     migrationId: MIGRATION_ID,
     scope: "runtime-config",

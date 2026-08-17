@@ -100,6 +100,58 @@ describe("AgentRunner injection drain", () => {
     const spec = new AgentRunSpec({ injectionCallback: async () => { throw new Error("boom"); } });
     await expect(new AgentRunner().drainInjections(spec)).resolves.toEqual([]);
   });
+
+  it("preserves queue-steer recovery identity without merging or exposing it to providers", async () => {
+    const injection = {
+      role: "user",
+      content: "queued adjustment",
+      client_request_id: "88888888-8888-4888-8888-888888888888",
+      webui_request_digest: "queue-steer-digest",
+      turn_id: "turn-queue-steer",
+      turn_source: { kind: "gui", channel: "websocket" },
+      webui_queue_steer_origin: true,
+      webui_queue_steer_recovery: {
+        content: "queued adjustment",
+        media: [],
+        turn_id: "turn-queue-steer",
+      },
+    };
+    const drained = await new AgentRunner().drainInjections(new AgentRunSpec({
+      injectionCallback: async () => [injection],
+    }));
+    expect(drained).toEqual([injection]);
+
+    const adjacent = [{ role: "user", content: "existing" }];
+    AgentRunner.appendInjectedMessages(adjacent, drained);
+    expect(adjacent).toHaveLength(2);
+
+    let calls = 0;
+    const providerMessages: any[][] = [];
+    const provider = makeProvider(async ({ messages }) => {
+      calls += 1;
+      providerMessages.push(messages);
+      return new LLMResponse({ content: calls === 1 ? "first" : "final" });
+    });
+    const pending = [injection];
+    const result = await new AgentRunner(provider).run(new AgentRunSpec({
+      messages: [{ role: "user", content: "hello" }],
+      provider,
+      tools: makeTools(),
+      maxIterations: 5,
+      injectionCallback: drainArray(pending),
+    }));
+    const persisted = result.messages.find((message) => (
+      message.client_request_id === injection.client_request_id
+    ));
+    expect(persisted).toMatchObject({
+      client_request_id: injection.client_request_id,
+      webui_request_digest: injection.webui_request_digest,
+      turn_id: injection.turn_id,
+      webui_queue_steer_recovery: injection.webui_queue_steer_recovery,
+    });
+    expect(providerMessages.at(-1)?.find((message) => message.content === injection.content))
+      .toEqual({ role: "user", content: injection.content });
+  });
 });
 
 describe("AgentRunner injection checkpoints", () => {

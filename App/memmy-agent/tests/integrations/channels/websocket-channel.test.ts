@@ -640,6 +640,7 @@ describe("WebSocket channel", () => {
       queuedAt: "2026-08-09T12:00:00.000Z",
       sessionKey,
       source: { kind: "gui" as const, channel: "websocket" },
+      queueSurface: null,
     };
     const startedDescriptor = {
       ...descriptor,
@@ -890,6 +891,108 @@ describe("WebSocket channel", () => {
     });
   });
 
+  it("steers one GUI composer queue item with ordered idempotent broadcasts", async () => {
+    const bus = new MessageBus();
+    const channel = webuiChannel(bus);
+    const requester = connection();
+    const observer = connection();
+    const tui = connection();
+    const chatId = "chat-queue-steer";
+    const sessionKey = `websocket:${chatId}`;
+    const clientRequestId = "12121212-1212-4212-8212-121212121212";
+    const requestId = "34343434-3434-4434-8434-343434343434";
+    const turnId = "mec5x2l7-k3p9w8qd";
+    channel.connectionSurface.set(requester, "gui");
+    channel.connectionSurface.set(observer, "gui");
+    channel.connectionSurface.set(tui, "tui");
+    channel.attachConnection(requester, chatId);
+    channel.attachConnection(observer, chatId);
+    channel.attachConnection(tui, chatId);
+    await channel.dispatchEnvelope(requester, "client-message", {
+      type: "message",
+      chat_id: chatId,
+      content: "adjust the active turn",
+      webui: true,
+      queue_surface: "chat_composer",
+      client_request_id: clientRequestId,
+      target: { kind: "standalone" },
+    });
+    await bus.nextInbound();
+    requester.send.mockClear();
+    observer.send.mockClear();
+    tui.send.mockClear();
+    const descriptor = {
+      clientRequestId,
+      content: "adjust the active turn",
+      media: [],
+      queuedAt: "2026-08-10T12:00:00.000Z",
+      sessionKey,
+      source: { kind: "gui" as const, channel: "websocket" },
+      queueSurface: "chat_composer" as const,
+      turnAdmission: "steer" as const,
+      turnId,
+    };
+    channel.steerQueuedWebuiMessage = vi.fn(async () => ({
+      outcome: "steered" as const,
+      revision: 2,
+      turnId,
+      descriptor,
+    }));
+
+    await channel.dispatchEnvelope(requester, "client-control", {
+      type: "queue_steer",
+      chat_id: chatId,
+      request_id: requestId,
+      client_request_id: clientRequestId,
+      expected_turn_id: turnId,
+    });
+
+    const requesterEvents = requester.send.mock.calls.map(([payload]) => JSON.parse(payload));
+    expect(requesterEvents.map((event) => event.event)).toEqual([
+      "message_dequeued",
+      "message_steered",
+      "queue_steer_result",
+    ]);
+    expect(requesterEvents[0]).toMatchObject({
+      client_request_id: clientRequestId,
+      revision: 2,
+      turn_admission: "steer",
+      turn_id: turnId,
+      item: {
+        queue_surface: "chat_composer",
+        turn_admission: "steer",
+        turn_id: turnId,
+      },
+    });
+    expect(requesterEvents[2]).toMatchObject({
+      ok: true,
+      outcome: "steered",
+      turn_id: turnId,
+    });
+    expect(observer.send.mock.calls.map(([payload]) => JSON.parse(payload))).toEqual([
+      expect.objectContaining({ event: "message_dequeued", client_request_id: clientRequestId }),
+    ]);
+    expect(tui.send.mock.calls.map(([payload]) => JSON.parse(payload))).toEqual([
+      expect.objectContaining({ event: "message_dequeued", client_request_id: clientRequestId }),
+    ]);
+    expect(channel.inflightWebuiMessageRequests.get(`${sessionKey}\0${clientRequestId}`))
+      .toMatchObject({ queued: false, steeredTurnId: turnId });
+
+    await channel.dispatchEnvelope(tui, "tui-control", {
+      type: "queue_steer",
+      chat_id: chatId,
+      request_id: "78787878-7878-4878-8878-787878787878",
+      client_request_id: clientRequestId,
+      expected_turn_id: turnId,
+    });
+    expect(channel.steerQueuedWebuiMessage).toHaveBeenCalledTimes(1);
+    expect(tui.send.mock.calls.map(([payload]) => JSON.parse(payload)).at(-1)).toMatchObject({
+      event: "queue_steer_result",
+      ok: false,
+      error: "invalid_request",
+    });
+  });
+
   it("rejects new chat creation when no usable default model exists", async () => {
     const channel = new WebSocketChannel({}, new MessageBus(), {
       modelSelectionResolver: () => null,
@@ -1021,6 +1124,47 @@ describe("WebSocket channel", () => {
       category: "model_failed",
       detail: "Error: raw provider failure"
     });
+
+    await channel.send(new OutboundMessage({
+      channel: "websocket",
+      chatId: "chat-quota",
+      content: "图片解析失败，请稍后重试",
+      metadata: {
+        modelErrorCategory: "image_analysis_failed",
+        modelErrorDetail: "Error: internal vision failure",
+        modelErrorContext: {
+          category: "image_analysis_failed",
+          presetId: "account-agent",
+          source: "account",
+          provider: "memmy_account",
+          model: "agent_chat",
+          capability: "agent",
+          failedProvider: "memmy_account",
+          failedModel: "image2text",
+          apiKey: "must-not-leak"
+        }
+      }
+    }));
+    expect(sent(ws, 2).model_error).toEqual({
+      category: "image_analysis_failed",
+      detail: "Error: internal vision failure",
+      presetId: "account-agent",
+      source: "account",
+      provider: "memmy_account",
+      model: "agent_chat",
+      capability: "agent",
+      failedProvider: "memmy_account",
+      failedModel: "image2text"
+    });
+    expect(JSON.stringify(sent(ws, 2))).not.toContain("must-not-leak");
+
+    await channel.send(new OutboundMessage({
+      channel: "websocket",
+      chatId: "chat-quota",
+      content: "当前模型不支持图片输入，请切换到支持多模态能力的模型后重试",
+      metadata: { modelErrorCategory: "image_input_unsupported" }
+    }));
+    expect(sent(ws, 3).model_error).toEqual({ category: "image_input_unsupported" });
   });
 
   it("sends context compaction status as a dedicated WebUI event and transcript row", async () => {
@@ -1259,6 +1403,91 @@ describe("WebSocket channel", () => {
       event: "user",
       text: "编写亚洲流行文化网页",
     }));
+  });
+
+  it("repairs a persisted queue-steer user transcript idempotently on thread GET", () => {
+    const root = tempDataDir();
+    const sessions = new SessionManager(path.join(root, "sessions"));
+    const channel = new WebSocketChannel({}, new MessageBus(), {
+      sessionManager: sessions,
+      workspacePath: root,
+    });
+    const chatId = "chat-steer-repair";
+    const clientRequestId = "90909090-9090-4090-8090-909090909090";
+    const turnId = "mec5x2l7-k3p9w8qd";
+    const session = sessions.getOrCreate(`websocket:${chatId}`);
+    session.metadata.webui = true;
+    session.metadata.webuiProjectId = null;
+    session.metadata.webuiWorkspaceCwd = root;
+    session.messages.push({
+      role: "user",
+      content: "initial request",
+      client_request_id: "78787878-7878-4878-8878-787878787878",
+      turn_id: turnId,
+      turn_source: { kind: "gui", channel: "websocket" },
+    });
+    session.messages.push({
+      role: "user",
+      content: [{ type: "text", text: "provider-visible content" }],
+      client_request_id: clientRequestId,
+      turn_id: turnId,
+      turn_source: { kind: "gui", channel: "websocket" },
+      webui_queue_steer_recovery: {
+        client_request_id: clientRequestId,
+        content: "original queued adjustment",
+        media: [],
+        source: { kind: "gui", channel: "websocket" },
+        queue_surface: "chat_composer",
+        turn_id: turnId,
+      },
+    });
+    session.messages.push({ role: "assistant", content: "final answer" });
+    sessions.save(session, { fsync: true });
+    const transcript = webuiTranscriptPath(`websocket:${chatId}`);
+    fs.mkdirSync(path.dirname(transcript), { recursive: true });
+    fs.writeFileSync(transcript, [
+      {
+        event: "user",
+        chat_id: chatId,
+        text: "initial request",
+        client_request_id: "78787878-7878-4878-8878-787878787878",
+        turn_id: turnId,
+        source: { kind: "gui", channel: "websocket" },
+      },
+      { event: "delta", chat_id: chatId, text: "final answer", turn_id: turnId },
+      { event: "stream_end", chat_id: chatId, turn_id: turnId },
+      { event: "turn_end", chat_id: chatId, turn_id: turnId },
+    ].map((line) => JSON.stringify(line)).join("\n") + "\n", "utf8");
+    channel.apiTokens.set("api-token", Number.POSITIVE_INFINITY);
+    const request = {
+      path: `/api/sessions/websocket%3A${chatId}/webui-thread`,
+      headers: { authorization: "Bearer api-token" },
+    };
+
+    const response = channel.handleWebuiThreadGet(request, `websocket%3A${chatId}`);
+    expect(response.status).toBe(200);
+    expect(JSON.parse(String(response.body)).messages.map((message: Record<string, any>) => (
+      message.role === "user" ? message.client_request_id : message.role
+    ))).toEqual([
+      "78787878-7878-4878-8878-787878787878",
+      clientRequestId,
+      "assistant",
+    ]);
+    expect(channel.handleWebuiThreadGet(request, `websocket%3A${chatId}`).status).toBe(200);
+    const lines = fs.readFileSync(webuiTranscriptPath(`websocket:${chatId}`), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(lines.filter((line) => (
+      line.event === "user" && line.client_request_id === clientRequestId
+    ))).toEqual([
+      expect.objectContaining({
+        text: "original queued adjustment",
+        client_request_id: clientRequestId,
+        turn_id: turnId,
+        source: { kind: "gui", channel: "websocket" },
+      }),
+    ]);
   });
 
   it("notifies the WebUI title service only after thread-scoped session updates are sent", async () => {
@@ -2013,7 +2242,9 @@ describe("WebSocket channel", () => {
   });
 
   it("sends an idle run snapshot immediately after an explicit attach", async () => {
-    const channel = new WebSocketChannel({}, new MessageBus());
+    const channel = new WebSocketChannel({}, new MessageBus(), {
+      modelSelectionResolver: () => null,
+    });
     const ws = connection();
 
     await channel.dispatchEnvelope(ws, "client-1", { type: "attach", chat_id: "chat-1" });
@@ -2025,7 +2256,9 @@ describe("WebSocket channel", () => {
   });
 
   it("sends one authoritative running snapshot after attach", async () => {
-    const channel = new WebSocketChannel({}, new MessageBus());
+    const channel = new WebSocketChannel({}, new MessageBus(), {
+      modelSelectionResolver: () => null,
+    });
     const ws = connection();
     websocketTurnWallStartTimes.set("chat-1", 1780732800);
     channel.activeTurnIdByChatId.set("chat-1", "turn-1");
@@ -2045,7 +2278,9 @@ describe("WebSocket channel", () => {
   });
 
   it("correlates an idle snapshot with a still-known active turn", async () => {
-    const channel = new WebSocketChannel({}, new MessageBus());
+    const channel = new WebSocketChannel({}, new MessageBus(), {
+      modelSelectionResolver: () => null,
+    });
     const ws = connection();
     channel.activeTurnIdByChatId.set("chat-1", "turn-finishing");
 
@@ -2100,7 +2335,9 @@ describe("WebSocket channel", () => {
   });
 
   it("sends the run snapshot before active goal hydration", async () => {
-    const channel = new WebSocketChannel({}, new MessageBus());
+    const channel = new WebSocketChannel({}, new MessageBus(), {
+      modelSelectionResolver: () => null,
+    });
     const ws = connection();
     const goalState = {
       goalId: "8f59f58a-7295-4c34-8e03-55e7035a5a8d",
@@ -2141,7 +2378,9 @@ describe("WebSocket channel", () => {
   });
 
   it("continues subscription hydration when an earlier subscriber has disconnected", async () => {
-    const channel = new WebSocketChannel({}, new MessageBus());
+    const channel = new WebSocketChannel({}, new MessageBus(), {
+      modelSelectionResolver: () => null,
+    });
     const stale = { send: vi.fn(async () => { throw new Error("closed"); }) };
     const attaching = connection();
     const goalState = {

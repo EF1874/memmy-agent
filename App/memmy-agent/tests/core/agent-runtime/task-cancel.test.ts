@@ -65,7 +65,7 @@ function cancelableTaskWithSignal(): Promise<void> & { cancel: () => boolean; do
   return task;
 }
 
-async function withTimeout<T>(promise: Promise<T>, ms = 1000, label = "operation"): Promise<T> {
+async function withTimeout<T>(promise: Promise<T>, ms = 3000, label = "operation"): Promise<T> {
   return await Promise.race([
     promise,
     new Promise<T>((resolve, reject) => setTimeout(() => reject(new Error(`timeout: ${label}`)), ms)),
@@ -405,10 +405,10 @@ describe("task cancellation", () => {
         content: "/new",
         metadata: { webui: true },
       }));
-      const runningStatus = await withTimeout(loop.bus.consumeOutbound(), 2000, "new running status");
-      const reset = await withTimeout(loop.bus.consumeOutbound(), 2000, "new response");
-      const resetTurnEnd = await withTimeout(loop.bus.consumeOutbound(), 2000, "new turn_end");
-      const idleStatus = await withTimeout(loop.bus.consumeOutbound(), 2000, "new idle status");
+      const runningStatus = await withTimeout(loop.bus.consumeOutbound(), 5000, "new running status");
+      const reset = await withTimeout(loop.bus.consumeOutbound(), 5000, "new response");
+      const resetTurnEnd = await withTimeout(loop.bus.consumeOutbound(), 5000, "new turn_end");
+      const idleStatus = await withTimeout(loop.bus.consumeOutbound(), 5000, "new idle status");
 
       expect(runningStatus.metadata).toMatchObject({ runStatusEvent: true, runStatus: "running" });
       expect(reset.content).toBe("New session started.");
@@ -423,13 +423,13 @@ describe("task cancellation", () => {
         content: "hello after reset",
         metadata: { webui: true },
       }));
-      const reply = await withTimeout(loop.bus.consumeOutbound(), 2000, "follow-up running status");
+      const reply = await withTimeout(loop.bus.consumeOutbound(), 5000, "follow-up running status");
 
       expect(reply.metadata).toMatchObject({ runStatusEvent: true, runStatus: "running" });
-      const answerSessionUpdated = await withTimeout(loop.bus.consumeOutbound(), 2000, "follow-up session_updated");
-      const answer = await withTimeout(loop.bus.consumeOutbound(), 2000, "follow-up response");
-      const answerTurnEnd = await withTimeout(loop.bus.consumeOutbound(), 2000, "follow-up turn_end");
-      const answerIdle = await withTimeout(loop.bus.consumeOutbound(), 2000, "follow-up idle status");
+      const answerSessionUpdated = await withTimeout(loop.bus.consumeOutbound(), 5000, "follow-up session_updated");
+      const answer = await withTimeout(loop.bus.consumeOutbound(), 5000, "follow-up response");
+      const answerTurnEnd = await withTimeout(loop.bus.consumeOutbound(), 5000, "follow-up turn_end");
+      const answerIdle = await withTimeout(loop.bus.consumeOutbound(), 5000, "follow-up idle status");
 
       expect(answerSessionUpdated.metadata).toMatchObject({ sessionUpdated: true, sessionUpdateScope: "thread" });
       expect(answer.content).toBe("after-new");

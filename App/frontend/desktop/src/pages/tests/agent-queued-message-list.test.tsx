@@ -14,14 +14,16 @@ function queued(
   status: AgentQueuedMessage["status"] = "queued",
   media: AgentQueuedMessage["media"] = [],
   source: AgentQueuedMessage["source"] = { kind: "gui", channel: "websocket" },
+  queueSurface: AgentQueuedMessage["queueSurface"] = null,
 ): AgentQueuedMessage {
-  return { clientRequestId, content, status, media, queuedAt: Date.now(), source };
+  return { clientRequestId, content, status, media, queuedAt: Date.now(), source, queueSurface };
 }
 
 describe("AgentQueuedMessageList", () => {
   let container: HTMLDivElement;
   let root: Root;
   const onRemove = vi.fn();
+  const onSteer = vi.fn();
 
   beforeEach(() => {
     container = document.createElement("div");
@@ -41,6 +43,8 @@ describe("AgentQueuedMessageList", () => {
         items={items}
         label="Queued questions"
         removeLabel="Remove"
+        steerLabel="Steer"
+        canSteer={true}
         attachmentOnlyLabel={(count) => `${count} attachments`}
         sourceLabels={{
           gui: "From GUI",
@@ -49,6 +53,7 @@ describe("AgentQueuedMessageList", () => {
           unknownIm: "From IM"
         }}
         onRemove={onRemove}
+        onSteer={onSteer}
       />
     ));
   }
@@ -84,6 +89,28 @@ describe("AgentQueuedMessageList", () => {
 
     act(() => rows[0]?.querySelector("button")?.click());
     expect(onRemove).toHaveBeenCalledWith("one");
+  });
+
+  it("shows Steer only for full GUI composer items and places it before Remove", () => {
+    render([
+      queued("gui", "GUI", "queued", [], { kind: "gui", channel: "websocket" }, "chat_composer"),
+      queued("legacy", "Legacy"),
+      queued("slash", " /status", "queued", [], { kind: "gui", channel: "websocket" }, "chat_composer"),
+      queued("tui", "TUI", "queued", [], { kind: "tui", channel: "websocket" }, "chat_composer"),
+      queued("im", "IM", "queued", [], { kind: "im", channel: "slack" }, "chat_composer")
+    ]);
+    const rows = [...container.querySelectorAll<HTMLLIElement>(".agent-queue-item")];
+    expect(rows.map((row) => [...row.querySelectorAll("button")].map(
+      (button) => button.getAttribute("aria-label")
+    ))).toEqual([
+      ["Steer", "Remove"],
+      ["Remove"],
+      ["Remove"],
+      ["Remove"],
+      ["Remove"]
+    ]);
+    act(() => rows[0]?.querySelector<HTMLButtonElement>(".agent-queue-item__steer")?.click());
+    expect(onSteer).toHaveBeenCalledWith("gui");
   });
 
   it("falls back to MessageCircle for unknown or failed IM logos", () => {

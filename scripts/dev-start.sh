@@ -529,17 +529,15 @@ try {
 
 const defaults = config.agents?.defaults ?? {};
 const presetName = defaults.modelPreset;
-const activeModel = presetName && presetName !== "default"
-  ? config.modelPresets?.[presetName]
-  : defaults;
-const providerName = activeModel?.provider;
-const endpointName = activeModel?.endpoint;
-const modelName = activeModel?.model;
+const preset = presetName ? config.modelPresets?.[presetName] : null;
+const providerName = preset?.provider;
+const endpointName = preset?.endpoint;
+const modelName = preset?.model;
 const provider = providerName ? config.providers?.[providerName] : null;
 const endpoint = endpointName ? provider?.endpoints?.[endpointName] : null;
 const apiKey = endpoint?.apiKey ?? provider?.apiKey;
 
-if (!providerName || !modelName || !apiKey || (endpointName && !endpoint)) process.exit(1);
+if (!presetName || !providerName || !endpointName || !modelName || !endpoint || !apiKey) process.exit(1);
 process.exit(0);
 NODE
 }

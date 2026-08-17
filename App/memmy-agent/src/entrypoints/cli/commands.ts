@@ -1122,6 +1122,9 @@ export async function gateway({
     removeQueuedWebuiMessage: (sessionKey, clientRequestId) => (
       loop.removeQueuedWebuiMessage(sessionKey, clientRequestId)
     ),
+    steerQueuedWebuiMessage: (sessionKey, clientRequestId, expectedTurnId) => (
+      loop.steerQueuedWebuiMessage(sessionKey, clientRequestId, expectedTurnId)
+    ),
     stopExpectedTurn: (sessionKey, expectedTurnId) => (
       loop.stopExpectedTurn(sessionKey, expectedTurnId, "tui")
     ),

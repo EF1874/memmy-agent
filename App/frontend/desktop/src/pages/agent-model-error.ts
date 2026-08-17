@@ -63,10 +63,29 @@ export interface AgentModelErrorFormatOptions {
 }
 
 export function formatAgentModelError(content: string, t: Translate, options?: AgentModelErrorFormatOptions): AgentModelErrorPresentation {
+  const failedAt = [options?.modelError?.failedProvider, options?.modelError?.failedModel]
+    .filter((value): value is string => Boolean(value))
+    .join("/");
+  const structuredDetail = options?.modelError?.detail ?? null;
+  const failureDetail = failedAt
+    ? (structuredDetail ? `${failedAt}: ${structuredDetail}` : failedAt)
+    : structuredDetail;
+  if (options?.modelError?.category === "image_input_unsupported") {
+    return {
+      title: t(ERROR_NOTICE_KEYS.agent.imageInputUnsupported),
+      detail: options.modelError.detail ?? null
+    };
+  }
+  if (options?.modelError?.category === "image_analysis_failed") {
+    return {
+      title: t(ERROR_NOTICE_KEYS.agent.imageAnalysisFailed),
+      detail: failureDetail
+    };
+  }
   if (options?.modelError?.category === "quota_exhausted") {
     return {
       title: t(ERROR_NOTICE_KEYS.agent.quotaExhausted),
-      detail: options.modelError.detail ?? null
+      detail: failureDetail
     };
   }
   const text = content.trim();
@@ -74,10 +93,10 @@ export function formatAgentModelError(content: string, t: Translate, options?: A
     return { title: t("agent.error.modelFailed"), detail: null };
   }
 
-  const structuredDetail = options?.modelError?.category === "model_failed"
+  const modelFailureDetail = options?.modelError?.category === "model_failed"
     ? options.modelError.detail
     : undefined;
-  const classificationText = structuredDetail ?? text;
+  const classificationText = modelFailureDetail ?? text;
   const normalized = classificationText.replace(/^Error(?: calling LLM)?:\s*/i, "").trim();
   const haystack = `${classificationText}\n${normalized}`.toLowerCase();
 
@@ -87,22 +106,22 @@ export function formatAgentModelError(content: string, t: Translate, options?: A
   if (/401|403|unauthorized|invalid.*api.*key|authentication|api key/.test(haystack)) {
     return {
       title: t(options?.modelError?.source === "account" ? "agent.error.loginExpired" : "agent.error.authFailed"),
-      detail: structuredDetail ?? null
+      detail: modelFailureDetail ?? null
     };
   }
   if (/429|rate limit|too many requests/.test(haystack)) {
-    return { title: t("agent.error.rateLimited"), detail: structuredDetail ?? null };
+    return { title: t("agent.error.rateLimited"), detail: modelFailureDetail ?? null };
   }
   if (/503|502|504|upstream|connect error|connection refused|connection failure|econnrefused|delayed connect|transport failure|network|timeout|timed out/.test(haystack)) {
     return {
       title: t("agent.error.connectionFailed"),
-      detail: structuredDetail ?? (text || null)
+      detail: modelFailureDetail ?? (text || null)
     };
   }
 
   return {
     title: t(ERROR_NOTICE_KEYS.agent.modelFailed),
-    detail: structuredDetail ?? (text || null)
+    detail: modelFailureDetail ?? (text || null)
   };
 }
 

@@ -27,6 +27,7 @@ import {
   chatIdToSessionKey,
   isAgentGoalState,
   isAgentGoalStatus,
+  parseAgentTurnSource,
   parseMemmyAgentModelSelection
 } from "../api/memmy-agent-client.js";
 import type { PendingAttachment } from "./agent-composer-state.js";
@@ -128,6 +129,7 @@ export interface AgentChatMessage {
   stoppedByUser?: boolean;
   modelError?: MemmyAgentModelError;
   clientRequestId?: string;
+  queueSteerPending?: boolean;
 }
 
 export type AgentQueuedMessage = {
@@ -136,7 +138,10 @@ export type AgentQueuedMessage = {
   media: AgentChatMediaAttachment[];
   queuedAt: number;
   source: AgentTurnSource;
-  status: "queued" | "removing";
+  queueSurface: "chat_composer" | null;
+  turnAdmission?: "steer";
+  turnId?: string;
+  status: "queued" | "removing" | "steering";
 };
 
 export type AgentQueueDesync = {
@@ -212,6 +217,7 @@ export interface AgentState {
   runStatusVersionByChatId: Record<string, number>;
   currentSessionsRequestRunStatusVersionByChatId: Record<string, number> | null;
   activeTurnIdByChatId: Record<string, string | null>;
+  activeTurnSourceByChatId: Record<string, AgentTurnSource | null>;
   closedTurnIdsByChatId: Record<string, Record<string, "stopped" | "ended">>;
   optimisticSendingByChatId: Record<string, boolean>;
   deliveryUncertainByChatId: Record<string, boolean>;
@@ -287,6 +293,9 @@ export type AgentAction =
   | { type: "agent/userMessageQueued"; chatId: string; content: string; media?: AgentChatMediaAttachment[]; focus?: boolean; deliveryUncertain?: boolean; target?: WebuiSessionTarget; clientRequestId?: string }
   | { type: "agent/queueItemRemoveStarted"; chatId: string; clientRequestId: string }
   | { type: "agent/queueItemRemoveFailed"; chatId: string; clientRequestId: string; error: AgentOperationError }
+  | { type: "agent/queueItemSteerStarted"; chatId: string; clientRequestId: string }
+  | { type: "agent/queueItemSteerReset"; chatId: string; clientRequestId: string }
+  | { type: "agent/queueItemSteerFailed"; chatId: string; clientRequestId: string; error: AgentOperationError }
   | { type: "agent/composerDraftUpdated"; scopeKey: string; value: string }
   | { type: "agent/composerPendingAttachmentsUpdated"; scopeKey: string; attachments: PendingAttachment[] }
   | { type: "agent/draftTargetUpdated"; scopeKey: string; target: WebuiSessionTarget }
@@ -368,6 +377,7 @@ export const initialAgentState: AgentState = {
   runStatusVersionByChatId: {},
   currentSessionsRequestRunStatusVersionByChatId: null,
   activeTurnIdByChatId: {},
+  activeTurnSourceByChatId: {},
   closedTurnIdsByChatId: {},
   optimisticSendingByChatId: {},
   deliveryUncertainByChatId: {},
@@ -574,6 +584,16 @@ export function agentReducer(state: AgentState, action: AgentAction): AgentState
         "chat",
         action.error
       );
+    case "agent/queueItemSteerStarted":
+      return updateQueuedMessageStatus(state, action.chatId, action.clientRequestId, "steering");
+    case "agent/queueItemSteerReset":
+      return updateQueuedMessageStatus(state, action.chatId, action.clientRequestId, "queued");
+    case "agent/queueItemSteerFailed":
+      return setOperationError(
+        updateQueuedMessageStatus(state, action.chatId, action.clientRequestId, "queued"),
+        "chat",
+        action.error
+      );
     case "agent/composerDraftUpdated":
       return updateComposerDraft(state, action.scopeKey, action.value);
     case "agent/composerPendingAttachmentsUpdated":
@@ -732,6 +752,9 @@ function queuedMessageFromWire(item: WebuiQueuedMessage): AgentQueuedMessage | n
     media: normalizeMedia(Array.isArray(item.media_urls) ? item.media_urls : []),
     queuedAt,
     source: turnSourceFromWire(item.source),
+    queueSurface: item.queue_surface === "chat_composer" ? "chat_composer" : null,
+    ...(item.turn_admission === "steer" ? { turnAdmission: "steer" as const } : {}),
+    ...(typeof item.turn_id === "string" && item.turn_id ? { turnId: item.turn_id } : {}),
     status: "queued"
   };
 }
@@ -850,19 +873,31 @@ function updateQueuedMessageStatus(
 function promoteQueuedMessage(
   state: AgentState,
   chatId: string,
-  item: AgentQueuedMessage
+  item: AgentQueuedMessage,
+  turnId: string | null = null,
+  queueSteerPending = false
 ): AgentState {
   const removed = removeQueuedMessageFromChat(state, chatId, item.clientRequestId).state;
   if (chatMessagesForId(removed, chatId).some(
     (message) => message.clientRequestId === item.clientRequestId
   )) return removed;
-  return queueOptimisticUserMessage(removed, {
+  const promoted = queueOptimisticUserMessage(removed, {
     type: "agent/userMessageQueued",
     chatId,
     content: item.content,
     media: item.media,
     focus: false,
     clientRequestId: item.clientRequestId
+  });
+  if (!queueSteerPending || !turnId) return promoted;
+  const messages = chatMessagesForId(promoted, chatId).map((message) => (
+    message.clientRequestId === item.clientRequestId
+      ? { ...message, turnId, queueSteerPending: true }
+      : message
+  ));
+  return syncCurrentMessages({
+    ...promoted,
+    messagesByChatId: { ...promoted.messagesByChatId, [chatId]: messages }
   });
 }
 
@@ -892,7 +927,13 @@ function applyQueueSnapshot(state: AgentState, event: MemmyAgentWsEvent): AgentS
     .filter((item): item is AgentQueuedMessage => item !== null && !startedIds.has(item.clientRequestId));
   let nextState = setQueuedMessagesForChat(state, event.chat_id, sortedQueuedMessages(waiting));
   for (const item of sortedQueuedMessages(started)) {
-    nextState = promoteQueuedMessage(nextState, event.chat_id, item);
+    nextState = promoteQueuedMessage(
+      nextState,
+      event.chat_id,
+      item,
+      item.turnId ?? null,
+      item.queueSurface === "chat_composer" && item.turnAdmission === "steer"
+    );
   }
   return {
     ...nextState,
@@ -1198,7 +1239,13 @@ function applyRecoveryRunningSnapshot(
   snapshot: MemmyAgentRunStatusSnapshot
 ): AgentState {
   const runStartedAt = snapshot.startedAt ?? Date.now();
-  const runningState = markChatRunning(state, chatId, runStartedAt, snapshot.turnId);
+  const runningState = markChatRunning(
+    state,
+    chatId,
+    runStartedAt,
+    snapshot.turnId,
+    snapshot.source
+  );
   return deriveTasks({
     ...runningState,
     activeTurnIdByChatId: { ...runningState.activeTurnIdByChatId, [chatId]: snapshot.turnId },
@@ -1659,6 +1706,26 @@ function messagesContainTurn(messages: AgentChatMessage[], turnId: string | null
   return Boolean(turnId && messages.some((message) => message.turnId === turnId));
 }
 
+function reconcileQueueSteerPendingMessages(
+  current: AgentChatMessage[],
+  canonical: AgentChatMessage[],
+  activeTurnId: string | null,
+  turnClosed: boolean
+): AgentChatMessage[] {
+  return current.flatMap((message) => {
+    if (!message.queueSteerPending || !message.clientRequestId || !message.turnId) {
+      return [message];
+    }
+    const persisted = canonical.find((candidate) => (
+      candidate.clientRequestId === message.clientRequestId
+      && candidate.turnId === message.turnId
+    ));
+    if (persisted) return [{ ...persisted, queueSteerPending: false }];
+    if (!turnClosed && activeTurnId === message.turnId) return [message];
+    return [];
+  });
+}
+
 function completeHistoryLoad(state: AgentState, thread: MemmyAgentWebuiThread, requestId: string): AgentState {
   const chatId = sessionKeyToChatId(thread.sessionKey);
   if (state.currentChatId !== chatId || state.currentHistoryRequestIdByChatId[chatId] !== requestId) {
@@ -1677,7 +1744,14 @@ function completeHistoryLoad(state: AgentState, thread: MemmyAgentWebuiThread, r
     || isStaleThreadSnapshot(currentMessages, snapshot)
     || (snapshot.length === 0 && chatBusy && currentMessages.length > 0)
     || (chatBusy && isSnapshotMissingLatestUserMessage(currentMessages, snapshot));
-  const messages = shouldKeepCurrent ? currentMessages : snapshot;
+  const messages = shouldKeepCurrent
+    ? reconcileQueueSteerPendingMessages(
+        currentMessages,
+        snapshot,
+        activeTurnId,
+        historyTurnClosed
+      )
+    : snapshot;
   const pendingCanonicalHydrateByChatId = { ...state.pendingCanonicalHydrateByChatId };
   const currentHistoryRequestIdByChatId = { ...state.currentHistoryRequestIdByChatId };
   const currentHistoryHydrateRequestIdByChatId = { ...state.currentHistoryHydrateRequestIdByChatId };
@@ -1753,7 +1827,14 @@ function completeHistoryHydrateLoad(state: AgentState, thread: MemmyAgentWebuiTh
     || isStaleThreadSnapshot(currentMessages, snapshot)
     || (snapshot.length === 0 && chatBusy && currentMessages.length > 0)
     || (chatBusy && isSnapshotMissingLatestUserMessage(currentMessages, snapshot));
-  const messages = shouldKeepCurrent ? currentMessages : snapshot;
+  const messages = shouldKeepCurrent
+    ? reconcileQueueSteerPendingMessages(
+        currentMessages,
+        snapshot,
+        activeTurnId,
+        hydrateTurnClosed
+      )
+    : snapshot;
   const pendingCanonicalHydrateByChatId = { ...state.pendingCanonicalHydrateByChatId };
   const currentHistoryHydrateRequestIdByChatId = { ...state.currentHistoryHydrateRequestIdByChatId };
   const historyVersionByChatId = { ...state.historyVersionByChatId };
@@ -2471,6 +2552,20 @@ function reduceWsEvent(state: AgentState, event: MemmyAgentWsEvent): AgentState 
       const item = queuedMessageFromWire(event.item);
       if (!item) return state;
       return applyQueueIncrement(state, event, (currentState) => {
+        const currentMessages = chatMessagesForId(currentState, event.chat_id!);
+        const withoutSteerPending = currentMessages.filter((message) => !(
+          message.clientRequestId === item.clientRequestId
+          && message.queueSteerPending === true
+        ));
+        if (withoutSteerPending.length !== currentMessages.length) {
+          currentState = syncCurrentMessages({
+            ...currentState,
+            messagesByChatId: {
+              ...currentState.messagesByChatId,
+              [event.chat_id!]: withoutSteerPending
+            }
+          });
+        }
         const current = currentState.queuedMessagesByChatId[event.chat_id!] ?? [];
         const index = current.findIndex(
           (candidate) => candidate.clientRequestId === item.clientRequestId
@@ -2491,8 +2586,27 @@ function reduceWsEvent(state: AgentState, event: MemmyAgentWsEvent): AgentState 
           (item) => item.clientRequestId === event.client_request_id
         ) ?? null;
         const item = eventItem ?? localItem;
-        return item ? promoteQueuedMessage(currentState, event.chat_id!, item) : currentState;
+        const turnId = eventTurnId(event);
+        const queueSteerPending = event.turn_admission === "steer" && Boolean(turnId);
+        return item
+          ? promoteQueuedMessage(
+              currentState,
+              event.chat_id!,
+              item,
+              turnId,
+              queueSteerPending
+            )
+          : currentState;
       });
+    }
+    case "message_steered": {
+      if (!event.chat_id || !event.client_request_id) return state;
+      const item = state.queuedMessagesByChatId[event.chat_id]?.find(
+        (candidate) => candidate.clientRequestId === event.client_request_id
+      );
+      return item
+        ? promoteQueuedMessage(state, event.chat_id, item, eventTurnId(event), true)
+        : state;
     }
     case "message_queue_removed":
       if (!event.chat_id || !event.client_request_id) return state;
@@ -3669,10 +3783,29 @@ function assistantMessageHasMedia(event: MemmyAgentWsEvent): boolean {
 function normalizeModelError(value: unknown): MemmyAgentModelError | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const record = value as Record<string, unknown>;
-  if (record.category !== "quota_exhausted" && record.category !== "model_failed") return undefined;
+  if (
+    record.category !== "quota_exhausted"
+    && record.category !== "image_input_unsupported"
+    && record.category !== "image_analysis_failed"
+    && record.category !== "model_failed"
+  ) return undefined;
   return {
     category: record.category,
-    ...(typeof record.detail === "string" ? { detail: record.detail } : {})
+    ...(typeof record.detail === "string" ? { detail: record.detail } : {}),
+    ...(typeof record.presetId === "string" ? { presetId: record.presetId } : {}),
+    ...(record.source === "account" || record.source === "byok" ? { source: record.source } : {}),
+    ...(typeof record.provider === "string" ? { provider: record.provider } : {}),
+    ...(typeof record.model === "string" ? { model: record.model } : {}),
+    ...(record.capability === "agent"
+      || record.capability === "memory_summary"
+      || record.capability === "memory_evolution"
+      || record.capability === "embedding"
+      || record.capability === "asr"
+      || record.capability === "image_generation"
+      ? { capability: record.capability }
+      : {}),
+    ...(typeof record.failedProvider === "string" ? { failedProvider: record.failedProvider } : {}),
+    ...(typeof record.failedModel === "string" ? { failedModel: record.failedModel } : {})
   };
 }
 
@@ -3702,8 +3835,19 @@ function appendAssistantMessage(state: AgentState, event: MemmyAgentWsEvent): Ag
     : updatedLast?.role === "assistant" && updatedLast.isStreaming && updatedLast.kind !== "trace" && updatedLast.kind !== "narration"
       ? updatedLastIndex
       : findLatestStreamingAssistantAnswerIndex(messages, turnId);
+  const preservePartialImageAnswer = targetIndex >= 0
+    && Boolean(messages[targetIndex]?.content.trim())
+    && (modelError?.category === "image_input_unsupported" || modelError?.category === "image_analysis_failed");
 
-  if (targetIndex >= 0) {
+  if (preservePartialImageAnswer) {
+    messages[targetIndex] = {
+      ...messages[targetIndex]!,
+      isStreaming: false,
+      reasoningStreaming: false
+    };
+  }
+
+  if (targetIndex >= 0 && !preservePartialImageAnswer) {
     const target = messages[targetIndex]!;
     messages[targetIndex] = {
       ...target,
@@ -4027,7 +4171,13 @@ function updateGoalRunClockForGoalState(
   };
 }
 
-function markChatRunning(state: AgentState, chatId: string, startedAt: number, turnId: string | null = null): AgentState {
+function markChatRunning(
+  state: AgentState,
+  chatId: string,
+  startedAt: number,
+  turnId: string | null = null,
+  source: AgentTurnSource | null = null
+): AgentState {
   const optimisticSendingByChatId = { ...state.optimisticSendingByChatId };
   delete optimisticSendingByChatId[chatId];
   return {
@@ -4036,6 +4186,10 @@ function markChatRunning(state: AgentState, chatId: string, startedAt: number, t
     goalRunClockByChatId: updateGoalRunClockForRunning(state, chatId, startedAt, turnId),
     runStatusVersionByChatId: bumpRunStatusVersion(state, chatId),
     activeTurnIdByChatId: turnId ? { ...state.activeTurnIdByChatId, [chatId]: turnId } : state.activeTurnIdByChatId,
+    activeTurnSourceByChatId: {
+      ...state.activeTurnSourceByChatId,
+      [chatId]: source
+    },
     optimisticSendingByChatId,
     completedUnseenByChatId: clearChatMapValue(state.completedUnseenByChatId, chatId)
   };
@@ -4107,12 +4261,17 @@ function markChatIdle(state: AgentState, chatId: string, options: {
     ...suppressionClearedState.activeTurnIdByChatId,
     [chatId]: null,
   };
+  const activeTurnSourceByChatId = {
+    ...suppressionClearedState.activeTurnSourceByChatId,
+    [chatId]: null,
+  };
   const nextState = deriveTasks({
     ...suppressionClearedState,
     runStartedAtByChatId: { ...suppressionClearedState.runStartedAtByChatId, [chatId]: null },
     goalRunClockByChatId: { ...suppressionClearedState.goalRunClockByChatId, [chatId]: null },
     runStatusVersionByChatId: bumpRunStatusVersion(suppressionClearedState, chatId),
     activeTurnIdByChatId,
+    activeTurnSourceByChatId,
     optimisticSendingByChatId,
     stopInFlightByChatId,
     completedUnseenByChatId,
@@ -4136,7 +4295,13 @@ function reconcileRunStatusSnapshot(state: AgentState, event: MemmyAgentWsEvent)
     if (isClosedTurn(state, chatId, turnId)) {
       return state;
     }
-    const nextState = markChatRunning(state, chatId, event.started_at, turnId);
+    const nextState = markChatRunning(
+      state,
+      chatId,
+      event.started_at,
+      turnId,
+      parseAgentTurnSource(event.source)
+    );
     return deriveTasks({
       ...nextState,
       isSending: chatId === state.currentChatId ? isChatBusy(nextState, chatId) : state.isSending
@@ -4158,7 +4323,13 @@ function updateRunStatus(state: AgentState, event: MemmyAgentWsEvent): AgentStat
   }
 
   if (event.status === "running" && typeof event.started_at === "number") {
-    const nextState = markChatRunning(state, chatId, event.started_at, eventTurnId(event));
+    const nextState = markChatRunning(
+      state,
+      chatId,
+      event.started_at,
+      eventTurnId(event),
+      parseAgentTurnSource(event.source)
+    );
     return deriveTasks({
       ...nextState,
       isSending: chatId === state.currentChatId ? isChatBusy(nextState, chatId) : state.isSending
@@ -4310,6 +4481,11 @@ function normalizeThreadMessage(message: Record<string, unknown>, index: number)
       : typeof message.turn_id === "string" && message.turn_id.trim()
         ? message.turn_id.trim()
         : undefined;
+    const clientRequestId = typeof message.clientRequestId === "string" && message.clientRequestId.trim()
+      ? message.clientRequestId.trim()
+      : typeof message.client_request_id === "string" && message.client_request_id.trim()
+        ? message.client_request_id.trim()
+        : undefined;
     const rawToolEvents = Array.isArray(message.toolEvents)
       ? message.toolEvents
       : Array.isArray(message.tool_events)
@@ -4325,6 +4501,7 @@ function normalizeThreadMessage(message: Record<string, unknown>, index: number)
       role,
       content,
       ...(turnId ? { turnId } : {}),
+      ...(clientRequestId ? { clientRequestId } : {}),
       ...(kind ? { kind } : {}),
       ...(typeof message.reasoning === "string" ? { reasoning: message.reasoning } : {}),
       ...(typeof message.reasoningStreaming === "boolean" ? { reasoningStreaming: message.reasoningStreaming } : {}),
