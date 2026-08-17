@@ -2687,6 +2687,13 @@ button {
   padding: 12px 16px 4px;
 }
 
+/* Reserve the complete action rail: model selector (180px), three 32px
+   buttons, gaps, and the right inset. This must be explicit because the
+   committed utility sheet does not include the former `pr-36` class. */
+.agent-composer-shell textarea.agent-composer-input--conversation {
+  padding-right: 19rem;
+}
+
 /* Keep this more specific than `.agent-composer-shell textarea` above so its generic line-height cannot shift the caret.
    Keep overflow-y:auto (not hidden): if single-line detection lags behind wrapped content, the field must stay scrollable. */
 .agent-composer-shell textarea.agent-composer-input--single {
@@ -3819,6 +3826,12 @@ code {
 }
 
 .memory-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.memory-log-tour-group {
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -6647,7 +6660,9 @@ input[type="checkbox"].check-sky:checked::after {
 }
 
 .provider-model-list {
+  max-width: 100%;
   max-height: 220px;
+  overflow-x: hidden;
   overflow-y: auto;
 }
 
@@ -6956,6 +6971,58 @@ input[type="checkbox"].check-sky:checked::after {
   cursor: pointer;
   font-family: inherit;
   font-size: 12px;
+}
+
+.task-model-picker__choice {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+}
+
+.task-model-picker__default-button {
+  margin-left: 8px;
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  justify-content: center;
+  padding: 3px 9px;
+  border-width: 1px;
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--color-action-sky) 42%, transparent);
+  border-radius: var(--radius-pill);
+  background: var(--color-background-paper);
+  color: var(--color-action-sky-hover);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  transition: border-color var(--duration-fast), background var(--duration-fast), color var(--duration-fast);
+}
+
+.task-model-picker__default-button:hover {
+  border-color: var(--color-action-sky);
+  background: color-mix(in srgb, var(--color-action-sky) 10%, transparent);
+}
+
+.task-model-picker__default-button[aria-pressed="true"] {
+  border-color: var(--color-action-sky);
+  background: var(--color-action-sky);
+  color: white;
+  font-weight: 700;
+}
+
+.task-model-picker__default-button[aria-pressed="true"]:hover {
+  border-color: var(--color-action-sky-hover);
+  background: var(--color-action-sky-hover);
+}
+
+.task-model-picker__default-button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-action-sky) 55%, transparent);
+  outline-offset: 2px;
 }
 
 .task-model-picker__option:hover:not(:disabled) {
@@ -10504,32 +10571,13 @@ input[type="checkbox"].check-sky:checked::after {
   }
 }
 
-.agent-goal-bar__usage,
-.agent-goal-bar__usage-full,
-.agent-goal-bar__usage-compact {
-  align-items: center;
-  white-space: nowrap;
-}
-
-.agent-goal-bar__usage {
+.agent-goal-bar__time {
   display: inline-flex;
+  align-items: center;
   flex: 0 0 auto;
   color: color-mix(in srgb, var(--color-text-ink) 58%, transparent);
   font-size: 0.72rem;
-}
-
-.agent-goal-bar__usage-full {
-  display: inline-flex;
-  gap: 0.3rem;
-}
-
-.agent-goal-bar__usage-compact {
-  display: none;
-  gap: 0.25rem;
-}
-
-.agent-goal-bar__separator {
-  color: color-mix(in srgb, var(--color-text-ink) 34%, transparent);
+  white-space: nowrap;
 }
 
 .agent-goal-bar__actions {
@@ -10601,8 +10649,7 @@ input[type="checkbox"].check-sky:checked::after {
   padding: 0.75rem;
 }
 
-.agent-goal-bar__form textarea,
-.agent-goal-bar__form input {
+.agent-goal-bar__form textarea {
   width: 100%;
   border: 1px solid color-mix(in srgb, var(--color-border-stone) 45%, transparent);
   border-radius: 0.5rem;
@@ -10657,14 +10704,6 @@ input[type="checkbox"].check-sky:checked::after {
 
   .agent-goal-bar__objective-viewport {
     flex-basis: 7rem;
-  }
-
-  .agent-goal-bar__usage-full {
-    display: none;
-  }
-
-  .agent-goal-bar__usage-compact {
-    display: inline-flex;
   }
 
   .agent-goal-bar__actions {

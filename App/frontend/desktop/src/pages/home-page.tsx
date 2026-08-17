@@ -11,6 +11,7 @@ import {
   type MemmyAgentProject,
   type MemmyAgentSessionSummary,
   type MemmyAgentSlashCommand,
+  type AgentTurnSource,
   type MemmyAgentUiLanguage,
   type MemmyAgentWebSocketConnection,
   type UploadAgentMediaInput,
@@ -165,6 +166,7 @@ const TRANSLATABLE_AGENT_ERROR_KEYS = new Set<MessageKey>([
   "home.agent.messageNotRecorded",
   "home.agent.executionInterrupted",
   "home.agent.recoveryTimeout",
+  "home.composer.emptyMessage",
   "home.goal.controlUnknown",
   "home.modelSelector.unavailable",
   "home.project.desktopRequired",
@@ -177,6 +179,11 @@ const TRANSLATABLE_AGENT_ERROR_KEYS = new Set<MessageKey>([
 ]);
 export const AGENT_ATTACHMENT_ACCEPT = agentAttachmentAccept();
 export const AGENT_MEDIA_ACCEPT = AGENT_ATTACHMENT_ACCEPT;
+
+export function isSteerableCurrentTurn(source: AgentTurnSource | null, isGoalActive: boolean): boolean {
+  if (!source) return isGoalActive;
+  return source.kind === "gui" && source.channel === "websocket";
+}
 export const AGENT_RESTART_STATE_STORAGE_KEY = "memmy-agent-restart-state";
 
 export interface ComposerSubmitButtonProps {
@@ -620,7 +627,16 @@ export function requestNewSessionReset(input: RequestNewSessionResetInput): bool
 
 export async function submitAgentComposerMessage(input: SubmitAgentComposerMessageInput): Promise<boolean> {
   const text = input.content.trim();
-  const displayText = input.displayContent?.trim() || text;
+  const trimmedDisplayContent = input.displayContent?.trim();
+  const displayText = trimmedDisplayContent || text;
+  if (
+    text === COMPOSER_GOAL_COMMAND
+    && trimmedDisplayContent !== undefined
+    && !trimmedDisplayContent
+  ) {
+    input.setComposerMediaError?.("home.composer.emptyMessage");
+    return false;
+  }
   if ((!text && !input.pendingAttachments.length) || !input.connection) {
     return false;
   }
@@ -873,6 +889,8 @@ export function HomePage() {
   const currentQueuedMessages = state.agent.currentChatId
     ? state.agent.queuedMessagesByChatId[state.agent.currentChatId] ?? []
     : [];
+  const currentGoal = state.agent.goalState?.goal_id ? state.agent.goalState : null;
+  const isCurrentGoalActive = currentGoal?.status === "active";
   const currentActiveTurnId = state.agent.currentChatId
     ? state.agent.activeTurnIdByChatId[state.agent.currentChatId] ?? null
     : null;
@@ -885,8 +903,7 @@ export function HomePage() {
     && state.agent.recoveringGeneration === null
     && state.agent.runStartedAtByChatId[state.agent.currentChatId]
     && currentActiveTurnId
-    && currentActiveTurnSource?.kind === "gui"
-    && currentActiveTurnSource.channel === "websocket"
+    && isSteerableCurrentTurn(currentActiveTurnSource, Boolean(isCurrentGoalActive))
     && !currentQueuedMessages.some((item) => item.status === "steering")
   );
   const hasActiveConversation = hasActiveAgentConversation(state.agent.currentChatId, state.agent.messages.length);
@@ -914,8 +931,6 @@ export function HomePage() {
       state.agent.optimisticSendingByChatId[state.agent.currentChatId]
     )
   );
-  const currentGoal = state.agent.goalState?.goal_id ? state.agent.goalState : null;
-  const isCurrentGoalActive = currentGoal?.status === "active";
   const goalMutationPending = state.agent.currentChatId
     ? state.agent.goalMutationPendingByChatId[state.agent.currentChatId] ?? null
     : null;
@@ -1754,8 +1769,7 @@ export function HomePage() {
       || !connection
       || generation === null
       || !turnId
-      || source?.kind !== "gui"
-      || source.channel !== "websocket"
+      || !isSteerableCurrentTurn(source, Boolean(isCurrentGoalActive))
       || item?.source.kind !== "gui"
       || item.queueSurface !== "chat_composer"
       || item.content.trimStart().startsWith("/")
@@ -1933,8 +1947,7 @@ export function HomePage() {
         goalId: request.goalId,
         action: request.action,
         requestId,
-        ...(request.objective === undefined ? {} : { objective: request.objective }),
-        ...(request.tokenBudget === undefined ? {} : { tokenBudget: request.tokenBudget })
+        ...(request.objective === undefined ? {} : { objective: request.objective })
       }, expectedGeneration);
     } catch (error) {
       dispatch(agentActions.operationFailed("chat", createAgentOperationError({
@@ -2803,7 +2816,7 @@ export function HomePage() {
                       }}
                       onKeyDown={handleComposerKeyDown}
                       onPaste={handleComposerPaste}
-                      className={`${isComposerSingleLine ? "agent-composer-input--single " : ""}${selectedComposerCommand ? "agent-composer-input--command-selected " : ""}block w-full pl-4 pr-36 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40`}
+                      className={`${isComposerSingleLine ? "agent-composer-input--single " : ""}${selectedComposerCommand ? "agent-composer-input--command-selected " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40`}
                     />
                     <div className={`composer-actions absolute right-2.5 z-50 ${centerComposerControls ? "top-1/2 -translate-y-1/2" : "bottom-2"}`}>
                       <AgentModelSelector

@@ -36,7 +36,7 @@ const components: Components = {
 export function MemoryMarkdown(props: MemoryMarkdownProps) {
   return (
     <div className="memory-markdown">
-      <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]} components={components} skipHtml>
+      <ReactMarkdown remarkPlugins={[[remarkGfm, { singleTilde: false }], remarkBreaks]} components={components} skipHtml>
         {props.text}
       </ReactMarkdown>
     </div>

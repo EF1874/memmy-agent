@@ -31,6 +31,7 @@ import {
   isAgentConversationAtBottom,
   isComposingKeyboardEvent,
   isSingleLineComposerInput,
+  isSteerableCurrentTurn,
   parseStoredAgentRestartState,
   parseComposerCommandDraft,
   readFocusedAgentChatId,
@@ -66,6 +67,14 @@ function mockCallOrder(fn: { mock: { invocationCallOrder: readonly number[] } },
 }
 
 describe("HomePage", () => {
+  it("allows Goal steering when source metadata is missing without opening TUI or IM turns", () => {
+    expect(isSteerableCurrentTurn(null, true)).toBe(true);
+    expect(isSteerableCurrentTurn(null, false)).toBe(false);
+    expect(isSteerableCurrentTurn({ kind: "gui", channel: "websocket" }, false)).toBe(true);
+    expect(isSteerableCurrentTurn({ kind: "tui", channel: "websocket" }, true)).toBe(false);
+    expect(isSteerableCurrentTurn({ kind: "im", channel: "slack" }, true)).toBe(false);
+  });
+
   it("renders the first-phase agent input controls", () => {
     const html = renderToString(
       <AppProviders>
@@ -531,9 +540,37 @@ describe("HomePage", () => {
   it("centers the composer controls only while the session composer is one line", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
 
-    expect(source).toContain('${isComposerSingleLine ? "agent-composer-input--single " : ""}${selectedComposerCommand ? "agent-composer-input--command-selected " : ""}block w-full pl-4 pr-36 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40');
+    expect(source).toContain('${isComposerSingleLine ? "agent-composer-input--single " : ""}${selectedComposerCommand ? "agent-composer-input--command-selected " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40');
     expect(source).toContain('centerComposerControls ? "top-1/2 -translate-y-1/2" : "bottom-2"');
     expect(source).toContain("COMPOSER_SINGLE_LINE_HEIGHT_PX = 52");
+  });
+
+  it("reserves the conversation composer action rail from long text", () => {
+    const source = readFileSync(homePageSourcePath, "utf8");
+    const composerStart = source.indexOf('className="agent-conversation-composer"');
+    const textareaStart = source.indexOf("<textarea", composerStart);
+    const actionsStart = source.indexOf("composer-actions absolute", textareaStart);
+    const textareaSource = source.slice(textareaStart, actionsStart);
+
+    expect(composerStart).toBeGreaterThan(0);
+    expect(textareaStart).toBeGreaterThan(composerStart);
+    expect(actionsStart).toBeGreaterThan(textareaStart);
+    expect(textareaSource).toContain("agent-composer-input--conversation");
+    expect(textareaSource).not.toContain("pr-36");
+
+    const window = new Window();
+    const style = window.document.createElement("style");
+    style.textContent = readFileSync(stylesSourcePath, "utf8").replace(/^@import[^;]+;$/gm, "");
+    window.document.head.append(style);
+
+    const shell = window.document.createElement("div");
+    shell.className = "agent-composer-shell";
+    const textarea = window.document.createElement("textarea");
+    textarea.className = "agent-composer-input--conversation";
+    shell.append(textarea);
+    window.document.body.append(shell);
+
+    expect(window.getComputedStyle(textarea).paddingRight).toBe("304px");
   });
 
   it("keeps the single-line composer text and caret vertically centered", () => {
@@ -1403,6 +1440,44 @@ describe("HomePage", () => {
       focus: true,
       clientRequestId: expect.any(String)
     });
+  });
+
+  it("rejects an empty Goal objective with a localized toast before any Agent call", async () => {
+    const newChat = vi.fn();
+    const submitMessage = vi.fn(async () => ({ status: "accepted" as const }));
+    const dispatch = vi.fn();
+    const setComposerMediaError = vi.fn();
+    const clearComposer = vi.fn();
+    const track = vi.fn();
+    const uploadAgentMedia = vi.fn(async () => []);
+
+    await expect(submitAgentComposerMessage({
+      chatId: "chat-goal",
+      connection: {
+        getReadyGeneration: () => 1,
+        newChat,
+        submitMessage
+      },
+      content: "/goal ",
+      displayContent: "",
+      pendingAttachments: [],
+      uploadAgentMedia,
+      dispatch,
+      track,
+      clearComposer,
+      setComposerMediaError
+    })).resolves.toBe(false);
+
+    expect(setComposerMediaError).toHaveBeenCalledWith("home.composer.emptyMessage");
+    const toastMessage = agentErrorText("home.composer.emptyMessage");
+    expect(toastMessage).toBe("输入消息，点击发送以开始使用");
+    expect(renderToString(<AgentOperationErrorSlot message={toastMessage} />)).toContain('role="alert"');
+    expect(newChat).not.toHaveBeenCalled();
+    expect(submitMessage).not.toHaveBeenCalled();
+    expect(uploadAgentMedia).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(track).not.toHaveBeenCalled();
+    expect(clearComposer).not.toHaveBeenCalled();
   });
 
   it("newChat failure keeps composer input for retry", async () => {
