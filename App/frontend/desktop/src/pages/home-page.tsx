@@ -2080,6 +2080,7 @@ export function HomePage() {
     setSlashMenuDismissed(false);
     setSelectedCommandIndex(0);
     if (
+      !selectedComposerCommand &&
       slashQueryFromInput(value) != null &&
       clients?.memmyAgent &&
       slashCommandsRef.current.length === 0 &&
