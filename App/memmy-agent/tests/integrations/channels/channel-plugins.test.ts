@@ -638,10 +638,7 @@ describe("channel registry and plugins", () => {
     const manager = new ChannelManager(new MessageBus());
     const channel = new FakePluginChannel({}, manager.bus);
     manager.register(channel);
-    const send = vi.fn(async (channel: BaseChannel, message: OutboundMessage) => {
-      void channel;
-      void message;
-    });
+    const send = vi.fn(async (channel: BaseChannel, message: OutboundMessage) => undefined);
     manager.sendWithRetry = send as any;
     process.env[RESTART_NOTIFY_CHANNEL_ENV] = "fakeplugin";
     process.env[RESTART_NOTIFY_CHAT_ID_ENV] = "chat-1";

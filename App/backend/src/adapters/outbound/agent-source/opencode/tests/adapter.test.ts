@@ -7,12 +7,6 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createOpencodeSourceAdapter } from "../index.js";
 import { readOpencodeDatabase } from "../db-reader.js";
 
-const FAKE_OPENAI_API_KEY = [
-  "sk-",
-  "abcdefghijklmnopqrstuvwxyz",
-  "ABCDEFGHIJKLMN"
-].join("");
-
 let tempDir: string | undefined;
 
 afterEach(() => {
@@ -33,7 +27,7 @@ describe("opencode source adapter", () => {
         messageId: "opencode-db-message-user",
         conversationId: "opencode-db-session-1",
         role: "user",
-        content: `Please remember OPENAI_API_KEY=${FAKE_OPENAI_API_KEY}`,
+        content: "Please remember OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN",
         workspacePath: fixture.workspacePath,
         gitRoot: fixture.workspacePath
       }),

@@ -569,7 +569,7 @@ describe("MemmyMemoryHook", () => {
 
       expect(warnSpy).toHaveBeenCalledTimes(1);
 
-      client.openSession = vi.fn(async () => ({
+      client.openSession = vi.fn(async (_body: any) => ({
         sessionId: "session-recovered",
         userId: "local-user",
         resumed: false,

@@ -4,7 +4,7 @@ import type { ByokTokenUsageEvent } from "../../../src/integrations/byok-token-u
 
 describe("ByokTokenUsageRecorder", () => {
   it("records auxiliary Agent usage only with a committed BYOK model context", async () => {
-    const client = { recordEvent: vi.fn(async () => undefined) };
+    const client = { recordEvent: vi.fn(async (_event: ByokTokenUsageEvent) => undefined) };
     const recorder = new ByokTokenUsageRecorder({ client });
 
     await expect(recorder.recordAgentChatUsage({
@@ -36,7 +36,7 @@ describe("ByokTokenUsageRecorder", () => {
   });
 
   it("skips account contexts and missing model provenance", async () => {
-    const client = { recordEvent: vi.fn(async () => undefined) };
+    const client = { recordEvent: vi.fn(async (_event: ByokTokenUsageEvent) => undefined) };
     const recorder = new ByokTokenUsageRecorder({ client });
     const common = { usage: { prompt_tokens: 2 }, sessionKey: "websocket:chat-1" };
 
@@ -46,7 +46,7 @@ describe("ByokTokenUsageRecorder", () => {
   });
 
   it("does not record empty usage", async () => {
-    const client = { recordEvent: vi.fn(async () => undefined) };
+    const client = { recordEvent: vi.fn(async (_event: ByokTokenUsageEvent) => undefined) };
     const recorder = new ByokTokenUsageRecorder({ client });
     await expect(recorder.recordAgentChatUsage({
       usage: {},
@@ -58,7 +58,7 @@ describe("ByokTokenUsageRecorder", () => {
 
   it("does not throw when the local API client fails", async () => {
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    const client = { recordEvent: vi.fn(async () => { throw new Error("backend down"); }) };
+    const client = { recordEvent: vi.fn(async (_event: ByokTokenUsageEvent) => { throw new Error("backend down"); }) };
     const recorder = new ByokTokenUsageRecorder({ client });
 
     await expect(recorder.recordAgentChatUsage({

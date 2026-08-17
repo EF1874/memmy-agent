@@ -774,7 +774,7 @@ export class StreamingFileEditTracker {
       const action = /"action"\s*:\s*"(replace|add|delete)"/.exec(segment)?.[1] ?? "replace";
       const oldText = extractJsonStringPrefix(segment, "oldText") ?? "";
       const newText = extractJsonStringPrefix(segment, "newText") ?? "";
-      const added = ["replace", "add"].includes(action) ? textLineCount(newText) : 0;
+      let added = ["replace", "add"].includes(action) ? textLineCount(newText) : 0;
       let deleted = ["replace", "delete"].includes(action) ? textLineCount(oldText) : 0;
       let fileState = state.patchFiles.get(match.rawPath);
       if (!fileState) {

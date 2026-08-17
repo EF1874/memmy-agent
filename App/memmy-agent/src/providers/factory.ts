@@ -162,7 +162,7 @@ export function makeProvider(
   }
 
   const opts = typeof optsOrModel === "string" ? { model: optsOrModel } : optsOrModel;
-  resolveModelPreset(configOrName, opts);
+  const resolved = resolveModelPreset(configOrName, opts);
   let provider = makeProviderCore(configOrName, opts);
   const fallbackPresets = resolveFallbackPresets(configOrName);
   if (fallbackPresets.length) {

@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { Box, Text, render, useApp, useCursor, useInput, useStdout } from "ink";
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import stringWidth from "string-width";
 import { Config } from "../../config/schema.js";
 import { getConfigPath, getWorkspacePath } from "../../config/paths.js";
@@ -153,7 +153,6 @@ function modelSelectionLabel(selection: TuiModelSelection): string {
 }
 
 function modelLabel(_config: Config): string {
-  void _config;
   const resolved = resolveModelSelection({});
   return resolved ? modelSelectionLabel(resolved) : "(none configured)";
 }

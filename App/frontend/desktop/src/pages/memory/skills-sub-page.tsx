@@ -264,12 +264,14 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
 
   useEffect(() => {
     void refresh().catch(() => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.client, t, demoEnabled]);
 
   useEffect(() => {
     if (props.openRequest) {
       openSkill(props.openRequest.id);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.openRequest?.requestId]);
 
   return (
@@ -901,7 +903,7 @@ function parseJsonString(value: unknown): unknown {
   }
 
   const trimmed = value.trim();
-  if (!trimmed || !/^[[{"]/.test(trimmed)) {
+  if (!trimmed || !/^[\[{"]/.test(trimmed)) {
     return value;
   }
 

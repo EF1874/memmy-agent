@@ -211,7 +211,6 @@ describe("AgentRunner tool execution", () => {
       }
 
       async execute(_params: Record<string, any> = {}, context?: ToolExecutionContext): Promise<string> {
-        void _params;
         if (context) receivedContexts.push(context);
         entered();
         return await new Promise((resolve, reject) => {

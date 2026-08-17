@@ -78,7 +78,6 @@ export class SubagentHook extends AgentHook {
   }
 
   override async beforeExecuteTools(context: AgentHookContext): Promise<void> {
-    void context;
     // Hook point retained for parity with memmy logging and tests.
   }
 

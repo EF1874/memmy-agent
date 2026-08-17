@@ -283,7 +283,6 @@ export abstract class LLMProvider {
   async runAccountImageTextFallback(
     _args: AccountImageTextFallbackArgs,
   ): Promise<LLMResponse | null> {
-    void _args;
     return null;
   }
 

@@ -699,6 +699,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
       document.getElementById("pet-avatar")?.scrollIntoView({ behavior: "smooth", block: "start" });
     }, 0);
     // Mount-only deep-link sync; activeTabProp is read once for controlled vs local.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional
   }, []);
 
   useEffect(() => {

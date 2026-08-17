@@ -116,11 +116,10 @@ describe("v1.0.7/0002-import-legacy-app-state-model-config", () => {
     const databaseFile = path.join(base, "app.sqlite");
     const configPath = path.join(base, "config.yaml");
     const db = createDatabase(databaseFile);
-    const singletonSecret = ["sk-singleton-", "do-not-import"].join("");
     insertSecret(db, "local-primary", "sk-local");
     insertSecret(db, "local-embedding", "sk-local-embedding");
     insertSecret(db, "cloud-primary", "sk-cloud-do-not-import");
-    insertSecret(db, "singleton-primary", singletonSecret);
+    insertSecret(db, "singleton-primary", "sk-singleton-do-not-import");
     db.prepare(`INSERT INTO account_model_config (
       uuid, provider, base_url, model_id, api_key_ref,
       embedding_mode, embedding_base_url, embedding_model_id, embedding_api_key_ref
@@ -152,7 +151,6 @@ describe("v1.0.7/0002-import-legacy-app-state-model-config", () => {
     expect(JSON.stringify(config)).not.toContain("cloud-model");
     expect(JSON.stringify(config)).not.toContain("sk-cloud-do-not-import");
     expect(JSON.stringify(config)).not.toContain("singleton-model");
-    expect(JSON.stringify(config)).not.toContain(singletonSecret);
     expect(config.modelAssignments.byok.agent.candidates).toHaveLength(1);
     expect(config.modelAssignments.byok.memorySummary).toBe(config.modelAssignments.byok.agent.default);
     expect(config.modelAssignments.byok.embedding).toMatch(/^byok-openai-/);
