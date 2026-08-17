@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, normalize } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   resolveClaudeCodeHomeDirectory,
@@ -6,6 +6,8 @@ import {
   resolveCodexHomeDirectory,
   resolveCodexSessionsDirectory,
   resolveCursorDataPaths,
+  resolveDeepseekHarnessHomeDirectory,
+  resolveDeepseekHarnessSessionsDirectory,
   resolveHermesHomeDirectory,
   resolveOpencodeConfigDirectory,
   resolveOpencodeDataDirectory,
@@ -25,6 +27,7 @@ const ENVIRONMENT_VARIABLES = [
   "CLAUDE_CONFIG_DIR",
   "CODEBUDDY_CONFIG_DIR",
   "CODEX_HOME",
+  "DSH_HOME",
   "HERMES_HOME",
   "OPENCODE_CONFIG_DIR",
   "OPENCLAW_CONFIG_PATH",
@@ -51,6 +54,7 @@ describe("agent paths", () => {
   it("honors each Agent's configured home or state directory", () => {
     process.env.CLAUDE_CONFIG_DIR = "/tmp/claude-home";
     process.env.CODEX_HOME = "/tmp/codex-home";
+    process.env.DSH_HOME = "/tmp/dsh-home";
     process.env.HERMES_HOME = "/tmp/hermes-home";
     process.env.OPENCLAW_STATE_DIR = "/tmp/openclaw-state";
     process.env.OPENCLAW_CONFIG_PATH = "/tmp/openclaw-config.json";
@@ -58,24 +62,26 @@ describe("agent paths", () => {
     process.env.QWENWORK_CONFIG_DIR = "/tmp/qwenwork-home";
     process.env.WORKBUDDY_CONFIG_DIR = "/tmp/workbuddy-home";
 
-    expect(resolveClaudeCodeHomeDirectory()).toBe("/tmp/claude-home");
-    expect(resolveCodexHomeDirectory()).toBe("/tmp/codex-home");
-    expect(resolveHermesHomeDirectory()).toBe("/tmp/hermes-home");
-    expect(resolveOpenclawStateDirectory()).toBe("/tmp/openclaw-state");
-    expect(resolveOpenclawConfigPath()).toBe("/tmp/openclaw-config.json");
-    expect(resolvePiAgentDirectory()).toBe("/tmp/pi-agent");
-    expect(resolveQwenworkHomeDirectory()).toBe("/tmp/qwenwork-home");
-    expect(resolveWorkbuddyHomeDirectory()).toBe("/tmp/workbuddy-home");
+    expect(resolveClaudeCodeHomeDirectory()).toBe(normalize("/tmp/claude-home"));
+    expect(resolveCodexHomeDirectory()).toBe(normalize("/tmp/codex-home"));
+    expect(resolveDeepseekHarnessHomeDirectory()).toBe(normalize("/tmp/dsh-home"));
+    expect(resolveDeepseekHarnessSessionsDirectory()).toBe(join(normalize("/tmp/dsh-home"), "sessions"));
+    expect(resolveHermesHomeDirectory()).toBe(normalize("/tmp/hermes-home"));
+    expect(resolveOpenclawStateDirectory()).toBe(normalize("/tmp/openclaw-state"));
+    expect(resolveOpenclawConfigPath()).toBe(normalize("/tmp/openclaw-config.json"));
+    expect(resolvePiAgentDirectory()).toBe(normalize("/tmp/pi-agent"));
+    expect(resolveQwenworkHomeDirectory()).toBe(normalize("/tmp/qwenwork-home"));
+    expect(resolveWorkbuddyHomeDirectory()).toBe(normalize("/tmp/workbuddy-home"));
   });
 
   it("uses WorkBuddy's official config directory variables", () => {
     process.env.WORKBUDDY_CONFIG_DIR = "/tmp/workbuddy-current";
     process.env.CODEBUDDY_CONFIG_DIR = "/tmp/workbuddy-legacy-product-name";
 
-    expect(resolveWorkbuddyHomeDirectory()).toBe("/tmp/workbuddy-current");
+    expect(resolveWorkbuddyHomeDirectory()).toBe(normalize("/tmp/workbuddy-current"));
 
     process.env.WORKBUDDY_CONFIG_DIR = " ";
-    expect(resolveWorkbuddyHomeDirectory()).toBe("/tmp/workbuddy-legacy-product-name");
+    expect(resolveWorkbuddyHomeDirectory()).toBe(normalize("/tmp/workbuddy-legacy-product-name"));
   });
 
   it("uses OpenCode's custom config directory and XDG data directory", () => {
@@ -87,10 +93,10 @@ describe("agent paths", () => {
     expect(resolveOpencodeDataDirectory()).toBe(join("/tmp/xdg-data", "opencode"));
 
     process.env.OPENCODE_CONFIG_DIR = "/tmp/custom-opencode";
-    expect(resolveOpencodeConfigDirectory()).toBe("/tmp/custom-opencode");
+    expect(resolveOpencodeConfigDirectory()).toBe(normalize("/tmp/custom-opencode"));
   });
 
-  it("resolves all nine Agent source paths on macOS", () => {
+  it("resolves all ten Agent source paths on macOS", () => {
     const options = {
       platform: "darwin" as const,
       homeDirectory: "/Users/alice",
@@ -104,6 +110,7 @@ describe("agent paths", () => {
       opencode: resolveOpencodeDatabasePath(options),
       openclaw: resolveOpenclawStateDirectory(options),
       hermes: resolveHermesHomeDirectory(options),
+      deepseekHarness: resolveDeepseekHarnessSessionsDirectory(options),
       pi: resolvePiSessionsDirectory(options),
       qwenwork: resolveQwenworkProjectsDirectory(options),
       workbuddy: resolveWorkbuddyProjectsDirectory(options)
@@ -114,13 +121,14 @@ describe("agent paths", () => {
       opencode: "/Users/alice/.local/share/opencode/opencode.db",
       openclaw: "/Users/alice/.openclaw",
       hermes: "/Users/alice/.hermes",
+      deepseekHarness: "/Users/alice/.dsh/sessions",
       pi: "/Users/alice/.pi/agent/sessions",
       qwenwork: "/Users/alice/.qwenworkcn/projects",
       workbuddy: "/Users/alice/.workbuddy/projects"
     });
   });
 
-  it("resolves all nine Agent source paths on Windows", () => {
+  it("resolves all ten Agent source paths on Windows", () => {
     const options = {
       platform: "win32",
       homeDirectory: "C:\\Users\\alice",
@@ -136,6 +144,7 @@ describe("agent paths", () => {
       opencode: resolveOpencodeDatabasePath(options),
       openclaw: resolveOpenclawStateDirectory(options),
       hermes: resolveHermesHomeDirectory(options),
+      deepseekHarness: resolveDeepseekHarnessSessionsDirectory(options),
       pi: resolvePiSessionsDirectory(options),
       qwenwork: resolveQwenworkProjectsDirectory(options),
       workbuddy: resolveWorkbuddyProjectsDirectory(options)
@@ -146,6 +155,7 @@ describe("agent paths", () => {
       opencode: "C:\\Users\\alice\\.local\\share\\opencode\\opencode.db",
       openclaw: "C:\\Users\\alice\\.openclaw",
       hermes: "C:\\Users\\alice\\.hermes",
+      deepseekHarness: "C:\\Users\\alice\\.dsh\\sessions",
       pi: "C:\\Users\\alice\\.pi\\agent\\sessions",
       qwenwork: "C:\\Users\\alice\\.qwenworkcn\\projects",
       workbuddy: "C:\\Users\\alice\\.workbuddy\\projects"

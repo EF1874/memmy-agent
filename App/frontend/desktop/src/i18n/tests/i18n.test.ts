@@ -61,7 +61,7 @@ describe("desktop i18n helpers", () => {
     expect(messageCatalogs["en-US"]["home.agent.platformApiFallback"]).toBe("Sorry, I couldn't get a valid response. Please try again in a moment.");
   });
 
-  it("keeps the four governed error notices aligned in Chinese and English", () => {
+  it("keeps governed error notices aligned in Chinese and English", () => {
     expect(messageCatalogs["zh-CN"]["agent.error.quotaExceeded"])
       .toBe("当前模型 Token 余额不足，请更换模型后重试");
     expect(messageCatalogs["en-US"]["agent.error.quotaExceeded"])
@@ -70,6 +70,14 @@ describe("desktop i18n helpers", () => {
       .toBe("模型请求失败，请稍后重试");
     expect(messageCatalogs["en-US"]["agent.error.modelFailed"])
       .toBe("The model request failed. Please try again later.");
+    expect(messageCatalogs["zh-CN"]["agent.error.imageInputUnsupported"])
+      .toBe("当前模型不支持图片输入，请切换到支持多模态能力的模型后重试");
+    expect(messageCatalogs["en-US"]["agent.error.imageInputUnsupported"])
+      .toBe("The current model does not support image input. Switch to a multimodal model and try again.");
+    expect(messageCatalogs["zh-CN"]["agent.error.imageAnalysisFailed"])
+      .toBe("图片解析失败，请稍后重试");
+    expect(messageCatalogs["en-US"]["agent.error.imageAnalysisFailed"])
+      .toBe("Image analysis failed. Please try again later.");
     expect(messageCatalogs["zh-CN"]["memory.memories.processing.quotaExhaustedTitle"])
       .toBe("当前模型 Token 余额不足，记忆处理失败，请更换模型后重试");
     expect(messageCatalogs["en-US"]["memory.memories.processing.quotaExhaustedTitle"])

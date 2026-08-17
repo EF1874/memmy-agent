@@ -166,7 +166,9 @@ describe("channel admin API", () => {
     }));
     channel.pollLoginSession = vi.fn(async () => ({ status: "connected" }));
     manager.nextEnsureChannel = channel;
-    const admin = createChannelAdmin(manager as any);
+    const admin = createChannelAdmin(manager as any, {
+      loadChannelSection: () => ({ enabled: true, appId: "cli_memmy" }),
+    });
 
     await expect(admin.startWeixinLogin()).resolves.toMatchObject({
       status: "pendingQr",

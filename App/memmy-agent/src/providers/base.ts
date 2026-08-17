@@ -1,5 +1,12 @@
-import { imagePlaceholderText } from "../utils/helpers.js";
-import type { ProviderErrorCategory } from "./provider-error-classifier.js";
+import {
+  classifyImageInputUnsupported,
+  type ProviderErrorCategory,
+} from "./provider-error-classifier.js";
+
+export type AccountImageTextFallbackArgs = {
+  messages: Record<string, any>[];
+  signal?: AbortSignal | null;
+};
 
 export class ToolCallRequest {
   id: string;
@@ -57,6 +64,10 @@ export class LLMResponse {
   errorCode?: string | null;
   errorRetryAfterS?: number | null;
   errorShouldRetry?: boolean | null;
+  actualProvider?: string | null;
+  actualModel?: string | null;
+  failedProvider?: string | null;
+  failedModel?: string | null;
   errorCategory?: ProviderErrorCategory | null;
 
   constructor(init: {
@@ -73,6 +84,10 @@ export class LLMResponse {
     errorCode?: string | null;
     errorRetryAfterS?: number | null;
     errorShouldRetry?: boolean | null;
+    actualProvider?: string | null;
+    actualModel?: string | null;
+    failedProvider?: string | null;
+    failedModel?: string | null;
     errorCategory?: ProviderErrorCategory | null;
   }) {
     this.content = init.content;
@@ -88,6 +103,10 @@ export class LLMResponse {
     this.errorCode = init.errorCode ?? null;
     this.errorRetryAfterS = init.errorRetryAfterS ?? null;
     this.errorShouldRetry = init.errorShouldRetry ?? null;
+    this.actualProvider = init.actualProvider ?? null;
+    this.actualModel = init.actualModel ?? null;
+    this.failedProvider = init.failedProvider ?? null;
+    this.failedModel = init.failedModel ?? null;
     this.errorCategory = init.errorCategory ?? null;
   }
 
@@ -257,6 +276,48 @@ export abstract class LLMProvider {
     signal?: AbortSignal | null;
   }): Promise<LLMResponse>;
 
+  supportsAccountImageTextFallback(): boolean {
+    return false;
+  }
+
+  async runAccountImageTextFallback(
+    _args: AccountImageTextFallbackArgs,
+  ): Promise<LLMResponse | null> {
+    return null;
+  }
+
+  static containsImageInput(messages: Record<string, any>[]): boolean {
+    return messages.some((message) => (
+      Array.isArray(message.content)
+      && message.content.some((block: any) => block?.type === "image_url")
+    ));
+  }
+
+  static classifyImageInputUnsupportedResponse(
+    response: LLMResponse,
+    messages: Record<string, any>[],
+  ): LLMResponse {
+    if (response.finishReason !== "error" || response.errorCategory === "quota_exhausted") {
+      return response;
+    }
+    const hasImageInput = LLMProvider.containsImageInput(messages);
+    if (!hasImageInput) {
+      if (response.errorCategory === "image_input_unsupported") response.errorCategory = null;
+      return response;
+    }
+    const category = classifyImageInputUnsupported({
+      hasImageInput,
+      httpStatus: response.errorStatusCode ?? null,
+      errorKind: response.errorKind ?? null,
+      errorType: response.errorType ?? null,
+      errorCode: response.errorCode ?? null,
+      content: response.content,
+      errorCategory: response.errorCategory ?? null,
+    });
+    if (category) response.errorCategory = category;
+    return response;
+  }
+
   static isTransientError(content: string | null | undefined): boolean {
     const text = (content ?? "").toLowerCase();
     return this.TRANSIENT_ERROR_MARKERS.some((marker) => text.includes(marker));
@@ -297,7 +358,11 @@ export abstract class LLMProvider {
   }
 
   static isTransientResponse(response: LLMResponse): boolean {
-    if (response.errorCategory === "quota_exhausted") return false;
+    if (
+      response.errorCategory === "quota_exhausted"
+      || response.errorCategory === "image_input_unsupported"
+      || response.errorCategory === "image_analysis_failed"
+    ) return false;
     if (response.errorShouldRetry != null) return Boolean(response.errorShouldRetry);
     if (response.errorStatusCode != null) {
       const status = response.errorStatusCode;
@@ -354,37 +419,6 @@ export abstract class LLMProvider {
       merged.splice(firstNonSystem, 0, { role: "user", content: SYNTHETIC_USER_CONTENT });
     }
     return merged;
-  }
-
-  static stripImageContent(messages: Record<string, any>[]): Record<string, any>[] | null {
-    let found = false;
-    const result = messages.map((msg) => {
-      if (!Array.isArray(msg.content)) return msg;
-      const content = msg.content.map((block: any) => {
-        if (block?.type === "image_url") {
-          found = true;
-          return { type: "text", text: imagePlaceholderText(block.meta?.path ?? "", "[image omitted]") };
-        }
-        return block;
-      });
-      return { ...msg, content };
-    });
-    return found ? result : null;
-  }
-
-  static stripImageContentInplace(messages: Record<string, any>[]): boolean {
-    let found = false;
-    for (const msg of messages) {
-      if (!Array.isArray(msg.content)) continue;
-      msg.content = msg.content.map((block: any) => {
-        if (block?.type === "image_url") {
-          found = true;
-          return { type: "text", text: imagePlaceholderText(block.meta?.path ?? "", "[image omitted]") };
-        }
-        return block;
-      });
-    }
-    return found;
   }
 
   async chatStream(args: Parameters<LLMProvider["chat"]>[0] & {
@@ -501,17 +535,16 @@ export abstract class LLMProvider {
     });
   }
 
-	  protected async runWithRetry<TArgs extends Parameters<LLMProvider["chat"]>[0]>(
-	    args: TArgs & {
-	      retryMode?: "standard" | "persistent";
-	      onRetryWait?: (message: string) => Promise<void> | void;
-	    },
-	    operation: (requestArgs: TArgs) => Promise<LLMResponse>,
-	  ): Promise<LLMResponse> {
-	    const retryMode = args.retryMode ?? "standard";
+  protected async runWithRetry<TArgs extends Parameters<LLMProvider["chat"]>[0]>(
+    args: TArgs & {
+      retryMode?: "standard" | "persistent";
+      onRetryWait?: (message: string) => Promise<void> | void;
+    },
+    operation: (requestArgs: TArgs) => Promise<LLMResponse>,
+  ): Promise<LLMResponse> {
+    const retryMode = args.retryMode ?? "standard";
     const onRetryWait = args.onRetryWait;
     const requestArgs = this.buildRetryArgs(args) as TArgs;
-    let imageFallbackTried = false;
     let identicalErrors = 0;
     let lastError = "";
     let attempt = 0;
@@ -521,17 +554,8 @@ export abstract class LLMProvider {
 
       if (response.finishReason !== "error") return response;
       if (response.errorCategory === "quota_exhausted") return response;
-
-      const strippedMessages = !imageFallbackTried ? LLMProvider.stripImageContent(requestArgs.messages) : null;
-      if (strippedMessages) {
-        imageFallbackTried = true;
-        const retryArgs = { ...requestArgs, messages: strippedMessages } as TArgs;
-        const retry = await operation(retryArgs);
-        if (retry.finishReason !== "error") {
-          LLMProvider.stripImageContentInplace(requestArgs.messages);
-        }
-        return retry;
-      }
+      LLMProvider.classifyImageInputUnsupportedResponse(response, requestArgs.messages);
+      if (response.errorCategory === "image_input_unsupported") return response;
 
       if (!LLMProvider.isTransientResponse(response)) return response;
 

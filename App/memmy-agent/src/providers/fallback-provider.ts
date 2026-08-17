@@ -1,4 +1,8 @@
-import { LLMProvider, LLMResponse } from "./base.js";
+import {
+  type AccountImageTextFallbackArgs,
+  LLMProvider,
+  LLMResponse,
+} from "./base.js";
 
 const PRIMARY_FAILURE_THRESHOLD = 3;
 const PRIMARY_COOLDOWN_MS = 60_000;
@@ -80,18 +84,32 @@ export class FallbackProvider extends LLMProvider {
     return this.primary.getDefaultModel();
   }
 
+  supportsAccountImageTextFallback(): boolean {
+    return this.primary.supportsAccountImageTextFallback();
+  }
+
+  runAccountImageTextFallback(
+    args: AccountImageTextFallbackArgs,
+  ): Promise<LLMResponse | null> {
+    return this.primary.runAccountImageTextFallback(args);
+  }
+
   primaryAvailable(): boolean {
     if (this.primaryTrippedAt == null) return true;
     return Date.now() - this.primaryTrippedAt >= PRIMARY_COOLDOWN_MS;
   }
 
   async chat(args: any): Promise<LLMResponse> {
-    if (!this.hasFallbacks) return this.primary.chat(args);
+    if (!this.hasFallbacks) {
+      return annotateExecution(await this.primary.chat(args), this.primary, args.model);
+    }
     return this.tryWithFallback((provider, nextArgs) => provider.chat(nextArgs), args, null);
   }
 
   async chatStream(args: any): Promise<LLMResponse> {
-    if (!this.hasFallbacks) return this.primary.chatStream(args);
+    if (!this.hasFallbacks) {
+      return annotateExecution(await this.primary.chatStream(args), this.primary, args.model);
+    }
     const hasStreamed = [false];
     const originalDelta = args.onContentDelta;
     args.onContentDelta = async (text: string) => {
@@ -109,7 +127,11 @@ export class FallbackProvider extends LLMProvider {
     const primaryModel = args.model ?? this.primary.getDefaultModel();
     let lastResponse: LLMResponse | null = null;
     if (this.primaryAvailable()) {
-      const response = await call(this.primary, args);
+      const response = LLMProvider.classifyImageInputUnsupportedResponse(annotateExecution(
+        await call(this.primary, args),
+        this.primary,
+        args.model ?? this.primary.getDefaultModel(),
+      ), args.messages);
       if (response.finishReason !== "error") {
         this.primaryFailures = 0;
         this.primaryTrippedAt = null;
@@ -151,8 +173,12 @@ export class FallbackProvider extends LLMProvider {
         args.reasoningEffort = reasoning;
       }
       try {
-        const response = await call(fallbackProvider, args);
+        const response = LLMProvider.classifyImageInputUnsupportedResponse(
+          annotateExecution(await call(fallbackProvider, args), fallbackProvider, fallback.model),
+          args.messages,
+        );
         if (response.finishReason !== "error") return response;
+        if (response.errorCategory === "image_input_unsupported") return response;
         lastResponse = response;
       } finally {
         restoreArg(args, "model", original.model);
@@ -171,6 +197,7 @@ export class FallbackProvider extends LLMProvider {
   }
 
   static shouldFallback(response: LLMResponse): boolean {
+    if (response.errorCategory === "image_input_unsupported") return false;
     if (response.errorCategory === "quota_exhausted") return true;
     if (response.errorShouldRetry === false) return false;
     const status = response.errorStatusCode;
@@ -189,6 +216,26 @@ export class FallbackProvider extends LLMProvider {
     return [kind, errorType, code, text].some((value) => FALLBACK_ERROR_TOKENS.some((token) => value.includes(token)));
   }
 
+}
+
+function annotateExecution(
+  response: LLMResponse,
+  provider: LLMProvider,
+  model: unknown,
+): LLMResponse {
+  response.actualProvider = providerName(provider);
+  response.actualModel = typeof model === "string" && model.trim()
+    ? model.trim()
+    : provider.getDefaultModel();
+  return response;
+}
+
+function providerName(provider: LLMProvider): string | null {
+  const value = (provider as LLMProvider & {
+    spec?: { name?: unknown };
+    providerName?: unknown;
+  }).spec?.name ?? (provider as { providerName?: unknown }).providerName;
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 function restoreArg(args: any, name: string, value: any): void {

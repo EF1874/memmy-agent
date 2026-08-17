@@ -69,23 +69,16 @@ describe("app config local api routes", () => {
         async getModelConfig() {
           calls.push("model:get");
           return modelConfigView({
-            provider: "openai_compatible",
-            baseUrl: "https://api.example.com/v1",
-            modelId: "gpt-4.1-mini",
             hasApiKey: true,
-            apiKeyMasked: "sk-l••••cret",
-            embedding: localEmbeddingView()
+            apiKeyMasked: "sk-l••••cret"
           });
         },
         async setModelConfig(input) {
-          calls.push(`model:${input.provider}`);
+          calls.push(`model:${input.providers[0]?.provider}`);
           return modelConfigView({
-            provider: input.provider,
-            baseUrl: input.baseUrl,
-            modelId: input.modelId,
-            hasApiKey: Boolean(input.apiKey),
-            apiKeyMasked: "sk-l••••cret",
-            embedding: localEmbeddingView()
+            configRevision: "revision-after-save",
+            hasApiKey: Boolean(input.providers[0]?.apiKey),
+            apiKeyMasked: "sk-l••••cret"
           });
         },
         async testModelConfig(input) {
@@ -110,14 +103,30 @@ describe("app config local api routes", () => {
     const improvement = await injectJson("PATCH", "/api/app/improvement-program", { improvementProgram: "declined" });
     const tokenUsage = await injectJson("GET", "/api/app/token-usage");
     const modelConfig = await injectJson("PUT", "/api/app/model-config", {
-      provider: "openai_compatible",
-      baseUrl: "https://api.example.com/v1",
-      modelId: "gpt-4.1-mini",
-      apiKey: "sk-live-secret"
+      configRevision: "revision-before-save",
+      providers: [{
+        provider: "openai",
+        apiKey: "sk-live-secret",
+        endpoints: [{
+          endpointId: "primary",
+          apiBase: "https://api.example.com/v1",
+          protocol: "openai-chat-completions"
+        }],
+        models: [{
+          presetId: "work-gpt",
+          endpointId: "primary",
+          model: "gpt-4.1-mini",
+          source: "byok",
+          capabilities: ["agent"]
+        }]
+      }],
+      modelAssignments: modelAssignments()
     });
     const modelConfigTest = await injectJson("POST", "/api/app/model-config/test", {
       provider: "openai_compatible",
-      baseUrl: "https://api.example.com/v1",
+      endpointId: "primary",
+      protocol: "openai-chat-completions",
+      apiBase: "https://api.example.com/v1",
       modelId: "gpt-5.5",
       apiKey: "sk-test-secret"
     });
@@ -137,14 +146,22 @@ describe("app config local api routes", () => {
       lastSyncedAt: "2026-06-24T10:00:00.000Z"
     });
     expect(modelConfigBeforeSave.json()).toMatchObject({
-      provider: "openai_compatible",
-      hasApiKey: true,
-      apiKeyMasked: "sk-l••••cret"
+      modelAssignments: { byok: { agent: { default: "work-gpt" } } },
+      providers: [{
+        provider: "openai",
+        hasApiKey: true,
+        apiKeyMasked: "sk-l••••cret",
+        models: [{ presetId: "work-gpt", model: "gpt-4.1-mini" }]
+      }]
     });
     expect(modelConfig.json()).toMatchObject({
-      provider: "openai_compatible",
-      hasApiKey: true,
-      apiKeyMasked: "sk-l••••cret"
+      configRevision: "revision-after-save",
+      modelAssignments: { byok: { agent: { default: "work-gpt" } } },
+      providers: [{
+        provider: "openai",
+        hasApiKey: true,
+        apiKeyMasked: "sk-l••••cret"
+      }]
     });
     expect(JSON.stringify(modelConfig.json())).not.toContain("sk-live-secret");
     expect(modelConfigTest.json()).toEqual({
@@ -161,7 +178,7 @@ describe("app config local api routes", () => {
       "onboarding:completed",
       "improvement:declined",
       "tokenUsage:get",
-      "model:openai_compatible",
+      "model:openai",
       "model:test:openai_compatible:gpt-5.5",
       "skin:midnight"
     ]);
@@ -262,22 +279,14 @@ function createServer(overrides: Record<string, unknown> = {}): FastifyInstance 
       },
       async getModelConfig() {
         return modelConfigView({
-          provider: "openai_compatible",
-          baseUrl: "https://api.example.com/v1",
-          modelId: "gpt-4.1-mini",
           hasApiKey: false,
-          apiKeyMasked: "",
-          embedding: localEmbeddingView()
+          apiKeyMasked: ""
         });
       },
       async setModelConfig() {
         return modelConfigView({
-          provider: "openai_compatible",
-          baseUrl: "https://api.example.com/v1",
-          modelId: "gpt-4.1-mini",
           hasApiKey: false,
-          apiKeyMasked: "",
-          embedding: localEmbeddingView()
+          apiKeyMasked: ""
         });
       },
       async testModelConfig() {
@@ -334,47 +343,63 @@ function createPermissionManager(): PermissionManager {
 }
 
 function modelConfigView(overrides: Record<string, unknown> = {}) {
-  const provider = (overrides.provider ?? "openai_compatible") as string;
-  const baseUrl = (overrides.baseUrl ?? "https://api.example.com/v1") as string;
-  const modelId = (overrides.modelId ?? "gpt-4.1-mini") as string;
   const hasApiKey = Boolean(overrides.hasApiKey);
   const apiKeyMasked = (overrides.apiKeyMasked ?? "") as string;
+  const model = {
+    presetId: "work-gpt",
+    provider: "openai",
+    endpointId: "primary",
+    protocol: "openai-chat-completions",
+    model: "gpt-4.1-mini",
+    source: "byok",
+    capabilities: ["agent"],
+    available: hasApiKey
+  };
   return {
-    provider,
-    baseUrl,
-    modelId,
-    hasApiKey,
-    apiKeyMasked,
-    embedding: overrides.embedding ?? localEmbeddingView(),
-    asr: overrides.asr ?? null,
-    imageGen: overrides.imageGen ?? null,
-    memmyMemory: {
-      summary: {
-        provider,
-        baseUrl,
-        modelId,
+    configRevision: overrides.configRevision ?? "revision-before-save",
+    providers: [{
+      provider: "openai",
+      configured: hasApiKey,
+      hasApiKey,
+      apiKeyMasked,
+      apiKey: "",
+      accountManaged: false,
+      editable: true,
+      endpoints: [{
+        endpointId: "primary",
+        apiBase: "https://api.example.com/v1",
+        protocol: "openai-chat-completions",
         hasApiKey,
-        apiKeyMasked
-      },
-      evolution: {
-        provider,
-        baseUrl,
-        modelId,
-        hasApiKey,
-        apiKeyMasked
-      }
-    },
+        apiKeyMasked,
+        apiKey: ""
+      }],
+      models: [model]
+    }],
+    modelAssignments: modelAssignments(),
+    effectiveCandidates: { byok: [model], account: [] },
+    configured: hasApiKey,
     updatedAt: "2026-06-02T10:00:00.000Z"
   };
 }
 
-function localEmbeddingView() {
+function modelAssignments() {
   return {
-    mode: "local",
-    baseUrl: null,
-    modelId: null,
-    hasApiKey: false,
-    apiKeyMasked: ""
+    byok: {
+      agent: { candidates: ["work-gpt"], default: "work-gpt" },
+      memorySummary: null,
+      memoryEvolution: null,
+      embedding: null,
+      asr: null,
+      imageGeneration: null
+    },
+    account: {
+      agent: { candidates: [], default: null },
+      memorySummary: null,
+      memoryEvolution: null,
+      embedding: null,
+      asr: null,
+      imageGeneration: null
+    }
   };
 }
 

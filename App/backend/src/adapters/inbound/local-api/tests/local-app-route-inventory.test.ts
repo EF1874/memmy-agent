@@ -22,12 +22,37 @@ describe("local app route inventory", () => {
       {
         method: "PUT",
         url: "/api/app/model-config",
-        payload: { provider: "openai_compatible", baseUrl: "https://api.example.com/v1", modelId: "gpt-4.1-mini" }
+        payload: {
+          configRevision: "revision-before-save",
+          providers: [{
+            provider: "openai",
+            endpoints: [{
+              endpointId: "primary",
+              apiBase: "https://api.example.com/v1",
+              protocol: "openai-chat-completions"
+            }],
+            models: [{
+              presetId: "work-gpt",
+              endpointId: "primary",
+              model: "gpt-4.1-mini",
+              source: "byok",
+              capabilities: ["agent"]
+            }]
+          }],
+          modelAssignments: modelAssignments()
+        }
       },
       {
         method: "POST",
         url: "/api/app/model-config/test",
-        payload: { provider: "openai_compatible", baseUrl: "https://api.example.com/v1", modelId: "gpt-4.1-mini", apiKey: "sk-test" }
+        payload: {
+          provider: "openai_compatible",
+          endpointId: "primary",
+          protocol: "openai-chat-completions",
+          apiBase: "https://api.example.com/v1",
+          modelId: "gpt-4.1-mini",
+          apiKey: "sk-test"
+        }
       },
       { method: "PATCH", url: "/api/app/privacy", payload: { localOnlyMode: true } },
       { method: "PATCH", url: "/api/app/onboarding", payload: { currentStep: "completed" } },
@@ -86,25 +111,11 @@ function createServer(): FastifyInstance {
       async updateSettings(input) {
         return appSettings(input);
       },
-      async setModelConfig(input) {
-        return modelConfigView({
-          provider: input.provider,
-          baseUrl: input.baseUrl,
-          modelId: input.modelId,
-          hasApiKey: Boolean(input.apiKey),
-          apiKeyMasked: input.apiKey ? "sk-t••••cret" : "",
-          embedding: localEmbeddingView()
-        });
+      async setModelConfig() {
+        return modelConfigView({ configRevision: "revision-after-save" });
       },
       async getModelConfig() {
-        return modelConfigView({
-          provider: "openai_compatible",
-          baseUrl: "https://api.example.com/v1",
-          modelId: "gpt-4.1-mini",
-          hasApiKey: false,
-          apiKeyMasked: "",
-          embedding: localEmbeddingView()
-        });
+        return modelConfigView();
       },
       async testModelConfig() {
         return {
@@ -227,7 +238,7 @@ function createServer(): FastifyInstance {
         return {
           text: "你好",
           modelId: "qwen3-asr-flash",
-          provider: "aliyun",
+          provider: "dashscope",
           source: "byok",
           transcribedAt: "2026-06-15T10:00:00.000Z"
         };
@@ -306,37 +317,61 @@ function createPermissionManager(): PermissionManager {
 }
 
 function modelConfigView(overrides: Record<string, unknown> = {}) {
-  const provider = (overrides.provider ?? "openai_compatible") as string;
-  const baseUrl = (overrides.baseUrl ?? "https://api.example.com/v1") as string;
-  const modelId = (overrides.modelId ?? "gpt-4.1-mini") as string;
-  const hasApiKey = Boolean(overrides.hasApiKey);
-  const apiKeyMasked = (overrides.apiKeyMasked ?? "") as string;
+  const model = {
+    presetId: "work-gpt",
+    provider: "openai",
+    endpointId: "primary",
+    protocol: "openai-chat-completions",
+    model: "gpt-4.1-mini",
+    source: "byok",
+    capabilities: ["agent"],
+    available: true
+  };
   return {
-    provider,
-    baseUrl,
-    modelId,
-    hasApiKey,
-    apiKeyMasked,
-    embedding: overrides.embedding ?? localEmbeddingView(),
-    asr: overrides.asr ?? asrView(),
-    imageGen: overrides.imageGen ?? null,
-    memmyMemory: {
-      summary: {
-        provider,
-        baseUrl,
-        modelId,
-        hasApiKey,
-        apiKeyMasked
-      },
-      evolution: {
-        provider,
-        baseUrl,
-        modelId,
-        hasApiKey,
-        apiKeyMasked
-      }
-    },
+    configRevision: overrides.configRevision ?? "revision-before-save",
+    providers: [{
+      provider: "openai",
+      configured: true,
+      hasApiKey: false,
+      apiKeyMasked: "",
+      apiKey: "",
+      accountManaged: false,
+      editable: true,
+      endpoints: [{
+        endpointId: "primary",
+        apiBase: "https://api.example.com/v1",
+        protocol: "openai-chat-completions",
+        hasApiKey: false,
+        apiKeyMasked: "",
+        apiKey: ""
+      }],
+      models: [model]
+    }],
+    modelAssignments: modelAssignments(),
+    effectiveCandidates: { byok: [model], account: [] },
+    configured: true,
     updatedAt: "2026-06-02T10:00:00.000Z"
+  };
+}
+
+function modelAssignments() {
+  return {
+    byok: {
+      agent: { candidates: ["work-gpt"], default: "work-gpt" },
+      memorySummary: null,
+      memoryEvolution: null,
+      embedding: null,
+      asr: null,
+      imageGeneration: null
+    },
+    account: {
+      agent: { candidates: [], default: null },
+      memorySummary: null,
+      memoryEvolution: null,
+      embedding: null,
+      asr: null,
+      imageGeneration: null
+    }
   };
 }
 
@@ -353,10 +388,7 @@ function asrView() {
 function localEmbeddingView() {
   return {
     mode: "local",
-    baseUrl: null,
-    modelId: null,
-    hasApiKey: false,
-    apiKeyMasked: ""
+    custom: null
   };
 }
 

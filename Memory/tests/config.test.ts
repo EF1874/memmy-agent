@@ -33,6 +33,23 @@ describe("memmy memory config", () => {
     expect(loadMemmyConfig(configPath).config.timeZone).toBeUndefined();
   });
 
+  it.each(["profiles", "activeProfile"])(
+    "rejects legacy memmyMemory.%s instead of migrating it during load",
+    (legacyField) => {
+      const root = tempRoot();
+      const configPath = join(root, "config.yaml");
+      writeFileSync(configPath, YAML.stringify({
+        memmyMemory: legacyField === "profiles"
+          ? { profiles: { byok: {} } }
+          : { activeProfile: "byok" }
+      }));
+
+      expect(() => loadMemmyConfig(configPath)).toThrow(
+        "memmyMemory legacy profiles require the registered runtime config migration"
+      );
+    }
+  );
+
   it("defaults memory gates and retrieval config", () => {
     const root = tempRoot();
     const configPath = join(root, "config.yaml");
@@ -43,6 +60,7 @@ describe("memmy memory config", () => {
     expect(loadMemmyConfig(configPath).config.algorithm.enableMemoryAdd).toBe(true);
     expect(loadMemmyConfig(configPath).config.algorithm.enableMemorySearch).toBe(true);
     expect(loadMemmyConfig(configPath).config.algorithm.enableQueryRewrite).toBe(false);
+    expect(loadMemmyConfig(configPath).config.algorithm.retrieval.minRecallScore).toBe(0.2);
     expect(loadMemmyConfig(configPath).config.algorithm.negativeExperience).toMatchObject({
       enabled: true,
       failureRTaskThreshold: -0.15,
@@ -117,7 +135,8 @@ describe("memmy memory config", () => {
           enableMemorySearch: false,
           enableQueryRewrite: true,
           retrieval: {
-            llmFilterEnabled: false
+            llmFilterEnabled: false,
+            minRecallScore: 0.35
           }
         }
       }
@@ -127,6 +146,7 @@ describe("memmy memory config", () => {
     expect(loadMemmyConfig(configPath).config.algorithm.enableMemorySearch).toBe(false);
     expect(loadMemmyConfig(configPath).config.algorithm.enableQueryRewrite).toBe(true);
     expect(loadMemmyConfig(configPath).config.algorithm.retrieval.llmFilterEnabled).toBe(false);
+    expect(loadMemmyConfig(configPath).config.algorithm.retrieval.minRecallScore).toBe(0.35);
 
     setEnv("MEMMY_ENABLE_MEMORY_ADD", "true");
     setEnv("MEMMY_ENABLE_MEMORY_SEARCH", "1");
@@ -165,6 +185,10 @@ describe("memmy memory config", () => {
     const configPath = join(root, "config.yaml");
     writeFileSync(configPath, YAML.stringify({
       memmyMemory: {
+        roleRouting: {
+          summary: "fixed",
+          evolution: "fixed"
+        },
         summary: {
           enableThinking: true
         },
@@ -199,117 +223,149 @@ describe("memmy memory config", () => {
     expect(loadMemmyConfig(configPath).config.summary.maxTokens).toBe(512);
   });
 
-  it("selects active memory profiles and forces account models to openai-compatible runtime providers", () => {
+  it("resolves follow roles and cloud embedding from the account model projection", () => {
     const root = tempRoot();
     const configPath = join(root, "config.yaml");
     writeFileSync(configPath, YAML.stringify({
-      memmyMemory: {
-        activeProfile: "account",
-        storage: {
-          endpoint: "http://127.0.0.1:18960"
-        },
-        profiles: {
-          byok: {
-            embedding: {
-              provider: "local"
-            }
-          },
-          account: {
-            userId: "user_account",
-            summary: {
-              endpoint: "https://apigw-pre.memtensor.cn/api/agentExternal/v1",
-              model: "memory_summary",
-              apiKey: "cloud-uuid"
-            },
-            evolution: {
-              endpoint: "https://apigw-pre.memtensor.cn/api/agentExternal/v1",
-              model: "memory_evolution",
-              apiKey: "cloud-uuid"
-            },
-            embedding: {
-              endpoint: "https://apigw-pre.memtensor.cn/api/agentExternal/v1",
-              model: "embedding",
-              apiKey: "cloud-uuid"
+      providers: {
+        memmy_account: {
+          apiKey: "cloud-uuid",
+          ownerAccountId: "user_account",
+          endpoints: {
+            memory: {
+              apiBase: "https://apigw-pre.memtensor.cn/api/agentExternal/v1",
+              protocol: "memmy-account"
             }
           }
+        }
+      },
+      modelPresets: {
+        "memmy-account-summary": {
+          provider: "memmy_account",
+          endpoint: "memory",
+          model: "agent_chat",
+          source: "account",
+          ownerAccountId: "user_account",
+          capabilities: ["memory_summary"]
+        },
+        "memmy-account-evolution": {
+          provider: "memmy_account",
+          endpoint: "memory",
+          model: "memory_evolution",
+          source: "account",
+          ownerAccountId: "user_account",
+          capabilities: ["memory_evolution"]
+        },
+        "memmy-account-embedding": {
+          provider: "memmy_account",
+          endpoint: "memory",
+          model: "embedding",
+          source: "account",
+          ownerAccountId: "user_account",
+          capabilities: ["embedding"]
+        }
+      },
+      modelAssignments: {
+        byok: {},
+        account: {
+          ownerAccountId: "user_account",
+          memorySummary: "memmy-account-summary",
+          memoryEvolution: "memmy-account-evolution",
+          embedding: "memmy-account-embedding"
+        }
+      },
+      app: {
+        userMode: "account",
+        userId: "user_account"
+      },
+      memmyMemory: {
+        userId: "user_account",
+        roleRouting: {
+          summary: "follow",
+          evolution: "follow"
+        },
+        embedding: {
+          mode: "cloud"
+        },
+        storage: {
+          endpoint: "http://127.0.0.1:18960"
         }
       }
     }));
 
     const { config } = loadMemmyConfig(configPath);
 
-    expect(config.activeProfile).toBe("account");
+    expect(config.roleRouting).toEqual({ summary: "follow", evolution: "follow" });
     expect(config.userId).toBe("user_account");
     expect(config.summary).toMatchObject({
       provider: "openai_compatible",
-      vendor: "qwen",
+      sourceProvider: "memmy_account",
       endpoint: "https://apigw-pre.memtensor.cn/api/agentExternal/v1",
-      model: "memory_summary",
+      model: "agent_chat",
       apiKey: "cloud-uuid"
     });
     expect(config.evolution).toMatchObject({
       provider: "openai_compatible",
-      vendor: "qwen",
+      sourceProvider: "memmy_account",
       model: "memory_evolution",
       thinkingBudget: 1_000,
       timeoutMs: 180_000
     });
     expect(config.embedding).toMatchObject({
+      mode: "cloud",
       provider: "openai_compatible",
+      sourceProvider: "memmy_account",
       model: "embedding"
     });
   });
 
-  it("keeps BYOK local embedding profiles local at runtime", () => {
+  it("keeps local embedding independent from role routing", () => {
     const root = tempRoot();
     const configPath = join(root, "config.yaml");
     writeFileSync(configPath, YAML.stringify({
       memmyMemory: {
-        activeProfile: "byok",
-        profiles: {
-          byok: {
-            embedding: {
-              provider: "local"
-            }
-          }
+        roleRouting: {
+          summary: "follow",
+          evolution: "follow"
+        },
+        embedding: {
+          mode: "local"
         }
       }
     }));
 
     const { config } = loadMemmyConfig(configPath);
 
-    expect(config.activeProfile).toBe("byok");
+    expect(config.embedding.mode).toBe("local");
     expect(config.embedding.provider).toBe("local");
     expect(config.evolution.thinkingBudget).toBeUndefined();
   });
 
-  it("preserves an explicit BYOK evolution timeout without injecting a thinking budget", () => {
+  it("rejects a legacy fixed BYOK evolution connection before runtime use", () => {
     const root = tempRoot();
     const configPath = join(root, "config.yaml");
     writeFileSync(configPath, YAML.stringify({
       memmyMemory: {
-        activeProfile: "byok",
-        profiles: {
-          byok: {
-            evolution: {
-              provider: "openai_compatible",
-              endpoint: "https://example.com/v1",
-              model: "qwen3.7-plus",
-              apiKey: "sk-user",
-              timeoutMs: 75_000
-            },
-            embedding: {
-              provider: "local"
-            }
-          }
+        roleRouting: {
+          summary: "follow",
+          evolution: "fixed"
+        },
+        evolution: {
+          provider: "openai_compatible",
+          endpoint: "https://example.com/v1",
+          model: "qwen3.7-plus",
+          apiKey: "sk-user",
+          timeoutMs: 75_000
+        },
+        embedding: {
+          mode: "local"
         }
       }
     }));
 
-    const { config } = loadMemmyConfig(configPath);
-
-    expect(config.evolution.timeoutMs).toBe(75_000);
-    expect(config.evolution.thinkingBudget).toBeUndefined();
+    expect(() => loadMemmyConfig(configPath)).toThrow(
+      "memmyMemory legacy model config requires the registered runtime config migration"
+    );
   });
 
   it("uses only MEMMY_CONFIG and the default config.yaml candidate", () => {

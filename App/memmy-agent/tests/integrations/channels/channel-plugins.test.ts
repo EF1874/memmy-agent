@@ -113,11 +113,22 @@ function writePackagePlugin({
 }
 
 function configWithChannels(channels: Record<string, any>, providerConfig: Record<string, any> = {}): any {
+  const currentProvider = (value: Record<string, any> = {}) => {
+    const { apiBase, ...provider } = value;
+    return new ProviderConfig({
+      ...provider,
+      ...(apiBase ? {
+        endpoints: {
+          chat: { apiBase, protocol: "openai-chat-completions" },
+        },
+      } : {}),
+    });
+  };
   return {
     channels: new ChannelsConfig(channels),
     providers: {
-      groq: new ProviderConfig(providerConfig.groq ?? {}),
-      openai: new ProviderConfig(providerConfig.openai ?? {}),
+      groq: currentProvider(providerConfig.groq),
+      openai: currentProvider(providerConfig.openai),
     },
     agents: { defaults: { workspace: os.tmpdir() } },
   };

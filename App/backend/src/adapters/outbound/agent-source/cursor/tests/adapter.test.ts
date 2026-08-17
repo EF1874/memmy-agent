@@ -2,6 +2,7 @@
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import { createCursorSourceAdapter } from "../index.js";
@@ -153,7 +154,7 @@ function createCursorWorkspaceFixture(): {
   mkdirSync(storagePath, { recursive: true });
   writeFileSync(
     join(storagePath, "workspace.json"),
-    JSON.stringify({ folder: `file://${projectPath}` }),
+    JSON.stringify({ folder: pathToFileURL(projectPath).href }),
     "utf8"
   );
 

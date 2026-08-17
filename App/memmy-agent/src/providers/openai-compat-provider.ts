@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import OpenAI from "openai";
 import {
+  type AccountImageTextFallbackArgs,
   createProviderAbortError,
   isProviderAbortError,
   LLMProvider,
@@ -1030,7 +1031,44 @@ export class OpenAICompatProvider extends LLMProvider {
     return model;
   }
 
+  supportsAccountImageTextFallback(): boolean {
+    return specName(this.spec) === "memmy_account";
+  }
+
+  runAccountImageTextFallback(
+    args: AccountImageTextFallbackArgs,
+  ): Promise<LLMResponse | null> {
+    if (!this.supportsAccountImageTextFallback()) return Promise.resolve(null);
+    return this.chat({
+      messages: args.messages,
+      tools: null,
+      toolChoice: null,
+      model: "image2text",
+      temperature: 0,
+      reasoningEffort: "none",
+      maxTokens: 2048,
+      signal: args.signal ?? null,
+    });
+  }
+
+  private imageInputUnsupportedResponse(args: ChatArgs): LLMResponse | null {
+    if (specName(this.spec) !== "deepseek" || !LLMProvider.containsImageInput(args.messages)) {
+      return null;
+    }
+    return new LLMResponse({
+      content: "The DeepSeek chat adapter does not support image input.",
+      finishReason: "error",
+      errorStatusCode: 400,
+      errorKind: "invalid_request",
+      errorCode: "image_input_unsupported",
+      errorShouldRetry: false,
+      errorCategory: "image_input_unsupported",
+    });
+  }
+
   async chat(args: ChatArgs): Promise<LLMResponse> {
+    const imageInputError = this.imageInputUnsupportedResponse(args);
+    if (imageInputError) return imageInputError;
     await this.ensureClient();
     const model = args.model ?? this.getDefaultModel();
     const reasoningEffort = args.reasoningEffort ?? null;
@@ -1068,6 +1106,8 @@ export class OpenAICompatProvider extends LLMProvider {
   }
 
   async chatStream(args: ChatArgs): Promise<LLMResponse> {
+    const imageInputError = this.imageInputUnsupportedResponse(args);
+    if (imageInputError) return imageInputError;
     await this.ensureClient();
     const model = args.model ?? this.getDefaultModel();
     const reasoningEffort = args.reasoningEffort ?? null;

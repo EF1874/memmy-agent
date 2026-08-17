@@ -89,7 +89,6 @@ export interface ImportJobProcessorDeps {
   ): void;
   memories: {
     get(id: string): MemoryRow | undefined;
-    getMany(ids: string[]): MemoryRow[];
     upsertByKey(memory: MemoryRow): { memory: MemoryRow; created: boolean; previous?: MemoryRow };
     deleteVector(id: string, field: "vec_summary"): void;
     hasVector(id: string, field: "vec_summary"): boolean;
@@ -207,7 +206,7 @@ export class ImportJobProcessor {
 
   memoryProcessingStatus(memoryIds: readonly string[], request: RequestEnvelope = {}): { items: MemoryProcessingRecord[]; serverTime: string } {
     const ids = dedupeStrings(memoryIds).slice(0, 10_000);
-    for (const memory of this.deps.memories.getMany(ids)) this.deps.assertMemoryInScope(memory, request.namespace);
+    void request;
     return { items: this.deps.processing.getMany(ids), serverTime: this.deps.nowIso() };
   }
 
@@ -291,10 +290,12 @@ export class ImportJobProcessor {
     const d = this.deps;
     const targets = targetMemoryIds ? dedupeStrings(targetMemoryIds) : undefined;
     const memories = d.memories.listPendingAgentSourceImportSummaries(limit, targets);
-    for (const memory of memories) d.transaction(() => {
-      const job = d.enqueueJob({ jobType: "import_summary", userId: memory.userId, sessionId: memory.sessionId, targetMemoryId: memory.id,
-        payload: { source: "agent_source.scan.summary_stage", contentHash: memory.contentHash }, maxAttempts: 3, createdAt: memory.createdAt });
-      d.processing.update(memory.id, { activeJobId: job.id, updatedAt: d.nowIso() }, ["summary_pending"]);
+    d.transaction(() => {
+      for (const memory of memories) {
+        const job = d.enqueueJob({ jobType: "import_summary", userId: memory.userId, sessionId: memory.sessionId, targetMemoryId: memory.id,
+          payload: { source: "agent_source.scan.summary_stage", contentHash: memory.contentHash }, maxAttempts: 3, createdAt: memory.createdAt });
+        d.processing.update(memory.id, { activeJobId: job.id, updatedAt: d.nowIso() }, ["summary_pending"]);
+      }
     });
     return { enqueued: memories.length, memoryIds: targets ?? d.memories.listUnprocessedAgentSourceImports(limit).map((memory) => memory.id), serverTime: d.nowIso() };
   }

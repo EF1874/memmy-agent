@@ -35,29 +35,37 @@ describe("ApiKeyPage source", () => {
     expect(source).not.toContain("testImageGenConnection");
     expect(source).not.toContain("optionalModelMissingWarning");
     expect(source).not.toContain("<OptionalModelMissingWarningModal");
+    expect(source).not.toContain("showAdvanced");
+    expect(source).not.toContain('t("apiKey.advanced")');
+    expect(source).not.toContain('t("apiKey.maxTokens")');
+    expect(source).not.toContain('t("apiKey.dailyLimit")');
     expect(source).toContain('dispatch(appActions.navigate("/api-key-models"))');
-    expect(source).toContain("asr: state.modelConfig.asr ?? null");
-    expect(source).toContain("imageGen: state.modelConfig.imageGen ?? null");
+    expect(source).toContain("clients.config.getModelConfig()");
+    expect(source).toContain('capabilities: ["agent"]');
+    expect(source).toContain('protocol: "openai-embeddings"');
+    expect(source).toContain('capabilities: ["embedding"]');
+    expect(source).toContain('assignCatalogPreset(agent.workspace, "byok", "agent"');
+    expect(source).toContain('assignCatalogPreset(embedding.workspace, "byok", "embedding"');
     expect(messageIndex).toBeGreaterThanOrEqual(0);
     expect(buttonIndex).toBeGreaterThanOrEqual(0);
     expect(messageIndex).toBeLessThan(buttonIndex);
   });
 
-  it("下一步先写入当前表单并跳到模型页，后端保存不阻塞导航", () => {
+  it("下一步以最新 revision 保存真实目录，持久化成功后再进入模型页", () => {
     const source = readFileSync(apiKeyPageSourcePath, "utf8");
     const handlerIndex = source.indexOf("function saveConfig()");
-    const draftIndex = source.indexOf("const configDraft = createModelConfigDraft();", handlerIndex);
-    const stateIndex = source.indexOf("dispatch(appActions.modelConfigUpdated(configDraft));", handlerIndex);
+    const getIndex = source.indexOf("clients.config.getModelConfig()", handlerIndex);
+    const saveIndex = source.indexOf("clients.config.saveModelCatalog(modelConfigInput(workspace))", handlerIndex);
+    const stateIndex = source.indexOf("dispatch(appActions.modelConfigUpdated(saved));", handlerIndex);
     const navigateIndex = source.indexOf('dispatch(appActions.navigate("/api-key-models"));', handlerIndex);
-    const saveIndex = source.indexOf("clients?.config.saveModelConfig(configDraft)", handlerIndex);
     const persistIndex = source.indexOf("persistLoginModeSelection({", handlerIndex);
 
     expect(handlerIndex).toBeGreaterThanOrEqual(0);
-    expect(draftIndex).toBeGreaterThan(handlerIndex);
-    expect(stateIndex).toBeGreaterThan(draftIndex);
-    expect(navigateIndex).toBeGreaterThan(stateIndex);
-    expect(saveIndex).toBeGreaterThan(navigateIndex);
-    expect(persistIndex).toBeGreaterThan(saveIndex);
+    expect(getIndex).toBeGreaterThan(handlerIndex);
+    expect(saveIndex).toBeGreaterThan(getIndex);
+    expect(stateIndex).toBeGreaterThan(saveIndex);
+    expect(persistIndex).toBeGreaterThan(stateIndex);
+    expect(navigateIndex).toBeGreaterThan(persistIndex);
   });
 
   it("重新进入 BYOK 第一步时从已保存模型配置 hydrate 主模型与 Embedding", () => {
@@ -70,8 +78,8 @@ describe("ApiKeyPage source", () => {
     expect(source).toContain("const [embeddingMode, setEmbeddingMode] = useState<EmbeddingMode>(initialEmbeddingMode)");
     expect(source).toContain("apiKeyMasked: embeddingConfig.apiKeyMasked");
     expect(source).toContain('secretTarget: "embedding"');
-    expect(source).toContain('apiKeyMasked: apiKey.trim() ? "" : apiKeyMasked');
-    expect(source).toContain('apiKeyMasked: embeddingConfig.apiKey.trim() ? "" : embeddingConfig.apiKeyMasked');
+    expect(source).toContain('...(apiKey.trim() ? { apiKey: apiKey.trim() } : {})');
+    expect(source).toContain('...(embeddingConfig.apiKey.trim() ? { apiKey: embeddingConfig.apiKey.trim() } : {})');
   });
 
   it("不再展示已保存 API Key 的脱敏提示行，改为用脱敏值作为输入框占位优先展示", () => {
@@ -129,7 +137,11 @@ describe("ApiKeyOptionalPage source", () => {
     expect(source).toContain("testImageGenConnection");
     expect(source).toContain("<OptionalModelMissingWarningModal");
     expect(source).toContain('t("apiKey.optionalPage.skip")');
-    expect(source).toContain("asr: isAsrUsable ? createAsrProviderConfig(");
-    expect(source).toContain("imageGen: isImageGenUsable");
+    expect(source).toContain('protocol: "dashscope-input-audio-chat"');
+    expect(source).toContain('capabilities: ["asr"]');
+    expect(source).toContain('capabilities: ["image_generation"]');
+    expect(source).toContain("clients.config.getModelConfig()");
+    expect(source).toContain("clients.config.saveModelCatalog(modelConfigInput(workspace))");
+    expect(source).toContain("savedConfig.catalog?.modelAssignments.byok.agent.candidates.length");
   });
 });

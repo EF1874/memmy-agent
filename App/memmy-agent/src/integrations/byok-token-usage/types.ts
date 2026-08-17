@@ -1,4 +1,5 @@
 import type { AgentHook } from "../../core/agent-runtime/hook.js";
+import type { ActualModelContext } from "@memmy/local-api-contracts";
 
 export type JsonRecord = Record<string, unknown>;
 
@@ -16,6 +17,10 @@ export type ByokTokenUsageEvent = NormalizedByokTokenUsage & {
   kind: "agent_chat";
   source: "agent";
   operationId: string;
+  presetId: string;
+  provider: string;
+  model: string;
+  capability: "agent";
   metadata: JsonRecord;
   createdAt: string;
 };
@@ -26,8 +31,12 @@ export interface ByokTokenUsageClient {
 
 export type ByokTokenUsageHookOptions = {
   client: ByokTokenUsageClient;
-  resolveProviderName?: (modelId: string | null) => string | null;
 };
+
+export type ByokUsageActualModelContext = Pick<
+  ActualModelContext,
+  "presetId" | "source" | "provider" | "model" | "capability"
+>;
 
 export type FetchLike = typeof fetch;
 

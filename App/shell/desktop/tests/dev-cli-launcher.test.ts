@@ -1,10 +1,15 @@
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
+import YAML from "yaml";
 
 const repoRoot = fileURLToPath(new URL("../../../..", import.meta.url));
 const devStartPath = fileURLToPath(new URL("../../../../scripts/dev-start.sh", import.meta.url));
+const memoryCliPath = fileURLToPath(new URL("../../../../Memory/src/cli/index.ts", import.meta.url));
+const agentConfigLoaderPath = fileURLToPath(new URL("../../../memmy-agent/src/config/loader.ts", import.meta.url));
 
 describe("development CLI launchers", () => {
   it("defaults development startup to the international edition", () => {
@@ -18,7 +23,7 @@ test "$MEMMY_ACCOUNT_CHANNEL" = "email"`;
     const result = spawnSync("bash", ["-s"], { cwd: repoRoot, encoding: "utf8", input: script });
 
     expect(result.status, result.stderr || result.stdout).toBe(0);
-  });
+  }, 15_000);
 
   it("loads the domestic edition from a dotenv file and derives its account channel", () => {
     const script = String.raw`set -euo pipefail
@@ -68,6 +73,105 @@ run_main`;
     expect(result.status, result.stderr || result.stdout).toBe(0);
     expect(result.stdout).toBe("cn/phone\n");
   });
+
+  it("recognizes endpoint-only credentials in model-preset runtime config", () => {
+    const script = String.raw`set -euo pipefail
+source scripts/dev-start.sh
+test_dir="$(mktemp -d)"
+trap 'rm -rf "$test_dir"' EXIT
+cat > "$test_dir/config.yaml" <<'YAML'
+agents:
+  defaults:
+    modelPreset: memmy-account
+    provider: auto
+    model: stale-model
+providers:
+  memmy_account:
+    endpoints:
+      chat:
+        apiKey: account-token
+modelPresets:
+  memmy-account:
+    provider: memmy_account
+    endpoint: chat
+    model: agent_chat
+YAML
+MEMMY_CONFIG_PATH="$test_dir/config.yaml"
+
+config_has_agent_model`;
+    const result = spawnSync("bash", ["-s"], { cwd: repoRoot, encoding: "utf8", input: script });
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+  });
+
+  it("does not accept legacy provider/model defaults without a model preset", () => {
+    const script = String.raw`set -euo pipefail
+source scripts/dev-start.sh
+test_dir="$(mktemp -d)"
+trap 'rm -rf "$test_dir"' EXIT
+cat > "$test_dir/config.yaml" <<'YAML'
+agents:
+  defaults:
+    provider: memmy_account
+    model: agent_chat
+providers:
+  memmy_account:
+    apiKey: account-token
+YAML
+MEMMY_CONFIG_PATH="$test_dir/config.yaml"
+
+if config_has_agent_model; then
+  exit 1
+fi`;
+    const result = spawnSync("bash", ["-s"], { cwd: repoRoot, encoding: "utf8", input: script });
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+  });
+
+  it("keeps memory initialization compatible with the current agent config contract", () => {
+    const root = mkdtempSync(join(tmpdir(), "memmy-dev-config-contract-"));
+    const configPath = join(root, "config.yaml");
+    try {
+      const init = spawnSync(
+        "node",
+        [
+          "--import", "tsx",
+          memoryCliPath,
+          "init",
+          "--home", root,
+          "--config", configPath,
+          "--db", join(root, "memory.sqlite"),
+          "--skip-agent-skills"
+        ],
+        {
+          cwd: repoRoot,
+          encoding: "utf8",
+          env: { ...process.env, HOME: root, VITEST: "true" }
+        }
+      );
+      expect(init.status, init.stderr || init.stdout).toBe(0);
+      const config = YAML.parse(readFileSync(configPath, "utf8"));
+      expect(config.memmyMemory).not.toHaveProperty("embedding");
+
+      const validate = spawnSync(
+        "node",
+        [
+          "--import", "tsx",
+          "--input-type=module",
+          "--eval",
+          `import { loadConfig } from ${JSON.stringify(pathToFileURL(agentConfigLoaderPath).href)}; loadConfig(process.env.MEMMY_CONFIG);`
+        ],
+        {
+          cwd: repoRoot,
+          encoding: "utf8",
+          env: { ...process.env, MEMMY_CONFIG: configPath, VITEST: "true" }
+        }
+      );
+      expect(validate.status, validate.stderr || validate.stdout).toBe(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 15_000);
 
   it("reinstalls memmy-agent dependencies when file validators are missing", () => {
     const script = String.raw`set -euo pipefail

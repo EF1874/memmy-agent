@@ -31,15 +31,21 @@ export class ByokTokenUsageHook extends AgentHook {
       const usage = normalizeByokTokenUsage(result?.usage ?? ctx.usage);
       if (!usage) return;
 
-      const modelId = resolveModelId(ctx);
-      const provider = resolveProviderName(ctx, modelId, this.options.resolveProviderName);
-      if (provider === ACCOUNT_PROVIDER) return;
+      const context = ctx.spec?.actualModelContext;
+      if (!context || context.source !== "byok") return;
+      const modelId = context.model;
+      const provider = context.provider;
+      if (!provider || provider === ACCOUNT_PROVIDER) return;
 
       const event: ByokTokenUsageEvent = {
         id: randomUUID(),
         kind: "agent_chat",
         source: "agent",
         operationId: turnId,
+        presetId: context.presetId,
+        provider,
+        model: modelId,
+        capability: "agent",
         ...usage,
         metadata: {
           sessionKey,
@@ -61,22 +67,6 @@ export class ByokTokenUsageHook extends AgentHook {
 
 function sessionKeyFromContext(ctx: AgentHookContext): string | null {
   return stringOrNull(ctx.spec?.sessionKey) ?? stringOrNull(ctx.sessionKey) ?? stringOrNull(ctx.session?.key);
-}
-
-function resolveModelId(ctx: AgentHookContext): string | null {
-  return (
-    stringOrNull(ctx.spec?.model) ??
-    stringOrNull(ctx.spec?.provider?.getDefaultModel?.()) ??
-    null
-  );
-}
-
-function resolveProviderName(
-  ctx: AgentHookContext,
-  modelId: string | null,
-  resolver: ((modelId: string | null) => string | null) | undefined,
-): string {
-  return stringOrNull(ctx.spec?.provider?.spec?.name) ?? stringOrNull(resolver?.(modelId)) ?? "";
 }
 
 function stringOrNull(value: unknown): string | null {

@@ -307,6 +307,7 @@ async function boot(): Promise<void> {
     runtimeServices = app.isPackaged
       ? await startPackagedRuntimeServices({
         appPath: app.getAppPath(),
+        appDatabaseFile: join(app.getPath("userData"), "app.sqlite"),
         resourcesPath: process.resourcesPath,
         logDirectory: app.getPath("logs"),
         logLevel: getCurrentLogLevel()

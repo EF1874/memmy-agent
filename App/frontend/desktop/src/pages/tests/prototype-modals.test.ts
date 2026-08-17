@@ -47,49 +47,45 @@ describe("2026-06-04 prototype modals", () => {
     const applyMoreSource = readSource(resolve(appDir, "app/token-exhausted-apply-more.ts"));
 
     expect(messagesSource).toContain('"tokenExhausted.title": "体验额度已用完"');
-    expect(messagesSource).toContain('"tokenExhausted.body": "赠送 Token 已耗尽，可以申请更多赠送，也可切换为自己的 API Key 继续使用。"');
+    expect(messagesSource).toContain('"tokenExhausted.body": "赠送 Token 已耗尽，可以申请更多赠送，也可切换为自定义 API Key 继续使用。"');
     expect(messagesSource).toContain('"tokenExhausted.applyMore": "获取更多赠送 Token"');
-    expect(messagesSource).toContain('"tokenExhausted.switchApiKey": "更换自己的 API Key"');
+    expect(messagesSource).toContain('"tokenExhausted.switchApiKey": "使用自定义 API Key"');
     expect(messagesSource).toContain('"tokenExhausted.later": "稍后再说"');
     expect(modalSource).toContain('import { Gift } from "lucide-react"');
     expect(modalSource).toContain('pose="sad"');
     expect(modalSource).toContain('t("tokenExhausted.title")');
     expect(modalSource).toContain('t("tokenExhausted.applyMore")');
     expect(modalSource).toContain('t("tokenExhausted.switchApiKey")');
-    expect(routerSource).toContain("TokenExhaustedModal");
-    expect(routerSource).toContain("shouldShowTokenExhaustedModal");
-    expect(routerSource).toContain("state.bootstrap?.promotions?.applyMore ?? true");
-    expect(routerSource).toContain("writeTokenExhaustedApplyMoreRequest");
-    expect(routerSource).toContain("emitTokenExhaustedApplyMoreRequest");
-    expect(routerSource).toContain('navigate("/settings")');
-    expect(routerSource).toContain('document.getElementById("token-usage")');
-    expect(routerSource).toContain('document.getElementById("model-config")');
+    expect(routerSource).not.toContain("TokenExhaustedModal");
+    expect(routerSource).not.toContain("shouldShowTokenExhaustedModal");
+    expect(routerSource).not.toContain("writeTokenExhaustedApplyMoreRequest");
+    expect(routerSource).not.toContain("emitTokenExhaustedApplyMoreRequest");
     expect(routesSource).toContain("export function shouldShowTokenExhaustedModal");
     expect(applyMoreSource).toContain('TOKEN_EXHAUSTED_APPLY_MORE_EVENT = "memmy:token-exhausted-apply-more"');
     expect(settingsSource).toContain("consumeTokenExhaustedApplyMoreRequest");
     expect(settingsSource).toContain("TOKEN_EXHAUSTED_APPLY_MORE_EVENT");
     expect(settingsSource).toContain("canApplyMoreByPromotion");
-    expect(settingsSource).toContain('sectionId="model-config"');
-    expect(settingsSource).toContain('sectionId="token-usage"');
+    expect(settingsSource).toContain('id="model-config"');
+    expect(settingsSource).toContain('id="token-usage"');
   });
 
-  it("体验 Token 用完弹窗点「稍后再说」后本次运行不再复弹，仅重启可再弹", () => {
+  it("保留旧弹窗偏好读取工具，但 Router 启动时不再全局阻断", () => {
     const routerSource = readSource(resolve(appDir, "app/router.tsx"));
     const routesSource = readSource(resolve(appDir, "app/routes.ts"));
 
     expect(routesSource).toContain("export function readTokenExhaustedDismissed");
     expect(routesSource).toContain("export function writeTokenExhaustedDismissed");
-    expect(routerSource).toContain("readTokenExhaustedDismissed");
-    expect(routerSource).toContain("writeTokenExhaustedDismissed");
-    expect(routerSource).not.toContain("setHasDismissedTokenExhaustedModal(false)");
+    expect(routerSource).not.toContain("readTokenExhaustedDismissed");
+    expect(routerSource).not.toContain("writeTokenExhaustedDismissed");
+    expect(routerSource).not.toContain("setHasDismissedTokenExhaustedModal");
   });
 
-  it("体验 Token 用完弹窗在透明桌宠窗口里不渲染，避免遮罩盖住桌宠本体", () => {
+  it("Router 在主窗口和桌宠窗口都不渲染启动期额度弹窗", () => {
     const routerSource = readSource(resolve(appDir, "app/router.tsx"));
 
     expect(routerSource).toContain("function isPetWindow(");
-    expect(routerSource).toContain("isPetWindow(state.navigation.currentPath)");
-    expect(routerSource).toContain("shouldShowTokenExhaustedModal(state.bootstrap) && !isPetWindowContext");
+    expect(routerSource).not.toContain("shouldShowTokenExhaustedModal(state.bootstrap)");
+    expect(routerSource).not.toContain("TokenExhaustedModal");
   });
 });
 

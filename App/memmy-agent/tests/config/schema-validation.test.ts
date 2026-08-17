@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import YAML from "yaml";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConfigLoadError, loadConfig, saveConfig } from "../../src/config/loader.js";
 import { WebSocketConfig } from "../../src/integrations/channels/websocket.js";
@@ -37,6 +38,68 @@ function configFile(contents = ""): string {
 }
 
 describe("config schema validation", () => {
+  it("serializes only providers with explicit connection settings", () => {
+    const emptyProviders = new Config().toObject().providers;
+    expect(emptyProviders).toEqual({});
+
+    const providers = new Config({
+      providers: {
+        openai: { endpoints: { chat: { apiBase: "https://openai.example.test/v1", protocol: "openai-responses" } } },
+        anthropic: { apiKey: "anthropic-key" },
+        gemini: { endpoints: { chat: { apiBase: "https://gemini.example.test", protocol: "gemini-generate-content" } } },
+        deepseek: { extraHeaders: { "X-Test": "header" } },
+        zhipu: { extraBody: { trace: true } },
+        bedrock: { region: "us-east-1" },
+      },
+    }).toObject().providers;
+
+    expect(new Set(Object.keys(providers))).toEqual(new Set([
+      "bedrock",
+      "openai",
+      "anthropic",
+      "gemini",
+      "deepseek",
+      "zhipu",
+    ]));
+    expect(providers).not.toHaveProperty("qwen");
+  });
+
+  it("round-trips current Provider endpoint blocks through the shared writer", () => {
+    const file = configFile(YAML.stringify({
+      providers: {
+        openai: {
+          apiKey: "openai-key",
+          endpoints: {
+            chat: {
+              apiBase: "https://openai.example.test/v1",
+              protocol: "openai-chat-completions",
+            },
+          },
+        },
+      },
+      channels: {
+        sendProgress: false,
+      },
+    }));
+    const config = loadConfig(file);
+
+    saveConfig(config, file);
+
+    const saved = YAML.parse(fs.readFileSync(file, "utf8"));
+    expect(saved.providers).toEqual({
+      openai: expect.objectContaining({
+        apiKey: "openai-key",
+        endpoints: {
+          chat: {
+            apiBase: "https://openai.example.test/v1",
+            protocol: "openai-chat-completions",
+          },
+        },
+      }),
+    });
+    expect(saved.channels.sendProgress).toBe(false);
+  });
+
   it("defines and round-trips browser tool defaults", () => {
     const defaults = new BrowserToolsConfig();
     expect(defaults.toObject()).toEqual({
@@ -142,11 +205,12 @@ describe("config schema validation", () => {
     expect(fs.readFileSync(file, "utf8")).toBe(contents);
   });
 
-  it("fails loudly for invalid unrelated sections without rewriting them", () => {
+  it("fails loudly for invalid unrelated sections without rewriting the config", () => {
     const contents = "sessionDag:\n  debugLog: \"true\"\n";
     const file = configFile(contents);
 
     expect(() => loadConfig(file)).toThrow(ConfigLoadError);
+    expect(() => loadConfig(file)).toThrow(/sessionDag\.debugLog/);
     expect(fs.readFileSync(file, "utf8")).toBe(contents);
   });
 
@@ -184,15 +248,16 @@ describe("config schema validation", () => {
   });
 
   it("requires model names in presets and inline fallback entries", () => {
-    expect(() => new ModelPresetConfig({ provider: "openai" })).toThrow(/modelPreset model/);
-    expect(() => new ModelPresetConfig({ model: "" })).toThrow(/modelPreset model/);
+    const base = { endpoint: "chat", provider: "openai", source: "byok", capabilities: ["agent"] };
+    expect(() => new ModelPresetConfig({ ...base })).toThrow(/modelPreset model/);
+    expect(() => new ModelPresetConfig({ ...base, model: "" })).toThrow(/modelPreset model/);
     expect(() => new InlineFallbackConfig({ provider: "openai" })).toThrow(/fallback model/);
     expect(() => new InlineFallbackConfig({ model: "gpt-4.1" })).toThrow(/fallback provider/);
     expect(() => new InlineFallbackConfig({ provider: "", model: "gpt-4.1" })).toThrow(/fallback provider/);
 
-    expect(new ModelPresetConfig({ model: "gpt-4.1" }).model).toBe("gpt-4.1");
-    expect(new ModelPresetConfig({ model: "gpt-4.1" }).maxTokens).toBe(DEFAULT_MAX_TOKENS);
-    expect(new ModelPresetConfig({ model: "gpt-4.1" }).temperature).toBe(0.7);
+    expect(new ModelPresetConfig({ ...base, model: "gpt-4.1" }).model).toBe("gpt-4.1");
+    expect(new ModelPresetConfig({ ...base, model: "gpt-4.1" }).maxTokens).toBe(DEFAULT_MAX_TOKENS);
+    expect(new ModelPresetConfig({ ...base, model: "gpt-4.1" }).temperature).toBe(0.7);
     expect(new InlineFallbackConfig({ provider: "openai", model: "gpt-4.1" }).provider).toBe("openai");
   });
 

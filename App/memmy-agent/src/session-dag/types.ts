@@ -4,7 +4,7 @@ export type DagNodeKind = (typeof NODE_KINDS)[number];
 export const NODE_STATUSES = ["active", "done", "failed", "blocked", "frozen"] as const;
 export type DagNodeStatus = (typeof NODE_STATUSES)[number];
 
-export const EDGE_TYPES = ["decomposes", "continues", "blocks", "supersedes"] as const;
+export const EDGE_TYPES = ["decomposes", "continues", "blocks", "supersedes", "side_branch"] as const;
 export type DagEdgeType = (typeof EDGE_TYPES)[number];
 
 export const BUILD_MODES = ["llm_patch", "deterministic_fallback"] as const;
@@ -20,6 +20,20 @@ export const SOURCE_REF_TYPES = ["file", "artifact", "url"] as const;
 export type DagSourceRefType = (typeof SOURCE_REF_TYPES)[number];
 
 export type DagDetailJson = Record<string, unknown>;
+
+export type DagGoalStatus =
+  | "active"
+  | "paused"
+  | "blocked"
+  | "usage_limited"
+  | "budget_limited"
+  | "completed";
+
+export type DagGoalContext = {
+  goalId: string;
+  objective: string;
+  status: DagGoalStatus;
+};
 
 export type DagSourceRef = {
   type: DagSourceRefType;
@@ -49,6 +63,7 @@ export type DagNode = {
   updated_by: DagWriteSource;
   created_at: string;
   updated_at: string;
+  goal_id: string | null;
 };
 
 export type DagEdge = {
@@ -81,6 +96,9 @@ export type DagTurn = {
   next_retry_at: string | null;
   last_error: string | null;
   processed_at: string | null;
+  goal_id: string | null;
+  goal_objective: string | null;
+  goal_status: DagGoalStatus | null;
 };
 
 export type DagSnapshotRecord = {
@@ -116,6 +134,7 @@ export type DagContextNode = Pick<
   | "updated_turn_id"
   | "first_message_index"
   | "last_message_index"
+  | "goal_id"
 >;
 
 export type DagBuilderContext = {
@@ -168,6 +187,7 @@ export type DagTurnInput = {
   message_end: number;
   user_text?: string;
   assistant_text?: string;
+  goal_context?: DagGoalContext | null;
 };
 
 export type HistoryDagPayloadNode = {

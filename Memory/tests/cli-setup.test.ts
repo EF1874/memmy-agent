@@ -54,19 +54,16 @@ describe("memmy-memory CLI setup commands", () => {
     expect(saved).toMatchObject({
       memmyMemory: {
         version: 1,
-        activeProfile: "byok",
+        userId: "local-user",
+        roleRouting: {
+          summary: "follow",
+          evolution: "follow"
+        },
         storage: {
           mode: "local",
           backend: "sqlite",
           sqlitePath: dbPath,
           endpoint: "http://127.0.0.1:18888"
-        },
-        profiles: {
-          byok: {
-            embedding: {
-              provider: "local"
-            }
-          }
         },
         algorithm: {
           enableMemoryAdd: true,
@@ -75,6 +72,7 @@ describe("memmy-memory CLI setup commands", () => {
         }
       }
     });
+    expect(saved.memmyMemory).not.toHaveProperty("embedding");
     expect(existsSync(dbPath)).toBe(false);
   });
 
@@ -259,7 +257,19 @@ describe("memmy-memory CLI setup commands", () => {
       "agents:",
       "  defaults:",
       "    model: keep",
+      "futureSection:",
+      "  keepMe: true",
+      "providers:",
+      "  openai:",
+      "    futureProviderField: keep-provider",
+      "    endpoints:",
+      "      chat:",
+      "        futureEndpointField: keep-endpoint",
+      "modelPresets:",
+      "  future-preset:",
+      "    futurePresetField: keep-preset",
       "memmyMemory:",
+      "  futureMemoryField: keep-memory",
       "  storage:",
       "    endpoint: http://old.local",
       ""
@@ -274,25 +284,30 @@ describe("memmy-memory CLI setup commands", () => {
       cloudUuid: "old-app-cloud-login-uuid",
       userId: "user_123"
     });
-    expect(saved.identity).toBeUndefined();
-    expect(saved.uuid).toBeUndefined();
+    expect(saved.identity).toEqual({ userId: "old-identity-user" });
+    expect(saved.uuid).toBe("old-top-level-cloud-login-uuid");
     expect(saved.agents.defaults.model).toBe("keep");
+    expect(saved.futureSection).toEqual({ keepMe: true });
+    expect(saved.providers.openai).toMatchObject({
+      futureProviderField: "keep-provider",
+      endpoints: { chat: { futureEndpointField: "keep-endpoint" } }
+    });
+    expect(saved.modelPresets["future-preset"]).toEqual({
+      futurePresetField: "keep-preset"
+    });
     expect(saved.memmyMemory).toMatchObject({
+      futureMemoryField: "keep-memory",
       version: 1,
-      activeProfile: "byok",
+      userId: "user_123",
+      roleRouting: {
+        summary: "follow",
+        evolution: "follow"
+      },
       storage: {
         mode: "local",
         backend: "sqlite",
         sqlitePath: dbPath,
         endpoint: "http://new.local"
-      },
-      profiles: {
-        byok: {
-          userId: "user_123",
-          embedding: {
-            provider: "local"
-          }
-        }
       },
       algorithm: {
         enableMemoryAdd: true,
@@ -300,7 +315,65 @@ describe("memmy-memory CLI setup commands", () => {
         enableQueryRewrite: false
       }
     });
+    expect(saved.memmyMemory).not.toHaveProperty("embedding");
     expect(existsSync(dbPath)).toBe(false);
+  });
+
+  it("removes obsolete embedding mode markers during setup", async () => {
+    for (const mode of ["cloud", "local", "custom"]) {
+      const root = tempRoot();
+      const configPath = join(root, "config.yaml");
+      setEnv("HOME", root);
+      writeFileSync(configPath, YAML.stringify({
+        memmyMemory: {
+          embedding: { mode }
+        }
+      }));
+
+      await runCommand({
+        argv: [
+          "init",
+          "--home", root,
+          "--config", configPath,
+          "--db", join(root, "memory.sqlite"),
+          "--skip-agent-skills"
+        ]
+      });
+
+      const saved = YAML.parse(readFileSync(configPath, "utf8"));
+      expect(saved.memmyMemory).not.toHaveProperty("embedding");
+    }
+  });
+
+  it("rejects legacy embedding connections instead of discarding them during setup", async () => {
+    for (const embedding of [
+      {
+        provider: "openai_compatible",
+        endpoint: "https://example.com/v1"
+      },
+      {
+        mode: "custom",
+        custom: {
+          provider: "openai_compatible",
+          endpoint: "https://example.com/v1"
+        }
+      }
+    ]) {
+      const root = tempRoot();
+      const configPath = join(root, "config.yaml");
+      setEnv("HOME", root);
+      writeFileSync(configPath, YAML.stringify({ memmyMemory: { embedding } }));
+
+      await expect(runCommand({
+        argv: [
+          "init",
+          "--home", root,
+          "--config", configPath,
+          "--db", join(root, "memory.sqlite"),
+          "--skip-agent-skills"
+        ]
+      })).rejects.toThrow("memmyMemory.embedding requires the registered runtime config migration");
+    }
   });
 
   it("installs agent inject and skill folder during init when an agent is specified", async () => {

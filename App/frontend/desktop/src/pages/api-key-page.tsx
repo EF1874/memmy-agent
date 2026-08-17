@@ -1,15 +1,22 @@
 import { useState } from "react";
 import { Brain, ChevronLeft, Search } from "lucide-react";
-import type { ModelProviderConfig } from "../api/config-client.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import { persistLoginModeSelection } from "../app/login-mode.js";
 import { useApiClients } from "../app/providers.js";
 import { PAGE_CORNER_ACTION_CONTAINER_STYLE, PageCornerActionButton } from "../components/language-toggle-button.js";
+import { ModelProviderLogo } from "../components/model-provider-logo.js";
 import { Select } from "../components/Select.js";
 import type { MessageKey } from "../i18n/messages.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { appActions } from "../state/app-actions.js";
 import { useAppState } from "../state/app-state.js";
+import {
+  assignedCatalogEndpointId,
+  assignCatalogPreset,
+  createModelWorkspace,
+  modelConfigInput,
+  upsertByokPreset
+} from "../state/model-workspace.js";
 import {
   API_KEY_CARD_CLASS,
   API_KEY_PRIMARY_BTN_CLASS,
@@ -31,7 +38,7 @@ import {
   testModelConnection
 } from "./model-config.js";
 
-type EmbeddingMode = "local" | "custom";
+type EmbeddingMode = "custom";
 
 interface EmbeddingCustomConfig {
   model: string;
@@ -76,9 +83,6 @@ export function ApiKeyPage() {
   const [apiKey, setApiKey] = useState(initialModelForm.apiKey);
   const [apiKeyMasked, setApiKeyMasked] = useState(initialModelForm.apiKeyMasked);
   const [showApiKey, setShowApiKey] = useState(false);
-  const [showAdvanced, setShowAdvanced] = useState(false);
-  const [maxTokens, setMaxTokens] = useState("");
-  const [dailyLimit, setDailyLimit] = useState("");
   const modelFormValues = {
     provider,
     endpoint,
@@ -88,7 +92,7 @@ export function ApiKeyPage() {
     hasExistingApiKey: Boolean(apiKeyMasked)
   };
   const [llmValidation, setLlmValidation] = useState<ModelConfigValidationState>(initialModelForm.llmValidation);
-  const initialEmbeddingMode: EmbeddingMode = initialModelForm.embeddingMode === "custom" ? "custom" : "local";
+  const initialEmbeddingMode: EmbeddingMode = "custom";
   const [embeddingMode, setEmbeddingMode] = useState<EmbeddingMode>(initialEmbeddingMode);
   const [embeddingConfig, setEmbeddingConfig] = useState<EmbeddingCustomConfig>({
     model: initialModelForm.embModelId,
@@ -107,7 +111,7 @@ export function ApiKeyPage() {
   };
   const [embeddingValidation, setEmbeddingValidation] = useState<ModelConfigValidationState>(initialModelForm.embValidation);
   const canSave = canSaveModelConfig(modelFormValues, llmValidation)
-    && canSaveOptionalModelConfig(embeddingMode === "custom", embeddingFormValues, embeddingValidation);
+    && canSaveOptionalModelConfig(true, embeddingFormValues, embeddingValidation);
   const testedKey = createModelConfigValidationKey(modelFormValues);
   const isTestStale = Boolean(llmValidation.testedKey && llmValidation.testedKey !== testedKey);
   const embeddingTestKey = createModelConfigValidationKey(embeddingFormValues);
@@ -147,56 +151,48 @@ export function ApiKeyPage() {
     setEmbeddingConfig((current) => ({ ...current, [field]: value }));
   }
 
-  function createModelConfigDraft(): ModelProviderConfig {
-    return {
-      provider,
-      endpoint,
-      model,
-      apiKey,
-      apiKeyMasked: apiKey.trim() ? "" : apiKeyMasked,
-      configured: Boolean(endpoint.trim() && model.trim() && (apiKey.trim() || apiKeyMasked)),
-      embedding: embeddingMode === "custom"
-        ? {
-            mode: "custom",
-            endpoint: embeddingConfig.endpoint,
-            model: embeddingConfig.model,
-            apiKey: embeddingConfig.apiKey,
-            apiKeyMasked: embeddingConfig.apiKey.trim() ? "" : embeddingConfig.apiKeyMasked,
-            configured: Boolean(embeddingConfig.endpoint.trim() && embeddingConfig.model.trim() && (embeddingConfig.apiKey.trim() || embeddingConfig.apiKeyMasked))
-          }
-        : {
-            mode: "local",
-            endpoint: "",
-            model: "",
-            apiKey: "",
-            apiKeyMasked: "",
-            configured: true
-          },
-      asr: state.modelConfig.asr ?? null,
-      imageGen: state.modelConfig.imageGen ?? null
-    };
-  }
-
-  function saveConfig() {
-    if (!canSave) {
+  async function saveConfig() {
+    if (!canSave || !clients?.config) {
       return;
     }
-
-    const configDraft = createModelConfigDraft();
-    dispatch(appActions.modelConfigUpdated(configDraft));
-    dispatch(appActions.navigate("/api-key-models"));
-
-    void (clients?.config.saveModelConfig(configDraft) ?? Promise.resolve(configDraft))
-      .then((config) => {
-        track({ name: "model_config_saved", params: { page_path: "/api-key" }, consentTier: "basic" });
-        dispatch(appActions.modelConfigUpdated(config));
-        return persistLoginModeSelection({
-          configClient: clients?.config,
-          dispatch,
-          userMode: "byok"
-        });
-      })
-      .catch((error) => console.warn("save byok model config failed", error));
+    try {
+      const latest = await clients.config.getModelConfig();
+      let workspace = createModelWorkspace(latest);
+      const assignedAgentEndpointId = assignedCatalogEndpointId(workspace, "byok", "agent");
+      const agent = upsertByokPreset(workspace, {
+        provider,
+        ...(apiKeyMasked && assignedAgentEndpointId ? { endpointId: assignedAgentEndpointId } : {}),
+        endpoint,
+        protocol: chatProtocol(provider),
+        ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
+        ...(apiKeyMasked ? { apiKeyMasked } : {}),
+        model,
+        capabilities: ["agent"]
+      });
+      workspace = assignCatalogPreset(agent.workspace, "byok", "agent", agent.presetId);
+      const assignedEmbeddingEndpointId = assignedCatalogEndpointId(workspace, "byok", "embedding");
+      const embedding = upsertByokPreset(workspace, {
+        provider: "openai",
+        ...(embeddingConfig.apiKeyMasked && assignedEmbeddingEndpointId ? { endpointId: assignedEmbeddingEndpointId } : {}),
+        endpoint: embeddingConfig.endpoint,
+        protocol: "openai-embeddings",
+        ...(embeddingConfig.apiKey.trim() ? { apiKey: embeddingConfig.apiKey.trim() } : {}),
+        ...(embeddingConfig.apiKeyMasked ? { apiKeyMasked: embeddingConfig.apiKeyMasked } : {}),
+        model: embeddingConfig.model,
+        capabilities: ["embedding"]
+      });
+      workspace = assignCatalogPreset(embedding.workspace, "byok", "embedding", embedding.presetId);
+      const saved = await clients.config.saveModelCatalog(modelConfigInput(workspace));
+      if (!saved.catalog?.modelAssignments.byok.agent.candidates.length) {
+        throw new Error("persisted BYOK Agent assignment is empty");
+      }
+      track({ name: "model_config_saved", params: { page_path: "/api-key" }, consentTier: "basic" });
+      dispatch(appActions.modelConfigUpdated(saved));
+      await persistLoginModeSelection({ configClient: clients.config, dispatch, userMode: "byok" });
+      dispatch(appActions.navigate("/api-key-models"));
+    } catch (error) {
+      console.warn("save byok model config failed", error);
+    }
   }
 
   return (
@@ -237,7 +233,8 @@ export function ApiKeyPage() {
               className="select-control--subtle"
               options={providerOptions.map((option) => ({
                 value: option.value,
-                label: t(option.labelKey)
+                label: t(option.labelKey),
+                icon: <ModelProviderLogo provider={option.value} size={16} />
               }))}
             />
 
@@ -252,20 +249,6 @@ export function ApiKeyPage() {
               showPassword={showApiKey}
               onTogglePassword={() => setShowApiKey((value) => !value)}
             />
-
-            <button
-              type="button"
-              onClick={() => setShowAdvanced((value) => !value)}
-              className="flex items-center gap-1.5 text-xs text-text-ink/55 hover:text-text-ink/75 cursor-pointer transition-colors"
-            >
-              {showAdvanced ? "-" : "+"} {t("apiKey.advanced")}
-            </button>
-            {showAdvanced && (
-              <div className="space-y-3.5">
-                <ConfigField label={t("apiKey.maxTokens")} placeholder={t("apiKey.noLimit")} value={maxTokens} onChange={setMaxTokens} suffix="tokens" />
-                <ConfigField label={t("apiKey.dailyLimit")} placeholder={t("apiKey.noLimit")} value={dailyLimit} onChange={setDailyLimit} />
-              </div>
-            )}
 
             <div className="flex min-h-9 items-center justify-end gap-3">
               <ValidationMessage validation={llmValidation} stale={isTestStale} />
@@ -288,11 +271,10 @@ export function ApiKeyPage() {
               onValueChange={(value) => setEmbeddingMode(value as EmbeddingMode)}
               className="select-control--subtle"
               options={[
-                { value: "local", label: t("apiKey.localEmbedding") },
                 { value: "custom", label: t("apiKey.customEmbedding") }
               ]}
             />
-            {embeddingMode === "custom" && (
+            {(
               <>
                 <ConfigField
                   label={t("apiKey.embeddingModel")}
@@ -335,4 +317,10 @@ export function ApiKeyPage() {
       </div>
     </div>
   );
+}
+
+function chatProtocol(provider: string) {
+  if (provider === "anthropic") return "anthropic-messages" as const;
+  if (provider === "gemini") return "gemini-generate-content" as const;
+  return "openai-chat-completions" as const;
 }

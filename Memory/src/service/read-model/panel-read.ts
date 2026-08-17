@@ -352,7 +352,7 @@ export class PanelReadModel {
     sourceDistribution: Array<{ source: string; count: number; percentage: number }>;
     dailyActivity: Array<{ date: string; count: number }>;
   } {
-    const memories = this.listAllMemoriesForStats();
+    const memories = this.deps.repos.memories.listStats();
     const timeZone = resolveTimeZone(input.timeZone);
     const dates = panelDateKeys(this.now(), PANEL_DAILY_ACTIVITY_DAYS, timeZone);
     return {
@@ -385,7 +385,7 @@ export class PanelReadModel {
   } {
     const timeZone = resolveTimeZone(input.timeZone);
     const dates = panelLastSevenDateKeys(this.now(), timeZone);
-    const memories = this.listAllMemoriesForStats();
+    const memories = this.deps.repos.memories.listStats();
     const skillMemories = memories.filter((memory) => memory.memoryLayer === "Skill");
     const logs = this.deps.repos.runtime.listApiLogs({ limit: 10_000, offset: 0 }).logs
       .filter((log) => dates.includes(panelDateKey(log.calledAt, timeZone)));
@@ -560,13 +560,7 @@ export class PanelReadModel {
   }
 
   private jobStatusCounts(): Record<"queued" | "leased" | "succeeded" | "failed" | "dead_letter", number> {
-    return {
-      queued: this.deps.repos.runtime.listJobs("queued", 1000).length,
-      leased: this.deps.repos.runtime.listJobs("leased", 1000).length,
-      succeeded: this.deps.repos.runtime.listJobs("succeeded", 1000).length,
-      failed: this.deps.repos.runtime.listJobs("failed", 1000).length,
-      dead_letter: this.deps.repos.runtime.listJobs("dead_letter", 1000).length
-    };
+    return this.deps.repos.runtime.countJobsByStatus();
   }
 
   private memoryLayerCounts(): Record<MemoryLayer, number> {
@@ -590,16 +584,6 @@ export class PanelReadModel {
     return counts;
   }
 
-  private listAllMemoriesForStats() {
-    const rows = [] as ReturnType<Repositories["memories"]["list"]>;
-    const pageSize = 1000;
-    for (let offset = 0;; offset += pageSize) {
-      const batch = this.deps.repos.memories.list({}, pageSize, offset);
-      rows.push(...batch);
-      if (batch.length < pageSize) break;
-    }
-    return rows;
-  }
 }
 
 export function redactConfig(value: unknown): unknown {

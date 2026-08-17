@@ -5,6 +5,7 @@ import {
   AccountLoginResultViewSchema,
   AccountSessionViewSchema,
   ApiErrorBodySchema,
+  AsrTranscriptionResponseSchema,
   AuthorizeIntegrationResponseSchema,
   AvatarOptionSchema,
   ByokTokenUsageEventSchema,
@@ -26,6 +27,7 @@ import {
   ModelConfigTestInputSchema,
   ModelConfigTestResultSchema,
   ModelConfigViewSchema,
+  MODEL_NAME_MAX_LENGTH,
   PatchAppSettingsInputSchema,
   PatchOnboardingInputSchema,
   PatchPrivacyInputSchema,
@@ -36,16 +38,69 @@ import {
   SetImprovementProgramResponseSchema,
   SetSkinInputSchema,
   RequestConnectUrlResponseSchema,
+  TextModelItemInputSchema,
+  TextModelItemViewSchema,
   VerifyCodeInputSchema
 } from "@memmy/local-api-contracts";
 
 describe("local app contracts", () => {
+  it("limits newly saved model names without constraining normal names", () => {
+    const modelInput = {
+      endpointId: "primary",
+      source: "byok" as const,
+      capabilities: ["agent" as const]
+    };
+
+    expect(TextModelItemInputSchema.parse({
+      ...modelInput,
+      model: "gpt-4.1-mini"
+    }).model).toBe("gpt-4.1-mini");
+    expect(TextModelItemInputSchema.safeParse({
+      ...modelInput,
+      model: "m".repeat(MODEL_NAME_MAX_LENGTH)
+    }).success).toBe(true);
+    expect(TextModelItemInputSchema.safeParse({
+      ...modelInput,
+      model: "m".repeat(MODEL_NAME_MAX_LENGTH + 1)
+    }).success).toBe(false);
+    expect(TextModelItemViewSchema.safeParse({
+      ...modelInput,
+      presetId: "legacy-long-model",
+      provider: "openai",
+      protocol: "openai-chat-completions",
+      model: "m".repeat(MODEL_NAME_MAX_LENGTH + 1),
+      available: true
+    }).success).toBe(true);
+  });
+
+  it("accepts canonical BYOK and account ASR response identities", () => {
+    expect(AsrTranscriptionResponseSchema.parse({
+      text: "你好",
+      modelId: "custom-asr-model",
+      provider: "dashscope",
+      source: "byok",
+      transcribedAt: "2026-06-15T10:00:00.000Z"
+    }).provider).toBe("dashscope");
+
+    expect(AsrTranscriptionResponseSchema.parse({
+      text: "hello",
+      modelId: "account-asr",
+      provider: "memmy_account",
+      source: "account",
+      transcribedAt: "2026-06-15T10:00:00.000Z"
+    }).modelId).toBe("account-asr");
+  });
+
   it("parses BYOK token usage event and summary contracts", () => {
     const event = ByokTokenUsageEventSchema.parse({
       id: "event-1",
       kind: "agent_chat",
       source: "agent",
       operationId: "turn-1",
+      presetId: "byok-agent",
+      provider: "openai",
+      model: "gpt-4.1-mini",
+      capability: "agent",
       inputTokens: 10,
       outputTokens: 20,
       totalTokens: 30,
@@ -82,12 +137,31 @@ describe("local app contracts", () => {
         cacheCreationInputTokens: 2,
         eventCount: 1,
         updatedAt: "2026-06-11T10:00:00.000Z"
+      }],
+      byModel: [{
+        presetId: "byok-agent",
+        provider: "openai",
+        model: "gpt-4.1-mini",
+        capability: "agent",
+        inputTokens: 10,
+        outputTokens: 20,
+        totalTokens: 30,
+        cachedInputTokens: 5,
+        cacheCreationInputTokens: 2,
+        eventCount: 1,
+        updatedAt: "2026-06-11T10:00:00.000Z"
       }]
     });
 
     expect(summary.byKind[0]).toMatchObject({
       kind: "agent_chat",
       totalTokens: 30
+    });
+    expect(summary.byModel[0]).toMatchObject({
+      presetId: "byok-agent",
+      provider: "openai",
+      model: "gpt-4.1-mini",
+      capability: "agent"
     });
   });
 
@@ -149,102 +223,99 @@ describe("local app contracts", () => {
     expect(() => PatchAppSettingsInputSchema.parse({ defaultLaunchMode: "windowed" })).toThrow();
   });
 
-  it("parses model config input and exposes saved keys in model config view", () => {
+  it("parses canonical model catalog input and exposes saved endpoint keys", () => {
     const input = ModelConfigInputSchema.parse({
-      provider: "openai_compatible",
-      baseUrl: "https://api.example.com/v1",
-      modelId: "gpt-4.1-mini",
-      apiKey: "sk-test-secret",
-      embedding: {
-        mode: "custom",
-        baseUrl: "https://embedding.example.com/v1",
-        modelId: "text-embedding-3-large",
-        apiKey: "emb-test-secret"
-      },
-      memmyMemory: {
-        summary: {
-          provider: "anthropic",
-          baseUrl: "https://memory.example.com/v1",
-          modelId: "claude-3-5-haiku",
-          apiKey: "sk-memory-secret"
+      configRevision: "revision-1",
+      providers: [{
+        provider: "openai",
+        apiKey: "sk-test-secret",
+        endpoints: [{
+          endpointId: "primary",
+          apiBase: "https://api.example.com/v1",
+          protocol: "openai-chat-completions",
+          apiKey: "sk-endpoint-secret"
+        }],
+        models: [{
+          presetId: "work-gpt",
+          endpointId: "primary",
+          model: "gpt-4.1-mini",
+          source: "byok",
+          capabilities: ["agent", "memory_summary", "memory_evolution"]
+        }]
+      }],
+      modelAssignments: {
+        byok: {
+          agent: { candidates: ["work-gpt"], default: "work-gpt" },
+          memorySummary: "work-gpt",
+          memoryEvolution: "work-gpt",
+          embedding: null,
+          asr: null,
+          imageGeneration: null
         },
-        evolution: {
-          provider: "qwen",
-          baseUrl: "https://skill.example.com/v1",
-          modelId: "qwen-plus",
-          apiKey: "sk-skill-secret"
+        account: {
+          agent: { candidates: [], default: null },
+          memorySummary: null,
+          memoryEvolution: null,
+          embedding: null,
+          asr: null,
+          imageGeneration: null
         }
-      },
-      asr: {
-        provider: "aliyun",
-        baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        modelId: "qwen3-asr-flash",
-        apiKey: "sk-asr-secret"
       }
     });
 
-    expect(input.embedding?.mode).toBe("custom");
-    expect(input.memmyMemory?.evolution.provider).toBe("qwen");
-    expect(input.asr?.modelId).toBe("qwen3-asr-flash");
+    expect(input.providers[0]?.endpoints[0]?.apiKey).toBe("sk-endpoint-secret");
+    expect(input.modelAssignments.byok.memorySummary).toBe("work-gpt");
 
     const view = ModelConfigViewSchema.parse({
-      provider: "openai_compatible",
-      baseUrl: "https://api.example.com/v1",
-      modelId: "gpt-4.1-mini",
-      hasApiKey: true,
-      apiKeyMasked: "sk-t••••cret",
-      apiKey: "sk-test-secret",
-      embedding: {
-        mode: "custom",
-        baseUrl: "https://embedding.example.com/v1",
-        modelId: "text-embedding-3-large",
+      configRevision: "revision-2",
+      providers: [{
+        provider: "openai",
+        configured: true,
         hasApiKey: true,
-        apiKeyMasked: "emb-••••cret",
-        apiKey: "emb-test-secret"
-      },
-      memmyMemory: {
-        summary: {
-          provider: "anthropic",
-          baseUrl: "https://memory.example.com/v1",
-          modelId: "claude-3-5-haiku",
+        apiKeyMasked: "sk-t••••cret",
+        apiKey: "sk-test-secret",
+        accountManaged: false,
+        editable: true,
+        endpoints: [{
+          endpointId: "primary",
+          apiBase: "https://api.example.com/v1",
+          protocol: "openai-chat-completions",
           hasApiKey: true,
-          apiKeyMasked: "sk-m••••cret",
-          apiKey: "sk-memory-secret"
-        },
-        evolution: {
-          provider: "qwen",
-          baseUrl: "https://skill.example.com/v1",
-          modelId: "qwen-plus",
-          hasApiKey: true,
-          apiKeyMasked: "sk-s••••cret",
-          apiKey: "sk-skill-secret"
-        }
+          apiKeyMasked: "sk-e••••cret",
+          apiKey: "sk-endpoint-secret"
+        }],
+        models: [{
+          presetId: "work-gpt",
+          provider: "openai",
+          endpointId: "primary",
+          protocol: "openai-chat-completions",
+          model: "gpt-4.1-mini",
+          source: "byok",
+          capabilities: ["agent", "memory_summary", "memory_evolution"],
+          available: true
+        }]
+      }],
+      modelAssignments: input.modelAssignments,
+      effectiveCandidates: {
+        byok: [{
+          presetId: "work-gpt",
+          provider: "openai",
+          endpointId: "primary",
+          protocol: "openai-chat-completions",
+          model: "gpt-4.1-mini",
+          source: "byok",
+          capabilities: ["agent", "memory_summary", "memory_evolution"],
+          available: true
+        }],
+        account: []
       },
-      asr: {
-        provider: "aliyun",
-        baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        modelId: "qwen3-asr-flash",
-        hasApiKey: true,
-        apiKeyMasked: "sk-a••••cret",
-        apiKey: "sk-asr-secret"
-      },
-      imageGen: {
-        provider: "openai_compatible",
-        baseUrl: "https://api.openai.com/v1",
-        modelId: "gpt-image-1",
-        hasApiKey: true,
-        apiKeyMasked: "sk-i••••cret",
-        apiKey: "sk-image-secret"
-      },
+      configured: true,
       updatedAt: "2026-06-02T10:00:00.000Z"
     });
 
-    expect(view.apiKey).toBe("sk-test-secret");
-    expect(view.embedding?.apiKey).toBe("emb-test-secret");
-    expect(view.memmyMemory.summary.apiKey).toBe("sk-memory-secret");
-    expect(view.memmyMemory.evolution.apiKey).toBe("sk-skill-secret");
-    expect(view.asr?.apiKey).toBe("sk-asr-secret");
-    expect(view.imageGen?.apiKey).toBe("sk-image-secret");
+    expect(view.providers[0]?.apiKey).toBe("sk-test-secret");
+    expect(view.providers[0]?.endpoints[0]?.apiKey).toBe("sk-endpoint-secret");
+    expect(view.modelAssignments.byok.agent.default).toBe("work-gpt");
   });
 
   it("parses image generation model config and rejects unsupported providers", () => {
@@ -278,7 +349,9 @@ describe("local app contracts", () => {
 
     const imageTest = ModelConfigTestInputSchema.parse({
       provider: "doubao",
-      baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
+      endpointId: "image",
+      protocol: "openai-images",
+      apiBase: "https://ark.cn-beijing.volces.com/api/v3",
       modelId: "doubao-seedream-4-0-250828",
       apiKey: "sk-image-secret",
       capability: "image",
@@ -291,13 +364,17 @@ describe("local app contracts", () => {
   it("parses model config test input and returns non-secret validation result", () => {
     const input = ModelConfigTestInputSchema.parse({
       provider: "openai_compatible",
-      baseUrl: "https://api.openai.com/v1",
+      endpointId: "chat",
+      protocol: "openai-chat-completions",
+      apiBase: "https://api.openai.com/v1",
       modelId: "gpt-5.5",
       apiKey: "sk-test-secret"
     });
     const asrInput = ModelConfigTestInputSchema.parse({
       provider: "qwen",
-      baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      endpointId: "asr",
+      protocol: "dashscope-input-audio-chat",
+      apiBase: "https://dashscope.aliyuncs.com/compatible-mode/v1",
       modelId: "qwen3-asr-flash",
       apiKey: "sk-asr-secret",
       capability: "asr"

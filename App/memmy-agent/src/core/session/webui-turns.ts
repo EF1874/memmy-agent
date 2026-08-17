@@ -1,7 +1,7 @@
 import { InboundMessage, OutboundMessage } from "../runtime-messages/events.js";
 import { MessageBus } from "../runtime-messages/queue.js";
 import { LLMProvider } from "../../providers/base.js";
-import { goalStateWsBlob } from "./goal-state.js";
+import type { GoalStatus } from "./goal-state.js";
 import {
   Session,
   SessionManager,
@@ -47,6 +47,7 @@ function titleInputs(session: Session | any): [string, string] {
   let assistantText = "";
   for (const message of session?.messages ?? []) {
     if (message?.commandMessage === true) continue;
+    if (message?.internal_context === "goal_continuation") continue;
     const role = message?.role;
     const content = message?.content;
     if (typeof content !== "string" || !content.trim()) continue;
@@ -152,8 +153,8 @@ export async function publishTurnRunStatus(bus: MessageBus | any, msg: InboundMe
   const chatId = String(msg.chatId);
   const metadata: Record<string, any> = {
     ...(msg.metadata ?? {}),
-    goalStatusEvent: true,
-    goalStatus: status,
+    runStatusEvent: true,
+    runStatus: status,
   };
   if (status === "running") {
     const startedAt = Date.now() / 1000;
@@ -172,7 +173,8 @@ export async function finishWebuiTurn(input: {
   sessionKey: string;
   sessions: SessionManager;
   latencyMs?: number | null;
-  goalState?: Record<string, any> | null;
+  goalId?: string | null;
+  goalOutcome?: GoalStatus | null;
 }): Promise<void> {
   const { bus, msg, sessionKey, sessions, latencyMs } = input;
   if (msg.channel !== "websocket") return;
@@ -184,9 +186,12 @@ export async function finishWebuiTurn(input: {
   const metadata: Record<string, any> = {
     ...(msg.metadata ?? {}),
     turnEnd: true,
-    goalState: input.goalState ?? goalStateWsBlob(session.metadata),
   };
   if (latencyMs != null) metadata.latencyMs = Math.floor(latencyMs);
+  if (input.goalId && input.goalOutcome) {
+    metadata.goalId = input.goalId;
+    metadata.goalOutcome = input.goalOutcome;
+  }
   await bus.publishOutbound(new OutboundMessage({
     channel: msg.channel,
     chatId: msg.chatId,

@@ -66,8 +66,20 @@ describe("model HTTP responses", () => {
       { status: 403, headers: { "content-type": "application/json" } }
     )));
 
+    const actualModelContext = {
+      presetId: "summary-byok",
+      provider: "openai",
+      endpointId: "memory",
+      protocol: "openai-chat-completions" as const,
+      model: "gpt-summary",
+      source: "byok" as const,
+      ownerAccountId: null,
+      capability: "memory_summary" as const,
+      capabilities: ["memory_summary" as const]
+    };
     const request = postJsonWithRetry({
       provider: "openai_compatible",
+      actualModelContext,
       url: "https://api.example/v1/chat/completions",
       body: {},
       timeoutMs: 1_000,
@@ -79,7 +91,8 @@ describe("model HTTP responses", () => {
       provider: "openai_compatible",
       httpStatus: 403,
       errorCode: "40309",
-      detail
+      detail,
+      actualModelContext
     });
   });
 

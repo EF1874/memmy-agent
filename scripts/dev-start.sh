@@ -8,7 +8,12 @@ DESKTOP_DIR="$ROOT_DIR/App/shell/desktop"
 ELECTRON_PACKAGE_DIR="$DESKTOP_DIR/node_modules/electron"
 MEMORY_CLI_ENTRY="$ROOT_DIR/Memory/dist/src/cli/index.js"
 MEMMY_CONFIG_PATH="${MEMMY_CONFIG:-$HOME/.memmy/config.yaml}"
+MEMMY_WORKSPACE_IS_EXPLICIT=0
+if [[ -n "${MEMMY_WORKSPACE:-}" ]]; then
+  MEMMY_WORKSPACE_IS_EXPLICIT=1
+fi
 MEMMY_WORKSPACE_DIR="${MEMMY_WORKSPACE:-$HOME/.memmy/workspace}"
+MEMMY_APP_DATABASE_FILE="${MEMMY_APP_DATABASE:-}"
 MEMMY_BIN_DIR="$HOME/.local/bin"
 MEMMY_MEMORY_BIND_HOST="${MEMMY_MEMORY_HOST:-${MEMORY_SERVICE_HOST:-127.0.0.1}}"
 MEMMY_MEMORY_PORT_VALUE="${MEMMY_MEMORY_PORT:-${MEMORY_SERVICE_PORT:-18960}}"
@@ -23,7 +28,6 @@ WAIT_ON_BIN="$ROOT_DIR/node_modules/.bin/wait-on"
 LOG_DIR="$ROOT_DIR/.tmp/dev-stack"
 
 export MEMMY_CONFIG="$MEMMY_CONFIG_PATH"
-export MEMMY_AGENT_WORKSPACE="$MEMMY_WORKSPACE_DIR"
 export MEMMY_MEMORY_URL="${MEMMY_MEMORY_URL:-$MEMMY_MEMORY_ENDPOINT}"
 export MEMMY_MEMORY_LAYER_URL="${MEMMY_MEMORY_LAYER_URL:-$MEMMY_MEMORY_ENDPOINT}"
 if [[ -n "$MEMMY_MEMORY_TOKEN_VALUE" ]]; then
@@ -493,11 +497,27 @@ stop_existing_stack() {
 }
 
 config_has_agent_model() {
-  MEMMY_CONFIG_PATH="$MEMMY_CONFIG_PATH" node --input-type=module <<'NODE'
+  local node_command="${MEMMY_RUNTIME_NODE_PATH:-}"
+  if [[ -z "$node_command" ]]; then
+    if command_exists node; then
+      node_command="$(command -v node)"
+    elif command_exists node.exe; then
+      node_command="$(command -v node.exe)"
+    else
+      return 1
+    fi
+  fi
+
+  local config_path_for_node="$MEMMY_CONFIG_PATH"
+  if [[ "$node_command" == *.exe ]] && command_exists wslpath; then
+    config_path_for_node="$(wslpath -w "$MEMMY_CONFIG_PATH")"
+  fi
+
+  "$node_command" --input-type=module - "$config_path_for_node" <<'NODE'
 import fs from "node:fs";
 import { parse } from "yaml";
 
-const configPath = process.env.MEMMY_CONFIG_PATH;
+const configPath = process.argv[2];
 if (!configPath || !fs.existsSync(configPath)) process.exit(1);
 
 let config;
@@ -508,12 +528,16 @@ try {
 }
 
 const defaults = config.agents?.defaults ?? {};
-const providerName = defaults.provider;
-const modelName = defaults.model;
+const presetName = defaults.modelPreset;
+const preset = presetName ? config.modelPresets?.[presetName] : null;
+const providerName = preset?.provider;
+const endpointName = preset?.endpoint;
+const modelName = preset?.model;
 const provider = providerName ? config.providers?.[providerName] : null;
-const apiKey = provider?.apiKey;
+const endpoint = endpointName ? provider?.endpoints?.[endpointName] : null;
+const apiKey = endpoint?.apiKey ?? provider?.apiKey;
 
-if (!providerName || !modelName || !apiKey) process.exit(1);
+if (!presetName || !providerName || !endpointName || !modelName || !endpoint || !apiKey) process.exit(1);
 process.exit(0);
 NODE
 }
@@ -534,6 +558,7 @@ wait_for_agent_model_config() {
 
 run_gateway() {
   require_command node
+  export MEMMY_AGENT_WORKSPACE="${MEMMY_AGENT_WORKSPACE:-$MEMMY_WORKSPACE_DIR}"
   cd "$ROOT_DIR"
   wait_for_agent_model_config
   cd "$MEMMY_AGENT_DIR"
@@ -542,6 +567,7 @@ run_gateway() {
 
 run_agent_api() {
   require_command node
+  export MEMMY_AGENT_WORKSPACE="${MEMMY_AGENT_WORKSPACE:-$MEMMY_WORKSPACE_DIR}"
   cd "$ROOT_DIR"
   wait_for_agent_model_config
   cd "$MEMMY_AGENT_DIR"
@@ -561,6 +587,19 @@ run_main() {
   log "using Node $("$MEMMY_RUNTIME_NODE_PATH" --version) from $MEMMY_RUNTIME_NODE_PATH"
   log "using desktop edition $MEMMY_APP_EDITION with $MEMMY_ACCOUNT_CHANNEL account channel"
 
+  if [[ -z "$MEMMY_APP_DATABASE_FILE" ]]; then
+    MEMMY_APP_DATABASE_FILE="$("$MEMMY_RUNTIME_NODE_PATH" --eval '
+      const os = require("node:os");
+      const path = require("node:path");
+      const appData = process.platform === "win32"
+        ? (process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"))
+        : process.platform === "darwin"
+          ? path.join(os.homedir(), "Library", "Application Support")
+          : (process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"));
+      process.stdout.write(path.resolve(appData, "Memmy", "app.sqlite"));
+    ')"
+  fi
+
   ensure_npm_dependencies
 
   if [[ ! -x "$CONCURRENTLY_BIN" ]]; then
@@ -574,19 +613,70 @@ run_main() {
 
   stop_existing_stack
 
-  build_and_install_memory_cli
-
-  log "rebuilding better-sqlite3 for local Node runtime"
-  npm rebuild better-sqlite3
-  "$MEMMY_RUNTIME_NODE_PATH" --eval \
-    'const Database = require("better-sqlite3"); const db = new Database(":memory:"); db.close();'
-
-  ensure_electron_runtime
-
   log "building memmy-agent from current source"
   ensure_memmy_agent_dependencies
   cd "$MEMMY_AGENT_DIR"
   npm run build
+
+  local config_parent config_name
+  config_parent="$(dirname "$MEMMY_CONFIG_PATH")"
+  config_name="$(basename "$MEMMY_CONFIG_PATH")"
+  mkdir -p "$config_parent"
+  config_parent="$(cd "$config_parent" && pwd -P)"
+  MEMMY_CONFIG_PATH="$config_parent/$config_name"
+  export MEMMY_CONFIG="$MEMMY_CONFIG_PATH"
+
+  log "rebuilding better-sqlite3 for local Node runtime"
+  cd "$ROOT_DIR"
+  npm rebuild better-sqlite3
+  "$MEMMY_RUNTIME_NODE_PATH" --eval \
+    'const Database = require("better-sqlite3"); const db = new Database(":memory:"); db.close();'
+
+  unset MEMMY_MIGRATIONS_READY_CONFIG MEMMY_MIGRATIONS_READY_WORKSPACE MEMMY_MIGRATIONS_READY_SESSION_DAG MEMMY_MIGRATIONS_READY_APP_DATABASE
+  log "running startup migrations"
+  cd "$MEMMY_AGENT_DIR"
+  local migration_args=(dist/main.js migrate --config "$MEMMY_CONFIG_PATH" --app-database "$MEMMY_APP_DATABASE_FILE")
+  if [[ "$MEMMY_WORKSPACE_IS_EXPLICIT" == "1" ]]; then
+    mkdir -p "$MEMMY_WORKSPACE_DIR"
+    MEMMY_WORKSPACE_DIR="$(cd "$MEMMY_WORKSPACE_DIR" && pwd -P)"
+    migration_args+=(--workspace "$MEMMY_WORKSPACE_DIR")
+  fi
+  "$MEMMY_RUNTIME_NODE_PATH" "${migration_args[@]}"
+
+  MEMMY_WORKSPACE_DIR="$("$MEMMY_RUNTIME_NODE_PATH" - "$MEMMY_CONFIG_PATH" "$HOME/.memmy/workspace" <<'NODE'
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const YAML = require("yaml");
+const [configPath, fallback] = process.argv.slice(2);
+let configured;
+try {
+  const root = YAML.parse(fs.readFileSync(configPath, "utf8")) || {};
+  configured = root?.agents?.defaults?.workspace;
+} catch (error) {
+  if (error?.code !== "ENOENT") throw error;
+}
+const selected = typeof configured === "string" && configured.trim() ? configured.trim() : fallback;
+const expanded = selected === "~" || selected.startsWith("~/")
+  ? path.join(os.homedir(), selected.slice(2))
+  : selected;
+process.stdout.write(path.resolve(expanded));
+NODE
+)"
+  mkdir -p "$MEMMY_WORKSPACE_DIR"
+  MEMMY_WORKSPACE_DIR="$(cd "$MEMMY_WORKSPACE_DIR" && pwd -P)"
+  export MEMMY_AGENT_WORKSPACE="$MEMMY_WORKSPACE_DIR"
+  export MEMMY_MIGRATIONS_READY_CONFIG="$MEMMY_CONFIG_PATH"
+  export MEMMY_MIGRATIONS_READY_WORKSPACE="$MEMMY_WORKSPACE_DIR"
+  export MEMMY_MIGRATIONS_READY_SESSION_DAG="${MEMMY_AGENT_SESSION_DAG_DIR:-$(dirname "$MEMMY_WORKSPACE_DIR")/session-dag}"
+  export MEMMY_APP_DATABASE="$MEMMY_APP_DATABASE_FILE"
+  export MEMMY_MIGRATIONS_READY_APP_DATABASE="$MEMMY_APP_DATABASE_FILE"
+
+  build_and_install_memory_cli
+
+  ensure_electron_runtime
+
+  cd "$MEMMY_AGENT_DIR"
 
   install_user_cli_link "memmy" "$MEMMY_AGENT_DIR/dist/main.js"
   "$(user_cli_path "memmy")" --version >/dev/null

@@ -10,7 +10,7 @@ import {
   type MemmyAgentWebSocketConnection,
   type MemmyAgentWsEvent
 } from "../api/memmy-agent-client.js";
-import { agentActions, createAgentOperationError, type AppAction } from "../state/app-actions.js";
+import { agentActions, appActions, createAgentOperationError, type AppAction } from "../state/app-actions.js";
 import { updateSidebarStateForTask, type AgentState } from "../state/agent-chat-slice.js";
 import { useAppState } from "../state/app-state.js";
 import { useApiClients } from "./providers.js";
@@ -552,6 +552,29 @@ export function agentRuntimeConnectRetryDelayMs(attempt: number): number {
     ?? AGENT_RUNTIME_CONNECT_STEADY_RETRY_DELAY_MS;
 }
 
+export function requestDesyncedAgentQueueSnapshots(
+  connection: Pick<MemmyAgentWebSocketConnection, "requestQueueSnapshot">,
+  generation: number,
+  desyncedByChatId: Record<string, { generation: number; observedRevision: number }>,
+  requestedKeys: Set<string>
+): void {
+  const generationPrefix = `${generation}\0`;
+  for (const key of requestedKeys) {
+    if (!key.startsWith(generationPrefix)) requestedKeys.delete(key);
+  }
+  for (const [chatId, desync] of Object.entries(desyncedByChatId)) {
+    if (desync.generation !== generation) continue;
+    const key = `${generationPrefix}${chatId}\0${desync.observedRevision}`;
+    if (requestedKeys.has(key)) continue;
+    requestedKeys.add(key);
+    try {
+      connection.requestQueueSnapshot(chatId, generation);
+    } catch {
+      // A new connection generation receives an authoritative attach snapshot.
+    }
+  }
+}
+
 /** Checks is agent runtime bridge route. */
 export function isAgentRuntimeBridgeRoute(path: AppRoutePath): boolean {
   return path === "/main"
@@ -570,6 +593,9 @@ export function AgentRuntimeBridge(props: {
   const { state, dispatch } = useAppState();
   const enabled = isAgentRuntimeBridgeRoute(state.navigation.currentPath);
   const connectionRef = useRef<MemmyAgentWebSocketConnection | null>(null);
+  const modelCatalogRefreshInFlightRef = useRef(false);
+  const modelCatalogRefreshQueuedRef = useRef(false);
+  const modelCatalogRefreshVersionRef = useRef(0);
   const [connection, setConnection] = useState<MemmyAgentWebSocketConnection | null>(null);
   const connectionUnsubscribersRef = useRef<MemmyAgentUnsubscribe[]>([]);
   const chatUnsubscribeRef = useRef<MemmyAgentUnsubscribe | null>(null);
@@ -578,6 +604,7 @@ export function AgentRuntimeBridge(props: {
   const connectAttemptRef = useRef(0);
   const connectInFlightRef = useRef(false);
   const operationErrorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const queueSnapshotRequestKeysRef = useRef(new Set<string>());
   const agentStateRef = useRef(state.agent);
   agentStateRef.current = state.agent;
   const ownedTaskStateCoordinatorRef = useRef<{
@@ -612,6 +639,8 @@ export function AgentRuntimeBridge(props: {
 
   const cleanupConnection = useCallback((): void => {
     const hadActiveConnection = Boolean(connectionRef.current || connectInFlightRef.current);
+    modelCatalogRefreshVersionRef.current += 1;
+    modelCatalogRefreshQueuedRef.current = false;
     clearConnectRetryTimer();
     connectAttemptRef.current = 0;
     connectInFlightRef.current = false;
@@ -625,6 +654,7 @@ export function AgentRuntimeBridge(props: {
     connectionRef.current?.close();
     connectionRef.current = null;
     setConnection(null);
+    queueSnapshotRequestKeysRef.current.clear();
     if (hadActiveConnection) {
       dispatch(agentActions.connectionDisposed());
     }
@@ -650,15 +680,47 @@ export function AgentRuntimeBridge(props: {
     subscribeAgentChat(currentConnection, chatId);
   }, [subscribeAgentChat]);
 
+  const refreshModelCatalog = useCallback(async (): Promise<void> => {
+    const agentClient = clients?.memmyAgent;
+    const configClient = clients?.config;
+    if (!agentClient || !configClient) return;
+    modelCatalogRefreshVersionRef.current += 1;
+    if (modelCatalogRefreshInFlightRef.current) {
+      modelCatalogRefreshQueuedRef.current = true;
+      return;
+    }
+    modelCatalogRefreshInFlightRef.current = true;
+    try {
+      do {
+        modelCatalogRefreshQueuedRef.current = false;
+        const version = modelCatalogRefreshVersionRef.current;
+        try {
+          const [settings, modelConfig] = await Promise.all([
+            agentClient.getSettings(),
+            configClient.getModelConfig()
+          ]);
+          if (version === modelCatalogRefreshVersionRef.current) {
+            dispatch(agentActions.modelCatalogLoaded(
+              settings.model_presets,
+              settings.agent.model_preset
+            ));
+            dispatch(appActions.modelConfigUpdated(modelConfig));
+          }
+        } catch (error) {
+          console.error("Agent model catalog refresh failed:", error);
+        }
+      } while (modelCatalogRefreshQueuedRef.current);
+    } finally {
+      modelCatalogRefreshInFlightRef.current = false;
+      if (modelCatalogRefreshQueuedRef.current) {
+        void refreshModelCatalog();
+      }
+    }
+  }, [clients?.config, clients?.memmyAgent, dispatch]);
+
   const registerConnectionHandlers = useCallback((nextConnection: MemmyAgentWebSocketConnection): void => {
     connectionUnsubscribersRef.current = [
       nextConnection.onSessionUpdate((chatId, scope, generation) => dispatch(agentActions.wsEventReceived({ event: "session_updated", chat_id: chatId, connection_generation: generation, ...(scope ? { scope } : {}) }))),
-      nextConnection.onRuntimeModelUpdate((modelName, modelPreset, generation) => dispatch(agentActions.wsEventReceived({
-        event: "runtime_model_updated",
-        connection_generation: generation,
-        ...(modelName ? { model_name: modelName } : {}),
-        ...(modelPreset ? { model_preset: modelPreset } : {})
-      }))),
       nextConnection.onRunLifecycle((chatId, event) => {
         if (chatId === subscribedChatRef.current) {
           return;
@@ -718,9 +780,27 @@ export function AgentRuntimeBridge(props: {
         }
 
         dispatch(agentActions.bootstrapSucceeded(boot.model_name));
+        await refreshModelCatalog();
+        if (!isActive) {
+          return;
+        }
         dispatch(agentActions.connectionConnecting());
         const nextConnection = await client.connectWebSocket((event) => {
+          if (event.event === "model_catalog_updated") {
+            modelCatalogRefreshVersionRef.current += 1;
+            if (event.status === "invalid") {
+              dispatch(agentActions.modelCatalogLoaded([], null));
+            } else {
+              void refreshModelCatalog();
+            }
+          }
           if (isAgentConnectionEvent(event)) {
+            dispatch(agentActions.wsEventReceived(event));
+          }
+          if (
+            isAgentQueueProjectionEvent(event)
+            && event.chat_id !== subscribedChatRef.current
+          ) {
             dispatch(agentActions.wsEventReceived(event));
           }
         });
@@ -752,7 +832,7 @@ export function AgentRuntimeBridge(props: {
       isActive = false;
       cleanupConnection();
     };
-  }, [cleanupConnection, clearConnectRetryTimer, clients?.memmyAgent, dispatch, enabled, registerConnectionHandlers]);
+  }, [cleanupConnection, clearConnectRetryTimer, clients?.memmyAgent, dispatch, enabled, refreshModelCatalog, registerConnectionHandlers]);
 
   useEffect(() => {
     const chatId = state.agent.currentChatId;
@@ -765,6 +845,16 @@ export function AgentRuntimeBridge(props: {
 
     subscribeAgentChat(connection, chatId);
   }, [connection, state.agent.currentChatId, subscribeAgentChat]);
+
+  useEffect(() => {
+    if (!connection) return;
+    requestDesyncedAgentQueueSnapshots(
+      connection,
+      state.agent.connectionGeneration,
+      state.agent.queueDesyncedByChatId,
+      queueSnapshotRequestKeysRef.current
+    );
+  }, [connection, state.agent.connectionGeneration, state.agent.queueDesyncedByChatId]);
 
   useEffect(() => {
     const client = clients?.memmyAgent;
@@ -1016,6 +1106,13 @@ function isAgentConnectionEvent(event: MemmyAgentWsEvent): boolean {
     || event.event === "transport_error"
     || event.event === "connection_closed"
     || event.event === "connection_attempt_failed";
+}
+
+function isAgentQueueProjectionEvent(event: MemmyAgentWsEvent): boolean {
+  return event.event === "message_queued"
+    || event.event === "message_dequeued"
+    || event.event === "message_queue_removed"
+    || event.event === "message_queue_snapshot";
 }
 
 type SettledSuccess<T> = { ok: true; value: T };

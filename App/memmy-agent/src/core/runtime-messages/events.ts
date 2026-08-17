@@ -5,6 +5,29 @@ export const RUNTIME_CONTROL_MCP_RELOAD = "mcpReload";
 
 type TimestampInput = Date | string | number;
 
+export type InboundMessageInternal = {
+  kind: "goal_continuation";
+  goalId: string;
+  goalUpdatedAt: string;
+};
+
+export type TurnAdmissionMode = "queue" | "steer";
+
+export type TurnSource = {
+  kind: "gui" | "tui" | "im";
+  channel: string;
+};
+
+export function parseTurnSource(value: unknown): TurnSource | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const source = value as Record<string, unknown>;
+  const keys = Object.keys(source);
+  if (keys.length !== 2 || !keys.includes("kind") || !keys.includes("channel")) return null;
+  if (source.kind !== "gui" && source.kind !== "tui" && source.kind !== "im") return null;
+  if (typeof source.channel !== "string" || !source.channel.trim()) return null;
+  return { kind: source.kind, channel: source.channel };
+}
+
 function normalizeTimestamp(value: TimestampInput | null | undefined): Date {
   if (value instanceof Date) return new Date(value.getTime());
   if (value !== null && value !== undefined) {
@@ -26,6 +49,10 @@ export class InboundMessage {
   role: string;
   sessionKeyOverride: string | null;
   timestamp: Date;
+  internal: InboundMessageInternal | null;
+  turnAdmission: TurnAdmissionMode;
+  expectedTurnId: string | null;
+  turnSource: TurnSource | null;
   private explicitSessionKey!: string | null;
 
   constructor(init: {
@@ -41,6 +68,10 @@ export class InboundMessage {
     sessionKey?: string;
     sessionKeyOverride?: string | null;
     timestamp?: TimestampInput | null;
+    internal?: InboundMessageInternal | null;
+    turnAdmission?: TurnAdmissionMode;
+    expectedTurnId?: string | null;
+    turnSource?: TurnSource | null;
   }) {
     this.channel = init.channel;
     this.chatId = init.chatId ?? "";
@@ -53,6 +84,10 @@ export class InboundMessage {
     this.role = init.role ?? "user";
     this.sessionKeyOverride = init.sessionKeyOverride ?? null;
     this.timestamp = normalizeTimestamp(init.timestamp);
+    this.internal = init.internal ?? null;
+    this.turnAdmission = init.turnAdmission ?? "queue";
+    this.expectedTurnId = init.expectedTurnId ?? null;
+    this.turnSource = init.turnSource ? { ...init.turnSource } : null;
     Object.defineProperty(this, "explicitSessionKey", {
       value: init.sessionKey ?? null,
       writable: true,

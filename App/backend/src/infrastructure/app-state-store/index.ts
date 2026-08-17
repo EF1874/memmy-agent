@@ -12,7 +12,6 @@ import { createBootstrapRepository, type BootstrapRepository } from "./repositor
 import { createByokTokenUsageRepository, type ByokTokenUsageRepository } from "./repositories/byok-token-usage-repo.js";
 import { createComposioMachineTokenRepository, type ComposioMachineTokenRepository } from "./repositories/composio-machine-token-repo.js";
 import { createDeviceIdentityRepository, type DeviceIdentityRepository } from "./repositories/device-identity-repo.js";
-import { createModelConfigRepository, type ModelConfigRepository } from "./repositories/model-config-repo.js";
 import { finalizeDatabaseDesign } from "./schema-finalizer.js";
 import { createSqliteSecretStore, type SecretStore } from "./secret-store.js";
 
@@ -36,8 +35,6 @@ export interface AppStateStore {
   repositories: {
     /** Bootstrap. */
     bootstrap: BootstrapRepository;
-    /** Model config. */
-    modelConfig: ModelConfigRepository;
     /** Account session. */
     accountSession: AccountSessionRepository;
     /** Agent sources. */
@@ -79,7 +76,6 @@ export function createAppStateStore(options: CreateAppStateStoreOptions = {}): A
     db,
     repositories: {
       bootstrap: createBootstrapRepository(db),
-      modelConfig: createModelConfigRepository(db, secretStore),
       accountSession: createAccountSessionRepository(db, secretStore),
       agentSources: createAgentSourceRepository(db),
       idempotency: createIdempotencyStore(db, { getActiveUuid }),

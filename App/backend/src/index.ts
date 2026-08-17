@@ -33,8 +33,6 @@ import { loadCloudServiceEnv } from "./load-env.js";
 
 export type { BootstrapScenario };
 export { loadCloudServiceEnv };
-export { sendGa4Events, resolveGa4Config } from "./analytics/ga4-client.js";
-export type { Ga4Config, Ga4Event, SendGa4EventsOptions } from "./analytics/ga4-client.js";
 export { trackAnalyticsEvent } from "./analytics/analytics-transport.js";
 
 const DEFAULT_MEMORY_LAYER_TIMEOUT_MS = 20_000;
@@ -72,15 +70,15 @@ export interface LocalBackend {
 
 export async function createLocalBackend(options: CreateLocalBackendOptions): Promise<LocalBackend> {
   loadCloudServiceEnv();
+  const memmyConfigPath = options.memmyConfigPath ?? process.env.MEMMY_CONFIG;
+  if (!memmyConfigPath) {
+    throw new Error("memmyConfigPath or MEMMY_CONFIG is required");
+  }
   const appStateStore = createAppStateStore({ databasePath: options.databasePath });
   let server: Awaited<ReturnType<typeof createLocalApiServer>> | null = null;
   let autoScan: AgentSourceAutoScanService | null = null;
 
   try {
-    const memmyConfigPath = options.memmyConfigPath ?? process.env.MEMMY_CONFIG;
-    if (!memmyConfigPath) {
-      throw new Error("memmyConfigPath or MEMMY_CONFIG is required");
-    }
     if (options.desktopInstallFingerprint) {
       await resetAccountRuntimeForDesktopInstallChange({
         appStateStore,

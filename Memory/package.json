@@ -16,7 +16,7 @@
     "prebinary": "npm run version:sync",
     "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json && npm run copy-cli-assets",
     "postbuild": "node src/cli/scripts/set-executable.mjs dist/src/cli/index.js",
-    "copy-cli-assets": "rm -rf dist/src/cli/agent_inject.md dist/src/cli/skills && mkdir -p dist/src/cli && cp -R src/cli/agent_inject.md src/cli/skills dist/src/cli/",
+    "copy-cli-assets": "node src/cli/scripts/copy-assets.mjs",
     "dev": "tsx src/server/index.ts",
     "serve": "node dist/src/server/index.js",
     "serve:local": "node dist/src/server/index.js",
@@ -32,6 +32,8 @@
     "node": ">=20"
   },
   "dependencies": {
+    "@memmy/local-api-contracts": "0.0.0",
+    "@memmy/migrations": "0.0.0",
     "@huggingface/transformers": "^3.8.0",
     "better-sqlite3": "^12.6.3",
     "dotenv": "^16.6.1",

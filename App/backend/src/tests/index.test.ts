@@ -10,7 +10,6 @@ import type { CloudClient } from "../adapters/outbound/cloud-client/index.js";
 import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
 import { createLocalBackend, readMemoryLayerConfig, type LocalBackend } from "../index.js";
 import { createAppStateStore } from "../infrastructure/app-state-store/index.js";
-import { systemUtcOffset } from "../utils/time-zone.js";
 import { createMockCloudClient } from "./support/mock-cloud-client.js";
 import { createMockMemoryClient } from "./support/mock-memory-client.js";
 
@@ -285,6 +284,22 @@ describe("local api", () => {
     const memmyConfigPath = join(tempDir, ".memmy", "config.yaml");
     const store = createAppStateStore({ databasePath });
     store.repositories.bootstrap.updateAppSettings({ userMode: "byok" });
+    store.repositories.accountSession.upsert({
+      profile: {
+        userId: "user-1",
+        email: "user-1@example.test",
+        phoneNumber: null,
+        nickname: "user-1",
+        avatarUrl: null,
+        planType: "free",
+        hasFinishedGuide: false,
+        region: null,
+        registeredAt: "2026-06-01T10:00:00.000Z",
+        rawProfile: { id: "user-1", email: "user-1@example.test", userName: "user-1" }
+      },
+      uuid: "account-user-1",
+      cloudUuid: "cloud.login.uuid"
+    });
     store.close();
     mkdirSync(join(tempDir, ".memmy"), { recursive: true });
     writeFileSync(
@@ -293,16 +308,38 @@ describe("local api", () => {
         "app:",
         "  cloudUuid: cloud.login.uuid",
         "  userId: user-1",
-        "agents:",
-        "  defaults:",
-        "    provider: memmy_account",
-        "    model: agent_chat",
         "providers:",
         "  memmy_account:",
-        `    apiBase: ${process.env.MEMMY_CLOUD_SERVICE}/api/agentExternal/v1`,
+        "    ownerAccountId: user-1",
         "    apiKey: cloud.login.uuid",
-        "memmyMemory:",
-        "  activeProfile: account",
+        "    endpoints:",
+        "      platform:",
+        `        apiBase: ${process.env.MEMMY_CLOUD_SERVICE}/api/agentExternal/v1`,
+        "        protocol: memmy-account",
+        "modelPresets:",
+        "  account-agent:",
+        "    provider: memmy_account",
+        "    endpoint: platform",
+        "    model: agent_chat",
+        "    source: account",
+        "    ownerAccountId: user-1",
+        "    capabilities: [agent]",
+        "modelAssignments:",
+        "  byok:",
+        "    agent: { candidates: [], default: null }",
+        "    memorySummary: null",
+        "    memoryEvolution: null",
+        "    embedding: null",
+        "    asr: null",
+        "    imageGeneration: null",
+        "  account:",
+        "    ownerAccountId: user-1",
+        "    agent: { candidates: [account-agent], default: account-agent }",
+        "    memorySummary: null",
+        "    memoryEvolution: null",
+        "    embedding: null",
+        "    asr: null",
+        "    imageGeneration: null",
         ""
       ].join("\n"),
       "utf8"
@@ -339,14 +376,36 @@ describe("local api", () => {
       [
         "agents:",
         "  defaults:",
-        "    provider: openai",
-        "    model: gpt-4o",
+        "    modelPreset: byok-gpt-4o",
         "providers:",
         "  openai:",
-        "    apiBase: https://api.openai.example/v1",
         "    apiKey: sk-main",
-        "memmyMemory:",
-        "  activeProfile: byok",
+        "    endpoints:",
+        "      chat:",
+        "        apiBase: https://api.openai.example/v1",
+        "        protocol: openai-chat-completions",
+        "modelPresets:",
+        "  byok-gpt-4o:",
+        "    provider: openai",
+        "    endpoint: chat",
+        "    model: gpt-4o",
+        "    source: byok",
+        "    capabilities: [agent, memory_summary, memory_evolution]",
+        "modelAssignments:",
+        "  byok:",
+        "    agent: { candidates: [byok-gpt-4o], default: byok-gpt-4o }",
+        "    memorySummary: byok-gpt-4o",
+        "    memoryEvolution: byok-gpt-4o",
+        "    embedding: null",
+        "    asr: null",
+        "    imageGeneration: null",
+        "  account:",
+        "    agent: { candidates: [], default: null }",
+        "    memorySummary: null",
+        "    memoryEvolution: null",
+        "    embedding: null",
+        "    asr: null",
+        "    imageGeneration: null",
         ""
       ].join("\n"),
       "utf8"
@@ -368,6 +427,13 @@ describe("local api", () => {
           "x-memmy-local-token": "test-token"
         }
       });
+      const currentModelConfigResponse = await fetch(`${backend.runtimeConfig.baseUrl}/api/app/model-config`, {
+        method: "GET",
+        headers: {
+          "x-memmy-local-token": "test-token"
+        }
+      });
+      const currentModelConfig = await currentModelConfigResponse.json() as any;
       const modelConfigResponse = await fetch(`${backend.runtimeConfig.baseUrl}/api/app/model-config`, {
         method: "PUT",
         headers: {
@@ -375,10 +441,24 @@ describe("local api", () => {
           "x-memmy-local-token": "test-token"
         },
         body: JSON.stringify({
-          provider: "openai_compatible",
-          baseUrl: "https://api.changed.example/v1",
-          modelId: "gpt-4.1-mini",
-          apiKey: "sk-changed"
+          configRevision: currentModelConfig.configRevision,
+          providers: [{
+            provider: "openai",
+            apiKey: "sk-changed",
+            endpoints: [{
+              endpointId: "chat",
+              apiBase: "https://api.changed.example/v1",
+              protocol: "openai-chat-completions"
+            }],
+            models: [{
+              presetId: "byok-gpt-4o",
+              endpointId: "chat",
+              model: "gpt-4.1-mini",
+              source: "byok",
+              capabilities: ["agent", "memory_summary", "memory_evolution"]
+            }]
+          }],
+          modelAssignments: currentModelConfig.modelAssignments
         })
       });
 
@@ -390,14 +470,18 @@ describe("local api", () => {
       });
       expect(modelConfigResponse.status).toBe(200);
       const parsedConfig = YAML.parse(readFileSync(memmyConfigPath, "utf8")) as any;
-      expect(parsedConfig.agents.defaults).toEqual({
+      expect(parsedConfig.agents.defaults.modelPreset).toBe("byok-gpt-4o");
+      expect(parsedConfig.agents.defaults.timezone).toBeUndefined();
+      expect(parsedConfig.modelPresets[parsedConfig.agents.defaults.modelPreset]).toMatchObject({
         provider: "openai",
-        model: "gpt-4.1-mini",
-        timezone: systemUtcOffset()
+        model: "gpt-4.1-mini"
       });
       expect(parsedConfig.providers.openai).toMatchObject({
-        apiBase: "https://api.changed.example/v1",
         apiKey: "sk-changed"
+      });
+      expect(parsedConfig.providers.openai.endpoints.chat).toMatchObject({
+        apiBase: "https://api.changed.example/v1",
+        protocol: "openai-chat-completions"
       });
     } finally {
       restoreOptionalEnv("MEMMY_CONFIG", previousMemmyConfig);
@@ -638,6 +722,13 @@ describe("local api", () => {
         loginSource: "Memmy"
       })
     });
+    const currentModelConfigResponse = await fetch(`${backend.runtimeConfig.baseUrl}/api/app/model-config`, {
+      method: "GET",
+      headers: {
+        "x-memmy-local-token": "test-token"
+      }
+    });
+    const currentModelConfig = await currentModelConfigResponse.json() as any;
     const modelConfigResponse = await fetch(`${backend.runtimeConfig.baseUrl}/api/app/model-config`, {
       method: "PUT",
       headers: {
@@ -645,10 +736,23 @@ describe("local api", () => {
         "x-memmy-local-token": "test-token"
       },
       body: JSON.stringify({
-        provider: "openai_compatible",
-        baseUrl: "https://api.example.com/v1",
-        modelId: "gpt-4.1-mini",
-        apiKey: "sk-local-secret"
+        configRevision: currentModelConfig.configRevision,
+        providers: [{
+          provider: "openai",
+          apiKey: "sk-local-secret",
+          endpoints: [{
+            endpointId: "chat",
+            apiBase: "https://api.example.com/v1",
+            protocol: "openai-chat-completions"
+          }],
+          models: [{
+            endpointId: "chat",
+            model: "gpt-4.1-mini",
+            source: "byok",
+            capabilities: ["agent"]
+          }]
+        }],
+        modelAssignments: currentModelConfig.modelAssignments
       })
     });
     const settingsResponse = await fetch(`${backend.runtimeConfig.baseUrl}/api/app/settings`, {
@@ -1018,7 +1122,7 @@ describe("local api", () => {
     }
   });
 
-  it("exposes the nine built-in agent sources in registry order", async () => {
+  it("exposes the ten built-in agent sources in registry order", async () => {
     backend = await createTempBackend();
 
     const response = await fetch(`${backend.runtimeConfig.baseUrl}/api/agent-sources`, {
@@ -1036,9 +1140,10 @@ describe("local api", () => {
       expect.objectContaining({ sourceId: "opencode", displayName: "Opencode" }),
       expect.objectContaining({ sourceId: "openclaw", displayName: "OpenClaw" }),
       expect.objectContaining({ sourceId: "hermes", displayName: "Hermes" }),
+      expect.objectContaining({ sourceId: "deepseek_harness", displayName: "DeepSeek Harness" }),
       expect.objectContaining({ sourceId: "workbuddy", displayName: "WorkBuddy" }),
       expect.objectContaining({ sourceId: "pi", displayName: "Pi" }),
-      expect.objectContaining({ sourceId: "qwenwork", displayName: "qwenwork" })
+      expect.objectContaining({ sourceId: "qwenwork", displayName: "QwenWork" })
     ]);
   });
 });

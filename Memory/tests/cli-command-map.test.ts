@@ -391,7 +391,7 @@ describe("memmy CLI command map", () => {
     expect(requests[0]?.headers["x-memmy-user-id"]).toBe("user_from_memory");
   });
 
-  it("uses active memory profile userId from config when profiles are configured", async () => {
+  it("uses the flat memory userId even when obsolete profile fields remain", async () => {
     const root = mkdtempSync(join(tmpdir(), "memmy-cli-map-"));
     roots.push(root);
     const configPath = join(root, "config.yaml");
@@ -416,7 +416,7 @@ describe("memmy CLI command map", () => {
       fetch: mockFetch(requests)
     });
 
-    expect(requests[0]?.headers["x-memmy-user-id"]).toBe("user_from_byok_profile");
+    expect(requests[0]?.headers["x-memmy-user-id"]).toBe("user_from_flat_memory");
   });
 
   it("lets explicit user-id override memmyMemory.userId from config", async () => {

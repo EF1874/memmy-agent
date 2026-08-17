@@ -22,6 +22,23 @@ afterEach(() => {
 });
 
 describe("provider snapshot loader", () => {
+  it("uses registry defaults when the default selection has no YAML provider block", () => {
+    const snapshot = buildProviderSnapshot(
+      new Config({
+        agents: {
+          defaults: {
+            provider: "ollama",
+            model: "llama3",
+          },
+        },
+      }),
+    );
+
+    expect(snapshot.model).toBe("llama3");
+    expect((snapshot.provider as any).spec?.name).toBe("ollama");
+    expect((snapshot.provider as any).apiBase).toBe("http://localhost:11434/v1");
+  });
+
   it("builds snapshots from standard provider and model config", () => {
     const snapshot = buildProviderSnapshot(
       new Config({
@@ -34,8 +51,12 @@ describe("provider snapshot loader", () => {
         providers: {
           openai: {
             apiKey: "sk-user",
-            apiBase: "https://api.openai.com/v1",
-            apiType: "chatCompletions",
+            endpoints: {
+              chat: {
+                apiBase: "https://api.openai.com/v1",
+                protocol: "openai-chat-completions",
+              },
+            },
           },
         },
       }),
@@ -56,7 +77,12 @@ describe("provider snapshot loader", () => {
       providers: {
         memmy_account: {
           apiKey: "cloud-login-uuid",
-          apiBase: `${process.env.MEMMY_CLOUD_SERVICE}/api/agentExternal/v1`,
+          endpoints: {
+            platform: {
+              apiBase: `${process.env.MEMMY_CLOUD_SERVICE}/api/agentExternal/v1`,
+              protocol: "memmy-account",
+            },
+          },
         },
       },
     });
@@ -75,8 +101,12 @@ describe("provider snapshot loader", () => {
         providers: {
           openai: {
             apiKey: "sk-user",
-            apiBase: "https://api.openai.com/v1",
-            apiType: "chatCompletions",
+            endpoints: {
+              chat: {
+                apiBase: "https://api.openai.com/v1",
+                protocol: "openai-chat-completions",
+              },
+            },
           },
         },
       }),

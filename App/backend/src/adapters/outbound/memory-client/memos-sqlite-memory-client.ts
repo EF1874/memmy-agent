@@ -169,7 +169,6 @@ export function createMemosSqliteMemoryClient(options: CreateMemosSqliteMemoryCl
         version: "memmy-memory-sqlite",
         uptimeMs: 0,
         mode: "dev",
-        activeProfile: "byok",
         storage: {
           backend: "sqlite",
           schemaVersion: "memory-service",
@@ -179,17 +178,20 @@ export function createMemosSqliteMemoryClient(options: CreateMemosSqliteMemoryCl
           summary: {
             provider: "sqlite-local",
             configured: false,
-            remote: false
+            remote: false,
+            routing: null
           },
           evolution: {
             provider: "sqlite-local",
             configured: false,
-            remote: false
+            remote: false,
+            routing: null
           },
           embedding: {
             provider: "sqlite-local",
             configured: false,
-            remote: false
+            remote: false,
+            mode: null
           }
         },
         capabilities: {
@@ -1153,7 +1155,7 @@ function sourceLabelFromSessionId(value: string | null): string | undefined {
   if (!normalized) return undefined;
   if (normalized === "claude" || normalized.startsWith("claude-")) return "claude-code";
   if (normalized === "open-code" || normalized.startsWith("open-code-")) return "opencode";
-  for (const source of ["hermes", "openclaw", "codex", "cursor", "claude-code", "opencode", "workbuddy", "pi", "qwenwork"]) {
+  for (const source of ["deepseek-harness", "hermes", "openclaw", "codex", "cursor", "claude-code", "opencode", "workbuddy", "pi", "qwenwork"]) {
     if (normalized === source || normalized.startsWith(`${source}-`)) return source;
   }
   return undefined;
@@ -1163,7 +1165,8 @@ function normalizedAgentSource(value: string | undefined): string | undefined {
   const normalized = value?.trim().toLowerCase();
   if (normalized === "claude") return "claude-code";
   if (normalized === "open-code") return "opencode";
-  return ["hermes", "openclaw", "codex", "cursor", "claude-code", "opencode", "workbuddy", "pi", "qwenwork"].includes(normalized ?? "")
+  if (normalized === "deepseek_harness") return "deepseek-harness";
+  return ["deepseek-harness", "hermes", "openclaw", "codex", "cursor", "claude-code", "opencode", "workbuddy", "pi", "qwenwork"].includes(normalized ?? "")
     ? normalized
     : undefined;
 }

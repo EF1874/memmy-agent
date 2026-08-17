@@ -134,7 +134,16 @@ describe("runtime refresh", () => {
     const loop = new AgentLoop({
       provider,
       workspace: "/tmp/memmy-runtime-refresh",
-      modelPresets: { fast: { model: "openai/gpt-4.1", maxTokens: 222, temperature: 0.2, contextWindowTokens: 333 } },
+      modelPresets: { fast: {
+        endpoint: "default",
+        model: "openai/gpt-4.1",
+        provider: "openai",
+        source: "byok",
+        capabilities: ["agent"],
+        maxTokens: 222,
+        temperature: 0.2,
+        contextWindowTokens: 333,
+      } },
     });
 
     loop.setModelPreset("fast");
