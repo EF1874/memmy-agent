@@ -719,7 +719,11 @@ fi
     import fs from "node:fs";
     import path from "node:path";
     import { createRequire } from "node:module";
-    import { runMigrations } from "@memmy/migrations";
+    import {
+      CURRENT_MIGRATION_STATE_FORMAT_VERSION,
+      SUPPORTED_MIGRATION_STATE_FORMAT_VERSIONS,
+      runMigrations,
+    } from "@memmy/migrations";
     import { createConnection } from "@playwright/mcp";
     import { chromium } from "playwright";
     const require = createRequire(import.meta.url);
@@ -731,6 +735,7 @@ fi
     const playwrightPackage = require(playwrightPath);
     const corePackage = require(corePath);
     if (typeof runMigrations !== "function") throw new Error("Migrations runtime export is unavailable");
+    if (CURRENT_MIGRATION_STATE_FORMAT_VERSION !== 2 || JSON.stringify(SUPPORTED_MIGRATION_STATE_FORMAT_VERSIONS) !== "[1,2]") throw new Error("Migrations runtime state compatibility mismatch");
     if (typeof createConnection !== "function" || typeof chromium?.executablePath !== "function") throw new Error("Playwright MCP runtime exports are unavailable");
     if (mcpPackage.version !== runtimePackage.dependencies["@playwright/mcp"]) throw new Error("Playwright MCP runtime version mismatch");
     if (playwrightPackage.version !== runtimePackage.dependencies.playwright || corePackage.version !== runtimePackage.dependencies.playwright) throw new Error("Playwright runtime version mismatch");
