@@ -872,7 +872,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain("await services?.close()");
     expect(mainSource).toContain("app.quit()");
     expect(runtimeServicesSource).toContain("STOP_MANAGED_CHILD_GRACE_MS");
-    expect(runtimeServicesSource).toContain("sleep(STOP_MANAGED_CHILD_GRACE_MS)");
+    expect(runtimeServicesSource).toContain("waitForManagedChildExit(child, STOP_MANAGED_CHILD_GRACE_MS)");
     expect(interfaceSource).toContain("export type DesktopUpdateMode");
     expect(interfaceSource).toContain("export interface DesktopUpdateDownloadOptions");
     expect(interfaceSource).toContain("minSupportedVersion?: string");
@@ -958,8 +958,11 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).not.toContain("await preparePackagedBrowser(entries, runtimeConfig, options)");
     expect(source).toContain('[entries.agentEntry, "internal", "browser-prepare"]');
     expect(source.indexOf("browserPreparation = startPackagedBrowserPreparation")).toBeLessThan(
-      source.indexOf("await ensureMemoryService"),
+      source.indexOf("memoryStartup = ensureMemoryService"),
     );
+    expect(source).toContain("memoryStartup = ensureMemoryService");
+    expect(source).toContain("Memory service unavailable during desktop startup");
+    expect(source).toContain("readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath)");
     expect(source).toContain("browserPreparation?.stop()");
     expect(source).toContain("terminateProcessTreeSync(child)");
     expect(source).toContain('detached: process.platform !== "win32"');
