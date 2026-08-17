@@ -2864,10 +2864,6 @@ button {
   line-height: 24px;
 }
 
-.agent-composer-shell textarea.agent-composer-input--command-selected {
-  padding-left: 86px;
-}
-
 .agent-attachment-card {
   display: inline-flex;
   width: 220px;
@@ -10070,6 +10066,12 @@ input[type="checkbox"].check-sky:checked::after {
   padding: 4px 8px 6px;
 }
 
+.app-frame-sidebar-footer--compound {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .app-frame-sidebar-footer--button {
   display: block;
   width: 100%;
@@ -10086,6 +10088,12 @@ input[type="checkbox"].check-sky:checked::after {
   text-align: left;
   cursor: pointer;
   transition: background-color 120ms ease;
+}
+
+.app-frame-sidebar-footer-account {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
 }
 
 .app-frame-sidebar-footer--button:hover,
@@ -10138,9 +10146,126 @@ input[type="checkbox"].check-sky:checked::after {
   border-radius: 6px;
 }
 
+.app-frame-profile-settings-button {
+  border: 0;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+}
+
+.app-frame-profile-settings-button:hover,
+.app-frame-profile-settings-button:focus-visible {
+  background: color-mix(in srgb, var(--color-canvas-oat) 60%, transparent);
+}
+
+.app-frame-profile-settings-button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-action-sky) 55%, transparent);
+  outline-offset: -2px;
+}
+
 .app-frame-profile-settings svg {
   width: 14px;
   height: 14px;
+}
+
+.app-frame-sidebar-update-button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 32px;
+  min-width: 32px;
+  max-width: 86px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 999px;
+  appearance: none;
+  background: #2f8fff;
+  color: #fff;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0;
+  white-space: nowrap;
+  box-shadow: 0 4px 10px rgba(47, 143, 255, 0.22);
+  transition: background-color 120ms ease, box-shadow 120ms ease, min-width 120ms ease, padding 120ms ease;
+}
+
+.app-frame-sidebar-update-button:hover,
+.app-frame-sidebar-update-button:focus-visible {
+  background: #1d7df2;
+  box-shadow: 0 6px 14px rgba(47, 143, 255, 0.28);
+}
+
+.app-frame-sidebar-update-button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-action-sky) 55%, transparent);
+  outline-offset: 2px;
+}
+
+.app-frame-sidebar-update-button:disabled {
+  cursor: default;
+  opacity: 1;
+}
+
+.app-frame-sidebar-update-button svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.app-frame-sidebar-update-button__label {
+  display: inline-block;
+  overflow: hidden;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+.app-frame-sidebar-update-button--available {
+  width: 32px;
+  padding: 0;
+}
+
+.app-frame-sidebar-update-button--available .app-frame-sidebar-update-button__label {
+  max-width: 0;
+  opacity: 0;
+  transition: max-width 120ms ease, opacity 120ms ease;
+}
+
+.app-frame-sidebar-update-button--available:hover,
+.app-frame-sidebar-update-button--available:focus-visible {
+  width: auto;
+  min-width: 54px;
+  padding: 0 10px;
+}
+
+.app-frame-sidebar-update-button--available:hover .app-frame-sidebar-update-button__label,
+.app-frame-sidebar-update-button--available:focus-visible .app-frame-sidebar-update-button__label {
+  max-width: 40px;
+  opacity: 1;
+}
+
+.app-frame-sidebar-update-button--downloading {
+  min-width: 50px;
+}
+
+.app-frame-sidebar-update-button--installing {
+  min-width: 72px;
+}
+
+.app-frame-sidebar-update-button--prepared {
+  min-width: 58px;
+  background: #159a84;
+  box-shadow: 0 4px 10px rgba(21, 154, 132, 0.2);
+}
+
+.app-frame-sidebar-update-button--prepared:hover,
+.app-frame-sidebar-update-button--prepared:focus-visible {
+  background: #118572;
+  box-shadow: 0 6px 14px rgba(21, 154, 132, 0.24);
 }
 
 .rounded-menu {

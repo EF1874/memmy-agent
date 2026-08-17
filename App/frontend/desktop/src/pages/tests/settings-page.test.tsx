@@ -1027,6 +1027,7 @@ function createUpdateViewModel(
     preparedUpdatePath: null,
     downloadProgress: null,
     feedback: null,
+    requestInlineAction: vi.fn(async () => undefined),
     requestPrimaryAction: vi.fn(async () => undefined),
     ...overrides
   };
