@@ -1889,6 +1889,7 @@ async function downloadUpdate(
       console.warn("mac update package staging skipped:", error);
       await writePackagedStartupLog(`mac-update-stage skipped\n${formatStartupError(error)}`);
     });
+    await writePreparedRequiredUpdate(update, filePath);
     return { filePath, opened: false };
   }
 

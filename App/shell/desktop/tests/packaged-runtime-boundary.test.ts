@@ -809,6 +809,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain('value.code !== 0');
     expect(mainSource).toContain('readManifestRecord(value, "data") ?? {}');
     expect(mainSource).toContain("async function downloadUpdate");
+    expect(mainSource).toContain("await writePreparedRequiredUpdate(update, filePath)");
     expect(mainSource).toContain("function resolveUpdatesDirectory()");
     expect(mainSource).toContain('join(app.getPath("userData"), "updates")');
     expect(mainSource).toContain("function resolveDownloadedUpdatePath");
