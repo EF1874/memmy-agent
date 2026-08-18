@@ -3128,7 +3128,7 @@ const DEFAULT_RETRIEVAL_TUNING: Required<RetrievalTuningConfig> = {
   mmrLambda: 0.7,
   rrfConstant: 60,
   relativeThresholdFloor: 0.2,
-  minRecallScore: 0.2,
+  minRecallScore: 0.12,
   minSkillEta: 0.1,
   minTraceSim: 0.25,
   episodeGoalMinSim: 0.45,
