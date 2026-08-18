@@ -2864,10 +2864,6 @@ button {
   line-height: 24px;
 }
 
-.agent-composer-shell textarea.agent-composer-input--command-selected {
-  padding-left: 86px;
-}
-
 .agent-attachment-card {
   display: inline-flex;
   width: 220px;

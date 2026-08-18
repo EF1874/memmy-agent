@@ -8,7 +8,9 @@ import YAML from "yaml";
 const repoRoot = resolve(import.meta.dirname, "..");
 const legacyWorkflowPath = resolve(repoRoot, ".github/workflows/github-release.yml");
 const draftWorkflowPath = resolve(repoRoot, ".github/workflows/github-draft-release-v2.yml");
+const releaseCompareScriptPath = resolve(repoRoot, "scripts/build-release-compare.mjs");
 const draftSource = readFileSync(draftWorkflowPath, "utf8");
+const releaseCompareSource = readFileSync(releaseCompareScriptPath, "utf8");
 const draftWorkflow = YAML.parse(draftSource);
 const draftJob = draftWorkflow.jobs.release;
 const draftSteps = draftJob.steps as Array<Record<string, unknown>>;
@@ -112,6 +114,74 @@ describe("Memmy release workflow metadata", () => {
 });
 
 describe("GitHub Draft Release v2 workflow", () => {
+  it("builds an uncapped, NUL-safe comparison from the trusted local Git graph", () => {
+    const tempDir = mkdtempSync(resolve(tmpdir(), "memmy-release-compare-"));
+    const git = (args: string[]) =>
+      spawnSync("git", args, { cwd: tempDir, encoding: "utf8" });
+
+    expect(git(["init", "--initial-branch=main"]).status).toBe(0);
+    expect(git(["config", "user.name", "Release Test"]).status).toBe(0);
+    expect(git(["config", "user.email", "release-test@example.invalid"]).status).toBe(0);
+    writeFileSync(resolve(tempDir, "base file.txt"), "base\n");
+    expect(git(["add", "."]).status).toBe(0);
+    expect(git(["commit", "-m", "base"]).status).toBe(0);
+    const baseSha = git(["rev-parse", "HEAD"]).stdout.trim();
+
+    for (let index = 0; index < 301; index += 1) {
+      writeFileSync(resolve(tempDir, `bulk-${String(index).padStart(3, "0")}.txt`), `${index}\n`);
+    }
+    expect(git(["add", "."]).status).toBe(0);
+    expect(git(["commit", "-m", "add more than 300 files"]).status).toBe(0);
+    expect(git(["mv", "base file.txt", "renamed file.txt"]).status).toBe(0);
+    writeFileSync(resolve(tempDir, "bulk-000.txt"), "updated\n");
+    expect(git(["add", "."]).status).toBe(0);
+    expect(git(["commit", "-m", "rename and update"]).status).toBe(0);
+    const targetSha = git(["rev-parse", "HEAD"]).stdout.trim();
+    const outputPath = resolve(tempDir, "compare.json");
+
+    const result = spawnSync(
+      "node",
+      [
+        releaseCompareScriptPath,
+        "--base",
+        baseSha,
+        "--target",
+        targetSha,
+        "--repository",
+        "MemTensor/memmy-agent",
+        "--output",
+        outputPath,
+      ],
+      { cwd: tempDir, encoding: "utf8" },
+    );
+    expect(result.status, result.stderr).toBe(0);
+
+    const comparison = JSON.parse(readFileSync(outputPath, "utf8"));
+    expect(comparison.total_commits).toBe(2);
+    expect(comparison.commits).toHaveLength(2);
+    expect(comparison.files).toHaveLength(302);
+    expect(comparison.files).toContainEqual(
+      expect.objectContaining({
+        filename: "renamed file.txt",
+        previous_filename: "base file.txt",
+        status: "renamed",
+      }),
+    );
+    expect(comparison.snapshot).toEqual({
+      source: "local-git",
+      complete: true,
+      baseSha,
+      targetSha,
+      commitCount: 2,
+      changedFileCount: 302,
+    });
+
+    expect(releaseCompareSource).toContain('"--reverse"');
+    expect(releaseCompareSource).toContain('"--name-status", "-z"');
+    expect(releaseCompareSource).toContain('"--numstat", "-z"');
+    expect(releaseCompareSource).toContain('"merge-base", "--is-ancestor"');
+  });
+
   it("keeps every shell block syntactically valid", () => {
     const tempDir = mkdtempSync(resolve(tmpdir(), "memmy-release-workflow-"));
 
@@ -289,8 +359,37 @@ describe("GitHub Draft Release v2 workflow", () => {
     expect(download).toContain("SHA256SUMS.txt");
   });
 
+  it("does not expect a nonexistent head_commit in GitHub Compare metadata", () => {
+    const realCompareMetadataShape = {
+      base_commit: { sha: "base-sha" },
+      merge_base_commit: { sha: "base-sha" },
+      status: "ahead",
+      ahead_by: 2,
+      behind_by: 0,
+      total_commits: 2,
+      commits: [{ sha: "first-commit" }],
+      files: [],
+    };
+    expect(realCompareMetadataShape).not.toHaveProperty("head_commit");
+
+    const snapshot = draftScript("Build complete release change snapshot");
+    expect(snapshot).not.toContain("api_head=");
+    expect(snapshot).not.toContain(
+      "'.head_commit.sha // empty' release-assets/COMPARE_METADATA.json",
+    );
+    expect(snapshot).toContain('"repos/${GITHUB_REPOSITORY}/commits/${TARGET_SHA}"');
+    expect(snapshot).toContain("TARGET_COMMIT_METADATA.json");
+    expect(snapshot).toContain("Release target metadata failed");
+    expect(snapshot).toContain("api_target");
+    expect(snapshot).toContain('"$api_target" != "$TARGET_SHA"');
+    expect(snapshot).toContain(
+      "'.head_commit.sha // empty' release-assets/COMPARE.json",
+    );
+  });
+
   it("records independently auditable commits, PRs, files, versions, and assets", () => {
     for (const stepName of [
+      "Build complete release change snapshot",
       "Build release notes",
       "Build auditable release evidence",
     ]) {
@@ -332,14 +431,19 @@ describe("GitHub Draft Release v2 workflow", () => {
     expect(releaseNotes).toContain("QUALITY_REPORT.json");
     expect(releaseNotes).not.toContain("releases/generate-notes");
     expect(releaseNotes).not.toContain("github-generated");
+    const snapshot = draftScript("Build complete release change snapshot");
+    expect(snapshot).toContain("git merge-base --is-ancestor");
+    expect(snapshot).toContain("scripts/build-release-compare.mjs");
+    expect(snapshot).toContain("COMPARE_METADATA.json");
+    expect(snapshot).toContain("api_merge_base");
+    expect(snapshot).toContain("api_total");
+    expect(snapshot).toContain("gh api --paginate");
+    expect(snapshot).toContain("?per_page=100");
+    expect(snapshot).toContain("remoteMetadataValidated");
     const evidence = draftScript("Build auditable release evidence");
-    expect(evidence).toContain("compare/${compare_base}...${TARGET_SHA}");
-    expect(evidence).toContain("commits/${commit_sha}/pulls");
-    expect(evidence).toContain("Release compare failed");
-    expect(evidence).toContain("Release compare is truncated");
-    expect(evidence).toContain("Release diff is too large");
+    expect(evidence).toContain("Complete release snapshot is missing");
+    expect(evidence).toContain("Release snapshot is incomplete");
     expect(evidence).toContain("Release compare target mismatch");
-    expect(evidence).toContain("Pull request evidence failed");
     expect(evidence).toContain("memmy.release.evidence.v2");
     expect(evidence).toContain("changedFiles");
     expect(evidence).toContain("versionFiles");
@@ -355,6 +459,10 @@ describe("GitHub Draft Release v2 workflow", () => {
     expect(JSON.stringify(uploadAudit)).toContain("RELEASE_NOTES.md");
     expect(JSON.stringify(uploadAudit)).toContain("RELEASE_NOTES_SOURCE.json");
     expect(JSON.stringify(uploadAudit)).toContain("QUALITY_REPORT.json");
+    expect(JSON.stringify(uploadAudit)).toContain("COMPARE_METADATA.json");
+    expect(JSON.stringify(uploadAudit)).toContain("TARGET_COMMIT_METADATA.json");
+    expect(JSON.stringify(uploadAudit)).toContain("COMPARE.json");
+    expect(JSON.stringify(uploadAudit)).toContain("PULL_REQUESTS.json");
     expect(draftScript("Create draft release and upload every asset")).toContain(
       "RELEASE_EVIDENCE.json",
     );
