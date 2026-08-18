@@ -740,6 +740,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain("await writePreparedRequiredUpdate(update, preparedFilePath)");
     expect(mainSource).toContain("async function installPreparedRequiredUpdateOnQuit");
     expect(mainSource).toContain("await installPreparedRequiredUpdateOnQuit()");
+    expect(mainSource).toContain("showUpdateInstallSplashWindow(targetVersion)");
     expect(mainSource).toContain("openAfterInstall: false");
     expect(mainSource).not.toContain('openAfterInstall: process.platform === "win32"');
     expect(mainSource).toContain("function resolvePreparedRequiredUpdateLockPath");
@@ -778,6 +779,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).not.toContain("Memmy 正在更新");
     expect(mainSource).toContain("boot:prepared-required-update win32");
     expect(mainSource).toContain("async function waitForPreparedRequiredUpdateLockStart");
+    expect(mainSource).toContain("quit:prepared-required-update lock-start-timeout");
     expect(windowsPreparedUpdateSource).toContain("openBackgroundUpdateInstaller(safeFilePath");
     expect(mainSource).toContain("$arguments = @('/S', '--updated', '/currentuser', ('/D=' + $appDir))");
     expect(mainSource).not.toContain("app reopened before install; deferring update");
@@ -809,6 +811,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain('value.code !== 0');
     expect(mainSource).toContain('readManifestRecord(value, "data") ?? {}');
     expect(mainSource).toContain("async function downloadUpdate");
+    expect(mainSource).toContain("await writePreparedRequiredUpdate(update, filePath)");
     expect(mainSource).toContain("function resolveUpdatesDirectory()");
     expect(mainSource).toContain('join(app.getPath("userData"), "updates")');
     expect(mainSource).toContain("function resolveDownloadedUpdatePath");
@@ -832,6 +835,9 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain("$arguments = @('/S', '--updated', '/currentuser', ('/D=' + $appDir))");
     expect(mainSource).toContain("CURRENT_APP_PID");
     expect(mainSource).toContain("OPEN_AFTER_INSTALL");
+    expect(mainSource).toContain('REOPEN_AFTER_INSTALL="$OPEN_AFTER_INSTALL"');
+    expect(mainSource).toContain("detected reopen while background update is installing; will reopen after replacement");
+    expect(mainSource).toContain('if [[ "$REOPEN_AFTER_INSTALL" == "1" ]]');
     expect(mainSource).toContain('while /bin/kill -0 "$CURRENT_APP_PID"');
     expect(mainSource).toContain("terminating leftover Memmy runtime processes");
     expect(mainSource).toContain("-WindowStyle Hidden");

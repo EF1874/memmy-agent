@@ -96,6 +96,7 @@ describe("SettingsPage invitation banner", () => {
               preparedUpdatePath: null,
               downloadProgress: null,
               feedback: null,
+              requestInlineAction: vi.fn(async () => undefined),
               requestPrimaryAction: vi.fn(async () => undefined)
             }}
           />
