@@ -109,14 +109,6 @@ export function AgentWorkspaceContext({
               <GitFork size={17} aria-hidden="true" />
               <span>{t("home.environment.mode.newWorktree")}</span>
             </button>
-            <button type="button" className="home-workspace-menu__item" role="menuitem" disabled title={t("home.environment.mode.connectCodexWebUnavailable")}>
-              <Cloud size={17} aria-hidden="true" />
-              <span>{t("home.environment.mode.connectCodexWeb")}</span>
-            </button>
-            <button type="button" className="home-workspace-menu__item" role="menuitem" disabled title={t("home.environment.mode.sendCloudUnavailable")}>
-              <Cloud size={17} aria-hidden="true" />
-              <span>{t("home.environment.mode.sendCloud")}</span>
-            </button>
           </div>
         ) : null}
       </div>
