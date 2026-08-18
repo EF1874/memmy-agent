@@ -36,6 +36,8 @@ export interface TurnMemoryCaptureDecision {
   l1Summary: string;
   createUserMemory: boolean;
   userMemoryTypes: UserMemoryType[];
+  userMemoryEvidence: Array<{ quote: string; type: UserMemoryType }>;
+  l1Evidence: Array<{ quote: string; sourceRole: "user" | "assistant" | "tool"; kind: string }>;
   reason: string;
 }
 
@@ -721,6 +723,8 @@ private reflectionDownstreamPreview(job: EvolutionJobRecord, memory: MemoryRow):
       l1_summary?: unknown;
       create_user_memory?: unknown;
       user_memory_types?: unknown;
+      user_memory_evidence?: unknown;
+      l1_evidence?: unknown;
       reason?: unknown;
     }>([
       {
@@ -753,6 +757,8 @@ private reflectionDownstreamPreview(job: EvolutionJobRecord, memory: MemoryRow):
       l1Summary,
       createUserMemory: result.create_user_memory,
       userMemoryTypes,
+      userMemoryEvidence: parseUserMemoryEvidence(result.user_memory_evidence, input.userText),
+      l1Evidence: parseL1Evidence(result.l1_evidence, input),
       reason: clip(stringOr(result.reason, ""), 300)
     };
   }
@@ -936,6 +942,8 @@ Return exactly one JSON object:
   "l1_summary": string,
   "create_user_memory": boolean,
   "user_memory_types": ("User Fact" | "User Preference" | "User Directive")[],
+  "user_memory_evidence": [{"quote": string, "type": "User Fact" | "User Preference" | "User Directive"}],
+  "l1_evidence": [{"quote": string, "source_role": "user" | "assistant" | "tool", "kind": "task_outcome" | "verified_tool_result" | "environment_fact" | "decision" | "correction"}],
   "reason": string
 }
 
@@ -950,12 +958,17 @@ User Memory rules:
 - Decide only from explicit claims in USER text. Never infer User Memory from ASSISTANT text or tool output.
 - Create it for durable user facts, preferences/habits, and reusable behavioral directives.
 - Do not create it for questions, recalled answers, temporary requests, current external facts, or facts about the user's device/project that are not personal facts, preferences, habits, or directives.
+- Short follow-ups such as "换一个", "再来一个", or "another one" are temporary constraints for the current request. They create neither User Memory nor L1 unless the user explicitly makes the constraint durable.
 - The two decisions are independent. A turn may create neither, either one, or both.
+- Evidence quotes must be short verbatim substrings of the matching USER, ASSISTANT, or TOOLS section. Do not paraphrase evidence.
+- "以后不要再……", "以后……", "always", "never", and equivalent durable future behavior constraints must include "User Directive". A statement may be both "User Preference" and "User Directive".
+- Keep a compound USER statement as one User Memory even when it contains multiple facts or preferences.
 
 Summary rules:
 - If create_l1 is true, l1_summary must be a grounded, compact summary in the user's language, normally <= 200 characters. Preserve concrete names, numbers, paths, commands, decisions, corrections, evidence, and outcomes.
 - If create_l1 is false, l1_summary must be empty.
 - user_memory_types must be empty when create_user_memory is false.
+- user_memory_evidence must be empty when create_user_memory is false; l1_evidence must be empty when create_l1 is false.
 - Do not invent facts.`;
 
 interface BatchReflectionScore {
@@ -1329,6 +1342,38 @@ function parseUserMemoryTypes(value: unknown): UserMemoryType[] {
   return [...new Set(value.filter((item): item is UserMemoryType =>
     item === "User Fact" || item === "User Preference" || item === "User Directive"
   ))];
+}
+
+function parseUserMemoryEvidence(
+  value: unknown,
+  userText: string
+): Array<{ quote: string; type: UserMemoryType }> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!isRecord(item)) return [];
+    const quote = stringOr(item.quote, "");
+    const type = parseUserMemoryTypes([item.type])[0];
+    return quote && type && userText.includes(quote) ? [{ quote, type }] : [];
+  });
+}
+
+function parseL1Evidence(
+  value: unknown,
+  input: { userText: string; agentText: string; toolCalls: ToolCallPayload[] }
+): Array<{ quote: string; sourceRole: "user" | "assistant" | "tool"; kind: string }> {
+  if (!Array.isArray(value)) return [];
+  const toolText = stringifyForMemory(input.toolCalls);
+  return value.flatMap((item) => {
+    if (!isRecord(item)) return [];
+    const quote = stringOr(item.quote, "");
+    const sourceRole = item.source_role === "user" || item.source_role === "assistant" || item.source_role === "tool"
+      ? item.source_role
+      : undefined;
+    const sourceText = sourceRole === "user" ? input.userText : sourceRole === "assistant" ? input.agentText : toolText;
+    return quote && sourceRole && sourceText.includes(quote)
+      ? [{ quote, sourceRole, kind: stringOr(item.kind, "unspecified") }]
+      : [];
+  });
 }
 
 function formatReflectionToolCall(call: ToolCallPayload): string {

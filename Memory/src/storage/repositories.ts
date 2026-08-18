@@ -1459,6 +1459,10 @@ export class MemoryProcessingRepository {
     if (!current || (expectedStates && !expectedStates.includes(current.state))) return undefined;
     return this.save({ ...current, ...patch, memoryId });
   }
+
+  delete(memoryId: string): boolean {
+    return this.db.prepare(`DELETE FROM memory_processing_state WHERE memory_id = ?`).run(memoryId).changes > 0;
+  }
 }
 
 export class RuntimeRepository {

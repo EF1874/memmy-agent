@@ -24,6 +24,8 @@ import { logEvolutionDecision } from "./evolution-logging.js";
 export type PolicyDraft = ReturnType<typeof buildPolicyDraft> & {
   expectedOutcome?: string;
   exclusions?: string[];
+  freshnessClass?: "stable" | "dynamic";
+  revalidateAfterDays?: number;
 };
 export type PolicyEnhancementResult =
   | { ok: true; draft: PolicyDraft }
@@ -297,6 +299,10 @@ export class PolicyInductionEngine {
         ...enhancement.draft,
         key: policyKey
       };
+      const freshnessClass = draft.freshnessClass ?? inferPolicyFreshness(`${draft.trigger}\n${draft.procedure}`);
+      const revalidateAfter = freshnessClass === "dynamic"
+        ? new Date(Date.parse(at) + (draft.revalidateAfterDays ?? 30) * 24 * 60 * 60 * 1000).toISOString()
+        : undefined;
 
       const l2 = this.deps.buildMemory({
         userId: source.userId,
@@ -319,6 +325,9 @@ export class PolicyInductionEngine {
           gain: draft.gain,
           raw_gain: draft.rawGain,
           policy_confidence: draft.confidence,
+          freshness_class: freshnessClass,
+          last_verified_at: at,
+          ...(revalidateAfter ? { revalidate_after: revalidateAfter } : {}),
           status: draft.status,
           source_memory_ids: draft.sourceTraceIds
         },
@@ -338,6 +347,9 @@ export class PolicyInductionEngine {
           gain: draft.gain,
           raw_gain: draft.rawGain,
           policy_confidence: draft.confidence,
+          freshness_class: freshnessClass,
+          last_verified_at: at,
+          ...(revalidateAfter ? { revalidate_after: revalidateAfter } : {}),
           status: draft.status,
           source_episode_ids: draft.sourceEpisodeIds,
           source_trace_ids: draft.sourceTraceIds,
@@ -353,6 +365,9 @@ export class PolicyInductionEngine {
             gain: draft.gain,
             raw_gain: draft.rawGain,
             policy_confidence: draft.confidence,
+            freshness_class: freshnessClass,
+            last_verified_at: at,
+            ...(revalidateAfter ? { revalidate_after: revalidateAfter } : {}),
             status: draft.status,
             experience_type: "success_pattern",
             evidence_polarity: "positive",
@@ -515,6 +530,8 @@ export class PolicyInductionEngine {
           expected_outcome?: unknown;
           expectedOutcome?: unknown;
           exclusions?: unknown;
+          freshness_class?: unknown;
+          revalidate_after_days?: unknown;
         }>([
           {
             role: "system",
@@ -562,6 +579,14 @@ export class PolicyInductionEngine {
           ? skillMarkdown(result.verification)
           : fallback.verification;
         const expectedOutcome = skillMarkdown(result.expected_outcome ?? result.expectedOutcome) || verification;
+        const freshnessClass = result.freshness_class === "dynamic"
+          ? "dynamic"
+          : result.freshness_class === "stable"
+            ? "stable"
+            : inferPolicyFreshness(`${result.trigger ?? ""}\n${procedure}`);
+        const revalidateAfterDays = freshnessClass === "dynamic"
+          ? clampNumber(numberOr(result.revalidate_after_days, 30), 1, 365)
+          : undefined;
         const next = {
           ...fallback,
           title: skillText(result.title),
@@ -571,6 +596,8 @@ export class PolicyInductionEngine {
           boundary,
           expectedOutcome,
           exclusions,
+          freshnessClass,
+          revalidateAfterDays,
           confidence: clampNumber(numberOr(result.confidence, fallback.confidence), 0, 1)
         };
 
@@ -981,6 +1008,13 @@ function l2InductionInvalidReason(result: unknown): string | null {
     return "llm-failed: l2.induction.invalid: missing exclusions";
   }
   return null;
+}
+
+function inferPolicyFreshness(text: string): "stable" | "dynamic" {
+  return /(?:当前|实时|最新|业务数据|数据源|市场|库存|价格|策略变化|产品行为|外部\s*API)|\b(?:current|latest|live|real[- ]time|business data|data source|market|inventory|price|external api|product behavior)\b/i
+    .test(text)
+    ? "dynamic"
+    : "stable";
 }
 
 function uniq<T>(values: T[]): T[] {

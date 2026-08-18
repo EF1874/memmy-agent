@@ -56,6 +56,7 @@ import {
   isDynamicCurrentFactQuery,
   isPureUserMemoryStatement,
   isQuestionLike,
+  isTaskLinkedUserFeedback,
   isUserMemoryQuestion
 } from "../user-memory/user-memory.js";
 import type {
@@ -324,7 +325,12 @@ function l1ObservationMetadata(rawTurn: RawTurnRecord, session: SessionRecord, a
   const deviceMemoryObservation = hasToolEvidence &&
     /(?:(?:电脑|计算机|设备|机器).{0,16}(?:内存|ram)|(?:内存|ram).{0,16}(?:电脑|计算机|设备|机器))|\b(?:computer|device|machine)\b.{0,24}\b(?:memory|ram)\b/i.test(text);
   if (deviceMemoryObservation) {
-    const scopeKey = `device:${session.source}:${session.profileId}`;
+    const deviceId = stringFromMaybeRecord(session.meta, "device_id") ??
+      stringFromMaybeRecord(session.meta, "deviceId") ??
+      stringFromMaybeRecord(session.meta, "installation_id") ??
+      stringFromMaybeRecord(session.meta, "installationId") ??
+      "local";
+    const scopeKey = `device:${deviceId}:${session.profileId}`;
     const claim = {
       key: "device.total_memory",
       source_role: "tool",
@@ -393,12 +399,6 @@ function pendingL1DecisionMetadata(observation: ReturnType<typeof l1ObservationM
       }
     }
   };
-}
-
-function isTaskLinkedUserFeedback(text: string): boolean {
-  const feedback = /(?:以后|下次|不要|别再|应该|改成|保持|避免|更喜欢)|\b(?:next time|from now on|do not|don't|should|prefer)\b/i.test(text);
-  const artifact = /(?:刚才|前面|这次|你(?:写|做|给|生成|回答)|代码|实现|修改|方案|文档|测试|输出|结果|兜底)|\b(?:your|the|this|previous)\s+(?:code|implementation|answer|output|result|document|test|fallback)\b/i.test(text);
-  return feedback && artifact;
 }
 
 function episodeClosedByEndTopicTurn(episode: EpisodeRecord, turnId: string): boolean {
@@ -1321,9 +1321,7 @@ export class SessionTurnService {
           kind: "trace",
           lifecycleStatus: modelDecidesCapture ? "candidate" : "active",
           memoryType: "LongTermMemory",
-          key: modelDecidesCapture
-            ? `trace:${session.id}:${step.turnId}:${step.stepIndex}`
-            : observation.memoryKey ?? `trace:${session.id}:${step.turnId}:${step.stepIndex}`,
+          key: observation.memoryKey ?? `trace:${session.id}:${step.turnId}:${step.stepIndex}`,
           value: this.deps.renderTraceMemoryValue({
             ...step,
             summary: "",
@@ -2267,7 +2265,7 @@ export class SessionTurnService {
   ): ReturnType<typeof captureTurnSteps> {
     const seenRawTurnIds = new Set(
       episode.l1MemoryIds
-        .map((id) => this.deps.repos.memories.get(id))
+        .map((id) => this.deps.repos.memories.getIncludingDeleted(id))
         .filter((memory): memory is MemoryRow => Boolean(memory))
         .map((memory) => this.deps.rawTurnIdFromMemory(memory))
         .filter((id): id is string => Boolean(id))

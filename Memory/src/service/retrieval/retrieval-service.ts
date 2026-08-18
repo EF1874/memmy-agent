@@ -13,6 +13,7 @@ import {
   isResearchDomain,
   isStandaloneMathFinalAnswerTask,
   policyMetaFromMemory,
+  policyRequiresRevalidation,
   renderMathFinalAnswerProtocol,
   renderRepositoryRepairProtocol,
   RETRIEVAL_FILTER_PROMPT,
@@ -280,7 +281,7 @@ function sourceTurnIdFromAgentMemory(memory: MemoryRow): string | undefined {
   return trace && typeof trace.raw_turn_id === "string" ? trace.raw_turn_id : undefined;
 }
 
-function mergeSameTurnRecallHits(
+export function mergeSameTurnRecallHits(
   agentHits: RecallHit[],
   agentMemories: MemoryRow[],
   userHits: RecallHit[]
@@ -365,7 +366,7 @@ function mergeSameTurnRecallHits(
   };
 }
 
-function mmrRecallHits(hits: RecallHit[], limit: number, lambda: number): RecallHit[] {
+export function mmrRecallHits(hits: RecallHit[], limit: number, lambda: number): RecallHit[] {
   const pool = [...hits];
   const selected: RecallHit[] = [];
   while (selected.length < limit && pool.length > 0) {
@@ -402,6 +403,10 @@ function recallTextSimilarity(left: string, right: string): number {
   let overlap = 0;
   for (const term of a) if (b.has(term)) overlap += 1;
   return overlap / Math.max(a.size, b.size);
+}
+
+export function parallelMemoryLaneLimit(limit: number): number {
+  return Math.ceil(1.5 * limit);
 }
 
 function isOnboardingFirstReportContinuationQuery(query: string): boolean {
@@ -490,6 +495,16 @@ export function retrievedMemorySourceIds(memory: MemoryRow): string[] {
     ...(skill?.evidenceAnchorIds ?? []),
     ...(worldModel?.policyIds ?? [])
   ];
+}
+
+function memoryUsesStalePolicy(memory: MemoryRow, stalePolicyIds: ReadonlySet<string>): boolean {
+  if (stalePolicyIds.has(memory.id)) return true;
+  const sourcePolicyIds = memory.memoryLayer === "Skill"
+    ? skillMetaFromMemory(memory)?.sourcePolicyIds ?? []
+    : memory.memoryLayer === "L3"
+      ? worldModelMetaFromMemory(memory)?.policyIds ?? []
+      : [];
+  return sourcePolicyIds.some((policyId) => stalePolicyIds.has(policyId));
 }
 
 function llmFilterFallbackCap(hits: RecallHit[], maxKeep: number): RecallHit[] {
@@ -1705,6 +1720,13 @@ export class RetrievalService {
       ? allowedLayers
       : request.layers.filter((layer) => allowedLayers.includes(layer));
     const dynamicCurrentQuery = isDynamicCurrentFactQuery(request.query);
+    const stalePolicyIds = new Set(this.deps.repos.memories
+      .list({ memoryLayer: "L2", status: "activated" }, 1000)
+      .map(policyMetaFromMemory)
+      .filter((policy): policy is NonNullable<ReturnType<typeof policyMetaFromMemory>> =>
+        Boolean(policy && policyRequiresRevalidation(policy))
+      )
+      .map((policy) => policy.id));
     const semanticLayers = dynamicCurrentQuery
       ? requestedSemanticLayers.filter((layer) => layer !== "L1")
       : requestedSemanticLayers;
@@ -1733,7 +1755,7 @@ export class RetrievalService {
       ? TIME_FILTERED_TRACE_LIMIT
       : request.limit ?? this.deps.turnStartRetrievalLimit();
     const parallelLaneLimit = includeUserMemory
-      ? Math.ceil(1.5 * retrievalLimit)
+      ? parallelMemoryLaneLimit(retrievalLimit)
       : retrievalLimit;
     const retrievalOutput = onboardingFirstReportHit && onboardingFirstReportMemory
       ? {
@@ -1759,8 +1781,23 @@ export class RetrievalService {
           targetSkillId: request.targetSkillId,
           currentAgentId: context.namespace.source
         });
-    const retrieval = retrievalOutput.retrieval;
-    const memories = retrievalOutput.memories;
+    const memories = retrievalOutput.memories.filter((memory) =>
+      !memoryUsesStalePolicy(memory, stalePolicyIds)
+    );
+    const allowedMemoryIds = new Set(memories.map((memory) => memory.id));
+    const allowedEpisodeIds = new Set(memories.flatMap((memory) => {
+      const episodeId = traceMetaFromMemory(memory)?.episodeId;
+      return episodeId ? [episodeId] : [];
+    }));
+    const retrieval = {
+      ...retrievalOutput.retrieval,
+      hits: retrievalOutput.retrieval.hits.filter((hit) =>
+        allowedMemoryIds.has(hit.id) ||
+        allowedEpisodeIds.has(hit.id) ||
+        (hit.memberMemoryIds ?? []).some((id) => allowedMemoryIds.has(id)) ||
+        (hit.members ?? []).some((member) => allowedMemoryIds.has(member.id))
+      )
+    };
     const userMemoryOutput = includeUserMemory && !timeFilter
       ? await this.retrieveUserMemories({
           userId: context.userId,
@@ -1893,6 +1930,7 @@ export class RetrievalService {
       status: uniq([
         ...filteredHits.status,
         ...(dynamicCurrentQuery ? ["dynamic_current:refresh_required"] : []),
+        ...(stalePolicyIds.size > 0 ? ["policy:revalidation_required"] : []),
         ...(!this.deps.memoryAddEnabled() ? ["memory_add:disabled:no_recall_log"] : [])
       ]),
       verbose: request.verbose === true,

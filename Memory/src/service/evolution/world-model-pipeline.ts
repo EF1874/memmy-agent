@@ -4,6 +4,7 @@ import {
   cosine,
   detectDominantLanguage,
   languageSteeringLine,
+  policyIsEligibleForDownstream,
   policyMetaFromMemory,
   shapeWorldModelConfidence,
   traceMetaFromMemory,
@@ -61,7 +62,9 @@ export class WorldModelPipeline {
       const remainingPolicies = world.policyIds
         .map((id) => this.deps.repos.memories.get(id))
         .map((source) => source ? policyMetaFromMemory(source) : null)
-        .filter((policy): policy is PolicyMeta => Boolean(policy?.status === "active"));
+        .filter((policy): policy is PolicyMeta => Boolean(
+          policy && policyIsEligibleForDownstream(policy)
+        ));
       const replacement = buildWorldModelDraft({
         policies: remainingPolicies,
         minPolicies: this.deps.config.algorithm.l3Abstraction.minPolicies,
@@ -162,7 +165,7 @@ export class WorldModelPipeline {
       .list({ memoryLayer: "L2", status: "activated" }, 1000)
       .map(policyMetaFromMemory)
       .filter((policy): policy is NonNullable<ReturnType<typeof policyMetaFromMemory>> =>
-        Boolean(policy)
+        Boolean(policy && policyIsEligibleForDownstream(policy))
       );
     const domainTagsFilter = stringArray(job.payload.domainTagsFilter);
     const filteredPolicies = domainTagsFilter.length > 0

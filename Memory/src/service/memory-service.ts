@@ -408,6 +408,8 @@ export class MemoryService {
       namespaceIdFromMemory,
       runWorkerNoWrite: this.runWorkerNoWrite.bind(this),
       restartFailedProcessing: this.restartFailedProcessing.bind(this),
+      previewPolicyEvidenceReconciliation: this.evolutionJobs.previewPolicyEvidenceReconciliation.bind(this.evolutionJobs),
+      reconcileOrphanedPolicies: this.evolutionJobs.reconcileOrphanedPolicies.bind(this.evolutionJobs),
       enqueueJob: this.workerHandlers.enqueueJob,
       enqueueEmbeddingRetry: this.workerHandlers.enqueueEmbeddingRetry,
       appendJobChange: this.workerHandlers.appendJobChange,

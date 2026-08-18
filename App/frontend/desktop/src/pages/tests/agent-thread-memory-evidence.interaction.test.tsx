@@ -20,7 +20,7 @@ describe("AgentThreadMessages memory evidence interaction", () => {
     container.remove();
   });
 
-  it("deletes same-turn L1 and User Memory members together", async () => {
+  it("[BC-27 chat] deletes same-turn L1 and User Memory members together", async () => {
     const deleteMemory = vi.fn(async (id: string) => {
       if (id === "trace-1") throw Object.assign(new Error("already deleted"), { status: 404 });
       return {

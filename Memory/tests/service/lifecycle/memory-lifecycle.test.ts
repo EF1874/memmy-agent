@@ -4,7 +4,8 @@ import {
   insertActivePolicyMemory,
   insertActiveSkillMemoryForTest,
   insertTracePolicyLinkForTest,
-  insertWorldModelMemoryForTest
+  insertWorldModelMemoryForTest,
+  makeTraceEligibleForL2
 } from "../../fixtures/evolution-fixture.js";
 
 const {
@@ -15,7 +16,118 @@ const {
 afterEach(cleanup);
 
 describe("MemoryService / lifecycle / governance", () => {
-  it("recomputes Policy, World Model, and Skill dependencies after deleting L1 evidence", () => {
+  it("restores missing Policy evidence links when the declared L1 source is still valid", () => {
+    const { db, service } = createTestService();
+    const namespace = {
+      source: "codex",
+      profileId: "jiang",
+      userId: "restorable-policy-user"
+    };
+    const session = service.openSession({ namespace, workspaceId: "restorable-policy-workspace" });
+    const trace = service.completeTurn("turn-restorable-policy", {
+      sessionId: session.sessionId,
+      episodeId: "episode-restorable-policy",
+      query: "修复 pytest 失败并验证结果",
+      answer: "已修复失败并验证测试通过。"
+    });
+    makeTraceEligibleForL2(db, trace.l1MemoryId);
+    insertActivePolicyMemory(db, {
+      id: "policy_restorable",
+      userId: namespace.userId,
+      sessionId: session.sessionId,
+      agentId: namespace.source,
+      appId: "restorable-policy-workspace",
+      profileId: namespace.profileId,
+      sourceTraceId: trace.l1MemoryId,
+      sourceEpisodeId: trace.episodeId
+    });
+
+    const first = service.reconcileWorkerStartup();
+    const second = service.reconcileWorkerStartup();
+
+    expect(first.reconciledOrphanPolicies).toBe(1);
+    expect(first.policyEvidencePreflight).toEqual({
+      orphanPolicyIds: [],
+      affectedWorldModelIds: [],
+      affectedSkillIds: [],
+      restorablePolicyIds: ["policy_restorable"]
+    });
+    expect(second.reconciledOrphanPolicies).toBe(0);
+    expect(second.policyEvidencePreflight).toEqual({
+      orphanPolicyIds: [],
+      affectedWorldModelIds: [],
+      affectedSkillIds: [],
+      restorablePolicyIds: []
+    });
+    expect(memoryState(db, "policy_restorable")).toBe("activated");
+    expect(db.db.prepare(
+      `SELECT l1_memory_id, l2_memory_id
+       FROM trace_policy_links
+       WHERE l1_memory_id = ? AND l2_memory_id = ?`
+    ).get(trace.l1MemoryId, "policy_restorable")).toEqual({
+      l1_memory_id: trace.l1MemoryId,
+      l2_memory_id: "policy_restorable"
+    });
+    db.close();
+  });
+
+  it("[BC-22] reports orphaned active policies and derived memories before an idempotent startup migration", () => {
+    const { db, service } = createTestService();
+    const policyInput = {
+      userId: "orphan-policy-user",
+      sessionId: "orphan-policy-session",
+      agentId: "codex",
+      appId: "orphan-policy-workspace",
+      profileId: "jiang"
+    };
+    insertActivePolicyMemory(db, {
+      ...policyInput,
+      id: "policy_orphaned",
+      sourceTraceId: "missing_l1_evidence",
+      sourceEpisodeId: "missing_episode"
+    });
+    insertWorldModelMemoryForTest(db, {
+      ...policyInput,
+      id: "world_orphaned",
+      memoryKey: "world:orphaned",
+      domainKey: "orphaned|policy",
+      domainTags: ["orphaned"],
+      policyIds: ["policy_orphaned"]
+    });
+    insertActiveSkillMemoryForTest(db, {
+      ...policyInput,
+      id: "skill_orphaned",
+      sourcePolicyIds: ["policy_orphaned"]
+    });
+
+    const first = service.reconcileWorkerStartup();
+    const second = service.reconcileWorkerStartup();
+
+    expect(first.reconciledOrphanPolicies).toBe(1);
+    expect(first.policyEvidencePreflight).toEqual({
+      orphanPolicyIds: ["policy_orphaned"],
+      affectedWorldModelIds: ["world_orphaned"],
+      affectedSkillIds: ["skill_orphaned"],
+      restorablePolicyIds: []
+    });
+    expect(second.reconciledOrphanPolicies).toBe(0);
+    expect(second.policyEvidencePreflight).toEqual({
+      orphanPolicyIds: [],
+      affectedWorldModelIds: [],
+      affectedSkillIds: [],
+      restorablePolicyIds: []
+    });
+    expect(memoryState(db, "policy_orphaned")).toBe("archived");
+    expect(memoryProperties(db, "policy_orphaned").internal_info?.policy?.status)
+      .toBe("quarantined");
+    expect(memoryState(db, "world_orphaned")).toBe("archived");
+    expect(memoryState(db, "skill_orphaned")).toBe("archived");
+    expect(memoryProperties(db, "skill_orphaned").internal_info?.skill?.status)
+      .toBe("suspended");
+    db.close();
+  });
+
+  it("[BC-11][BC-26] recomputes Policy, World Model, and Skill dependencies after deleting L1 evidence", () => {
     const { db, service } = createTestService();
     const namespace = {
       source: "codex",

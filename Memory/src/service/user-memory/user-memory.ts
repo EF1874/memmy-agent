@@ -81,6 +81,12 @@ export function isPureUserMemoryStatement(text: string): boolean {
   return classifyUserMemory(text).length > 0;
 }
 
+export function isTaskLinkedUserFeedback(text: string): boolean {
+  const feedback = /(?:以后|下次|不要|别再|应该|改成|保持|避免|更喜欢)|\b(?:next time|from now on|do not|don't|should|prefer)\b/i.test(text);
+  const artifact = /(?:刚才|前面|这次|你(?:写|做|给|生成|回答)|代码|实现|修改|方案|文档|测试|输出|结果|兜底)|\b(?:your|the|this|previous)\s+(?:code|implementation|answer|output|result|document|test|fallback)\b/i.test(text);
+  return feedback && artifact;
+}
+
 export function isQuestionLike(text: string): boolean {
   return QUESTION_PATTERN.test(text.trim());
 }

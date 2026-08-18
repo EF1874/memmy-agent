@@ -561,7 +561,7 @@ export function evolutionJobDedupeKey(input: Pick<EnqueueJobInput, "jobType" | "
       return basis ? `l3_abstraction:${basis}` : input.episodeId ? `l3_abstraction:${input.episodeId}` : undefined;
     }
     case "skill_crystallization": {
-      const seed = target ?? payloadString("policyId") ?? payloadString("skillId");
+      const seed = payloadString("skillId") ?? target ?? payloadString("policyId");
       return seed ? `skill_crystallization:${seed}` : input.episodeId ? `skill_crystallization:${input.episodeId}` : undefined;
     }
     case "skill_trial_resolve": {

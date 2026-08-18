@@ -6,6 +6,7 @@ import {
   detectDominantLanguage,
   extractToolNamesFromTraces,
   languageSteeringLine,
+  policyIsEligibleForDownstream,
   policyMetaFromMemory,
   skillEtaAfterRewardDrift,
   skillMetaFromMemory,
@@ -26,10 +27,11 @@ import { skillBetaPosterior,skillSuccessRate } from "../read-model/skill.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
 import { logEvolutionDecision } from "./evolution-logging.js";
 
-type TraceMeta=NonNullable<ReturnType<typeof traceMetaFromMemory>>;
-type PolicyMeta=NonNullable<ReturnType<typeof policyMetaFromMemory>>;
-type SkillDraft=NonNullable<ReturnType<typeof buildSkillDraft>>;
-type SkillEnhancementResult=|{ok:true;draft:SkillDraft}|{ok:false;reason:string};
+type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
+type PolicyMeta = NonNullable<ReturnType<typeof policyMetaFromMemory>>;
+type SkillMeta = NonNullable<ReturnType<typeof skillMetaFromMemory>>;
+type SkillDraft = NonNullable<ReturnType<typeof buildSkillDraft>>;
+type SkillEnhancementResult = { ok: true; draft: SkillDraft } | { ok: false; reason: string };
 type SkillRebuildLevel = "L0" | "L1" | "L2";
 
 const SKILL_REFUSAL_PREFIXES = [
@@ -75,7 +77,9 @@ export class SkillPipeline {
       const activePolicies = skill.sourcePolicyIds
         .map((id) => this.deps.repos.memories.get(id))
         .map((source) => source ? policyMetaFromMemory(source) : null)
-        .filter((policy): policy is PolicyMeta => Boolean(policy?.status === "active"));
+        .filter((policy): policy is PolicyMeta => Boolean(
+          policy && policyIsEligibleForDownstream(policy)
+        ));
       const activePolicyIds = new Set(activePolicies.map((policy) => policy.id));
       const procedure = skillProcedureJsonFromMemory(memory);
       const originalSteps = Array.isArray(procedure.steps) ? procedure.steps.filter(isRecord) : [];
@@ -200,7 +204,7 @@ export class SkillPipeline {
     for (const policyMemory of policyMemories) {
       const startedAt = performance.now();
       const policy = policyMetaFromMemory(policyMemory);
-      if (!policy) continue;
+      if (!policy || !policyIsEligibleForDownstream(policy)) continue;
       const evidenceTraces = this.gatherSkillEvidence(policy);
       const counterExamples = this.gatherSkillCounterExamples(policy);
       if (evidenceTraces.length === 0) {
@@ -221,7 +225,34 @@ export class SkillPipeline {
         });
         continue;
       }
-      const existingSkill = this.findExistingSkillForPolicy(policy);
+      const requestedSkillId = typeof job.payload.skillId === "string" ? job.payload.skillId : undefined;
+      const directSkills = this.mutableSkillsForPolicy(policy)
+        .filter((skill) => skill.sourcePolicyIds.includes(policy.id));
+      if (!requestedSkillId && directSkills.length > 1) {
+        for (const skill of directSkills) {
+          this.deps.enqueueJob({
+            jobType: "skill_crystallization",
+            userId,
+            sessionId: policyMemory.sessionId ?? job.sessionId,
+            episodeId: job.episodeId,
+            targetMemoryId: policy.id,
+            payload: {
+              ...job.payload,
+              reason: "policy.skill_fanout",
+              skillId: skill.id
+            },
+            createdAt: at
+          });
+        }
+        continue;
+      }
+      const targetSkillId = requestedSkillId ?? directSkills[0]?.id;
+      const existingSkill = this.consolidateCompatibleSkillsForPolicy(
+        policy,
+        at,
+        targetSkillId,
+        job.payload.reason !== "policy.skill_fanout"
+      );
       if (this.isSkillCrystallizationInCooldown(policy, at)) {
         logEvolutionDecision(job, "skill_crystallization", "cooldown", {
           policyId: policy.id,
@@ -423,23 +454,156 @@ export class SkillPipeline {
   findExistingSkillForPolicy(
     policy: PolicyMeta
   ): NonNullable<ReturnType<typeof skillMetaFromMemory>> | null {
-    const candidates = this.deps.repos.memories
-      .list({ memoryLayer: "Skill" }, 1000)
-      .map(skillMetaFromMemory)
-      .filter((skill): skill is NonNullable<ReturnType<typeof skillMetaFromMemory>> =>
-        Boolean(skill &&
-          skill.status !== "archived" &&
-          !isReadOnlySkillMemory(skill.memory))
-      );
+    const candidates = this.mutableSkillsForPolicy(policy);
     const direct = candidates
       .filter((skill) => skill.sourcePolicyIds.includes(policy.id))
       .sort(compareSkillMergeTargets)[0];
-    if (direct) return direct;
-    return candidates
-      .map((skill) => ({ skill, score: skillPolicyCompatibility(skill, policy) }))
-      .filter((candidate) => candidate.score >= 0.8)
-      .sort((left, right) => right.score - left.score || compareSkillMergeTargets(left.skill, right.skill))[0]
-      ?.skill ?? null;
+    return direct ?? candidates
+      .filter((skill) => skillPolicyCompatibility(skill, policy) >= 0.8)
+      .sort(compareSkillMergeTargets)[0] ?? null;
+  }
+
+  private mutableSkillsForPolicy(policy: PolicyMeta): SkillMeta[] {
+    return this.deps.repos.memories
+      .list({ memoryLayer: "Skill" }, 1000)
+      .map(skillMetaFromMemory)
+      .filter((skill): skill is SkillMeta => Boolean(
+        skill &&
+        skill.memory.userId === policy.memory.userId &&
+        skill.status !== "archived" &&
+        !isReadOnlySkillMemory(skill.memory)
+      ));
+  }
+
+  private consolidateCompatibleSkillsForPolicy(
+    policy: PolicyMeta,
+    at: string,
+    targetSkillId?: string,
+    allowTargetMerge = true
+  ): SkillMeta | null {
+    const mutableSkills = this.mutableSkillsForPolicy(policy);
+    const target = targetSkillId
+      ? mutableSkills.find((skill) => skill.id === targetSkillId)
+      : undefined;
+    if (target && !allowTargetMerge) return target;
+    const compatible = mutableSkills
+      .filter((skill) => skillPolicyCompatibility(skill, policy) >= 0.8)
+      .sort(compareSkillMergeTargets);
+    const seed = target ?? compatible[0];
+    const mergeable = seed
+      ? mutableSkills.filter((skill) =>
+          skill.id !== seed.id &&
+          skillPolicyCompatibility(skill, policy) >= 0.8 &&
+          skillsAreCompatibleForMerge(seed, skill)
+        )
+      : [];
+    const candidates = seed ? [seed, ...mergeable].sort(compareSkillMergeTargets) : [];
+    const canonical = candidates[0];
+    if (!canonical || candidates.length === 1) return canonical ?? null;
+
+    const aliases = candidates.slice(1);
+    const sourcePolicyIds = uniq(candidates.flatMap((skill) => skill.sourcePolicyIds));
+    const sourceWorldModelIds = uniq(candidates.flatMap((skill) => skill.sourceWorldModelIds));
+    const evidenceAnchorIds = uniq(candidates.flatMap((skill) => skill.evidenceAnchorIds)).slice(0, 20);
+    const procedureJson = mergeCompatibleSkillProcedures(candidates.map((skill) => skill.memory));
+    const policyContentHashes = Object.assign(
+      {},
+      ...candidates.map((skill) => storedSkillPolicyContentHashes(skill.memory))
+    ) as Record<string, string>;
+    const nextStatus = candidates.some((skill) => skill.status === "active") ? "active" : "candidate";
+    const internal = canonical.memory.properties.internal_info;
+    const internalSkill = isRecord(internal.skill) ? internal.skill : {};
+    const saved = this.deps.repos.memories.update({
+      ...canonical.memory,
+      status: nextStatus === "active" ? "activated" : "resolving",
+      tags: uniq(candidates.flatMap((skill) => skill.memory.tags)),
+      info: {
+        ...canonical.memory.info,
+        status: nextStatus,
+        source_memory_ids: sourcePolicyIds,
+        source_policy_ids: sourcePolicyIds
+      },
+      properties: {
+        ...canonical.memory.properties,
+        status: nextStatus === "active" ? "activated" : "resolving",
+        internal_info: {
+          ...internal,
+          status: nextStatus,
+          source_memory_ids: sourcePolicyIds,
+          source_policy_ids: sourcePolicyIds,
+          source_world_model_ids: sourceWorldModelIds,
+          evidence_anchor_ids: evidenceAnchorIds,
+          procedure_json: procedureJson,
+          policy_content_hashes: policyContentHashes,
+          skill: {
+            ...internalSkill,
+            status: nextStatus,
+            source_policy_ids: sourcePolicyIds,
+            source_world_model_ids: sourceWorldModelIds,
+            evidence_anchor_ids: evidenceAnchorIds,
+            procedure_json: procedureJson,
+            policy_content_hashes: policyContentHashes
+          }
+        }
+      },
+      updatedAt: at
+    });
+    this.deps.repos.runtime.appendChange({
+      memoryId: saved.id,
+      namespaceId: this.deps.namespaceIdFromMemory(saved),
+      kind: kindFromMemory(saved),
+      op: "updated",
+      entityId: saved.id,
+      userId: saved.userId,
+      changeType: "skill_compatible_merge",
+      before: canonical.memory,
+      after: saved,
+      source: "worker.skill_crystallization.merge.v1",
+      createdAt: at
+    });
+
+    for (const alias of aliases) {
+      const aliasInternal = alias.memory.properties.internal_info;
+      const aliasSkill = isRecord(aliasInternal.skill) ? aliasInternal.skill : {};
+      const archived = this.deps.repos.memories.update({
+        ...alias.memory,
+        status: "archived",
+        info: {
+          ...alias.memory.info,
+          status: "archived",
+          merged_into_skill_id: saved.id
+        },
+        properties: {
+          ...alias.memory.properties,
+          status: "archived",
+          internal_info: {
+            ...aliasInternal,
+            status: "archived",
+            merged_into_skill_id: saved.id,
+            skill: {
+              ...aliasSkill,
+              status: "archived",
+              merged_into_skill_id: saved.id
+            }
+          }
+        },
+        updatedAt: at
+      });
+      this.deps.repos.runtime.appendChange({
+        memoryId: archived.id,
+        namespaceId: this.deps.namespaceIdFromMemory(archived),
+        kind: kindFromMemory(archived),
+        op: "archived",
+        entityId: archived.id,
+        userId: archived.userId,
+        changeType: "skill_merged_into_canonical",
+        before: alias.memory,
+        after: archived,
+        source: "worker.skill_crystallization.merge.v1",
+        createdAt: at
+      });
+    }
+    return skillMetaFromMemory(saved);
   }
 
 private isSkillCrystallizationInCooldown(policy: PolicyMeta, at: string): boolean {
@@ -1047,6 +1211,63 @@ function mergeSkillRebuildProcedureJson(
   };
 }
 
+function mergeCompatibleSkillProcedures(memories: MemoryRow[]): Record<string, unknown> {
+  const [first, ...rest] = memories;
+  if (!first) return {};
+  let merged = procedureWithPolicySources(first);
+  for (const memory of rest) {
+    const next = procedureWithPolicySources(memory);
+    merged = {
+      ...next,
+      ...merged,
+      steps: mergeCompatibleSkillSteps(merged.steps, next.steps)
+    };
+  }
+  return merged;
+}
+
+function procedureWithPolicySources(memory: MemoryRow): Record<string, unknown> {
+  const procedure = skillProcedureJsonFromMemory(memory);
+  const policyIds = skillMetaFromMemory(memory)?.sourcePolicyIds ?? [];
+  const steps = Array.isArray(procedure.steps) ? procedure.steps.filter(isRecord) : [];
+  return {
+    ...procedure,
+    steps: steps.map((step) => ({
+      ...step,
+      supportingPolicyIds: uniq([
+        ...stringArray(step.supportingPolicyIds ?? step.supporting_policy_ids),
+        ...(stringArray(step.supportingPolicyIds ?? step.supporting_policy_ids).length === 0 ? policyIds : [])
+      ])
+    }))
+  };
+}
+
+function mergeCompatibleSkillSteps(existing: unknown, incoming: unknown): unknown {
+  if (!Array.isArray(existing) || !Array.isArray(incoming)) return existing ?? incoming;
+  const merged = existing.filter(isRecord).map((step) => ({ ...step }));
+  const byId = new Map(merged.flatMap((step) =>
+    typeof step.id === "string" && step.id ? [[step.id, step] as const] : []
+  ));
+  const byTitle = new Map(merged.map((step) => [normalizeSkillStepTitle(step.title), step]));
+  for (const step of incoming.filter(isRecord)) {
+    const current = (typeof step.id === "string" ? byId.get(step.id) : undefined) ??
+      byTitle.get(normalizeSkillStepTitle(step.title));
+    if (!current) {
+      merged.push({ ...step });
+      continue;
+    }
+    Object.assign(current, {
+      ...step,
+      ...current,
+      supportingPolicyIds: uniq([
+        ...stringArray(current.supportingPolicyIds ?? current.supporting_policy_ids),
+        ...stringArray(step.supportingPolicyIds ?? step.supporting_policy_ids)
+      ])
+    });
+  }
+  return merged;
+}
+
 function mergeSkillSteps(existing: unknown, draft: unknown): unknown {
   if (!Array.isArray(existing) || !Array.isArray(draft)) return draft ?? existing;
   const additions = draft.filter(isRecord);
@@ -1112,7 +1333,8 @@ function normalizeSkillStepTitle(value: unknown): string {
 }
 
 function isReadOnlySkillMemory(memory: MemoryRow): boolean {
-  return memory.properties.internal_info.read_only === true;
+  const internal = memory.properties.internal_info;
+  return internal.read_only === true || internal.generated_by_memory_base !== true;
 }
 
 function compareSkillMergeTargets(
@@ -1149,6 +1371,28 @@ function skillPolicyCompatibility(
   if (!tagCompatible && lexical < 0.25) return 0;
   const vector = skill.vec && policy.vec ? cosine(skill.vec, policy.vec) : 0;
   return Math.max(lexical, vector);
+}
+
+function skillsAreCompatibleForMerge(left: SkillMeta, right: SkillMeta): boolean {
+  if (left.memory.userId !== right.memory.userId) return false;
+  const leftProject = projectIdFromMemory(left.memory);
+  const rightProject = projectIdFromMemory(right.memory);
+  if (leftProject && rightProject && leftProject !== rightProject) return false;
+  const leftProfile = profileIdFromMemory(left.memory);
+  const rightProfile = profileIdFromMemory(right.memory);
+  if (leftProfile && rightProfile && leftProfile !== rightProfile) return false;
+
+  const genericTags = new Set(["skill", "policy", "active", "candidate"]);
+  const leftTags = new Set(left.memory.tags.map((tag) => tag.toLowerCase()).filter((tag) => !genericTags.has(tag)));
+  const rightTags = new Set(right.memory.tags.map((tag) => tag.toLowerCase()).filter((tag) => !genericTags.has(tag)));
+  if (![...leftTags].some((tag) => rightTags.has(tag))) return false;
+
+  const lexical = textTokenOverlap(
+    `${left.name}\n${left.invocationGuide}`,
+    `${right.name}\n${right.invocationGuide}`
+  );
+  const vector = left.vec && right.vec ? cosine(left.vec, right.vec) : 0;
+  return lexical >= 0.5 || (lexical >= 0.25 && vector >= 0.8);
 }
 
 function textTokenOverlap(left: string, right: string): number {

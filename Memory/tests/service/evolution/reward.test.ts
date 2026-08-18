@@ -333,7 +333,7 @@ describe("MemoryService / evolution / reward", () => {
       finalExchange: { user: string; assistant: string };
       feedbackHistory: Array<{ polarity: string }>;
     };
-    expect(rewardInput.turnSummaries).toHaveLength(3);
+    expect(rewardInput.turnSummaries).toHaveLength(2);
     expect(rewardInput.finalExchange).toEqual({
       user: "哈密瓜和西瓜谁的营养价值更高",
       assistant: "综合营养密度上哈密瓜通常更高一点。"
@@ -349,8 +349,8 @@ describe("MemoryService / evolution / reward", () => {
     expect(typeof rewarded.r_task).toBe("number");
     expect(JSON.parse(rewarded.reward_detail_json)).toMatchObject({
       phase: "final",
-      traceCount: 3,
-      traceIds: [first.l1MemoryId, second.l1MemoryId, third.l1MemoryId]
+      traceCount: 2,
+      traceIds: [second.l1MemoryId, third.l1MemoryId]
     });
     db.close();
   });

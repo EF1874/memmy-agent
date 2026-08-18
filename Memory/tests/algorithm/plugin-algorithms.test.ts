@@ -1831,6 +1831,7 @@ function policy(id: string, title: string, vec: number[], gain: number): PolicyM
       preference: [],
       antiPattern: []
     },
+    freshnessClass: "stable",
     salience: gain,
     vec,
     updatedAtMs: 0

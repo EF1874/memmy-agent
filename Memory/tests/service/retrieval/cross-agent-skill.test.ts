@@ -6,7 +6,7 @@ const { cleanup, createTestService } = createMemoryServiceFixture();
 afterEach(cleanup);
 
 describe("cross-Agent read-only Skill retrieval", () => {
-  it("excludes the current Agent source and recalls another Agent source with provenance", async () => {
+  it("[BC-23] excludes the current Agent source and recalls another Agent source with provenance", async () => {
     const { db, service } = createTestService();
     const userId = "cross-agent-skill-user";
     const session = service.openSession({
@@ -60,7 +60,7 @@ describe("cross-Agent read-only Skill retrieval", () => {
     db.close();
   });
 
-  it("versions changed scanned Skills and does not restore a locally deleted version", () => {
+  it("[BC-24][BC-27 external] versions changed scanned Skills and does not restore a locally deleted version", () => {
     const { db, service } = createTestService();
     const namespace = { source: "agent-a", profileId: "default", userId: "skill-version-user" };
     const base = {

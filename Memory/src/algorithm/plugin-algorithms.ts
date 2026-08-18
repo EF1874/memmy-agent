@@ -89,6 +89,9 @@ export interface PolicyMemoryMeta {
     preference: string[];
     antiPattern: string[];
   };
+  freshnessClass: "stable" | "dynamic";
+  lastVerifiedAt?: string;
+  revalidateAfter?: string;
   salience: number;
   vec: number[] | null;
   updatedAtMs: number;
@@ -951,7 +954,7 @@ export type PromptLanguage = "auto" | "zh" | "en";
 
 export const L2_INDUCTION_PROMPT = {
   id: "l2.induction",
-  version: 3,
+  version: 4,
   description:
     "Distill an L2 policy (procedural sub-task strategy) from a cluster of similar L1 traces, with explicit boundaries against L3 world-model drift.",
   system: `You induce reusable **procedural policies** from agent experience.
@@ -1048,8 +1051,16 @@ Return JSON:
                 environment behaves this way)",
   "caveats": ["step-level pitfall string", ...],
   "confidence": number in [0, 1],
+  "freshness_class": "stable" | "dynamic",
+  "revalidate_after_days": number | null,
   "support_trace_ids": ["tr_...", ...]
-}`,
+}
+
+Use freshness_class="dynamic" when the policy depends on changing business data,
+external APIs, current product behavior, market conditions, live data sources, or
+other assumptions that can expire. Set revalidate_after_days to a positive bounded
+interval for dynamic policies. Use freshness_class="stable" and null for durable
+techniques whose trigger and verification remain self-contained.`,
 } as const;
 
 export const REWARD_R_HUMAN_PROMPT = {
@@ -3300,10 +3311,27 @@ export function policyMetaFromMemory(memory: MemoryRow): PolicyMemoryMeta | null
           ])
         : []
     },
+    freshnessClass: statusField(policy, "freshness_class", ["stable", "dynamic"]) ?? "stable",
+    lastVerifiedAt: stringField(policy, "last_verified_at"),
+    revalidateAfter: stringField(policy, "revalidate_after"),
     salience: numberField(policy, "salience") ?? numberField(policy, "raw_gain") ?? numberField(policy, "gain") ?? 0,
     vec: memoryVector(memory, "vec"),
     updatedAtMs: Date.parse(memory.updatedAt)
   };
+}
+
+export function policyRequiresRevalidation(policy: PolicyMemoryMeta, now = Date.now()): boolean {
+  if (policy.freshnessClass !== "dynamic") return false;
+  if (!policy.revalidateAfter) return true;
+  const revalidateAt = Date.parse(policy.revalidateAfter);
+  return !Number.isFinite(revalidateAt) || revalidateAt <= now;
+}
+
+export function policyIsEligibleForDownstream(
+  policy: PolicyMemoryMeta,
+  now = Date.now()
+): boolean {
+  return policy.status === "active" && !policyRequiresRevalidation(policy, now);
 }
 
 export function failureAvoidancePolicyIsRetrievalEligible(policy: PolicyMemoryMeta): boolean {
@@ -4933,6 +4961,7 @@ export function isMemoryReadyForRetrieval(memory: MemoryRow): boolean {
   if (evidenceStatus === "provisional" || evidenceStatus === "disputed") return false;
   const policy = memory.memoryLayer === "L2" ? policyMetaFromMemory(memory) : null;
   if (policy && policy.status !== "candidate" && policy.status !== "active") return false;
+  if (policy && policyRequiresRevalidation(policy)) return false;
   const skill = memory.memoryLayer === "Skill" ? skillMetaFromMemory(memory) : null;
   if (skill && skill.status !== "candidate" && skill.status !== "active") return false;
   if (hasMemoryRetrievalIndex(memory)) return true;

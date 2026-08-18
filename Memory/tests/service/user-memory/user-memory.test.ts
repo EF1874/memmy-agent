@@ -15,6 +15,91 @@ afterEach(() => {
 });
 
 describe("User Memory", () => {
+  it("[BC-06] keeps a one-turn alternative request temporary and a durable prohibition persistent", async () => {
+    const { db, service } = createTestService({
+      llm: captureDecisionRouterLlm((payload) => {
+        if (payload.includes("以后不要再推荐飞盘")) {
+          return {
+            create_l1: false,
+            l1_summary: "",
+            create_user_memory: true,
+            user_memory_types: ["User Directive"],
+            user_memory_evidence: [{ quote: "以后不要再推荐飞盘", type: "User Directive" }],
+            reason: "durable future directive"
+          };
+        }
+        if (payload.includes("我喜欢玩飞盘")) {
+          return {
+            create_l1: false,
+            l1_summary: "",
+            create_user_memory: true,
+            user_memory_types: ["User Preference"],
+            user_memory_evidence: [{ quote: "我喜欢玩飞盘", type: "User Preference" }],
+            reason: "durable preference"
+          };
+        }
+        return {
+          create_l1: false,
+          l1_summary: "",
+          create_user_memory: false,
+          user_memory_types: [],
+          user_memory_evidence: [],
+          reason: "temporary current-request constraint"
+        };
+      })
+    });
+    const session = open(service, "bc-06-user");
+    const turns = [
+      service.completeTurn("bc-06-preference", {
+        sessionId: session.sessionId,
+        query: "我喜欢玩飞盘",
+        answer: "记住了。"
+      }),
+      service.completeTurn("bc-06-temporary", {
+        sessionId: session.sessionId,
+        query: "换一个",
+        answer: "可以，改为桌游。"
+      }),
+      service.completeTurn("bc-06-directive", {
+        sessionId: session.sessionId,
+        query: "以后不要再推荐飞盘",
+        answer: "好的。"
+      })
+    ];
+
+    await service.runWorkerOnce(50, { priorityCohortOnly: true });
+
+    const userMemories = db.db.prepare(
+      `SELECT content, memory_types_json, source_turn_refs_json
+       FROM user_memories
+       WHERE status = 'active'
+       ORDER BY created_at`
+    ).all() as Array<{
+      content: string;
+      memory_types_json: string;
+      source_turn_refs_json: string;
+    }>;
+    expect(userMemories.map((memory) => ({
+      content: memory.content,
+      types: JSON.parse(memory.memory_types_json)
+    }))).toEqual([
+      { content: "我喜欢玩飞盘", types: ["User Preference"] },
+      { content: "以后不要再推荐飞盘", types: ["User Directive"] }
+    ]);
+    expect(userMemories.every((memory) => JSON.parse(memory.source_turn_refs_json).length === 1)).toBe(true);
+    expect(db.db.prepare(
+      `SELECT COUNT(*) AS count FROM user_memories WHERE content = '换一个'`
+    ).get()).toEqual({ count: 0 });
+    expect(db.db.prepare(
+      `SELECT status FROM memories WHERE id IN (?, ?, ?) ORDER BY id`
+    ).all(...turns.map((turn) => turn.l1MemoryId))).toEqual([
+      { status: "deleted" },
+      { status: "deleted" },
+      { status: "deleted" }
+    ]);
+    db.close();
+  });
+
   it("uses the summary model to reject a recall-only turn from both memory branches", async () => {
     const calls: string[] = [];
     const { db, service } = createTestService({
@@ -45,6 +130,8 @@ describe("User Memory", () => {
     expect(rowCount(db, "user_memories")).toBe(0);
     expect(db.db.prepare(`SELECT status FROM memories WHERE id = ?`).get(completed.l1MemoryIds[0]))
       .toEqual({ status: "deleted" });
+    expect(db.db.prepare(`SELECT * FROM memory_processing_state WHERE memory_id = ?`).get(completed.l1MemoryIds[0]))
+      .toBeUndefined();
     db.close();
   });
 
@@ -107,7 +194,150 @@ describe("User Memory", () => {
     db.close();
   });
 
-  it("does not persist an agent guess about the user as User Memory or L1", () => {
+  it("does not let the summary model reject a verified durable tool observation", async () => {
+    const { db, service } = createTestService({
+      llm: captureDecisionLlm([], {
+        create_l1: false,
+        l1_summary: "",
+        create_user_memory: false,
+        user_memory_types: [],
+        reason: "incorrect model rejection"
+      })
+    });
+    const session = open(service, "model-hardware-guard-user");
+    const completed = service.completeTurn("turn-model-hardware-guard", {
+      sessionId: session.sessionId,
+      query: "我的电脑内存多大？",
+      answer: "工具读取结果是 16 GB。",
+      toolCalls: [{ name: "system_info", input: { field: "memory" } }],
+      toolResults: [{ totalMemory: "16 GB" }]
+    });
+
+    await service.runWorkerOnce(20, { priorityCohortOnly: true });
+
+    expect(db.db.prepare(
+      `SELECT status, memory_key, json_extract(info_json, '$.evidence_status') AS evidence_status
+       FROM memories WHERE id = ?`
+    ).get(completed.l1MemoryIds[0])).toEqual({
+      status: "activated",
+      memory_key: "trace:environment:device:local:default:device.total_memory",
+      evidence_status: "verified"
+    });
+    expect(rowCount(db, "user_memories")).toBe(0);
+    db.close();
+  });
+
+  it("repairs model memory types and keeps task-linked feedback in both branches", async () => {
+    const { db, service } = createTestService({
+      llm: captureDecisionLlm([], {
+        create_l1: false,
+        l1_summary: "",
+        create_user_memory: true,
+        user_memory_types: ["User Preference"],
+        reason: "incomplete model classification"
+      })
+    });
+    const session = open(service, "model-feedback-guard-user");
+    const completed = service.completeTurn("turn-model-feedback-guard", {
+      sessionId: session.sessionId,
+      query: "你刚才写了很多兜底代码，我更喜欢简洁的代码，以后不要写不必要的兜底代码",
+      answer: "已精简实现并通过测试。"
+    });
+
+    await service.runWorkerOnce(20, { priorityCohortOnly: true });
+
+    expect(JSON.parse((db.db.prepare(`SELECT memory_types_json FROM user_memories`).get() as {
+      memory_types_json: string;
+    }).memory_types_json)).toEqual(["User Preference", "User Directive"]);
+    expect(db.db.prepare(`SELECT status FROM memories WHERE id = ?`).get(completed.l1MemoryIds[0]))
+      .toEqual({ status: "activated" });
+    const recall = await service.search({
+      sessionId: session.sessionId,
+      query: "简洁代码 不必要兜底代码",
+      layers: ["L1"],
+      limit: 5,
+      includeInjectedContext: true
+    });
+    expect(recall.hits.find((hit) => hit.sourceTurnId)?.memberMemoryIds).toEqual(expect.arrayContaining([
+      expect.stringMatching(/^user_memory_/),
+      completed.l1MemoryIds[0]
+    ]));
+    db.close();
+  });
+
+  it("keeps a durable standalone directive out of L1 even when the model disagrees", async () => {
+    const { db, service } = createTestService({
+      llm: captureDecisionLlm([], {
+        create_l1: true,
+        l1_summary: "不要推荐飞盘",
+        l1_evidence: [{
+          quote: "以后不要再推荐飞盘",
+          source_role: "user",
+          kind: "correction"
+        }],
+        create_user_memory: true,
+        user_memory_types: ["User Preference"],
+        reason: "incorrect model classification"
+      })
+    });
+    const session = open(service, "model-directive-guard-user");
+    const completed = service.completeTurn("turn-model-directive-guard", {
+      sessionId: session.sessionId,
+      query: "以后不要再推荐飞盘",
+      answer: "好的。"
+    });
+
+    await service.runWorkerOnce(20, { priorityCohortOnly: true });
+
+    expect(db.db.prepare(`SELECT memory_types_json FROM user_memories`).get())
+      .toEqual({ memory_types_json: '["User Directive"]' });
+    expect(db.db.prepare(`SELECT status FROM memories WHERE id = ?`).get(completed.l1MemoryIds[0]))
+      .toEqual({ status: "deleted" });
+    const rejected = db.db.prepare(`SELECT properties_json FROM memories WHERE id = ?`)
+      .get(completed.l1MemoryIds[0]) as { properties_json: string };
+    expect(JSON.parse(rejected.properties_json)).toMatchObject({
+      internal_info: {
+        capture_decision: {
+          status: "rejected",
+          create_l1: false,
+          l1_evidence: [{
+            quote: "以后不要再推荐飞盘",
+            source_role: "user",
+            kind: "correction"
+          }]
+        }
+      }
+    });
+    db.close();
+  });
+
+  it("keeps a compound user statement whole and out of L1 when the model disagrees", async () => {
+    const content = "我在大学的时候最喜欢吃苹果，我现在爱看的书是《百年孤独》";
+    const { db, service } = createTestService({
+      llm: captureDecisionLlm([], {
+        create_l1: true,
+        l1_summary: content,
+        create_user_memory: false,
+        user_memory_types: [],
+        reason: "incorrect model branch selection"
+      })
+    });
+    const session = open(service, "model-compound-guard-user");
+    const completed = service.completeTurn("turn-model-compound-guard", {
+      sessionId: session.sessionId,
+      query: content,
+      answer: "好的。"
+    });
+
+    await service.runWorkerOnce(20, { priorityCohortOnly: true });
+
+    expect(db.db.prepare(`SELECT content FROM user_memories`).all()).toEqual([{ content }]);
+    expect(db.db.prepare(`SELECT status FROM memories WHERE id = ?`).get(completed.l1MemoryIds[0]))
+      .toEqual({ status: "deleted" });
+    db.close();
+  });
+
+  it("[BC-01] does not persist an agent guess about the user as User Memory or L1", () => {
     const { db, service } = createTestService();
     const session = open(service, "guess-user");
 
@@ -124,7 +354,7 @@ describe("User Memory", () => {
     db.close();
   });
 
-  it("does not create L1 from an extended user-preference lookup backed only by recalled memory", () => {
+  it("[BC-03 recall] does not create L1 from an extended user-preference lookup backed only by recalled memory", () => {
     const { db, service } = createTestService();
     const session = open(service, "history-preference-question-user");
 
@@ -171,7 +401,7 @@ describe("User Memory", () => {
     db.close();
   });
 
-  it("coalesces exact repeats while preserving first creation and latest expression times", () => {
+  it("[BC-03 repeat] coalesces exact repeats while preserving first creation and latest expression times", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
     const { db, service } = createTestService();
@@ -204,6 +434,36 @@ describe("User Memory", () => {
       updated_at: "2026-01-05T00:00:00.000Z",
       status: "active"
     });
+    db.close();
+  });
+
+  it("does not recapture model-rejected L1 turns when a preference repeats in one session", async () => {
+    const { db, service } = createTestService({
+      llm: captureDecisionLlm([], {
+        create_l1: false,
+        l1_summary: "",
+        create_user_memory: true,
+        user_memory_types: ["User Preference"],
+        reason: "durable preference without task evidence"
+      })
+    });
+    const session = open(service, "model-repeat-user");
+
+    for (let index = 0; index < 5; index += 1) {
+      service.completeTurn(`turn-model-apple-${index}`, {
+        sessionId: session.sessionId,
+        query: "我最喜欢的水果是苹果",
+        answer: "好的。"
+      });
+      await service.runWorkerOnce(20, { priorityCohortOnly: true });
+    }
+
+    expect(db.db.prepare(`SELECT COUNT(*) AS count FROM memories`).get()).toEqual({ count: 5 });
+    expect(db.db.prepare(`SELECT COUNT(*) AS count FROM memories WHERE status = 'deleted'`).get()).toEqual({ count: 5 });
+    expect(db.db.prepare(`SELECT COUNT(*) AS count FROM memory_processing_state`).get()).toEqual({ count: 0 });
+    expect(db.db.prepare(`SELECT COUNT(*) AS count FROM user_memories`).get()).toEqual({ count: 1 });
+    expect(db.db.prepare(`SELECT json_array_length(source_turn_refs_json) AS count FROM user_memories`).get())
+      .toEqual({ count: 5 });
     db.close();
   });
 
@@ -242,7 +502,7 @@ describe("User Memory", () => {
     db.close();
   });
 
-  it("archives only the targeted User Memory on explicit correction", () => {
+  it("[BC-02 correction] archives only the targeted User Memory on explicit correction", () => {
     const { db, service } = createTestService();
     const session = open(service, "correction-user");
     const apple = service.completeTurn("turn-apple", {
@@ -285,7 +545,7 @@ describe("User Memory", () => {
     db.close();
   });
 
-  it("keeps both active memories when the user describes a new current state", async () => {
+  it("[BC-02 current change] keeps both active memories when the user describes a new current state", async () => {
     const { db, service } = createTestService();
     const session = open(service, "time-change-user");
     service.completeTurn("turn-old-favorite", {
@@ -321,7 +581,7 @@ describe("User Memory", () => {
     db.close();
   });
 
-  it("stores a compound user statement as one record and no L1", async () => {
+  it("[BC-28] stores a compound user statement as one record and no L1", async () => {
     const { db, service } = createTestService();
     const session = open(service, "compound-user");
     const content = "我在大学的时候最喜欢吃苹果，我现在爱看的书是《百年孤独》";
@@ -349,7 +609,7 @@ describe("User Memory", () => {
     db.close();
   });
 
-  it("independently creates User Memory and L1, then merges them by source turn", async () => {
+  it("[BC-25] independently creates User Memory and L1, then merges them by source turn", async () => {
     const { db, service } = createTestService();
     const session = open(service, "same-turn-user");
     const completed = service.completeTurn("turn-code-feedback", {
@@ -430,7 +690,7 @@ describe("User Memory", () => {
     db.close();
   });
 
-  it("keeps device observations in L1 and current weather out of long-lived memory", async () => {
+  it("[BC-04][BC-05] keeps device observations in L1 and current weather out of long-lived memory", async () => {
     const { db, service } = createTestService();
     const session = open(service, "dynamic-fact-user");
     const hardware = service.completeTurn("turn-hardware", {
@@ -457,8 +717,8 @@ describe("User Memory", () => {
        FROM memories WHERE id = ?`
     ).get(hardware.l1MemoryIds[0]) as Record<string, unknown>;
     expect(hardwareRow).toMatchObject({
-      memory_key: "trace:environment:device:codex:default:device.total_memory",
-      scope_key: "device:codex:default",
+      memory_key: "trace:environment:device:local:default:device.total_memory",
+      scope_key: "device:local:default",
       evidence_status: "verified",
       policy_eligible: 0
     });
@@ -476,7 +736,7 @@ describe("User Memory", () => {
     db.close();
   });
 
-  it("updates a device observation in place when the same scoped fact changes", () => {
+  it("[BC-04 update] updates a device observation in place when the same scoped fact changes", () => {
     const { db, service } = createTestService();
     const session = open(service, "hardware-update-user");
     const first = service.completeTurn("turn-hardware-16", {
@@ -497,7 +757,7 @@ describe("User Memory", () => {
     expect(second.l1MemoryIds).toEqual(first.l1MemoryIds);
     expect(db.db.prepare(
       `SELECT COUNT(*) AS count FROM memories
-       WHERE memory_key = 'trace:environment:device:codex:default:device.total_memory'`
+       WHERE memory_key = 'trace:environment:device:local:default:device.total_memory'`
     ).get()).toEqual({ count: 1 });
     expect((db.db.prepare(`SELECT memory_value FROM memories WHERE id = ?`).get(first.l1MemoryIds[0]) as {
       memory_value: string;
@@ -505,7 +765,7 @@ describe("User Memory", () => {
     db.close();
   });
 
-  it("deletes only the selected branch of a same-turn pair", async () => {
+  it("[BC-27 management] deletes only the selected branch of a same-turn pair", async () => {
     const { db, service } = createTestService();
     const session = open(service, "delete-user");
     const completed = service.completeTurn("turn-delete-pair", {
@@ -554,6 +814,8 @@ function captureDecisionLlm(
     l1_summary: string;
     create_user_memory: boolean;
     user_memory_types: string[];
+    user_memory_evidence?: unknown[];
+    l1_evidence?: unknown[];
     reason: string;
   }
 ): LlmClient {
@@ -577,6 +839,42 @@ function captureDecisionLlm(
     status: () => ({
       provider: "host",
       model: "summary-model",
+      configured: true,
+      remote: true
+    })
+  };
+}
+
+function captureDecisionRouterLlm(
+  decide: (payload: string) => {
+    create_l1: boolean;
+    l1_summary: string;
+    create_user_memory: boolean;
+    user_memory_types: string[];
+    user_memory_evidence?: unknown[];
+    l1_evidence?: unknown[];
+    reason: string;
+  }
+): LlmClient {
+  return {
+    config: {
+      ...DEFAULT_MEMMY_CONFIG.summary,
+      provider: "host",
+      endpoint: "http://127.0.0.1/summary-model-router",
+      model: "summary-model-router"
+    },
+    isConfigured: () => true,
+    complete: async () => "unused",
+    async completeJson<T extends Record<string, unknown>>(
+      messages: LlmMessage[],
+      options: LlmCompletionOptions
+    ): Promise<T> {
+      if (options.operation !== "capture.summarize") return { summary: "" } as unknown as T;
+      return decide(messages.find((message) => message.role === "user")?.content ?? "") as unknown as T;
+    },
+    status: () => ({
+      provider: "host",
+      model: "summary-model-router",
       configured: true,
       remote: true
     })
