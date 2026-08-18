@@ -974,6 +974,24 @@ describe("spawnNodeService 落盘与 env 注入", () => {
     expect(await readFile(logFile, "utf8")).toContain("hello-from-child");
   });
 
+  it("把 Agent Gateway 子进程 stderr 落盘到 agent-gateway.log", async () => {
+    const root = await makeTempRoot();
+    const entry = join(root, "entry.js");
+    await writeFile(entry, "process.stderr.write('[session-dag] compaction failed SQLITE_CANTOPEN\\n');\n");
+    const logFile = join(root, "agent-gateway.log");
+
+    const managed = spawnNodeService("agent-gateway", entry, [], {}, {
+      logFilePath: logFile,
+      logLevel: "info"
+    });
+    await new Promise<void>((done) => managed.process.once("exit", () => done()));
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+
+    const logText = await readFile(logFile, "utf8");
+    expect(logText).toContain("[session-dag] compaction failed");
+    expect(logText).toContain("SQLITE_CANTOPEN");
+  });
+
   it("把 MEMMY_LOG_LEVEL 注入子进程环境", async () => {
     const root = await makeTempRoot();
     const entry = join(root, "entry.js");
