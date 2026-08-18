@@ -1,5 +1,5 @@
-import { createLocalBackend, loadCloudServiceEnv, trackAnalyticsEvent, type BootstrapScenario, type LocalBackend } from "@memmy/backend";
-import { resolveCloudServiceBaseUrl } from "@memmy/local-api-contracts";
+import { createLocalBackend, loadCloudServiceEnv, syncRuntimeConfigForStartup, trackAnalyticsEvent, type BootstrapScenario, type LocalBackend } from "@memmy/backend";
+import { resolveCloudServiceBaseUrl, type AccountChannel } from "@memmy/local-api-contracts";
 import type {
   DesktopAppInfo,
   DesktopImageActionRequest,
@@ -307,12 +307,20 @@ async function boot(): Promise<void> {
     registerIpcHandlers();
     await installBundledCliIfNeeded();
     await startPackagedRendererServerIfNeeded();
+    const appDatabaseFile = join(app.getPath("userData"), "app.sqlite");
     runtimeServices = await startManagedRuntimeServices({
       appPath: app.getAppPath(),
-      appDatabaseFile: join(app.getPath("userData"), "app.sqlite"),
+      appDatabaseFile,
       resourcesPath: process.resourcesPath,
       logDirectory: app.getPath("logs"),
       logLevel: getCurrentLogLevel(),
+      beforeStartServices: async ({ databasePath, configPath }) => {
+        await syncRuntimeConfigForStartup({
+          databasePath,
+          memmyConfigPath: configPath,
+          accountChannel: resolveCurrentDesktopAccountChannel()
+        });
+      },
       runtimeEntries: app.isPackaged
         ? undefined
         : resolveDevelopmentRuntimeEntryPaths(import.meta.dirname),
@@ -434,6 +442,10 @@ function pathsEqual(left: string, right: string): boolean {
  */
 function resolveCurrentDesktopEdition(): DesktopEdition {
   return resolveDesktopEdition(readCurrentDesktopEditionManifest(), process.env.MEMMY_ACCOUNT_CHANNEL);
+}
+
+function resolveCurrentDesktopAccountChannel(): AccountChannel {
+  return resolveCurrentDesktopEdition() === "intl" ? "email" : "phone";
 }
 
 /**
@@ -754,6 +766,7 @@ async function startLocalApi(services: ManagedRuntimeServices | null): Promise<D
     // bootstrapScenario: overrides the first-launch state during development/debugging.
     bootstrapScenario: getBootstrapScenario(),
     desktopInstallFingerprint,
+    accountChannel: resolveCurrentDesktopAccountChannel(),
     memmyConfigPath: process.env.MEMMY_CONFIG,
     memoryBaseUrl: memoryControl.baseUrl,
     runtimeConfigPath: process.env.MEMMY_HOME ? join(process.env.MEMMY_HOME, "runtime.json") : undefined

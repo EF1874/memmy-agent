@@ -428,8 +428,16 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).toContain('app.setPath("userData", userDataPath);');
     expect(source).toContain('return join(dirname(process.execPath), "data");');
     expect(source).toContain("process.env.MEMMY_MEMORY_DB = memoryDatabasePath;");
+    expect(source).toContain('const appDatabaseFile = join(app.getPath("userData"), "app.sqlite");');
+    expect(source).toContain("accountChannel: resolveCurrentDesktopAccountChannel()");
     expect(source).toContain("runtimeServices = await startManagedRuntimeServices({");
-    expect(source).toContain('appDatabaseFile: join(app.getPath("userData"), "app.sqlite")');
+    const runtimeServicesSource = readFileSync(runtimeServicesPath, "utf8");
+    expect(runtimeServicesSource.indexOf("await runPackagedMigrationCommand({")).toBeLessThan(
+      runtimeServicesSource.indexOf("await options.beforeStartServices?.({")
+    );
+    expect(runtimeServicesSource.indexOf("await options.beforeStartServices?.({")).toBeLessThan(
+      runtimeServicesSource.indexOf("browserPreparation = startPackagedBrowserPreparation(")
+    );
     expect(source).toContain("resolveDevelopmentRuntimeEntryPaths(import.meta.dirname)");
     expect(source).toContain("memmyConfigPath: process.env.MEMMY_CONFIG");
     expect(source).not.toContain("startDesktopRuntimeServices");

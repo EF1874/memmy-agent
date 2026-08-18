@@ -51,6 +51,8 @@ export interface StartPackagedRuntimeServicesOptions {
 export interface StartManagedRuntimeServicesOptions extends StartPackagedRuntimeServicesOptions {
   runtimeEntries?: RuntimeEntryPaths;
   runtimeExecutable?: string;
+  /** Runs after migrations/config preparation and before any managed child starts. */
+  beforeStartServices?: (input: { databasePath: string; configPath: string }) => Promise<void>;
 }
 
 export type PackagedRuntimeServices = ManagedRuntimeServices;
@@ -163,6 +165,10 @@ export async function startManagedRuntimeServices(
   });
   const runtimeConfig = await preparePackagedRuntimeConfig();
   runtimeConfig.appDatabaseFile = options.appDatabaseFile;
+  await options.beforeStartServices?.({
+    databasePath: options.appDatabaseFile,
+    configPath: runtimeConfig.configPath
+  });
   const browserPreparationAttemptId = randomUUID();
   const children: ManagedChild[] = [];
   const gatewaySupervisor = new AgentGatewaySupervisor(
