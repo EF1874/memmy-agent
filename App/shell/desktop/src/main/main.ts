@@ -43,8 +43,8 @@ import {
   preparePackagedRuntimeConfig,
   restartExternalMemoryService,
   resolveAgentGatewayRuntimeConfig,
-  resolveDevelopmentRuntimeExecutable,
   resolveDevelopmentRuntimeEntryPaths,
+  resolveDevelopmentRuntimeExecutable,
   startManagedRuntimeServices,
   type ManagedRuntimeServices
 } from "./runtime-services.js";
@@ -94,6 +94,7 @@ import { backupSqliteDatabase } from "./sqlite-backup.js";
 import {
   resolveStartupSplashHtml,
   resolveStartupSplashLanguage,
+  resolveUpdateSplashHtml,
   type StartupSplashLanguage
 } from "./startup-splash.js";
 
@@ -1108,6 +1109,7 @@ async function installPreparedRequiredUpdateBeforeBoot(): Promise<boolean> {
 
     const safeFilePath = resolveDownloadedUpdatePath(preparedUpdate.filePath);
     await access(safeFilePath, fsConstants.R_OK);
+    showUpdateInstallSplashWindow(targetVersion);
     hideMacDockForPreparedUpdateInstall();
     await writePackagedStartupLog(`boot:prepared-required-update ${targetVersion}`);
     if (existsSync(resolvePreparedRequiredUpdateLockPath())) {
@@ -1125,6 +1127,7 @@ async function installPreparedRequiredUpdateBeforeBoot(): Promise<boolean> {
     return Boolean(installResult.willQuit);
   } catch (error) {
     console.warn("prepared required app update skipped:", error);
+    closeSplashWindow();
     await clearPreparedRequiredUpdate();
     await clearPreparedRequiredUpdateAttempt();
     await writePackagedStartupLog(`boot:prepared-required-update skipped\n${formatStartupError(error)}`);
@@ -1474,7 +1477,10 @@ async function installPreparedRequiredUpdateOnQuit(): Promise<void> {
     if (process.platform === "win32") {
       installOptions.expectedVersion = preparedUpdate.latestVersion;
     }
-    await openBackgroundUpdateInstaller(safeFilePath, installOptions);
+    const installResult = await openBackgroundUpdateInstaller(safeFilePath, installOptions);
+    if (process.platform === "darwin" && installResult.background && !(await waitForPreparedRequiredUpdateLockStart())) {
+      await writePackagedStartupLog("quit:prepared-required-update lock-start-timeout");
+    }
   } catch (error) {
     console.warn("prepared required app update on quit skipped:", error);
     if (isMissingFileError(error)) {
@@ -1895,6 +1901,7 @@ async function downloadUpdate(
       console.warn("mac update package staging skipped:", error);
       await writePackagedStartupLog(`mac-update-stage skipped\n${formatStartupError(error)}`);
     });
+    await writePreparedRequiredUpdate(update, filePath);
     return { filePath, opened: false };
   }
 
@@ -2193,6 +2200,7 @@ OPEN_AFTER_INSTALL="\${5:-1}"
 MARKER_PATH="\${6:-}"
 STAGED_APP_PATH="\${7:-}"
 STAGED_READY_PATH="\${8:-}"
+REOPEN_AFTER_INSTALL="$OPEN_AFTER_INSTALL"
 SCRIPT_PATH="$0"
 MOUNT_POINT=""
 LOCK_DIR=""
@@ -2265,6 +2273,10 @@ fi
 LEFTOVER_PIDS="$(/usr/bin/pgrep -f "$DEST_APP_PATH/Contents/MacOS/" || true)"
 if [[ -n "$LEFTOVER_PIDS" ]]; then
   echo "terminating leftover Memmy runtime processes: $LEFTOVER_PIDS"
+  if [[ "$OPEN_AFTER_INSTALL" != "1" ]]; then
+    REOPEN_AFTER_INSTALL="1"
+    echo "detected reopen while background update is installing; will reopen after replacement"
+  fi
   /bin/kill $LEFTOVER_PIDS >/dev/null 2>&1 || true
   for _ in 1 2 3 4 5; do
     LEFTOVER_PIDS="$(/usr/bin/pgrep -f "$DEST_APP_PATH/Contents/MacOS/" || true)"
@@ -2309,7 +2321,7 @@ if [[ -n "$MARKER_PATH" ]]; then
 fi
 /bin/rm -rf "$BACKUP_APP_PATH" >/dev/null 2>&1 || true
 INSTALL_SUCCEEDED=1
-if [[ "$OPEN_AFTER_INSTALL" == "1" ]]; then
+if [[ "$REOPEN_AFTER_INSTALL" == "1" ]]; then
   /bin/sleep 0.1
   /usr/bin/open -n "$DEST_APP_PATH" >/dev/null 2>&1 || true
 fi
@@ -3123,6 +3135,7 @@ let splashCloseTimer: ReturnType<typeof setTimeout> | null = null;
 // Fallback: regardless of whether the close signal arrives, force-close after at most this long, so
 // it never blocks the UI permanently.
 const SPLASH_MAX_VISIBLE_MS = 15 * 1000;
+const UPDATE_SPLASH_MAX_VISIBLE_MS = 60 * 1000;
 
 /**
  * Shows the startup splash. Only called on the normal boot path; creation failures do not affect the boot flow.
@@ -3130,13 +3143,30 @@ const SPLASH_MAX_VISIBLE_MS = 15 * 1000;
  * @returns Nothing.
  */
 function showSplashWindow(): void {
+  const language = resolveCurrentStartupSplashLanguage();
+  showSplashHtml(resolveStartupSplashHtml(language), 300, 200, SPLASH_MAX_VISIBLE_MS);
+}
+
+function showUpdateInstallSplashWindow(version?: string): void {
+  const language = resolveCurrentStartupSplashLanguage();
+  showSplashHtml(resolveUpdateSplashHtml(language, version), 360, 220, UPDATE_SPLASH_MAX_VISIBLE_MS);
+}
+
+function resolveCurrentStartupSplashLanguage(): StartupSplashLanguage {
+  return resolveStartupSplashLanguage(
+    join(app.getPath("userData"), "app.sqlite"),
+    resolveDefaultDesktopDisplayLanguage()
+  );
+}
+
+function showSplashHtml(html: string, width: number, height: number, maxVisibleMs: number): void {
   try {
     if (splashWindow && !splashWindow.isDestroyed()) {
       return;
     }
     const splash = new BrowserWindow({
-      width: 300,
-      height: 200,
+      width,
+      height,
       frame: false,
       resizable: false,
       movable: false,
@@ -3155,12 +3185,8 @@ function showSplashWindow(): void {
         splash.show();
       }
     });
-    const language = resolveStartupSplashLanguage(
-      join(app.getPath("userData"), "app.sqlite"),
-      resolveDefaultDesktopDisplayLanguage()
-    );
-    void splash.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(resolveStartupSplashHtml(language))}`);
-    splashCloseTimer = setTimeout(closeSplashWindow, SPLASH_MAX_VISIBLE_MS);
+    void splash.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+    splashCloseTimer = setTimeout(closeSplashWindow, maxVisibleMs);
     splashCloseTimer.unref?.();
   } catch (error) {
     console.warn("splash window skipped:", error);

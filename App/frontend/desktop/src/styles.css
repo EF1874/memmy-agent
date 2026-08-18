@@ -323,7 +323,7 @@ body.memmy-window-fullscreen {
 .home-composer-toolbar {
   --home-composer-toolbar-pad-inline: 10px;
   position: relative;
-  z-index: 60;
+  z-index: 45;
   display: flex;
   align-items: center;
   justify-content: flex-start;
@@ -2858,9 +2858,40 @@ body:has(.memory-drawer) .window-drag-region {
 }
 
 .agent-chat-bubble-frame:hover .agent-message-copy-cluster,
-.agent-chat-bubble-frame:focus-within .agent-message-copy-cluster {
+.agent-chat-bubble-frame:focus-within .agent-message-copy-cluster,
+.agent-chat-bubble-frame:hover .agent-memory-evidence-toggle,
+.agent-memory-evidence-toggle:focus-visible {
   opacity: 1;
   pointer-events: auto;
+}
+
+.agent-memory-evidence-toggle {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.agent-memory-evidence-delete {
+  transition:
+    background 140ms ease,
+    color 140ms ease;
+}
+
+.agent-memory-evidence-delete:hover:not(:disabled) {
+  background: rgb(220 38 38 / 8%);
+  color: #dc2626;
+}
+
+.agent-memory-evidence-undo {
+  color: color-mix(in srgb, var(--color-text-ink) 62%, transparent);
+  transition:
+    background 140ms ease,
+    color 140ms ease;
+}
+
+.agent-memory-evidence-undo:hover {
+  background: color-mix(in srgb, var(--color-text-ink) 7%, transparent);
+  color: color-mix(in srgb, var(--color-text-ink) 82%, transparent);
 }
 
 .agent-message-time-label {
@@ -7995,6 +8026,38 @@ input[type="checkbox"].check-sky:checked::after {
   height: 100%;
 }
 
+.im-channel-title-icon {
+  --im-channel-title-icon-size: 18px;
+  display: inline-flex;
+  width: var(--im-channel-title-icon-size);
+  height: var(--im-channel-title-icon-size);
+  flex: 0 0 var(--im-channel-title-icon-size);
+  align-items: center;
+  justify-content: center;
+}
+
+.im-channel-title-icon :is(.integration-logo-slot, .channel-integration-icon) {
+  width: 100%;
+  height: 100%;
+}
+
+.im-channel-title-icon :is(.integration-logo-badge, .channel-integration-icon-badge, .generic-integration-icon-badge) {
+  width: 100%;
+  height: 100%;
+  border-radius: 5px;
+  box-shadow: none;
+  outline: none;
+}
+
+.im-channel-title-icon .integration-logo-image {
+  padding: 0;
+}
+
+.im-channel-title-icon .channel-integration-icon-badge svg {
+  width: 100%;
+  height: 100%;
+}
+
 .generic-integration-icon-badge svg {
   width: 18px;
   height: 18px;
@@ -8454,6 +8517,96 @@ input[type="checkbox"].check-sky:checked::after {
 .manual-source-modal__button {
   flex: 1 1 0;
   min-height: 40px;
+}
+
+.manual-agent-combobox {
+  position: relative;
+}
+
+.manual-agent-combobox__control {
+  position: relative;
+}
+
+.manual-agent-combobox__input {
+  width: 100%;
+  min-height: 40px;
+  border: 1px solid var(--color-border-stone);
+  border-radius: var(--radius-input);
+  outline: none;
+  padding: 10px 42px 10px 14px;
+  background: var(--color-background-paper);
+  color: var(--color-text-ink);
+  cursor: text;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.25;
+}
+
+.manual-agent-combobox__input::placeholder {
+  color: color-mix(in srgb, var(--color-text-ink) 44%, transparent);
+}
+
+.manual-agent-combobox__toggle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: grid;
+  width: 42px;
+  height: 100%;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: color-mix(in srgb, var(--color-text-ink) 48%, transparent);
+  cursor: pointer;
+}
+
+.manual-agent-combobox__toggle svg {
+  transition: transform var(--duration-fast);
+}
+
+.manual-agent-combobox__toggle[aria-expanded="true"] svg {
+  transform: rotate(180deg);
+}
+
+.manual-agent-combobox__menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  left: 0;
+  z-index: 80;
+  overflow: auto;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 72%, transparent);
+  border-radius: var(--radius-input);
+  padding: 6px;
+  background: var(--color-background-paper);
+  box-shadow: var(--shadow-popover);
+}
+
+.manual-agent-combobox__option {
+  display: flex;
+  width: 100%;
+  min-height: 34px;
+  align-items: center;
+  justify-content: space-between;
+  border: 0;
+  border-radius: 7px;
+  padding: 8px 9px;
+  background: transparent;
+  color: color-mix(in srgb, var(--color-text-ink) 76%, transparent);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+}
+
+.manual-agent-combobox__option--active {
+  background: color-mix(in srgb, var(--color-canvas-oat) 72%, transparent);
+  color: var(--color-text-ink);
+}
+
+.manual-agent-combobox__option svg {
+  flex: 0 0 auto;
+  color: var(--color-action-sky);
 }
 
 .confirm-dialog {
@@ -9861,6 +10014,12 @@ input[type="checkbox"].check-sky:checked::after {
   padding: 4px 8px 6px;
 }
 
+.app-frame-sidebar-footer--compound {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .app-frame-sidebar-footer--button {
   display: block;
   width: 100%;
@@ -9877,6 +10036,12 @@ input[type="checkbox"].check-sky:checked::after {
   text-align: left;
   cursor: pointer;
   transition: background-color 120ms ease;
+}
+
+.app-frame-sidebar-footer-account {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
 }
 
 .app-frame-sidebar-footer--button:hover,
@@ -9929,9 +10094,126 @@ input[type="checkbox"].check-sky:checked::after {
   border-radius: 6px;
 }
 
+.app-frame-profile-settings-button {
+  border: 0;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+}
+
+.app-frame-profile-settings-button:hover,
+.app-frame-profile-settings-button:focus-visible {
+  background: color-mix(in srgb, var(--color-canvas-oat) 60%, transparent);
+}
+
+.app-frame-profile-settings-button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-action-sky) 55%, transparent);
+  outline-offset: -2px;
+}
+
 .app-frame-profile-settings svg {
   width: 14px;
   height: 14px;
+}
+
+.app-frame-sidebar-update-button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 32px;
+  min-width: 32px;
+  max-width: 86px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 999px;
+  appearance: none;
+  background: #2f8fff;
+  color: #fff;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0;
+  white-space: nowrap;
+  box-shadow: 0 4px 10px rgba(47, 143, 255, 0.22);
+  transition: background-color 120ms ease, box-shadow 120ms ease, min-width 120ms ease, padding 120ms ease;
+}
+
+.app-frame-sidebar-update-button:hover,
+.app-frame-sidebar-update-button:focus-visible {
+  background: #1d7df2;
+  box-shadow: 0 6px 14px rgba(47, 143, 255, 0.28);
+}
+
+.app-frame-sidebar-update-button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-action-sky) 55%, transparent);
+  outline-offset: 2px;
+}
+
+.app-frame-sidebar-update-button:disabled {
+  cursor: default;
+  opacity: 1;
+}
+
+.app-frame-sidebar-update-button svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.app-frame-sidebar-update-button__label {
+  display: inline-block;
+  overflow: hidden;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+.app-frame-sidebar-update-button--available {
+  width: 32px;
+  padding: 0;
+}
+
+.app-frame-sidebar-update-button--available .app-frame-sidebar-update-button__label {
+  max-width: 0;
+  opacity: 0;
+  transition: max-width 120ms ease, opacity 120ms ease;
+}
+
+.app-frame-sidebar-update-button--available:hover,
+.app-frame-sidebar-update-button--available:focus-visible {
+  width: auto;
+  min-width: 54px;
+  padding: 0 10px;
+}
+
+.app-frame-sidebar-update-button--available:hover .app-frame-sidebar-update-button__label,
+.app-frame-sidebar-update-button--available:focus-visible .app-frame-sidebar-update-button__label {
+  max-width: 40px;
+  opacity: 1;
+}
+
+.app-frame-sidebar-update-button--downloading {
+  min-width: 50px;
+}
+
+.app-frame-sidebar-update-button--installing {
+  min-width: 72px;
+}
+
+.app-frame-sidebar-update-button--prepared {
+  min-width: 58px;
+  background: #159a84;
+  box-shadow: 0 4px 10px rgba(21, 154, 132, 0.2);
+}
+
+.app-frame-sidebar-update-button--prepared:hover,
+.app-frame-sidebar-update-button--prepared:focus-visible {
+  background: #118572;
+  box-shadow: 0 6px 14px rgba(21, 154, 132, 0.24);
 }
 
 .rounded-menu {

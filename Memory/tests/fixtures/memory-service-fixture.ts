@@ -313,7 +313,12 @@ export function createBatchReflectionLlm(calls: Array<{
       }
       if (options.operation === "capture.summarize") {
         return {
-          summary: captureSummary
+          summary: captureSummary,
+          create_l1: true,
+          l1_summary: captureSummary,
+          create_user_memory: false,
+          user_memory_types: [],
+          reason: "durable task result"
         } as unknown as T;
       }
       return {

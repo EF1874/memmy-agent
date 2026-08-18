@@ -78,7 +78,12 @@ function createSpanBigTurnLlm(
       }
       if (options.operation === "capture.summarize") {
         return {
-          summary: "定位构建失败、修改依赖配置并验证修复结果"
+          summary: "定位构建失败、修改依赖配置并验证修复结果",
+          create_l1: true,
+          l1_summary: "定位构建失败、修改依赖配置并验证修复结果",
+          create_user_memory: false,
+          user_memory_types: [],
+          reason: "复杂任务产生了可复用结果"
         } as unknown as T;
       }
       if (options.operation === "reward.reward.r_human.v7") {

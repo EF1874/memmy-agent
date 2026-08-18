@@ -139,7 +139,7 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
     if (isGoalContinuation && !internalObjective) return;
     try {
       const sessionId = await this.ensureSession(ctx, sessionKey);
-      const turnId = randomUUID();
+      const turnId = stringOrUndefined(ctx.spec?.turnId) ?? randomUUID();
       const userText = isGoalContinuation ? internalObjective : lastUserText(messages);
       const turn: MemmyMemoryTurnState = {
         sessionKey,

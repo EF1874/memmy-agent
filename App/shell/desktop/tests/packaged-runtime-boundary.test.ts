@@ -740,6 +740,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain("await writePreparedRequiredUpdate(update, preparedFilePath)");
     expect(mainSource).toContain("async function installPreparedRequiredUpdateOnQuit");
     expect(mainSource).toContain("await installPreparedRequiredUpdateOnQuit()");
+    expect(mainSource).toContain("showUpdateInstallSplashWindow(targetVersion)");
     expect(mainSource).toContain("openAfterInstall: false");
     expect(mainSource).not.toContain('openAfterInstall: process.platform === "win32"');
     expect(mainSource).toContain("function resolvePreparedRequiredUpdateLockPath");
@@ -778,6 +779,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).not.toContain("Memmy 正在更新");
     expect(mainSource).toContain("boot:prepared-required-update win32");
     expect(mainSource).toContain("async function waitForPreparedRequiredUpdateLockStart");
+    expect(mainSource).toContain("quit:prepared-required-update lock-start-timeout");
     expect(windowsPreparedUpdateSource).toContain("openBackgroundUpdateInstaller(safeFilePath");
     expect(mainSource).toContain("$arguments = @('/S', '--updated', '/currentuser', ('/D=' + $appDir))");
     expect(mainSource).not.toContain("app reopened before install; deferring update");
@@ -809,6 +811,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain('value.code !== 0');
     expect(mainSource).toContain('readManifestRecord(value, "data") ?? {}');
     expect(mainSource).toContain("async function downloadUpdate");
+    expect(mainSource).toContain("await writePreparedRequiredUpdate(update, filePath)");
     expect(mainSource).toContain("function resolveUpdatesDirectory()");
     expect(mainSource).toContain('join(app.getPath("userData"), "updates")');
     expect(mainSource).toContain("function resolveDownloadedUpdatePath");
@@ -832,6 +835,9 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain("$arguments = @('/S', '--updated', '/currentuser', ('/D=' + $appDir))");
     expect(mainSource).toContain("CURRENT_APP_PID");
     expect(mainSource).toContain("OPEN_AFTER_INSTALL");
+    expect(mainSource).toContain('REOPEN_AFTER_INSTALL="$OPEN_AFTER_INSTALL"');
+    expect(mainSource).toContain("detected reopen while background update is installing; will reopen after replacement");
+    expect(mainSource).toContain('if [[ "$REOPEN_AFTER_INSTALL" == "1" ]]');
     expect(mainSource).toContain('while /bin/kill -0 "$CURRENT_APP_PID"');
     expect(mainSource).toContain("terminating leftover Memmy runtime processes");
     expect(mainSource).toContain("-WindowStyle Hidden");
@@ -872,7 +878,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain("await services?.close()");
     expect(mainSource).toContain("app.quit()");
     expect(runtimeServicesSource).toContain("STOP_MANAGED_CHILD_GRACE_MS");
-    expect(runtimeServicesSource).toContain("sleep(STOP_MANAGED_CHILD_GRACE_MS)");
+    expect(runtimeServicesSource).toContain("waitForManagedChildExit(child, STOP_MANAGED_CHILD_GRACE_MS)");
     expect(interfaceSource).toContain("export type DesktopUpdateMode");
     expect(interfaceSource).toContain("export interface DesktopUpdateDownloadOptions");
     expect(interfaceSource).toContain("minSupportedVersion?: string");
@@ -944,6 +950,7 @@ describe("desktop packaged runtime boundaries", () => {
     const source = readFileSync(runtimeServicesPath, "utf8");
 
     expect(source).toContain("startManagedRuntimeServices");
+    expect(source).toContain("startPackagedRuntimeServices");
     expect(source).toContain('env.MEMMY_CONFIG ?? join(memmyHome, "config.yaml")');
     expect(source).toContain("const explicitWorkspace = stringValue(env.MEMMY_AGENT_WORKSPACE);");
     expect(source).toContain("if (!explicitWorkspace) return { configPath };");
@@ -958,8 +965,11 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).not.toContain("await preparePackagedBrowser(entries, runtimeConfig, options)");
     expect(source).toContain('[entries.agentEntry, "internal", "browser-prepare"]');
     expect(source.indexOf("browserPreparation = startPackagedBrowserPreparation")).toBeLessThan(
-      source.indexOf("await ensureMemoryService"),
+      source.indexOf("memoryStartup = ensureMemoryService"),
     );
+    expect(source).toContain("memoryStartup = ensureMemoryService");
+    expect(source).toContain("Memory service unavailable during desktop startup");
+    expect(source).toContain("readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath)");
     expect(source).toContain("browserPreparation?.stop()");
     expect(source).toContain("terminateProcessTreeSync(child)");
     expect(source).toContain('detached: process.platform !== "win32"');

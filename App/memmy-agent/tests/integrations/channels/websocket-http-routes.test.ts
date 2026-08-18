@@ -16,7 +16,7 @@ const routeMocks = vi.hoisted(() => ({
 const childProcessMocks = vi.hoisted(() => ({
   execFile: vi.fn((_command?: string, _args?: string[], _options?: unknown, callback?: (...args: any[]) => void) => callback?.(null, "", "")),
   spawn: vi.fn(() => ({ unref: vi.fn() })),
-  spawnSync: vi.fn((_command?: string, _args?: string[]) => ({ status: 0, stderr: "" })),
+  spawnSync: vi.fn(() => ({ status: 0, stderr: "" })),
 }));
 
 vi.mock("node:child_process", async (importOriginal: () => Promise<typeof import("node:child_process")>) => ({
@@ -43,12 +43,9 @@ afterEach(async () => {
   await Promise.all(running.splice(0).map((channel) => channel.stop()));
   for (const dir of tmpDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
   vi.restoreAllMocks();
-  childProcessMocks.spawn.mockReset();
-  childProcessMocks.spawn.mockImplementation(() => ({ unref: vi.fn() }));
-  childProcessMocks.spawnSync.mockReset();
-  childProcessMocks.spawnSync.mockImplementation((_command?: string, _args?: string[]) => ({ status: 0, stderr: "" }));
-  childProcessMocks.execFile.mockReset();
-  childProcessMocks.execFile.mockImplementation((_command?: string, _args?: string[], _options?: unknown, callback?: (...args: any[]) => void) => callback?.(null, "", ""));
+  childProcessMocks.execFile.mockClear();
+  childProcessMocks.spawn.mockClear();
+  childProcessMocks.spawnSync.mockClear();
   routeMocks.mcpPresetsSettingsAction.mockReset();
   if (originalMemmyAgentConfig === undefined) delete process.env.MEMMY_CONFIG;
   else process.env.MEMMY_CONFIG = originalMemmyAgentConfig;
@@ -110,6 +107,7 @@ describe("WebSocket HTTP route helpers", () => {
 
   function makeChannel({
     sessionManager = null,
+    projectStore = null,
     staticDistPath = null,
     runtimeModelName = null,
     runtimeToolNames = null,
@@ -118,9 +116,9 @@ describe("WebSocket HTTP route helpers", () => {
     cancelActiveTasks = undefined,
     closeBrowserChat = undefined,
     config = {},
-    projectStore = null,
   }: {
     sessionManager?: SessionManager | null;
+    projectStore?: ProjectStore | null;
     staticDistPath?: string | null;
     runtimeModelName?: (() => string | null | undefined) | null;
     runtimeToolNames?: (() => string[] | null | undefined) | null;
@@ -129,7 +127,6 @@ describe("WebSocket HTTP route helpers", () => {
     cancelActiveTasks?: (sessionKey: string) => Promise<number>;
     closeBrowserChat?: (channel: string, chatId: string) => Promise<void>;
     config?: Record<string, any>;
-    projectStore?: ProjectStore | null;
   } = {}): WebSocketChannel {
     return new WebSocketChannel(
       {
@@ -144,6 +141,7 @@ describe("WebSocket HTTP route helpers", () => {
       new MessageBus(),
       {
         sessionManager,
+        projectStore,
         staticDistPath,
         runtimeModelName,
         runtimeToolNames,
@@ -151,7 +149,6 @@ describe("WebSocket HTTP route helpers", () => {
         fileMemoryEnabled,
         cancelActiveTasks,
         closeBrowserChat,
-        projectStore,
       },
     );
   }

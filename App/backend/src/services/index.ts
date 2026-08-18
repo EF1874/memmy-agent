@@ -8,17 +8,7 @@ import {
 import type { SourceRegistry } from "../adapters/outbound/agent-source/source-registry.js";
 import { createHttpMemmyAgentAdminClient } from "../adapters/outbound/memmy-agent-admin-client/http-memmy-agent-admin-client.js";
 import type { MemmyAgentAdminClient } from "../adapters/outbound/memmy-agent-admin-client/index.js";
-import { createClaudeCodeSkillTarget } from "../adapters/outbound/skill-writer/claude-code/index.js";
-import { createCodexSkillTarget } from "../adapters/outbound/skill-writer/codex/index.js";
-import { createCursorSkillTarget } from "../adapters/outbound/skill-writer/cursor/index.js";
-import { createHermesSkillTarget } from "../adapters/outbound/skill-writer/hermes/index.js";
-import { createDeepseekHarnessSkillTarget } from "../adapters/outbound/skill-writer/deepseek-harness/index.js";
-import { createOpenclawSkillTarget } from "../adapters/outbound/skill-writer/openclaw/index.js";
-import { createOpencodeSkillTarget } from "../adapters/outbound/skill-writer/opencode/index.js";
-import { createPiSkillTarget } from "../adapters/outbound/skill-writer/pi/index.js";
-import { createQwenworkSkillTarget } from "../adapters/outbound/skill-writer/qwenwork/index.js";
-import { createWorkbuddySkillTarget } from "../adapters/outbound/skill-writer/workbuddy/index.js";
-import { createSkillTargetRegistry, type SkillTargetRegistry } from "../adapters/outbound/skill-writer/target-registry.js";
+import type { SkillTargetRegistry } from "../adapters/outbound/skill-writer/target-registry.js";
 import type { CloudClient } from "../adapters/outbound/cloud-client/index.js";
 import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
 import type { PermissionManager } from "../permission/index.js";
@@ -31,6 +21,7 @@ import { createToolConnectionAnalytics } from "../analytics/tool-connection-anal
 import { createAgentSourceService, type AgentSourceService } from "./agent-source-service.js";
 import { createAgentSourceAutoInjectService, type AgentSourceAutoInjectService } from "./agent-source-auto-inject-service.js";
 import { createBuiltinAgentSourceRegistry } from "./builtin-agent-source-registry.js";
+import { createBuiltinSkillTargetRegistry } from "./builtin-skill-target-registry.js";
 import { createAppConfigService, type AppConfigService } from "./app-config-service.js";
 import { createAccountService, type AccountService } from "./account-service.js";
 import { createAsrService, type AsrService } from "./asr-service.js";
@@ -121,18 +112,7 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     createBuiltinAgentSourceRegistry();
   const skillTargetRegistry =
     options.skillTargetRegistry ??
-    createSkillTargetRegistry([
-      createCursorSkillTarget({ memmyConfigPath: options.memmyConfigPath }),
-      createClaudeCodeSkillTarget({ memmyConfigPath: options.memmyConfigPath }),
-      createCodexSkillTarget({ memmyConfigPath: options.memmyConfigPath }),
-      createOpencodeSkillTarget(),
-      createOpenclawSkillTarget({ memmyConfigPath: options.memmyConfigPath }),
-      createHermesSkillTarget({ memmyConfigPath: options.memmyConfigPath }),
-      createDeepseekHarnessSkillTarget({ memmyConfigPath: options.memmyConfigPath }),
-      createWorkbuddySkillTarget(),
-      createPiSkillTarget(),
-      createQwenworkSkillTarget()
-    ]);
+    createBuiltinSkillTargetRegistry(options.memmyConfigPath);
   const skillDistributionService =
     options.skillDistributionService ??
     createSkillDistributionService({

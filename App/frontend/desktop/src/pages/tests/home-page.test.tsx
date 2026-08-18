@@ -10,7 +10,6 @@ import { AppProviders } from "../../app/providers.js";
 import { FOCUSED_AGENT_CHAT_STORAGE_KEY } from "../../app/routes.js";
 import type { SlashCommandPaletteItem, SlashCommandStorageLike } from "../agent-command-palette.js";
 import { buildAgentDisplayUnits } from "../agent-thread-messages.js";
-import { resolveWorkspaceEnvironmentScope } from "../use-workspace-environment.js";
 import {
   AGENT_RESTART_STATE_STORAGE_KEY,
   AGENT_MEDIA_ACCEPT,

@@ -9,8 +9,10 @@ import YAML from "yaml";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AgentGatewaySupervisor,
+  ensureMemoryService,
   preparePackagedBrowser,
   preparePackagedRuntimeConfig,
+  readLiveMemoryServerLock,
   resolveDevelopmentRuntimeExecutable,
   resolveDevelopmentRuntimeEntryPaths,
   resolvePackagedRuntimeMigrationTargets,
@@ -19,11 +21,12 @@ import {
   restartExternalMemoryService,
   spawnNodeService,
   startPackagedBrowserPreparation,
+  stopManagedChild,
   syncBundledAgentSkills,
   type ManagedChild,
   type PackagedRuntimeConfig,
   type RuntimeEntryPaths,
-  type StartManagedRuntimeServicesOptions
+  type StartPackagedRuntimeServicesOptions
 } from "../src/main/runtime-services.js";
 
 const tempRoots: string[] = [];
@@ -48,43 +51,6 @@ function recordValue(parent: ConfigRecord, key: string): ConfigRecord {
   }
   throw new Error(`Expected ${key} to be an object`);
 }
-
-describe("managed desktop runtime entries", () => {
-  it("uses source build outputs when Electron runs from the development main directory", () => {
-    const repoRoot = resolve("fixtures/memmy-repo");
-    const mainDirectory = join(repoRoot, "App", "shell", "desktop", "dist", "main");
-
-    expect(resolveDevelopmentRuntimeEntryPaths(mainDirectory)).toEqual({
-      memoryEntry: join(repoRoot, "Memory", "dist", "src", "server", "index.js"),
-      agentEntry: join(repoRoot, "App", "memmy-agent", "dist", "main.js")
-    });
-  });
-
-  it("uses explicitly supplied entries instead of packaged artifact paths", () => {
-    const runtimeEntries: RuntimeEntryPaths = {
-      memoryEntry: "/repo/Memory/dist/src/server/index.js",
-      agentEntry: "/repo/App/memmy-agent/dist/main.js"
-    };
-
-    expect(resolveRuntimeEntryPaths({
-      appPath: "/packaged/app",
-      resourcesPath: "/packaged/resources",
-      logDirectory: "/logs",
-      logLevel: "info",
-      runtimeEntries
-    })).toEqual(runtimeEntries);
-  });
-
-  it("uses the development Node executable instead of Electron for runtime children", () => {
-    expect(resolveDevelopmentRuntimeExecutable({
-      MEMMY_RUNTIME_NODE_PATH: " /opt/memmy/node ",
-      npm_node_execpath: "/ignored/npm/node"
-    })).toBe("/opt/memmy/node");
-    expect(resolveDevelopmentRuntimeExecutable({
-      npm_node_execpath: "/opt/npm/node"
-    })).toBe("/opt/npm/node");
-  });
-});
 
 describe("packaged desktop runtime config", () => {
   afterEach(async () => {
@@ -342,6 +308,87 @@ describe("packaged desktop runtime config", () => {
     await expect(stat(join(memmyHome, "memory-service"))).resolves.toBeTruthy();
     expect(recordValue(recordValue(config, "agents"), "defaults")).not.toHaveProperty("model");
     expect(recordValue(recordValue(config, "agents"), "defaults")).not.toHaveProperty("provider");
+  });
+
+  it("recognizes a live Memory server lock for the configured sqlite database", async () => {
+    const root = await makeTempRoot();
+    const databasePath = join(root, "memory.sqlite");
+    await writeFile(`${databasePath}.server.lock`, JSON.stringify({
+      pid: process.pid,
+      host: "127.0.0.1",
+      port: 18960,
+      sqlitePath: databasePath
+    }));
+
+    expect(readLiveMemoryServerLock(databasePath)).toEqual({
+      pid: process.pid,
+      host: "127.0.0.1",
+      port: 18960,
+      sqlitePath: databasePath
+    });
+  });
+
+  it("ignores a Memory server lock that names another sqlite database", async () => {
+    const root = await makeTempRoot();
+    const databasePath = join(root, "memory.sqlite");
+    await writeFile(`${databasePath}.server.lock`, JSON.stringify({
+      pid: process.pid,
+      sqlitePath: join(root, "other.sqlite")
+    }));
+
+    expect(readLiveMemoryServerLock(databasePath)).toBeNull();
+  });
+
+  it("waits for and reuses a live locked Memory service instead of spawning another", async () => {
+    const root = await makeTempRoot();
+    const databasePath = join(root, "memory.sqlite");
+    const reservation = createServer();
+    await new Promise<void>((resolveListen) => reservation.listen(0, "127.0.0.1", resolveListen));
+    const address = reservation.address();
+    if (!address || typeof address === "string") throw new Error("expected TCP address");
+    const port = address.port;
+    await new Promise<void>((resolveClose) => reservation.close(() => resolveClose()));
+    await writeFile(`${databasePath}.server.lock`, JSON.stringify({
+      pid: process.pid,
+      host: "127.0.0.1",
+      port,
+      sqlitePath: databasePath
+    }));
+
+    const server = createServer((_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ ok: true }));
+    });
+    testServers.push(server);
+    setTimeout(() => server.listen(port, "127.0.0.1"), 100);
+    const children: ManagedChild[] = [];
+
+    await ensureMemoryService(
+      { memoryEntry: join(root, "missing-memory.js"), agentEntry: join(root, "missing-agent.js") },
+      {
+        configPath: join(root, "config.yaml"),
+        agentWorkspace: join(root, "workspace"),
+        memoryDatabasePath: databasePath,
+        memoryBaseUrl: `http://127.0.0.1:${port}`,
+        memoryToken: "",
+        memoryListenHost: "127.0.0.1",
+        memoryListenPort: port,
+        agentGatewayBaseUrl: "http://127.0.0.1:18980",
+        agentGatewayHealthHost: "127.0.0.1",
+        agentGatewayHealthPort: 18970,
+        agentGatewayBootstrapSecret: "secret"
+      },
+      children,
+      {
+        appPath: root,
+        appDatabaseFile: join(root, "app.sqlite"),
+        resourcesPath: root,
+        logDirectory: root,
+        logLevel: "info"
+      }
+    );
+
+    expect(children).toHaveLength(0);
   });
 
   it("rereads the migrated workspace instead of pinning the pre-migration legacy value", async () => {
@@ -629,14 +676,13 @@ describe("packaged desktop runtime config", () => {
           resourcesPath: root,
           logDirectory,
           logLevel: "info",
-          runtimeExecutable: "/opt/memmy/node",
         },
         spawnProcess as any,
       ),
     ).resolves.toBe(true);
 
     expect(spawnProcess).toHaveBeenCalledWith(
-      "/opt/memmy/node",
+      process.execPath,
       [agentEntry, "internal", "browser-prepare"],
       expect.objectContaining({
         shell: false,
@@ -789,9 +835,6 @@ describe("AgentGatewaySupervisor", () => {
     await vi.advanceTimersByTimeAsync(60_000);
 
     expect(harness.spawn).toHaveBeenCalledTimes(1);
-    expect(harness.spawn.mock.calls[0]?.[4]).toMatchObject({
-      executablePath: "/opt/memmy/node"
-    });
     expect(harness.supervisor.hasReachedReady).toBe(false);
     expect(harness.supervisor.restartTimer).toBeNull();
   });
@@ -1033,6 +1076,25 @@ describe("spawnNodeService 落盘与 env 注入", () => {
 
     expect(await readFile(logFile, "utf8")).toContain("debug");
   });
+
+  it("强杀后等待 Memory 子进程真正退出", async () => {
+    const root = await makeTempRoot();
+    const entry = join(root, "stubborn-memory.js");
+    await writeFile(entry, [
+      "process.on('SIGTERM', () => {});",
+      "process.stdout.write('ready\\n');",
+      "setInterval(() => {}, 1000);"
+    ].join("\n"));
+    const managed = spawnNodeService("memory", entry, [], {}, {
+      logFilePath: join(root, "stubborn-memory.log"),
+      logLevel: "info"
+    });
+    await new Promise<void>((ready) => managed.process.stdout?.once("data", () => ready()));
+
+    await stopManagedChild(managed);
+
+    expect(managed.exitDescription).toBe("signal SIGKILL");
+  });
 });
 
 function createSupervisorHarness(overrides: {
@@ -1058,13 +1120,12 @@ function createSupervisorHarness(overrides: {
     agentGatewayHealthPort: 18970,
     agentGatewayBootstrapSecret: "gateway-secret"
   };
-  const options: StartManagedRuntimeServicesOptions = {
+  const options: StartPackagedRuntimeServicesOptions = {
     appPath: "/app",
     appDatabaseFile: "/memmy/app.sqlite",
     resourcesPath: "/resources",
     logDirectory: "/logs",
-    logLevel: "info",
-    runtimeExecutable: "/opt/memmy/node"
+    logLevel: "info"
   };
   const children: ManagedChild[] = [];
   const spawned: ManagedChild[] = [];

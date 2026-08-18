@@ -1023,19 +1023,6 @@ export class WebSocketChannel extends BaseChannel {
         return message;
       }
     }
-    const inbox = session.metadata?.[GOAL_TURN_INBOX_KEY];
-    if (Array.isArray(inbox)) {
-      const entry = inbox.find(
-        (item: any) => item?.metadata?.client_request_id === clientRequestId,
-      );
-      if (entry) {
-        return {
-          ...(entry.metadata ?? {}),
-          content: entry.content,
-          media: entry.media,
-        };
-      }
-    }
     return null;
   }
 
