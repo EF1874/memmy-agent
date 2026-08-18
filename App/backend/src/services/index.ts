@@ -1,3 +1,4 @@
+import type { AccountChannel } from "@memmy/local-api-contracts";
 import type { AppStateStore } from "../infrastructure/app-state-store/index.js";
 import { type MemmyConfigWriter } from "../infrastructure/memmy-config/index.js";
 import type { AgentAdapterRegistry } from "../adapters/outbound/agent-adapter/index.js";
@@ -103,6 +104,8 @@ export interface CreateBackendServicesOptions {
   memmyAgentAdminClient?: MemmyAgentAdminClient;
   /** Memmy agent admin bootstrap secret. */
   memmyAgentAdminBootstrapSecret?: string | null;
+  /** Verification channel supported by the current desktop package. */
+  accountChannel?: AccountChannel;
 }
 
 export function createBackendServices(options: CreateBackendServicesOptions): BackendServices {
@@ -177,7 +180,8 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       cloudClient: options.cloudClient,
       accountSessionRepository: options.appStateStore.repositories.accountSession,
       memmyConfigWriter: options.memmyConfigWriter,
-      memoryClient: options.memoryClient
+      memoryClient: options.memoryClient,
+      accountChannel: options.accountChannel
     }),
     integrations: createIntegrationService({
       cloudClient: options.cloudClient,
