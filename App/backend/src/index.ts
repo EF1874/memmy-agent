@@ -98,7 +98,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
     });
     const memoryClient = options.memoryClient ?? createDefaultMemoryClient(process.env);
     await memoryClient.reloadConfig({ reason: "desktop_startup" });
-    const scanWorker = options.memoryClient ? undefined : { databasePath: appStateStore.databasePath };
+    const scanProcess = options.memoryClient ? undefined : { databasePath: appStateStore.databasePath };
     const cloudConfig = resolveCloudClientConfig(process.env);
     const cloudClient = options.cloudClient ?? createDefaultCloudClient(
       cloudConfig,
@@ -130,7 +130,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       composioMcpToken,
       timeZone: configuredTimeZone,
       heartbeatIntervalMs: options.heartbeatIntervalMs,
-      scanWorker
+      scanProcess
     });
     await server.listen({ host: "127.0.0.1", port: 0 });
 
