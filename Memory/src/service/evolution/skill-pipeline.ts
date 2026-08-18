@@ -59,6 +59,135 @@ export class SkillPipeline {
  private readonly skillCrystallizationRuns=new Map<string,number>();
  constructor(private readonly deps:SkillPipelineDeps){}
 
+  invalidatePolicySource(policyId: string, at: string): void {
+    const affected = this.deps.repos.memories
+      .list({ memoryLayer: "Skill", status: ["activated", "resolving"] }, 1000)
+      .map((memory) => ({ memory, skill: skillMetaFromMemory(memory) }))
+      .filter((item): item is {
+        memory: MemoryRow;
+        skill: NonNullable<ReturnType<typeof skillMetaFromMemory>>;
+      } => Boolean(
+        item.skill?.sourcePolicyIds.includes(policyId) &&
+        !isReadOnlySkillMemory(item.memory)
+      ));
+
+    for (const { memory, skill } of affected) {
+      const activePolicies = skill.sourcePolicyIds
+        .map((id) => this.deps.repos.memories.get(id))
+        .map((source) => source ? policyMetaFromMemory(source) : null)
+        .filter((policy): policy is PolicyMeta => Boolean(policy?.status === "active"));
+      const activePolicyIds = new Set(activePolicies.map((policy) => policy.id));
+      const procedure = skillProcedureJsonFromMemory(memory);
+      const originalSteps = Array.isArray(procedure.steps) ? procedure.steps.filter(isRecord) : [];
+      let removedRequiredStep = false;
+      const steps = originalSteps.flatMap((step) => {
+        const declaredSources = stringArray(step.supportingPolicyIds ?? step.supporting_policy_ids);
+        const effectiveSources = declaredSources.length > 0 ? declaredSources : skill.sourcePolicyIds;
+        const supportingPolicyIds = effectiveSources.filter((id) => activePolicyIds.has(id));
+        if (supportingPolicyIds.length === 0) {
+          if (step.required === true || step.core === true) removedRequiredStep = true;
+          return [];
+        }
+        return [{ ...step, supportingPolicyIds }];
+      });
+      const shouldArchive = activePolicies.length === 0 || removedRequiredStep ||
+        (originalSteps.length > 0 && steps.length === 0);
+      const nextStatus = shouldArchive ? "suspended" : skill.status;
+      const nextProcedure = { ...procedure, steps };
+      const activeTraceIds = new Set(activePolicies.flatMap((policy) => policy.sourceTraceIds));
+      const evidenceAnchorIds = skill.evidenceAnchorIds.filter((id) => activeTraceIds.has(id));
+      const sourcePolicyIds = activePolicies.map((policy) => policy.id);
+      const sourceWorldModelIds = skill.sourceWorldModelIds.filter((id) => {
+        const world = this.deps.repos.memories.get(id);
+        return Boolean(world && world.status === "activated");
+      });
+      const internal = memory.properties.internal_info;
+      const internalSkill = isRecord(internal.skill) ? internal.skill : {};
+      const policyContentHashes = filterRecordByKeys(
+        isRecord(internalSkill.policy_content_hashes)
+          ? internalSkill.policy_content_hashes
+          : isRecord(internal.policy_content_hashes)
+            ? internal.policy_content_hashes
+            : {},
+        activePolicyIds
+      );
+      const invocationGuide = shouldArchive
+        ? skill.invocationGuide
+        : renderSkillInvocationGuide({
+            name: skill.name,
+            procedureJson: nextProcedure,
+            policy: activePolicies[0]!
+          });
+      const memoryStatus = shouldArchive
+        ? "archived"
+        : nextStatus === "active"
+        ? "activated"
+        : nextStatus === "candidate"
+          ? "resolving"
+          : "archived";
+      const saved = this.deps.repos.memories.update({
+        ...memory,
+        status: memoryStatus,
+        memoryValue: invocationGuide,
+        info: {
+          ...memory.info,
+          status: nextStatus,
+          source_memory_ids: sourcePolicyIds,
+          source_policy_ids: sourcePolicyIds
+        },
+        properties: {
+          ...memory.properties,
+          status: memoryStatus,
+          internal_info: {
+            ...internal,
+            status: nextStatus,
+            source_memory_ids: sourcePolicyIds,
+            source_policy_ids: sourcePolicyIds,
+            source_world_model_ids: sourceWorldModelIds,
+            evidence_anchor_ids: evidenceAnchorIds,
+            invocation_guide: invocationGuide,
+            procedure_json: nextProcedure,
+            policy_content_hashes: policyContentHashes,
+            skill: {
+              ...internalSkill,
+              status: nextStatus,
+              source_policy_ids: sourcePolicyIds,
+              source_world_model_ids: sourceWorldModelIds,
+              evidence_anchor_ids: evidenceAnchorIds,
+              invocation_guide: invocationGuide,
+              procedure_json: nextProcedure,
+              policy_content_hashes: policyContentHashes
+            }
+          }
+        },
+        updatedAt: at
+      });
+      this.deps.repos.runtime.appendChange({
+        memoryId: saved.id,
+        namespaceId: this.deps.namespaceIdFromMemory(saved),
+        kind: kindFromMemory(saved),
+        op: saved.status === "archived" ? "archived" : "updated",
+        entityId: saved.id,
+        userId: saved.userId,
+        changeType: "skill_policy_source_invalidated",
+        before: memory,
+        after: saved,
+        source: "governance.policy_invalidation",
+        createdAt: at
+      });
+      if (!shouldArchive && this.deps.config.algorithm.capture.embedAfterCapture) {
+        this.deps.enqueueJob({
+          jobType: "embedding",
+          userId: saved.userId,
+          sessionId: saved.sessionId,
+          targetMemoryId: saved.id,
+          payload: { reason: "skill.policy_source_invalidated" },
+          createdAt: at
+        });
+      }
+    }
+  }
+
   async crystallizeSkill(job: EvolutionJobRecord): Promise<void> {
     const source = job.targetMemoryId ? this.deps.repos.memories.get(job.targetMemoryId) : undefined;
     const userId = source?.userId ?? job.userId;
@@ -172,9 +301,19 @@ export class SkillPipeline {
       const verifiedDraft: SkillDraft = {
         ...draft,
         sourceTraceIds: evidenceAnchorIds,
-        evidenceAnchorIds: uniq([...evidenceAnchorIds, ...draft.evidenceAnchorIds]).slice(0, 10)
+        evidenceAnchorIds: uniq([...evidenceAnchorIds, ...draft.evidenceAnchorIds]).slice(0, 10),
+        procedureJson: attachSkillStepPolicySources(
+          draft.procedureJson,
+          existingSkill?.memory,
+          policy.id
+        )
+      };
+      const policyContentHashes = {
+        ...storedSkillPolicyContentHashes(existingSkill?.memory),
+        [policy.id]: skillPolicyContentHash(policy)
       };
       const skill = this.deps.buildMemory({
+        id: existingSkill?.id,
         userId,
         conversationId: policyMemory.conversationId,
         sessionId: policyMemory.sessionId ?? job.sessionId,
@@ -186,7 +325,7 @@ export class SkillPipeline {
         kind: "skill",
         lifecycleStatus: verifiedDraft.status,
         memoryType: "SkillMemory",
-        key: verifiedDraft.key,
+        key: existingSkill?.memory.memoryKey ?? stableSkillKey(verifiedDraft, policyMemory),
         value: verifiedDraft.invocationGuide,
         tags: verifiedDraft.tags,
         info: {
@@ -198,6 +337,8 @@ export class SkillPipeline {
         internal: {
           source: "worker.skill_crystallization.v7",
           plugin_algorithm: "skill.crystallization.v7",
+          read_only: false,
+          generated_by_memory_base: true,
           source_memory_ids: verifiedDraft.sourcePolicyIds,
           source_policy_ids: verifiedDraft.sourcePolicyIds,
           source_world_model_ids: verifiedDraft.sourceWorldModelIds,
@@ -209,6 +350,7 @@ export class SkillPipeline {
           support: verifiedDraft.support,
           gain: verifiedDraft.gain,
           policy_content_hash: skillPolicyContentHash(policy),
+          policy_content_hashes: policyContentHashes,
           skill: {
             name: verifiedDraft.name,
             eta: verifiedDraft.eta,
@@ -216,6 +358,7 @@ export class SkillPipeline {
             support: verifiedDraft.support,
             gain: verifiedDraft.gain,
             policy_content_hash: skillPolicyContentHash(policy),
+            policy_content_hashes: policyContentHashes,
             source_policy_ids: verifiedDraft.sourcePolicyIds,
             source_world_model_ids: verifiedDraft.sourceWorldModelIds,
             evidence_anchor_ids: verifiedDraft.evidenceAnchorIds,
@@ -286,10 +429,17 @@ export class SkillPipeline {
       .filter((skill): skill is NonNullable<ReturnType<typeof skillMetaFromMemory>> =>
         Boolean(skill &&
           skill.status !== "archived" &&
-          skill.sourcePolicyIds.includes(policy.id))
-      )
-      .sort((a, b) => Date.parse(b.memory.updatedAt) - Date.parse(a.memory.updatedAt));
-    return candidates[0] ?? null;
+          !isReadOnlySkillMemory(skill.memory))
+      );
+    const direct = candidates
+      .filter((skill) => skill.sourcePolicyIds.includes(policy.id))
+      .sort(compareSkillMergeTargets)[0];
+    if (direct) return direct;
+    return candidates
+      .map((skill) => ({ skill, score: skillPolicyCompatibility(skill, policy) }))
+      .filter((candidate) => candidate.score >= 0.8)
+      .sort((left, right) => right.score - left.score || compareSkillMergeTargets(left.skill, right.skill))[0]
+      ?.skill ?? null;
   }
 
 private isSkillCrystallizationInCooldown(policy: PolicyMeta, at: string): boolean {
@@ -733,6 +883,13 @@ function stringArray(value: unknown): string[] {
     .filter(Boolean);
 }
 
+function filterRecordByKeys(
+  value: Record<string, unknown>,
+  keys: ReadonlySet<string>
+): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(value).filter(([key]) => keys.has(key)));
+}
+
 function coerceSkillProcedureJson(result: Record<string, unknown>): Record<string, unknown> {
   const steps = coerceSkillSteps(result.steps);
   const preconditions = skillMarkdownArray(result.preconditions);
@@ -788,7 +945,7 @@ function skillRebuildPlan(
   snapshot: Record<string, unknown>;
 } {
   const policyHash = skillPolicyContentHash(policy);
-  const previousPolicyHash = storedSkillPolicyContentHash(existingSkill.memory);
+  const previousPolicyHash = storedSkillPolicyContentHash(existingSkill.memory, policy.id);
   const incrementalEvidence = evidenceTraces.filter((trace) => !existingSkill.evidenceAnchorIds.includes(trace.id));
   const level: SkillRebuildLevel = previousPolicyHash !== policyHash
     ? "L2"
@@ -825,11 +982,31 @@ function skillPolicyContentHash(policy: PolicyMeta): string {
   });
 }
 
-function storedSkillPolicyContentHash(memory: MemoryRow): string | null {
+function storedSkillPolicyContentHash(memory: MemoryRow, policyId?: string): string | null {
   const internal = memory.properties.internal_info;
   const skill = isRecord(internal.skill) ? internal.skill : {};
+  const hashes = isRecord(skill.policy_content_hashes)
+    ? skill.policy_content_hashes
+    : isRecord(internal.policy_content_hashes)
+      ? internal.policy_content_hashes
+      : {};
+  if (policyId && typeof hashes[policyId] === "string") return hashes[policyId];
   const value = skill.policy_content_hash ?? internal.policy_content_hash;
   return typeof value === "string" && value ? value : null;
+}
+
+function storedSkillPolicyContentHashes(memory: MemoryRow | undefined): Record<string, string> {
+  if (!memory) return {};
+  const internal = memory.properties.internal_info;
+  const skill = isRecord(internal.skill) ? internal.skill : {};
+  const raw = isRecord(skill.policy_content_hashes)
+    ? skill.policy_content_hashes
+    : isRecord(internal.policy_content_hashes)
+      ? internal.policy_content_hashes
+      : {};
+  return Object.fromEntries(
+    Object.entries(raw).filter((entry): entry is [string, string] => typeof entry[1] === "string")
+  );
 }
 
 function skillProcedureJsonFromMemory(memory: MemoryRow | undefined): Record<string, unknown> {
@@ -848,7 +1025,7 @@ function mergeSkillRebuildProcedureJson(
   level: SkillRebuildLevel,
   changedSections: string[]
 ): Record<string, unknown> {
-  if (Object.keys(existing).length === 0 || level === "L2") {
+  if (Object.keys(existing).length === 0) {
     return draft;
   }
   const allowed = skillRebuildAllowedSections(level, changedSections);
@@ -860,12 +1037,140 @@ function mergeSkillRebuildProcedureJson(
     summary: mergeField("summary"),
     parameters: mergeField("parameters"),
     preconditions: mergeField("preconditions"),
-    steps: mergeField("steps"),
+    steps: allowed.has("steps")
+      ? mergeSkillSteps(existing.steps, draft.steps)
+      : existing.steps ?? draft.steps,
     examples: mergeField("examples"),
     decisionGuidance: mergeField("decisionGuidance"),
     tags: mergeField("tags"),
     tools: mergeField("tools")
   };
+}
+
+function mergeSkillSteps(existing: unknown, draft: unknown): unknown {
+  if (!Array.isArray(existing) || !Array.isArray(draft)) return draft ?? existing;
+  const additions = draft.filter(isRecord);
+  const byId = new Map(additions.flatMap((step) =>
+    typeof step.id === "string" && step.id ? [[step.id, step] as const] : []
+  ));
+  const byTitle = new Map(additions.map((step) => [normalizeSkillStepTitle(step.title), step]));
+  const consumed = new Set<Record<string, unknown>>();
+  const merged = existing.filter(isRecord).map((step) => {
+    const replacement = (typeof step.id === "string" ? byId.get(step.id) : undefined) ??
+      byTitle.get(normalizeSkillStepTitle(step.title));
+    if (!replacement) return step;
+    consumed.add(replacement);
+    return { ...step, ...replacement };
+  });
+  for (const step of additions) if (!consumed.has(step)) merged.push(step);
+  return merged;
+}
+
+function attachSkillStepPolicySources(
+  procedure: Record<string, unknown>,
+  existingMemory: MemoryRow | undefined,
+  policyId: string
+): Record<string, unknown> {
+  const existingProcedure = skillProcedureJsonFromMemory(existingMemory);
+  const existingSteps = Array.isArray(existingProcedure.steps)
+    ? existingProcedure.steps.filter(isRecord)
+    : [];
+  const byId = new Map(existingSteps.flatMap((step) =>
+    typeof step.id === "string" && step.id ? [[step.id, step] as const] : []
+  ));
+  const byTitle = new Map(existingSteps.map((step) => [normalizeSkillStepTitle(step.title), step]));
+  const steps = Array.isArray(procedure.steps) ? procedure.steps.filter(isRecord) : [];
+  return {
+    ...procedure,
+    steps: steps.map((step) => {
+      const title = skillText(step.title) || "Step";
+      const body = skillMarkdown(step.body);
+      const existing = (typeof step.id === "string" ? byId.get(step.id) : undefined) ??
+        byTitle.get(normalizeSkillStepTitle(title));
+      const existingBody = existing ? skillMarkdown(existing.body) : "";
+      const supportingPolicyIds = uniq([
+        ...stringArray(existing?.supportingPolicyIds ?? existing?.supporting_policy_ids),
+        ...(!existing || existingBody !== body ? [policyId] : [])
+      ]);
+      return {
+        ...step,
+        id: typeof existing?.id === "string" && existing.id
+          ? existing.id
+          : typeof step.id === "string" && step.id
+            ? step.id
+            : `step_${stableHash(`${title}\n${body}`).slice(0, 12)}`,
+        title,
+        body,
+        supportingPolicyIds
+      };
+    })
+  };
+}
+
+function normalizeSkillStepTitle(value: unknown): string {
+  return skillText(value).toLowerCase().replace(/[\s_-]+/g, " ").trim();
+}
+
+function isReadOnlySkillMemory(memory: MemoryRow): boolean {
+  return memory.properties.internal_info.read_only === true;
+}
+
+function compareSkillMergeTargets(
+  left: NonNullable<ReturnType<typeof skillMetaFromMemory>>,
+  right: NonNullable<ReturnType<typeof skillMetaFromMemory>>
+): number {
+  const active = (skill: NonNullable<ReturnType<typeof skillMetaFromMemory>>) => skill.status === "active" ? 1 : 0;
+  return active(right) - active(left) ||
+    right.trialsPassed - left.trialsPassed ||
+    Date.parse(left.memory.createdAt) - Date.parse(right.memory.createdAt) ||
+    left.id.localeCompare(right.id);
+}
+
+function skillPolicyCompatibility(
+  skill: NonNullable<ReturnType<typeof skillMetaFromMemory>>,
+  policy: PolicyMeta
+): number {
+  if (skill.memory.userId !== policy.memory.userId) return 0;
+  const skillProject = projectIdFromMemory(skill.memory);
+  const policyProject = projectIdFromMemory(policy.memory);
+  if (skillProject && policyProject && skillProject !== policyProject) return 0;
+  const skillProfile = profileIdFromMemory(skill.memory);
+  const policyProfile = profileIdFromMemory(policy.memory);
+  if (skillProfile && policyProfile && skillProfile !== policyProfile) return 0;
+
+  const genericTags = new Set(["skill", "policy", "active", "candidate"]);
+  const skillTags = new Set(skill.memory.tags.map((tag) => tag.toLowerCase()).filter((tag) => !genericTags.has(tag)));
+  const policyTags = new Set(policy.memory.tags.map((tag) => tag.toLowerCase()).filter((tag) => !genericTags.has(tag)));
+  const tagCompatible = [...policyTags].some((tag) => skillTags.has(tag));
+  const lexical = textTokenOverlap(
+    `${skill.name}\n${skill.invocationGuide}`,
+    `${policy.title}\n${policy.trigger}\n${policy.procedure}`
+  );
+  if (!tagCompatible && lexical < 0.25) return 0;
+  const vector = skill.vec && policy.vec ? cosine(skill.vec, policy.vec) : 0;
+  return Math.max(lexical, vector);
+}
+
+function textTokenOverlap(left: string, right: string): number {
+  const tokens = (value: string) => new Set(
+    value.toLowerCase().match(/[\p{Script=Han}]{2,}|[a-z0-9_]{3,}/gu) ?? []
+  );
+  const a = tokens(left);
+  const b = tokens(right);
+  if (a.size === 0 || b.size === 0) return 0;
+  let overlap = 0;
+  for (const token of a) if (b.has(token)) overlap += 1;
+  return overlap / Math.min(a.size, b.size);
+}
+
+function stableSkillKey(draft: SkillDraft, policyMemory: MemoryRow): string {
+  return `skill:${stableHash({
+    userId: policyMemory.userId,
+    projectId: projectIdFromMemory(policyMemory),
+    profileId: profileIdFromMemory(policyMemory),
+    name: draft.name,
+    tools: isRecord(draft.procedureJson) ? draft.procedureJson.tools : undefined
+  }).slice(0, 20)}`;
 }
 
 function skillRebuildAllowedSections(level: SkillRebuildLevel, changedSections: string[]): Set<string> {

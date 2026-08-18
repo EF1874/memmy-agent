@@ -43,6 +43,15 @@ function createCountingLlm(
       options: { operation: string }
     ): Promise<T> {
       operations.push(options.operation);
+      if (options.operation === "capture.summarize") {
+        return {
+          create_l1: true,
+          l1_summary: "completed task turn",
+          create_user_memory: false,
+          user_memory_types: [],
+          reason: "durable task result"
+        } as unknown as T;
+      }
       if (options.operation === "reward.reward.r_human.v7" && reward) {
         return reward as unknown as T;
       }

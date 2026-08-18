@@ -575,7 +575,6 @@ describe("MemoryService / evolution / skill lifecycle", () => {
        FROM memories
        WHERE user_id = 'user-archived-skill-recreate'
          AND memory_layer = 'Skill'
-         AND memory_key = 'skill:policy_archived_skill_recreate'
        ORDER BY created_at ASC`
     ).all() as Array<{ id: string; status: string; updated_at: string; properties_json: string }>;
     expect(skillRows).toHaveLength(2);
@@ -867,13 +866,17 @@ describe("MemoryService / evolution / skill lifecycle", () => {
        WHERE user_id = ? AND memory_layer = 'Skill'
        LIMIT 1`
     ).get(userId) as { memory_key: string; properties_json: string };
-    const sourcePolicyId = skillRow.memory_key.replace(/^skill:/, "");
+    const skillSourceProperties = JSON.parse(skillRow.properties_json) as {
+      internal_info?: { source_policy_ids?: string[] };
+    };
+    const sourcePolicyId = skillSourceProperties.internal_info?.source_policy_ids?.[0];
+    expect(sourcePolicyId).toBeTruthy();
     const policyRow = db.db.prepare(
       `SELECT id, properties_json
        FROM memories
        WHERE id = ? AND user_id = ? AND memory_layer = 'L2'
        LIMIT 1`
-    ).get(sourcePolicyId, userId) as { id: string; properties_json: string };
+    ).get(sourcePolicyId!, userId) as { id: string; properties_json: string };
     const policyProperties = JSON.parse(policyRow.properties_json) as {
       internal_info?: {
         title?: string;
@@ -914,7 +917,8 @@ describe("MemoryService / evolution / skill lifecycle", () => {
         };
       };
     };
-    expect(skillRow.memory_key).toBe(`skill:${policyRow.id}`);
+    expect(skillRow.memory_key).toMatch(/^skill:[a-f0-9]{20}$/);
+    expect(skillRow.memory_key).not.toBe(`skill:${policyRow.id}`);
     expect(skillProperties.internal_info?.name).toBe(expectedName);
     expect(skillProperties.internal_info?.skill?.name).toBe(expectedName);
     expect(policyTitle).toBeTruthy();

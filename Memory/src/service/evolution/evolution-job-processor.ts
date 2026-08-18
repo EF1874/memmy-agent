@@ -32,6 +32,7 @@ import {
 } from "./reward-pipeline.js";
 import { SkillPipeline } from "./skill-pipeline.js";
 import { SpanPipeline } from "./span-pipeline.js";
+import type { TurnMemoryCaptureDecision } from "./span-pipeline.js";
 import { WorldModelPipeline } from "./world-model-pipeline.js";
 
 type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
@@ -205,8 +206,44 @@ export class EvolutionJobProcessor {
     return this.span.summarizeTraceForCapture(input, options);
   }
 
+  decideTurnMemoryForCapture(input: {
+    trace: TraceMeta;
+    userText: string;
+    agentText: string;
+    toolCalls: ToolCallPayload[];
+    reflectionText: string;
+  }): Promise<TurnMemoryCaptureDecision> {
+    return this.span.decideTurnMemoryForCapture(input);
+  }
+
   findExistingSkillForPolicy(policy: PolicyMeta) {
     return this.skill.findExistingSkillForPolicy(policy);
+  }
+
+  invalidateMemoryDependencies(memory: MemoryRow, at: string): void {
+    if (memory.memoryLayer === "L1") {
+      const policyIds = Array.from(new Set(
+        this.deps.repos.runtime
+          .listTracePolicyLinks({ l1MemoryId: memory.id, limit: 1000 })
+          .map((link) => link.l2MemoryId)
+      ));
+      for (const policyId of policyIds) {
+        const updated = this.policy.recomputePolicyStats(policyId, at);
+        const updatedPolicy = updated ? policyMetaFromMemory(updated) : null;
+        if (updatedPolicy?.status !== "active") {
+          this.invalidatePolicyDependencies(policyId, at);
+        }
+      }
+      return;
+    }
+    if (memory.memoryLayer === "L2") {
+      this.invalidatePolicyDependencies(memory.id, at);
+    }
+  }
+
+  private invalidatePolicyDependencies(policyId: string, at: string): void {
+    this.worldModel.invalidatePolicySource(policyId, at);
+    this.skill.invalidatePolicySource(policyId, at);
   }
 
   upsertEvolutionMemory(memory: MemoryRow): {

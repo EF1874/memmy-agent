@@ -11,7 +11,8 @@ import { retrievalDocumentSourceHash,traceMetaFromMemory } from "../../algorithm
 import type { Embedder,LlmClient } from "../../model/types.js";
 import type { EmbeddingRetryRecord,EmbeddingRetryVectorField,EvolutionJobRecord,Repositories } from "../../storage/repositories.js";
 import { kindFromMemory } from "../../storage/repositories.js";
-import type { JobType,MemoryProcessingState,MemoryRow,ToolCallPayload } from "../../types.js";
+import type { JobType,MemoryProcessingState,MemoryRow,ToolCallPayload,UserMemoryType } from "../../types.js";
+import { stableHash } from "../../utils/id.js";
 import {
   firstRealSummary,
   importStatusTags,
@@ -28,6 +29,7 @@ import {
 } from "../import/memory-import-pipeline.js";
 import { namespaceForMemory } from "../namespace/namespace-scope.js";
 import { processingJobMatchesMemory } from "../worker/job-handlers.js";
+import { buildUserMemory } from "../user-memory/user-memory.js";
 import {
   embeddingTextForMemory,
   traceSummaryEmbeddingText,
@@ -81,7 +83,7 @@ export interface ScheduleEmbeddingAfterTextUpdateInput {
 
 /** The host supplies cross-domain policy rather than this module reaching into MemoryService. */
 export interface EmbeddingJobProcessorDeps {
-  repos: Pick<Repositories, "transaction" | "memories" | "processing" | "runtime">;
+  repos: Pick<Repositories, "transaction" | "memories" | "userMemories" | "processing" | "runtime">;
   embedder: Embedder;
   llm: LlmClient;
   capture: { embedAfterCapture: boolean };
@@ -110,6 +112,19 @@ export interface EmbeddingJobProcessorDeps {
     },
     options?: { strict?: boolean }
   ): Promise<string>;
+  decideTurnMemoryForCapture(input: {
+    trace: TraceMeta;
+    userText: string;
+    agentText: string;
+    toolCalls: ToolCallPayload[];
+    reflectionText: string;
+  }): Promise<{
+    createL1: boolean;
+    l1Summary: string;
+    createUserMemory: boolean;
+    userMemoryTypes: UserMemoryType[];
+    reason: string;
+  }>;
 }
 
 export class EmbeddingJobProcessor {
@@ -124,6 +139,37 @@ export class EmbeddingJobProcessor {
     } catch (error) {
       if (!this.enqueueEmbeddingRetryAfterFailure(item, error)) throw error;
     }
+  }
+
+  async embedUserMemory(job: EvolutionJobRecord): Promise<void> {
+    const memory = job.targetMemoryId
+      ? this.deps.repos.userMemories.get(job.targetMemoryId)
+      : undefined;
+    if (!memory) throw new Error(`user memory embedding target not found: ${job.targetMemoryId ?? "unknown"}`);
+    const contentHash = typeof job.payload.contentHash === "string" ? job.payload.contentHash : undefined;
+    if (contentHash && contentHash !== stableHash(memory.content)) return;
+    const vector = await this.deps.embedder.embedOne(memory.content, "document");
+    const current = this.deps.repos.userMemories.get(memory.id);
+    if (!current || (contentHash && contentHash !== stableHash(current.content))) return;
+    const at = this.deps.nowIso();
+    const saved = this.deps.repos.userMemories.updateEmbedding(current.id, vector, {
+      model: this.deps.embedder.config.model,
+      provider: this.deps.embedder.config.provider,
+      updatedAt: at
+    });
+    if (!saved) return;
+    this.deps.repos.runtime.appendChange({
+      memoryId: saved.id,
+      kind: "user_memory",
+      op: "updated",
+      entityId: saved.id,
+      userId: saved.userId,
+      changeType: "user_memory_embedding_updated",
+      before: current,
+      after: saved,
+      source: "worker.user_memory_embedding",
+      createdAt: at
+    });
   }
 
   prepareEmbeddingJob(job: EvolutionJobRecord): PreparedEmbeddingJob | null {
@@ -266,9 +312,21 @@ export class EmbeddingJobProcessor {
     const trace = traceMetaFromMemory(memory);
     if (!trace) throw new Error(`trace payload is missing: ${memory.id}`);
 
-    const summary = this.deps.llm.isConfigured()
-      ? await this.deps.summarizeTraceForCapture({ trace, userText: trace.userText, agentText: trace.agentText, toolCalls: trace.toolCalls, reflectionText: "" }, { strict: true })
-      : trace.summary || fallbackTraceSummary(trace);
+    const decideCapture = job.payload.decideCapture === true;
+    const decision = decideCapture
+      ? await this.deps.decideTurnMemoryForCapture({
+          trace,
+          userText: trace.userText,
+          agentText: trace.agentText,
+          toolCalls: trace.toolCalls,
+          reflectionText: ""
+        })
+      : undefined;
+    const summary = decision
+      ? decision.l1Summary
+      : this.deps.llm.isConfigured()
+        ? await this.deps.summarizeTraceForCapture({ trace, userText: trace.userText, agentText: trace.agentText, toolCalls: trace.toolCalls, reflectionText: "" }, { strict: true })
+        : trace.summary || fallbackTraceSummary(trace);
     const at = this.deps.nowIso();
     const current = this.deps.repos.memories.get(memory.id);
     if (!current || !processingJobMatchesMemory(job, current)) return;
@@ -276,10 +334,21 @@ export class EmbeddingJobProcessor {
     if (!currentTrace) throw new Error(`trace payload is missing: ${current.id}`);
 
     this.deps.repos.transaction(() => {
+      if (decision?.createUserMemory && job.payload.captureUserMemory === true) {
+        this.captureUserMemoryFromDecision(current, currentTrace, decision.userMemoryTypes, job, at);
+      }
+      if (decision && !decision.createL1) {
+        const deleted = this.deps.repos.memories.softDelete(current.id, at);
+        if (deleted) this.appendMemoryChange(deleted, current, "worker.turn_memory_decision.rejected", at);
+        return;
+      }
       const previous = current;
-      const saved = summary.trim() && summary.trim() !== currentTrace.summary.trim()
+      const summarized = summary.trim() && summary.trim() !== currentTrace.summary.trim()
         ? this.deps.repos.memories.update(updateTraceSummary(current, { summary: summary.trim(), updatedAt: at }))
         : previous;
+      const saved = decision
+        ? this.deps.repos.memories.update(acceptTurnMemoryDecision(summarized, decision.reason, at))
+        : summarized;
       if (saved !== previous) this.appendMemoryChange(saved, previous, "worker.trace_summary", at);
       this.scheduleEmbeddingAfterTextUpdate({
         memory: saved,
@@ -291,6 +360,51 @@ export class EmbeddingJobProcessor {
         textOnlyAttemptCount: job.attempts,
         at
       });
+    });
+  }
+
+  private captureUserMemoryFromDecision(
+    sourceMemory: MemoryRow,
+    trace: TraceMeta,
+    memoryTypes: UserMemoryType[],
+    job: EvolutionJobRecord,
+    at: string
+  ): void {
+    const content = trace.userText.trim();
+    const sourceTurnId = trace.rawTurnId;
+    if (!content || !sourceTurnId || memoryTypes.length === 0) return;
+    const sourceAt = Number.isFinite(trace.ts) ? new Date(trace.ts).toISOString() : at;
+    const candidate = buildUserMemory({
+      id: `user_memory_${stableHash(`${sourceTurnId}:${content}`).slice(0, 20)}`,
+      sourceTurnId,
+      userId: sourceMemory.userId,
+      memoryTypes,
+      content,
+      createdAt: sourceAt
+    });
+    const upsert = this.deps.repos.userMemories.upsertExact(candidate);
+    this.deps.repos.runtime.appendChange({
+      memoryId: upsert.memory.id,
+      kind: "user_memory",
+      op: upsert.created ? "created" : "updated",
+      entityId: upsert.memory.id,
+      userId: upsert.memory.userId,
+      changeType: upsert.created ? "user_memory_created" : "user_memory_updated",
+      before: upsert.previous,
+      after: upsert.memory,
+      source: "worker.turn_memory_decision",
+      createdAt: at
+    });
+    if (!upsert.created || !this.deps.capture.embedAfterCapture) return;
+    this.deps.enqueueJob({
+      jobType: "user_memory_embedding",
+      userId: upsert.memory.userId,
+      sessionId: sourceMemory.sessionId,
+      episodeId: job.episodeId,
+      targetMemoryId: upsert.memory.id,
+      payload: { contentHash: stableHash(upsert.memory.content) },
+      maxAttempts: 6,
+      createdAt: at
     });
   }
 
@@ -352,6 +466,44 @@ export function updateTraceSummary(memory: MemoryRow, input: { summary: string; 
     ...memory.properties, info: { ...(memory.properties.info ?? {}), summary: input.summary },
     internal_info: { ...memory.properties.internal_info, summary: input.summary, trace: nextTrace }
   }, updatedAt: input.updatedAt };
+}
+
+function acceptTurnMemoryDecision(memory: MemoryRow, reason: string, updatedAt: string): MemoryRow {
+  const internal = memory.properties.internal_info;
+  const pending = isRecord(internal.capture_decision) ? internal.capture_decision : {};
+  const originalEvidenceStatus = typeof pending.original_evidence_status === "string"
+    ? pending.original_evidence_status
+    : undefined;
+  const { evidence_status: _infoEvidenceStatus, ...info } = memory.info;
+  const { evidence_status: _propertyInfoEvidenceStatus, ...propertyInfo } = memory.properties.info ?? {};
+  const { evidence_status: _internalEvidenceStatus, ...internalWithoutEvidence } = internal;
+  return {
+    ...memory,
+    status: "activated",
+    info: {
+      ...info,
+      ...(originalEvidenceStatus ? { evidence_status: originalEvidenceStatus } : {})
+    },
+    properties: {
+      ...memory.properties,
+      status: "activated",
+      info: {
+        ...propertyInfo,
+        ...(originalEvidenceStatus ? { evidence_status: originalEvidenceStatus } : {})
+      },
+      internal_info: {
+        ...internalWithoutEvidence,
+        ...(originalEvidenceStatus ? { evidence_status: originalEvidenceStatus } : {}),
+        capture_decision: {
+          ...pending,
+          status: "accepted",
+          reason,
+          decided_at: updatedAt
+        }
+      }
+    },
+    updatedAt
+  };
 }
 
 function fallbackImportSummary(trace: TraceMeta, memory: MemoryRow): string {

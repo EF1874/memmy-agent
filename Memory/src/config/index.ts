@@ -174,6 +174,7 @@ export interface AlgorithmConfig {
   l2Induction: {
     useLlm: boolean;
     minEpisodesForInduction: number;
+    minEpisodesForActivation: number;
     minSimilarity: number;
     candidateTtlDays: number;
     minTraceValue: number;
@@ -394,6 +395,7 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
     l2Induction: {
       useLlm: true,
       minEpisodesForInduction: 1,
+      minEpisodesForActivation: 3,
       minSimilarity: 0.65,
       candidateTtlDays: 30,
       minTraceValue: 0.005,
@@ -997,6 +999,7 @@ function normalizeAlgorithm(input: Record<string, unknown>): AlgorithmConfig {
     l2Induction: {
       useLlm: booleanValue(l2.useLlm, DEFAULT_MEMMY_CONFIG.algorithm.l2Induction.useLlm),
       minEpisodesForInduction: numberValue(l2.minEpisodesForInduction, DEFAULT_MEMMY_CONFIG.algorithm.l2Induction.minEpisodesForInduction),
+      minEpisodesForActivation: numberValue(l2.minEpisodesForActivation, DEFAULT_MEMMY_CONFIG.algorithm.l2Induction.minEpisodesForActivation),
       minSimilarity: numberValue(l2.minSimilarity, DEFAULT_MEMMY_CONFIG.algorithm.l2Induction.minSimilarity),
       candidateTtlDays: numberValue(l2.candidateTtlDays, DEFAULT_MEMMY_CONFIG.algorithm.l2Induction.candidateTtlDays),
       minTraceValue: numberValue(l2.minTraceValue, DEFAULT_MEMMY_CONFIG.algorithm.l2Induction.minTraceValue),

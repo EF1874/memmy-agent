@@ -2756,6 +2756,7 @@ export function HomePage() {
                 isSending={state.agent.isSending}
                 sanitizePlatformApiErrors={sanitizePlatformApiErrors}
                 artifactClient={sessionArtifactClient}
+                memoryRuntimeClient={clients?.memoryRuntime ?? null}
               />
             </div>
           </div>

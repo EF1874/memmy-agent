@@ -105,7 +105,18 @@ describe("MemoryService / evolution / policy induction", () => {
   });
 
   it("associates each L1 trace to only the best L2 policy like the plugin", async () => {
-    const { db, service } = createTestService();
+    const { db, service } = createTestService({
+      config: {
+        ...DEFAULT_MEMMY_CONFIG,
+        algorithm: {
+          ...DEFAULT_MEMMY_CONFIG.algorithm,
+          l2Induction: {
+            ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction,
+            minEpisodesForActivation: 1
+          }
+        }
+      }
+    });
     const session = service.openSession({
       namespace: {
         source: "codex",
@@ -297,7 +308,7 @@ describe("MemoryService / evolution / policy induction", () => {
       };
     };
     expect(properties.internal_info?.policy?.support).toBe(1);
-    expect(properties.internal_info?.policy?.status).toBe("active");
+    expect(properties.internal_info?.policy?.status).toBe("candidate");
     expect(properties.internal_info?.policy?.source_trace_ids).toEqual(expect.arrayContaining(evidenceIds));
 
     db.close();
@@ -697,6 +708,7 @@ describe("MemoryService / evolution / policy induction", () => {
     expect(l2Calls.filter((call) => call.options.operation === "l2.induction.v3")).toHaveLength(1);
     expect(l2Call!.options.thinkingMode).toBe("enabled");
     expect(l2Call!.messages[0]!.content).toContain("procedural policies");
+    expect(l2Call!.messages[0]!.content).toContain("should_generate=false");
     expect(l2Call!.messages[0]!.content).toContain("Same fact, two framings");
     expect(l2Call!.messages[0]!.content).toContain("Do NOT express here (declarative");
     expect(l2Call!.messages[1]!.content).toContain("English");
@@ -727,8 +739,8 @@ describe("MemoryService / evolution / policy induction", () => {
     expect(properties.internal_info?.policy?.procedure).toContain("Run the focused pytest workflow");
     expect(properties.internal_info?.policy?.procedure).toContain("inspect migration output");
     expect(properties.internal_info?.policy?.procedure).not.toContain("javascript:");
-    expect(properties.internal_info?.policy?.verification).toBe("");
-    expect(properties.internal_info?.policy?.boundary).toBe("");
+    expect(properties.internal_info?.policy?.verification).toBeTruthy();
+    expect(properties.internal_info?.policy?.boundary).toBeTruthy();
     expect(properties.internal_info?.policy?.policy_confidence).toBeCloseTo(0.77);
 
     db.close();
@@ -1020,7 +1032,9 @@ describe("MemoryService / evolution / policy induction", () => {
       }, {
         title: "Focused migration diagnosis",
         trigger: "pytest migration output needs focused diagnosis",
-        procedure: "Run the focused pytest workflow and inspect the exact failure."
+        procedure: "Run the focused pytest workflow and inspect the exact failure.",
+        verification: "Rerun the focused test and confirm it passes.",
+        exclusions: ["Do not apply when the failure is unrelated to migrations."]
       }]),
       config: {
         ...DEFAULT_MEMMY_CONFIG,

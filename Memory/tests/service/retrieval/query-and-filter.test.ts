@@ -344,10 +344,22 @@ describe("MemoryService / retrieval / query and filtering", () => {
       path: join(root, "memory.sqlite")
     });
     const config = DEFAULT_MEMMY_CONFIG;
+    const failingFilterLlm = createFailingLlm();
     const service = createTestMemoryService({
       db,
       mode: "dev",
-      llm: createFailingLlm(),
+      llm: {
+        ...failingFilterLlm,
+        async completeJson<T extends Record<string, unknown>>(
+          messages: LlmMessage[],
+          options: LlmCompletionOptions
+        ): Promise<T> {
+          if (options.operation === "capture.summarize") {
+            return acceptedCaptureDecision("Python pytest failure was inspected.") as unknown as T;
+          }
+          return failingFilterLlm.completeJson<T>(messages, options);
+        }
+      },
       embedder: createCapturingEmbedder([]),
       config: {
         ...config,
@@ -384,6 +396,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
     });
     makeTraceEligibleForL2(db, first.l1MemoryId);
     makeTraceEligibleForL2(db, second.l1MemoryId);
+    await service.runWorkerOnce(20, { priorityCohortOnly: true });
 
     const recall = await service.search({
       namespace: {
@@ -505,6 +518,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
     });
     makeTraceEligibleForL2(db, first.l1MemoryId);
     makeTraceEligibleForL2(db, second.l1MemoryId);
+    await service.runWorkerOnce(20, { priorityCohortOnly: true });
 
     const recall = await service.search({
       namespace: {
@@ -548,6 +562,9 @@ describe("MemoryService / retrieval / query and filtering", () => {
         options: { operation: string; maxTokens?: number }
       ): Promise<T> {
         calls.push({ messages, options });
+        if (options.operation === "capture.summarize") {
+          return acceptedCaptureDecision("Python pytest failure was inspected.") as unknown as T;
+        }
         return {
           ranked: [1],
           sufficient: false
@@ -606,6 +623,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
     });
     makeTraceEligibleForL2(db, first.l1MemoryId);
     makeTraceEligibleForL2(db, second.l1MemoryId);
+    await service.runWorkerOnce(20, { priorityCohortOnly: true });
 
     const recall = await service.search({
       namespace: {
@@ -658,6 +676,9 @@ describe("MemoryService / retrieval / query and filtering", () => {
         messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
         options: { operation: string }
       ): Promise<T> {
+        if (options.operation === "capture.summarize") {
+          return acceptedCaptureDecision("Python pytest failure was inspected.") as unknown as T;
+        }
         summaryCalls.push({ operation: options.operation });
         if (summaryFails && options.operation === "retrieval.retrieval.filter.v5") {
           throw new Error("summary filter unavailable");
@@ -755,6 +776,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
     });
     makeTraceEligibleForL2(db, first.l1MemoryId);
     makeTraceEligibleForL2(db, second.l1MemoryId);
+    await service.runWorkerOnce(20, { priorityCohortOnly: true });
 
     const recall = await service.search({
       namespace: {
@@ -1173,6 +1195,9 @@ function createRankedRetrievalFilterLlm(
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string }
     ): Promise<T> {
+      if (options.operation === "capture.summarize") {
+        return acceptedCaptureDecision("durable retrieval test trace") as unknown as T;
+      }
       if (options.operation === "retrieval.retrieval.query.extract.v2") {
         return {
           queryVecText: messages.find((message) => message.role === "user")?.content.replace(/^COMPLETE USER INPUT:\n/, "") ?? "",
@@ -1193,6 +1218,16 @@ function createRankedRetrievalFilterLlm(
         remote: true
       };
     }
+  };
+}
+
+function acceptedCaptureDecision(summary: string) {
+  return {
+    create_l1: true,
+    l1_summary: summary,
+    create_user_memory: false,
+    user_memory_types: [],
+    reason: "durable task result"
   };
 }
 
