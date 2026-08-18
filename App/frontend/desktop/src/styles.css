@@ -1865,20 +1865,67 @@ body:has(.memory-drawer) .window-drag-region {
 
 .agent-environment-diff {
   margin: 0 12px 8px 38px;
-  overflow: hidden;
+  max-height: 320px;
+  overflow: auto;
   border: 1px solid color-mix(in srgb, var(--color-border-stone) 36%, transparent);
   border-radius: 7px;
-  background: color-mix(in srgb, var(--color-text-ink) 3%, transparent);
+  background: var(--color-background-paper);
 }
 
-.agent-environment-diff pre {
-  max-height: 260px;
-  margin: 0;
-  overflow: auto;
-  padding: 9px;
+.workspace-diff-view {
+  min-width: max-content;
   font-family: var(--font-mono);
-  font-size: 9px;
-  line-height: 14px;
+  font-size: 10px;
+  line-height: 18px;
+  tab-size: 2;
+}
+
+.workspace-diff-view__line {
+  display: grid;
+  min-height: 18px;
+  grid-template-columns: 42px minmax(max-content, 1fr);
+}
+
+.workspace-diff-view__line--addition {
+  background: color-mix(in srgb, var(--color-status-success) 11%, transparent);
+}
+
+.workspace-diff-view__line--deletion {
+  background: color-mix(in srgb, var(--color-status-error) 12%, transparent);
+}
+
+.workspace-diff-view__line--notice {
+  background: color-mix(in srgb, var(--color-text-ink) 3%, transparent);
+  color: color-mix(in srgb, var(--color-text-ink) 48%, transparent);
+}
+
+.workspace-diff-view__line-number {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  padding: 0 8px 0 4px;
+  border-right: 1px solid color-mix(in srgb, var(--color-border-stone) 40%, transparent);
+  background: color-mix(in srgb, var(--color-background-paper) 96%, transparent);
+  color: color-mix(in srgb, var(--color-text-ink) 42%, transparent);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  user-select: none;
+}
+
+.workspace-diff-view__line--addition .workspace-diff-view__line-number {
+  background: color-mix(in srgb, var(--color-status-success) 15%, var(--color-background-paper));
+  color: color-mix(in srgb, var(--color-status-success) 80%, var(--color-text-ink));
+}
+
+.workspace-diff-view__line--deletion .workspace-diff-view__line-number {
+  background: color-mix(in srgb, var(--color-status-error) 16%, var(--color-background-paper));
+  color: color-mix(in srgb, var(--color-status-error) 82%, var(--color-text-ink));
+}
+
+.workspace-diff-view__code {
+  display: block;
+  min-width: 0;
+  padding: 0 10px;
   white-space: pre;
 }
 

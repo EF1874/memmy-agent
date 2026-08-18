@@ -118,7 +118,8 @@ describe("AgentEnvironmentPanel", () => {
       { kind: "session", key: "websocket:chat-1" },
       "src/panel.tsx",
     );
-    expect(container.textContent).toContain("+export function Panel() {}");
+    expect(container.textContent).toContain("export function Panel() {}");
+    expect(container.querySelector('[data-kind="addition"]')).toBeTruthy();
 
     act(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })));
     expect(onClose).toHaveBeenCalledTimes(1);
@@ -231,12 +232,13 @@ describe("AgentEnvironmentPanel", () => {
     const firstButton = buttons.find((button) => button.textContent?.includes("src/a.ts"));
     const secondButton = buttons.find((button) => button.textContent?.includes("src/b.ts"));
     await act(async () => firstButton!.click());
+    expect(container.textContent).toContain("正在加载 Diff…");
     await act(async () => secondButton!.click());
     await act(async () => second.resolve({ path: "src/b.ts", diff: "+new-b", truncated: false, unavailable_reason: null }));
-    expect(container.textContent).toContain("+new-b");
+    expect(container.textContent).toContain("new-b");
 
     await act(async () => first.resolve({ path: "src/a.ts", diff: "+stale-a", truncated: false, unavailable_reason: null }));
-    expect(container.textContent).toContain("+new-b");
-    expect(container.textContent).not.toContain("+stale-a");
+    expect(container.textContent).toContain("new-b");
+    expect(container.textContent).not.toContain("stale-a");
   });
 });

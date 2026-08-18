@@ -17,6 +17,7 @@ import type {
   WorkspaceEnvironmentState,
 } from "../api/memmy-agent-client.js";
 import { useTranslation } from "../i18n/use-translation.js";
+import { WorkspaceDiffView } from "./workspace-diff-view.js";
 
 type AgentEnvironmentPanelProps = {
   client: MemmyAgentClient | null;
@@ -202,8 +203,18 @@ export function AgentEnvironmentPanel({
                       </span>
                     </button>
                     {selectedPath === file.path ? (
-                      <div className="agent-environment-diff">
-                        {diff?.diff ? <pre>{diff.diff}</pre> : <p>{diff?.unavailable_reason === "untracked_diff_unavailable" ? t("home.environment.diff.untrackedUnavailable") : t("home.environment.diff.empty")}</p>}
+                      <div className="agent-environment-diff" aria-busy={!diff}>
+                        {!diff ? (
+                          <p role="status">{t("home.environment.diff.loading")}</p>
+                        ) : diff.diff ? (
+                          <WorkspaceDiffView
+                            diff={diff.diff}
+                            path={diff.path}
+                            ariaLabel={t("home.environment.diff.label", { path: diff.path })}
+                          />
+                        ) : (
+                          <p>{diff.unavailable_reason === "untracked_diff_unavailable" ? t("home.environment.diff.untrackedUnavailable") : t("home.environment.diff.empty")}</p>
+                        )}
                         {diff?.truncated ? <small>{t("home.environment.diff.truncated")}</small> : null}
                       </div>
                     ) : null}
