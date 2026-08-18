@@ -2188,6 +2188,7 @@ OPEN_AFTER_INSTALL="\${5:-1}"
 MARKER_PATH="\${6:-}"
 STAGED_APP_PATH="\${7:-}"
 STAGED_READY_PATH="\${8:-}"
+REOPEN_AFTER_INSTALL="$OPEN_AFTER_INSTALL"
 SCRIPT_PATH="$0"
 MOUNT_POINT=""
 LOCK_DIR=""
@@ -2260,6 +2261,10 @@ fi
 LEFTOVER_PIDS="$(/usr/bin/pgrep -f "$DEST_APP_PATH/Contents/MacOS/" || true)"
 if [[ -n "$LEFTOVER_PIDS" ]]; then
   echo "terminating leftover Memmy runtime processes: $LEFTOVER_PIDS"
+  if [[ "$OPEN_AFTER_INSTALL" != "1" ]]; then
+    REOPEN_AFTER_INSTALL="1"
+    echo "detected reopen while background update is installing; will reopen after replacement"
+  fi
   /bin/kill $LEFTOVER_PIDS >/dev/null 2>&1 || true
   for _ in 1 2 3 4 5; do
     LEFTOVER_PIDS="$(/usr/bin/pgrep -f "$DEST_APP_PATH/Contents/MacOS/" || true)"
@@ -2304,7 +2309,7 @@ if [[ -n "$MARKER_PATH" ]]; then
 fi
 /bin/rm -rf "$BACKUP_APP_PATH" >/dev/null 2>&1 || true
 INSTALL_SUCCEEDED=1
-if [[ "$OPEN_AFTER_INSTALL" == "1" ]]; then
+if [[ "$REOPEN_AFTER_INSTALL" == "1" ]]; then
   /bin/sleep 0.1
   /usr/bin/open -n "$DEST_APP_PATH" >/dev/null 2>&1 || true
 fi

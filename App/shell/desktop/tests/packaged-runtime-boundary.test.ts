@@ -833,6 +833,9 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain("$arguments = @('/S', '--updated', '/currentuser', ('/D=' + $appDir))");
     expect(mainSource).toContain("CURRENT_APP_PID");
     expect(mainSource).toContain("OPEN_AFTER_INSTALL");
+    expect(mainSource).toContain('REOPEN_AFTER_INSTALL="$OPEN_AFTER_INSTALL"');
+    expect(mainSource).toContain("detected reopen while background update is installing; will reopen after replacement");
+    expect(mainSource).toContain('if [[ "$REOPEN_AFTER_INSTALL" == "1" ]]');
     expect(mainSource).toContain('while /bin/kill -0 "$CURRENT_APP_PID"');
     expect(mainSource).toContain("terminating leftover Memmy runtime processes");
     expect(mainSource).toContain("-WindowStyle Hidden");
