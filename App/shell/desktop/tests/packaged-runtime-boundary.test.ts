@@ -206,10 +206,15 @@ describe("desktop packaged runtime boundaries", () => {
       expect(source).toContain('if [ -L "$RUNTIME_MIGRATIONS_DIR" ]; then');
       expect(source).toContain('if [ ! -f "$RUNTIME_MIGRATIONS_DIR/dist/index.js" ]; then');
       expect(source).toContain('if [ -e "$MIGRATIONS_STAGING_DIR" ]; then');
-      expect(source).toContain('import { runMigrations } from "@memmy/migrations";');
+      expect(source).toContain("CURRENT_MIGRATION_STATE_FORMAT_VERSION");
+      expect(source).toContain("SUPPORTED_MIGRATION_STATE_FORMAT_VERSIONS");
+      expect(source).toMatch(
+        /import \{[\s\S]*CURRENT_MIGRATION_STATE_FORMAT_VERSION,[\s\S]*SUPPORTED_MIGRATION_STATE_FORMAT_VERSIONS,[\s\S]*runMigrations,[\s\S]*\} from "@memmy\/migrations";/u,
+      );
       expect(source).toContain(
         'if (typeof runMigrations !== "function") throw new Error("Migrations runtime export is unavailable")',
       );
+      expect(source).toContain("Migrations runtime state compatibility mismatch");
       expect(source).toContain(
         '$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations/dist/index.js',
       );
@@ -241,6 +246,17 @@ describe("desktop packaged runtime boundaries", () => {
     expect(winSource.indexOf('run build --prefix "$MIGRATIONS_DIR"')).toBeLessThan(
       winSource.indexOf('ci --prefix "$AGENT_DIR"'),
     );
+    expect(winSource).toContain("verify_migration_state_compatibility_module \\");
+    expect(winSource).toContain(
+      '"$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations/dist/state-store.js"',
+    );
+    expect(winSource).toContain("MEMMY_MIGRATION_STATE_MODULE_PATH");
+    expect(winSource).toContain('import { pathToFileURL } from "node:url";');
+    expect(winSource).toContain("stateStore.validateMigrationState");
+    expect(winSource).toContain("Migrations runtime state behavior mismatch");
+    expect(winSource.lastIndexOf("verify_packaged_windows_unpacked_artifacts")).toBeGreaterThan(
+      winSource.lastIndexOf("npx electron-builder"),
+    );
   });
 
   it("materializes private Memory workspace packages in the Windows runtime", () => {
@@ -261,6 +277,38 @@ describe("desktop packaged runtime boundaries", () => {
       source.indexOf("run build -w @memmy/memory"),
     );
     expect(source).not.toContain('cp "$MEMORY_DIR/package-lock.json"');
+  });
+
+  it("installs and verifies better-sqlite3 for both Windows runtimes", () => {
+    const source = readFileSync(packageWinX64Path, "utf8");
+
+    expect(source).toContain('install_better_sqlite3_win_x64 "$RUNTIME_DIR/memory"');
+    expect(source).toContain('install_better_sqlite3_win_x64 "$RUNTIME_DIR/memmy-agent"');
+    expect(source).toContain(
+      '$RUNTIME_DIR/memmy-agent/node_modules/better-sqlite3/build/Release/better_sqlite3.node',
+    );
+    expect(source).toContain(
+      '$unpacked_runtime/memmy-agent/node_modules/better-sqlite3/build/Release/better_sqlite3.node',
+    );
+    const agentDependenciesIndex = source.indexOf('npm_ci_win_x64 "$RUNTIME_DIR/memmy-agent"');
+    const agentInstallIndex = source.indexOf(
+      'install_better_sqlite3_win_x64 "$RUNTIME_DIR/memmy-agent"',
+      agentDependenciesIndex,
+    );
+    const agentVerifyIndex = source.indexOf("verify_windows_agent_native_artifacts", agentInstallIndex);
+    const agentSmokeIndex = source.indexOf(
+      'verify_windows_better_sqlite3_runtime "$RUNTIME_DIR/memmy-agent"',
+      agentVerifyIndex,
+    );
+    const builderIndex = source.lastIndexOf("npx electron-builder");
+    const finalVerifyIndex = source.lastIndexOf("verify_packaged_windows_unpacked_artifacts");
+    expect(agentDependenciesIndex).toBeGreaterThanOrEqual(0);
+    expect(agentInstallIndex).toBeGreaterThan(agentDependenciesIndex);
+    expect(agentVerifyIndex).toBeGreaterThan(agentInstallIndex);
+    expect(agentSmokeIndex).toBeGreaterThan(agentVerifyIndex);
+    expect(builderIndex).toBeGreaterThan(agentSmokeIndex);
+    expect(finalVerifyIndex).toBeGreaterThan(builderIndex);
+    expect(source).toContain("verify_packaged_file_matches_runtime");
   });
 
   it("unpacks the migrations runtime in every desktop package variant", () => {
