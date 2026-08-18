@@ -388,7 +388,7 @@ export async function readWorkspaceEnvironment(context: WorkspaceEnvironmentCont
     behind: result.state.behind,
     worktree: files.length ? "dirty" as const : "clean" as const,
   };
-  const revision = revisionFor({ repository, changes, goal, files });
+  const revision = revisionFor({ repository, changes, goal, files, branches: result.state.branches });
   return {
     snapshot: {
       scope_kind: context.scope.kind,
@@ -420,6 +420,30 @@ export async function switchWorkspaceBranch(
   }
   if (environment.snapshot.repository.branch === branch) return environment;
   const switched = await runGit(environment.snapshot.repository.root, ["switch", "--no-guess", branch]);
+  if (!switched.ok) throw new WorkspaceEnvironmentError("workspace_branch_switch_failed", 409);
+  return readWorkspaceEnvironment(context);
+}
+
+export async function createOrCheckoutWorkspaceBranch(
+  context: WorkspaceEnvironmentContext,
+  environment: Awaited<ReturnType<typeof readWorkspaceEnvironment>>,
+  branch: string,
+  expectedRevision: string,
+): Promise<Awaited<ReturnType<typeof readWorkspaceEnvironment>>> {
+  if (environment.snapshot.revision !== expectedRevision) {
+    throw new WorkspaceEnvironmentError("workspace_environment_stale", 409);
+  }
+  const repository = environment.snapshot.repository;
+  const normalizedBranch = branch.trim();
+  if (!repository || !normalizedBranch) {
+    throw new WorkspaceEnvironmentError("workspace_branch_invalid", 400);
+  }
+  if (environment.branches.includes(normalizedBranch)) {
+    return switchWorkspaceBranch(context, environment, normalizedBranch, expectedRevision);
+  }
+  const validated = await runGit(repository.root, ["check-ref-format", "--branch", normalizedBranch]);
+  if (!validated.ok) throw new WorkspaceEnvironmentError("workspace_branch_invalid", 400);
+  const switched = await runGit(repository.root, ["switch", "-c", normalizedBranch]);
   if (!switched.ok) throw new WorkspaceEnvironmentError("workspace_branch_switch_failed", 409);
   return readWorkspaceEnvironment(context);
 }

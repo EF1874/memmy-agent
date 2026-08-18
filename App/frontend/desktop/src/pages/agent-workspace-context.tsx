@@ -2,10 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import {
   Check,
-  Cloud,
   GitBranch,
   GitFork,
   Laptop,
+  Plus,
   Search,
 } from "lucide-react";
 import type {
@@ -19,9 +19,10 @@ export type AgentWorkspaceContextProps = {
   loading: boolean;
   error: string | null;
   onSwitchBranch: (branch: string) => Promise<boolean>;
+  onCreateOrCheckoutBranch: (branch: string) => Promise<boolean>;
 };
 
-const DEFAULT_VISIBLE_BRANCH_COUNT = 6;
+const DEFAULT_VISIBLE_BRANCH_COUNT = 5;
 
 export function AgentWorkspaceContext({
   snapshot,
@@ -29,12 +30,16 @@ export function AgentWorkspaceContext({
   loading,
   error,
   onSwitchBranch,
+  onCreateOrCheckoutBranch,
 }: AgentWorkspaceContextProps) {
   const { t } = useTranslation();
   const [openMenu, setOpenMenu] = useState<"mode" | "branch" | null>(null);
   const [query, setQuery] = useState("");
+  const [createBranchOpen, setCreateBranchOpen] = useState(false);
+  const [newBranchName, setNewBranchName] = useState("");
   const rootRef = useRef<HTMLDivElement | null>(null);
   const branchSearchRef = useRef<HTMLInputElement | null>(null);
+  const newBranchRef = useRef<HTMLInputElement | null>(null);
   const repository = snapshot?.status === "ready" ? snapshot.repository : null;
   const revision = repository?.branch
     ?? (repository?.head_sha ? `HEAD ${repository.head_sha.slice(0, 7)}` : null);
@@ -60,8 +65,14 @@ export function AgentWorkspaceContext({
   useEffect(() => {
     if (openMenu !== "branch") return;
     setQuery("");
+    setCreateBranchOpen(false);
+    setNewBranchName("");
     branchSearchRef.current?.focus();
   }, [openMenu]);
+
+  useEffect(() => {
+    if (createBranchOpen) newBranchRef.current?.focus();
+  }, [createBranchOpen]);
 
   if (!revision) return null;
 
@@ -70,18 +81,28 @@ export function AgentWorkspaceContext({
     ? t("home.environment.branch.label", { branch: revision })
     : t("home.environment.detachedHead");
 
+  function confirmDirtyWorkspace(): boolean {
+    return snapshot?.repository?.worktree !== "dirty"
+      || window.confirm(t("home.environment.branch.dirtyConfirm"));
+  }
+
   async function selectBranch(branch: string) {
     if (branch === currentBranch) {
       setOpenMenu(null);
       return;
     }
-    if (
-      snapshot?.repository?.worktree === "dirty"
-      && !window.confirm(t("home.environment.branch.dirtyConfirm"))
-    ) {
-      return;
-    }
+    if (!confirmDirtyWorkspace()) return;
     if (await onSwitchBranch(branch)) setOpenMenu(null);
+  }
+
+  async function createOrCheckoutBranch() {
+    const branch = newBranchName.trim();
+    if (!branch || !confirmDirtyWorkspace()) return;
+    if (await onCreateOrCheckoutBranch(branch)) {
+      setCreateBranchOpen(false);
+      setNewBranchName("");
+      setOpenMenu(null);
+    }
   }
 
   return (
@@ -163,6 +184,51 @@ export function AgentWorkspaceContext({
               )) : <p className="home-workspace-menu__empty">{t("home.environment.branch.empty")}</p>}
             </div>
             {error ? <p className="home-workspace-menu__error" role="status">{error}</p> : null}
+            {createBranchOpen ? (
+              <form
+                className="home-workspace-menu__branch-create-form"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void createOrCheckoutBranch();
+                }}
+              >
+                <input
+                  ref={newBranchRef}
+                  value={newBranchName}
+                  maxLength={250}
+                  aria-label={t("home.environment.branch.newNameAria")}
+                  placeholder={t("home.environment.branch.newNamePlaceholder")}
+                  disabled={loading}
+                  onChange={(event) => setNewBranchName(event.target.value)}
+                />
+                <div className="home-workspace-menu__branch-create-actions">
+                  <button
+                    type="button"
+                    disabled={loading}
+                    onClick={() => {
+                      setCreateBranchOpen(false);
+                      setNewBranchName("");
+                    }}
+                  >
+                    {t("home.environment.branch.cancelCreate")}
+                  </button>
+                  <button type="submit" disabled={loading || !newBranchName.trim()}>
+                    {t("home.environment.branch.confirmCreate")}
+                  </button>
+                </div>
+              </form>
+            ) : null}
+            <div className="home-workspace-menu__branch-footer">
+              <button
+                type="button"
+                className="home-workspace-menu__branch-create"
+                aria-expanded={createBranchOpen}
+                onClick={() => setCreateBranchOpen(true)}
+              >
+                <Plus size={17} aria-hidden="true" />
+                <span>{t("home.environment.branch.createOrCheckout")}</span>
+              </button>
+            </div>
           </div>
         ) : null}
       </div>

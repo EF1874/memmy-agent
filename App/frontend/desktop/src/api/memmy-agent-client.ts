@@ -648,6 +648,11 @@ export interface MemmyAgentClient {
     branch: string,
     expectedRevision: string
   ): Promise<WorkspaceEnvironmentState>;
+  createOrCheckoutWorkspaceEnvironmentBranch(
+    scope: WorkspaceEnvironmentScope,
+    branch: string,
+    expectedRevision: string
+  ): Promise<WorkspaceEnvironmentState>;
   listSlashCommands(): Promise<MemmyAgentSlashCommand[]>;
   readSidebarState(): Promise<MemmyAgentSidebarState>;
   writeSidebarState(
@@ -1004,6 +1009,19 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
       `/api/${collection}/${encodeURIComponent(scope.key)}/environment/branch`,
       WorkspaceEnvironmentStateSchema,
       { method: "POST", body: { branch, expected_revision: expectedRevision } }
+    );
+  }
+
+  async createOrCheckoutWorkspaceEnvironmentBranch(
+    scope: WorkspaceEnvironmentScope,
+    branch: string,
+    expectedRevision: string
+  ): Promise<WorkspaceEnvironmentState> {
+    const collection = scope.kind === "session" ? "sessions" : "projects";
+    return this.request(
+      `/api/${collection}/${encodeURIComponent(scope.key)}/environment/branch`,
+      WorkspaceEnvironmentStateSchema,
+      { method: "POST", body: { branch, expected_revision: expectedRevision, create: true } }
     );
   }
 

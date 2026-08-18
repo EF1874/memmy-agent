@@ -11,6 +11,7 @@ export type WorkspaceEnvironmentQuery = {
   error: string | null;
   refresh: () => Promise<void>;
   switchBranch: (branch: string) => Promise<boolean>;
+  createOrCheckoutBranch: (branch: string) => Promise<boolean>;
 };
 
 export function resolveWorkspaceEnvironmentScope(
@@ -58,17 +59,26 @@ export function useWorkspaceEnvironment(
     }
   }, [client, scopeKey, scopeKind]);
 
-  const switchBranch = useCallback(async (branch: string): Promise<boolean> => {
+  const mutateBranch = useCallback(async (
+    branch: string,
+    operation: "switch" | "create-or-checkout",
+  ): Promise<boolean> => {
     if (!client || !scopeKind || !scopeKey || !data) return false;
     const requestId = ++requestIdRef.current;
     setLoading(true);
     setError(null);
     try {
-      const next = await client.switchWorkspaceEnvironmentBranch(
-        { kind: scopeKind, key: scopeKey },
-        branch,
-        data.snapshot.revision,
-      );
+      const next = operation === "create-or-checkout"
+        ? await client.createOrCheckoutWorkspaceEnvironmentBranch(
+          { kind: scopeKind, key: scopeKey },
+          branch,
+          data.snapshot.revision,
+        )
+        : await client.switchWorkspaceEnvironmentBranch(
+          { kind: scopeKind, key: scopeKey },
+          branch,
+          data.snapshot.revision,
+        );
       if (requestId !== requestIdRef.current) return false;
       setData(next);
       return true;
@@ -81,6 +91,15 @@ export function useWorkspaceEnvironment(
       if (requestId === requestIdRef.current) setLoading(false);
     }
   }, [client, data, scopeKey, scopeKind]);
+
+  const switchBranch = useCallback(
+    (branch: string) => mutateBranch(branch, "switch"),
+    [mutateBranch],
+  );
+  const createOrCheckoutBranch = useCallback(
+    (branch: string) => mutateBranch(branch, "create-or-checkout"),
+    [mutateBranch],
+  );
 
   useEffect(() => {
     setData(null);
@@ -105,5 +124,5 @@ export function useWorkspaceEnvironment(
     return () => window.removeEventListener("focus", refreshOnFocus);
   }, [refresh]);
 
-  return { data, loading, error, refresh, switchBranch };
+  return { data, loading, error, refresh, switchBranch, createOrCheckoutBranch };
 }

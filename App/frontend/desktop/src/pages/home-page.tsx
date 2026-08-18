@@ -2765,6 +2765,7 @@ export function HomePage() {
                   loading={workspaceEnvironment.loading}
                   error={workspaceEnvironment.error}
                   onSwitchBranch={workspaceEnvironment.switchBranch}
+                  onCreateOrCheckoutBranch={workspaceEnvironment.createOrCheckoutBranch}
                 />
               </div>
             </div>

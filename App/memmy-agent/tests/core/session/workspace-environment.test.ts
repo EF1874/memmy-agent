@@ -7,6 +7,7 @@ import { GOAL_STATE_KEY } from "../../../src/core/session/goal-state.js";
 import { Session } from "../../../src/core/session/manager.js";
 import {
   captureGoalWorkspaceBaseline,
+  createOrCheckoutWorkspaceBranch,
   readWorkspaceEnvironment,
   readWorkspaceFileDiff,
   switchWorkspaceBranch,
@@ -159,5 +160,27 @@ describe("workspace environment", () => {
 
     await expect(switchWorkspaceBranch(context, switched, environment.snapshot.repository?.branch ?? "", "stale"))
       .rejects.toMatchObject({ code: "workspace_environment_stale", status: 409 });
+  });
+
+  it("creates and checks out a valid branch while rejecting invalid names", async () => {
+    const root = repository();
+    const context = contextFor(sessionFor(root));
+    const environment = await readWorkspaceEnvironment(context);
+
+    const created = await createOrCheckoutWorkspaceBranch(
+      context,
+      environment,
+      "feature/new-branch",
+      environment.snapshot.revision,
+    );
+    expect(created.snapshot.repository?.branch).toBe("feature/new-branch");
+    expect(created.branches).toContain("feature/new-branch");
+
+    await expect(createOrCheckoutWorkspaceBranch(
+      context,
+      created,
+      "invalid branch name",
+      created.snapshot.revision,
+    )).rejects.toMatchObject({ code: "workspace_branch_invalid", status: 400 });
   });
 });

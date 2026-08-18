@@ -56,6 +56,7 @@ import type { WebuiTitleService } from "../../core/session/webui-title.js";
 import { visibleWebuiUserContent } from "../../core/session/webui-user-content.js";
 import { TerminalRunControl } from "../../core/session/terminal-session-control.js";
 import {
+  createOrCheckoutWorkspaceBranch,
   readWorkspaceEnvironment,
   readWorkspaceFileDiff,
   switchWorkspaceBranch,
@@ -1715,21 +1716,33 @@ export class WebSocketChannel extends BaseChannel {
         } catch {
           return httpError(400, "workspace_branch_request_invalid");
         }
+        const bodyRecord = body && typeof body === "object" && !Array.isArray(body)
+          ? body as Record<string, unknown>
+          : null;
+        const branch = bodyRecord?.branch;
+        const expectedRevision = bodyRecord?.expected_revision;
+        const create = bodyRecord?.create;
         if (
-          !body
-          || typeof body !== "object"
-          || Array.isArray(body)
-          || typeof (body as Record<string, unknown>).branch !== "string"
-          || typeof (body as Record<string, unknown>).expected_revision !== "string"
+          !bodyRecord
+          || typeof branch !== "string"
+          || typeof expectedRevision !== "string"
+          || (create !== undefined && typeof create !== "boolean")
         ) {
           return httpError(400, "workspace_branch_request_invalid");
         }
-        const next = await switchWorkspaceBranch(
-          context,
-          environment,
-          (body as Record<string, string>).branch,
-          (body as Record<string, string>).expected_revision,
-        );
+        const next = create === true
+          ? await createOrCheckoutWorkspaceBranch(
+            context,
+            environment,
+            branch,
+            expectedRevision,
+          )
+          : await switchWorkspaceBranch(
+            context,
+            environment,
+            branch,
+            expectedRevision,
+          );
         return httpJsonResponse(next);
       }
       const [, query] = parseRequestPath(String(request.path ?? ""));

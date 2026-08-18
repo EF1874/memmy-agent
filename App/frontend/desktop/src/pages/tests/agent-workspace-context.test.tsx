@@ -50,7 +50,11 @@ describe("AgentWorkspaceContext", () => {
     vi.unstubAllGlobals();
   });
 
-  function renderContext(snapshot = environment(), onSwitchBranch = vi.fn(async () => true)) {
+  function renderContext(
+    snapshot = environment(),
+    onSwitchBranch = vi.fn(async () => true),
+    onCreateOrCheckoutBranch = vi.fn(async () => true),
+  ) {
     const branches = ["main", "zy_git_v1.0.7", "zy_v1.0.6", "release/1", "release/2", "release/3", "release/4", "release/5"];
     act(() => {
       root.render(
@@ -61,11 +65,12 @@ describe("AgentWorkspaceContext", () => {
             loading={false}
             error={null}
             onSwitchBranch={onSwitchBranch}
+            onCreateOrCheckoutBranch={onCreateOrCheckoutBranch}
           />
         </I18nProvider>
       );
     });
-    return { branches, onSwitchBranch };
+    return { branches, onSwitchBranch, onCreateOrCheckoutBranch };
   }
 
   it("shows the local mode and current branch from the shared snapshot", () => {
@@ -85,6 +90,7 @@ describe("AgentWorkspaceContext", () => {
             loading={false}
             error={null}
             onSwitchBranch={vi.fn(async () => true)}
+            onCreateOrCheckoutBranch={vi.fn(async () => true)}
           />
         </I18nProvider>
       );
@@ -102,8 +108,6 @@ describe("AgentWorkspaceContext", () => {
     expect(container.textContent).toContain("工作模式");
     expect([...container.querySelectorAll("button:disabled")].map((button) => button.textContent)).toEqual([
       "新工作树",
-      "关联 Codex web",
-      "发送至云端",
     ]);
   });
 
@@ -112,7 +116,7 @@ describe("AgentWorkspaceContext", () => {
     const branchButton = [...container.querySelectorAll("button")].find((button) => button.textContent === "zy_git_v1.0.7");
     act(() => branchButton!.click());
 
-    expect((container.querySelector('[role="listbox"]') as HTMLElement).style.getPropertyValue("--visible-branch-count")).toBe("6");
+    expect((container.querySelector('[role="listbox"]') as HTMLElement).style.getPropertyValue("--visible-branch-count")).toBe("5");
     const search = container.querySelector('input[aria-label="搜索分支"]') as HTMLInputElement;
     act(() => {
       search.value = "main";
@@ -122,6 +126,30 @@ describe("AgentWorkspaceContext", () => {
     await act(async () => mainOption.click());
 
     expect(onSwitchBranch).toHaveBeenCalledWith("main");
+  });
+
+  it("keeps the create action outside the five-row scroller and creates a new branch", async () => {
+    const { onCreateOrCheckoutBranch } = renderContext();
+    const branchButton = [...container.querySelectorAll("button")].find((button) => button.textContent === "zy_git_v1.0.7");
+    act(() => branchButton!.click());
+
+    const listbox = container.querySelector('[role="listbox"]') as HTMLElement;
+    const createButton = [...container.querySelectorAll("button")]
+      .find((button) => button.textContent === "创建或检出新分支") as HTMLButtonElement;
+    expect(listbox.contains(createButton)).toBe(false);
+
+    act(() => createButton.click());
+    const input = container.querySelector('input[aria-label="新分支名称"]') as HTMLInputElement;
+    act(() => {
+      const setInputValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      setInputValue?.call(input, "feature/new-branch");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const confirmButton = [...container.querySelectorAll("button")]
+      .find((button) => button.textContent === "创建并检出") as HTMLButtonElement;
+    await act(async () => confirmButton.click());
+
+    expect(onCreateOrCheckoutBranch).toHaveBeenCalledWith("feature/new-branch");
   });
 
   it("requires confirmation before switching a dirty workspace", async () => {

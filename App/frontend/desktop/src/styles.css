@@ -510,11 +510,83 @@ body.memmy-window-fullscreen {
 }
 
 .home-workspace-menu__branch-list {
-  max-height: calc(42px * var(--visible-branch-count, 6));
+  max-height: calc(42px * var(--visible-branch-count, 5));
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
+}
+
+.home-workspace-menu__branch-create-form {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 10px 8px;
+  border-top: 1px solid color-mix(in srgb, var(--color-border-stone) 42%, transparent);
+}
+
+.home-workspace-menu__branch-create-form input {
+  width: 100%;
+  height: 36px;
+  padding: 0 9px;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 62%, transparent);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-text-ink);
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.home-workspace-menu__branch-create-form input:focus {
+  border-color: color-mix(in srgb, var(--color-brand-primary) 55%, var(--color-border-stone));
+}
+
+.home-workspace-menu__branch-create-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.home-workspace-menu__branch-create-actions button {
+  min-height: 28px;
+  padding: 0 9px;
+  border-radius: 7px;
+  color: color-mix(in srgb, var(--color-text-ink) 70%, transparent);
+  font-size: 11px;
+}
+
+.home-workspace-menu__branch-create-actions button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-text-ink) 6%, transparent);
+}
+
+.home-workspace-menu__branch-create-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.home-workspace-menu__branch-footer {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid color-mix(in srgb, var(--color-border-stone) 42%, transparent);
+}
+
+.home-workspace-menu__branch-create {
+  display: flex;
+  width: 100%;
+  height: 42px;
+  align-items: center;
+  gap: 9px;
+  padding: 0 10px;
+  border-radius: 10px;
+  color: var(--color-text-ink);
+  font-family: inherit;
+  font-size: inherit;
+  text-align: left;
+}
+
+.home-workspace-menu__branch-create:hover,
+.home-workspace-menu__branch-create[aria-expanded="true"] {
+  background: color-mix(in srgb, var(--color-text-ink) 6%, transparent);
 }
 
 .home-workspace-menu__empty {

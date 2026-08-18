@@ -195,6 +195,7 @@ describe("WebSocket HTTP route helpers", () => {
         return callback?.(null, `# branch.oid 84d10f8f00\u0000# branch.head ${currentBranch}\u00001 .M N... 100644 100644 100644 abc abc tracked.ts\u0000`, "");
       }
       if (args[0] === "for-each-ref") return callback?.(null, "zy_git_v1.0.7\nmain\n", "");
+      if (args[0] === "check-ref-format") return callback?.(null, args.at(-1) ?? "", "");
       if (args[0] === "switch") {
         currentBranch = args.at(-1) ?? currentBranch;
         return callback?.(null, "", "");
@@ -370,6 +371,20 @@ describe("WebSocket HTTP route helpers", () => {
     });
     expect(responseJson(branchResponse!)).toMatchObject({
       snapshot: { scope_kind: "session", repository: { branch: "main" } },
+    });
+
+    const createBranchResponse = await channel.dispatchHttp(localConnection, {
+      path: `/api/sessions/${encoded}/environment/branch`,
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        branch: "feature/new-branch",
+        expected_revision: responseJson(branchResponse!).snapshot.revision,
+        create: true,
+      }),
+    });
+    expect(responseJson(createBranchResponse!)).toMatchObject({
+      snapshot: { scope_kind: "session", repository: { branch: "feature/new-branch" } },
     });
   });
 

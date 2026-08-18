@@ -124,7 +124,12 @@ describe("memmy-agent client", () => {
       if (url.pathname === "/webui/bootstrap") return json(bootstrap);
       if (url.pathname.endsWith("/environment/branch")) {
         expect(init?.method).toBe("POST");
-        expect(JSON.parse(String(init?.body))).toEqual({ branch: "main", expected_revision: "rev-zy_git_v1.0.7" });
+        const body = JSON.parse(String(init?.body));
+        if (body.create === true) {
+          expect(body).toEqual({ branch: "feature/new", expected_revision: "rev-main", create: true });
+          return json(workspaceState(url.pathname.includes("/projects/"), "feature/new"));
+        }
+        expect(body).toEqual({ branch: "main", expected_revision: "rev-zy_git_v1.0.7" });
         return json(workspaceState(url.pathname.includes("/projects/"), "main"));
       }
       if (url.pathname.endsWith("/environment/diff")) {
@@ -164,6 +169,11 @@ describe("memmy-agent client", () => {
       "main",
       "rev-zy_git_v1.0.7"
     )).resolves.toMatchObject({ snapshot: { repository: { branch: "main" } } });
+    await expect(client.createOrCheckoutWorkspaceEnvironmentBranch(
+      { kind: "project", key: "project-1" },
+      "feature/new",
+      "rev-main"
+    )).resolves.toMatchObject({ snapshot: { repository: { branch: "feature/new" } } });
     expect(calls).toContain("/api/sessions/websocket%3Achat-1/environment/diff?path=src%2Fpanel.tsx");
     expect(calls).toContain("/api/projects/project-1/environment");
     expect(calls).toContain("/api/projects/project-1/environment/diff?path=src%2Fpanel.tsx");
