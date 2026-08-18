@@ -142,6 +142,8 @@ describe("HomePage", () => {
     expect(chipStyles).toContain("opacity: 0;");
     expect(chipStyles).toContain("opacity: 1;");
     expect(chipStyles).toContain("font-weight: 500;");
+    expect(chipStyles).toMatch(/\.composer-command-chip__icon\s*{[^}]*position:\s*absolute;/s);
+    expect(chipStyles).toMatch(/\.composer-command-chip__leading\s*{[^}]*display:\s*inline-flex;/s);
     expect(source.match(/<ComposerCommandChip/g)).toHaveLength(2);
     expect(source.match(/value=\{composerInput\}/g)).toHaveLength(2);
     expect(source).toContain("setCurrentComposerDraft(buildComposerCommandDraft(selectedComposerCommand, value));");
@@ -579,12 +581,32 @@ describe("HomePage", () => {
 
   it("keeps the conversation composer on the same expanded two-row layout as a new chat", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
+    const styles = readFileSync(stylesSourcePath, "utf8");
 
-    expect(source).toContain('${isComposerSingleLine ? "agent-composer-input--single " : ""}${selectedComposerCommand ? "agent-composer-input--command-selected " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40');
+    expect(source).toContain('${isComposerSingleLine ? "agent-composer-input--single " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40');
+    expect(source).not.toContain("agent-composer-input--command-selected");
+    expect(styles).not.toContain("padding-left: 86px;");
     expect(source).toContain('className="relative agent-composer-shell agent-composer-shell--expanded rounded-card-lg"');
     expect(source).toContain('className="agent-composer-toolbar"');
-    expect(source).toContain('<div className="max-w-2xl mx-auto">');
+    expect(source).toContain('<div className="agent-conversation-content agent-conversation-content--composer max-w-2xl mx-auto">');
+    expect(styles).toMatch(/\.agent-composer-toolbar\s*{[^}]*display:\s*flex;/s);
+    expect(styles).toMatch(/\.agent-composer-toolbar \.composer-actions\s*{[^}]*margin-left:\s*auto;/s);
     expect(source).toContain("COMPOSER_SINGLE_LINE_HEIGHT_PX = 52");
+  });
+
+  it("shifts the conversation without resizing it when the environment panel has room", () => {
+    const source = readFileSync(homePageSourcePath, "utf8");
+    const styles = readFileSync(stylesSourcePath, "utf8");
+
+    expect(source).toContain('agent-workspace-layout${environmentPanelOpen ? " agent-workspace-layout--environment-open" : ""}');
+    expect(source).toContain('className="agent-conversation-content max-w-3xl mx-auto space-y-3"');
+    expect(source).toContain('className="agent-conversation-content agent-conversation-content--composer max-w-2xl mx-auto"');
+    expect(styles).toContain("container-name: agent-workspace;");
+    expect(styles).toContain("@container agent-workspace (min-width: 1240px)");
+    expect(styles).toContain(".agent-workspace-layout--environment-open .agent-conversation-content");
+    expect(styles).toMatch(/--agent-conversation-shift:\s*\d+px;/);
+    expect(styles).toContain("transform: translateX(calc(0px - var(--agent-conversation-shift)));");
+    expect(styles).toMatch(/\.agent-environment-panel\s*{[^}]*position:\s*absolute;/s);
   });
 
   it("lets expanded conversation text use the full width above the action footer", () => {

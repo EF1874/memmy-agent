@@ -219,7 +219,7 @@ body.memmy-window-fullscreen {
 }
 
 .agent-conversation-composer textarea {
-  max-height: 400px;
+  max-height: 300px;
 }
 
 /* Home empty-state composer ONLY: an opaque strip under the bottom action
@@ -566,6 +566,7 @@ body.memmy-window-fullscreen {
   background: transparent;
   color: color-mix(in srgb, var(--color-text-ink) 68%, transparent);
   font-size: 11px;
+  font-weight: 500;
   line-height: 1;
   transition: background 140ms ease, color 140ms ease;
 }
@@ -576,30 +577,75 @@ body.memmy-window-fullscreen {
   color: var(--color-text-ink);
 }
 
+.composer-command-chip__icon {
+  position: absolute;
+  color: color-mix(in srgb, var(--color-action-sky) 48%, var(--color-text-ink));
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.composer-command-chip__icon--target {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.composer-command-chip__icon--remove {
+  opacity: 0;
+  transform: scale(0.75);
+}
+
 .composer-command-chip__label {
   white-space: nowrap;
 }
 
-.composer-command-chip__remove {
+.composer-command-chip__leading {
+  position: relative;
   display: inline-flex;
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 18px;
   flex-shrink: 0;
   align-items: center;
   justify-content: center;
   padding: 0;
   border: 0;
-  border-radius: 999px;
   background: transparent;
   color: currentColor;
-  opacity: 0;
   cursor: pointer;
-  transition: opacity 140ms ease;
 }
 
-.composer-command-chip:hover .composer-command-chip__remove,
-.composer-command-chip:focus-within .composer-command-chip__remove {
+.composer-command-chip:hover .composer-command-chip__icon--target,
+.composer-command-chip:focus-within .composer-command-chip__icon--target {
+  opacity: 0;
+  transform: scale(0.75);
+}
+
+.composer-command-chip:hover .composer-command-chip__icon--remove,
+.composer-command-chip:focus-within .composer-command-chip__icon--remove {
   opacity: 1;
+  transform: scale(1);
+}
+
+.agent-composer-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.agent-composer-toolbar__leading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+}
+
+.agent-composer-shell--expanded .agent-composer-toolbar {
+  position: relative;
+  z-index: 50;
+  min-height: 40px;
+  padding: 0 10px 8px;
+}
+
+.agent-composer-toolbar .composer-actions {
+  margin-left: auto;
 }
 
 /* Composer bottom-right controls: one shared hit size / color / spacing. */
@@ -1504,12 +1550,18 @@ body:has(.memory-drawer) .window-drag-region {
 }
 
 .agent-workspace-layout {
+  --agent-environment-panel-width: 300px;
+  --agent-environment-panel-gutter: 24px;
+  --agent-conversation-shift: 112px;
+
   position: relative;
   display: flex;
   width: 100%;
   height: 100%;
   min-width: 0;
   overflow: hidden;
+  container-name: agent-workspace;
+  container-type: inline-size;
 }
 
 .agent-workspace-layout > .agent-conversation-panel {
@@ -1522,13 +1574,28 @@ body:has(.memory-drawer) .window-drag-region {
   flex: 1 1 auto;
 }
 
+.agent-conversation-content {
+  transition: transform 160ms ease;
+}
+
+/* Shift only when the message column and environment panel can coexist. */
+@container agent-workspace (min-width: 1240px) {
+  .agent-workspace-layout--environment-open .agent-conversation-content {
+    transform: translateX(calc(0px - var(--agent-conversation-shift)));
+  }
+
+  .agent-workspace-layout--environment-open .agent-scroll-to-bottom-fab {
+    right: calc(50% + var(--agent-conversation-shift));
+  }
+}
+
 .agent-environment-panel {
   position: absolute;
   top: 12px;
   right: 12px;
   z-index: 1000;
   display: flex;
-  width: min(400px, calc(100% - 24px));
+  width: min(var(--agent-environment-panel-width), calc(100% - var(--agent-environment-panel-gutter)));
   max-height: calc(100% - 24px);
   min-width: 0;
   flex-direction: column;
@@ -2464,9 +2531,17 @@ body:has(.memory-drawer) .window-drag-region {
   cursor: pointer;
   transform: translateX(50%);
   transition:
+    right 160ms ease,
     background 140ms ease,
     color 140ms ease,
     box-shadow 140ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-conversation-content,
+  .agent-scroll-to-bottom-fab {
+    transition: none;
+  }
 }
 
 .agent-scroll-to-bottom-fab:hover {
@@ -3201,6 +3276,12 @@ button {
   padding: 12px 16px 4px;
 }
 
+/* Expanded composers keep controls in a footer so text can use the full row. */
+.agent-composer-shell--expanded textarea.agent-composer-input--conversation {
+  padding-right: 1rem;
+  padding-bottom: 6px;
+}
+
 /* Keep this more specific than `.agent-composer-shell textarea` above so its generic line-height cannot shift the caret.
    Keep overflow-y:auto (not hidden): if single-line detection lags behind wrapped content, the field must stay scrollable. */
 .agent-composer-shell textarea.agent-composer-input--single {
@@ -3210,10 +3291,6 @@ button {
   overflow-x: hidden;
   overflow-y: auto;
   line-height: 24px;
-}
-
-.agent-composer-shell textarea.agent-composer-input--command-selected {
-  padding-left: 86px;
 }
 
 .agent-attachment-card {
@@ -7161,8 +7238,18 @@ input[type="checkbox"].check-sky:checked::after {
 }
 
 .provider-model-list {
-  max-height: 220px;
+  --provider-model-row-height: 41px;
+  --provider-model-visible-rows: 6;
+
+  width: 100%;
+  max-width: 100%;
+  max-height: calc(var(--provider-model-row-height) * var(--provider-model-visible-rows));
+  overflow-x: hidden;
   overflow-y: auto;
+}
+
+.provider-model-list__row {
+  height: var(--provider-model-row-height);
 }
 
 .modal.model-connection-modal {

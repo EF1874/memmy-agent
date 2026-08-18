@@ -2653,7 +2653,7 @@ export function HomePage() {
       ) : null}
       topBarBorder={Boolean(hasActiveConversation || environmentScope)}
     >
-      <div className="agent-workspace-layout">
+      <div className={`agent-workspace-layout${environmentPanelOpen ? " agent-workspace-layout--environment-open" : ""}`}>
         {!hasActiveConversation ? (
         <section className="app-frame-page-content home-empty-screen flex flex-col items-center justify-center h-full">
           <div className="text-center mb-8">
@@ -2784,7 +2784,7 @@ export function HomePage() {
             onWheel={markAgentConversationUserScrollIntent}
             onTouchMove={markAgentConversationUserScrollIntent}
           >
-            <div className="max-w-3xl mx-auto space-y-3">
+            <div className="agent-conversation-content max-w-3xl mx-auto space-y-3">
               {displayConnectionStatus !== "connected" && (
                 <div className="text-center">
                   <span className="inline-flex text-[11px] px-3 py-1 rounded-tag bg-background-paper text-text-ink/55 border border-border-stone/30">
@@ -2819,7 +2819,7 @@ export function HomePage() {
             </button>
           ) : null}
           <div ref={composerOverlayRef} className="agent-conversation-composer">
-            <div className="max-w-2xl mx-auto">
+            <div className="agent-conversation-content agent-conversation-content--composer max-w-2xl mx-auto">
               <div className="agent-composer-flow">
                 {slashMenuOpen && (
                   <div className="agent-composer-popover absolute left-0 bottom-full mb-3 z-40" style={{ width: "min(448px, 100%)" }}>
@@ -2913,7 +2913,7 @@ export function HomePage() {
                       }}
                       onKeyDown={handleComposerKeyDown}
                       onPaste={handleComposerPaste}
-                      className={`${isComposerSingleLine ? "agent-composer-input--single " : ""}${selectedComposerCommand ? "agent-composer-input--command-selected " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40`}
+                      className={`${isComposerSingleLine ? "agent-composer-input--single " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40`}
                     />
                     <div className="agent-composer-toolbar">
                       <div className="agent-composer-toolbar__leading">
