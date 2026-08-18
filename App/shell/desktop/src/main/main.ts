@@ -92,6 +92,7 @@ import { backupSqliteDatabase } from "./sqlite-backup.js";
 import {
   resolveStartupSplashHtml,
   resolveStartupSplashLanguage,
+  resolveUpdateSplashHtml,
   type StartupSplashLanguage
 } from "./startup-splash.js";
 
@@ -1102,6 +1103,7 @@ async function installPreparedRequiredUpdateBeforeBoot(): Promise<boolean> {
 
     const safeFilePath = resolveDownloadedUpdatePath(preparedUpdate.filePath);
     await access(safeFilePath, fsConstants.R_OK);
+    showUpdateInstallSplashWindow(targetVersion);
     hideMacDockForPreparedUpdateInstall();
     await writePackagedStartupLog(`boot:prepared-required-update ${targetVersion}`);
     if (existsSync(resolvePreparedRequiredUpdateLockPath())) {
@@ -1119,6 +1121,7 @@ async function installPreparedRequiredUpdateBeforeBoot(): Promise<boolean> {
     return Boolean(installResult.willQuit);
   } catch (error) {
     console.warn("prepared required app update skipped:", error);
+    closeSplashWindow();
     await clearPreparedRequiredUpdate();
     await clearPreparedRequiredUpdateAttempt();
     await writePackagedStartupLog(`boot:prepared-required-update skipped\n${formatStartupError(error)}`);
@@ -1468,7 +1471,10 @@ async function installPreparedRequiredUpdateOnQuit(): Promise<void> {
     if (process.platform === "win32") {
       installOptions.expectedVersion = preparedUpdate.latestVersion;
     }
-    await openBackgroundUpdateInstaller(safeFilePath, installOptions);
+    const installResult = await openBackgroundUpdateInstaller(safeFilePath, installOptions);
+    if (process.platform === "darwin" && installResult.background && !(await waitForPreparedRequiredUpdateLockStart())) {
+      await writePackagedStartupLog("quit:prepared-required-update lock-start-timeout");
+    }
   } catch (error) {
     console.warn("prepared required app update on quit skipped:", error);
     if (isMissingFileError(error)) {
@@ -3123,6 +3129,7 @@ let splashCloseTimer: ReturnType<typeof setTimeout> | null = null;
 // Fallback: regardless of whether the close signal arrives, force-close after at most this long, so
 // it never blocks the UI permanently.
 const SPLASH_MAX_VISIBLE_MS = 15 * 1000;
+const UPDATE_SPLASH_MAX_VISIBLE_MS = 60 * 1000;
 
 /**
  * Shows the startup splash. Only called on the normal boot path; creation failures do not affect the boot flow.
@@ -3130,13 +3137,30 @@ const SPLASH_MAX_VISIBLE_MS = 15 * 1000;
  * @returns Nothing.
  */
 function showSplashWindow(): void {
+  const language = resolveCurrentStartupSplashLanguage();
+  showSplashHtml(resolveStartupSplashHtml(language), 300, 200, SPLASH_MAX_VISIBLE_MS);
+}
+
+function showUpdateInstallSplashWindow(version?: string): void {
+  const language = resolveCurrentStartupSplashLanguage();
+  showSplashHtml(resolveUpdateSplashHtml(language, version), 360, 220, UPDATE_SPLASH_MAX_VISIBLE_MS);
+}
+
+function resolveCurrentStartupSplashLanguage(): StartupSplashLanguage {
+  return resolveStartupSplashLanguage(
+    join(app.getPath("userData"), "app.sqlite"),
+    resolveDefaultDesktopDisplayLanguage()
+  );
+}
+
+function showSplashHtml(html: string, width: number, height: number, maxVisibleMs: number): void {
   try {
     if (splashWindow && !splashWindow.isDestroyed()) {
       return;
     }
     const splash = new BrowserWindow({
-      width: 300,
-      height: 200,
+      width,
+      height,
       frame: false,
       resizable: false,
       movable: false,
@@ -3155,12 +3179,8 @@ function showSplashWindow(): void {
         splash.show();
       }
     });
-    const language = resolveStartupSplashLanguage(
-      join(app.getPath("userData"), "app.sqlite"),
-      resolveDefaultDesktopDisplayLanguage()
-    );
-    void splash.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(resolveStartupSplashHtml(language))}`);
-    splashCloseTimer = setTimeout(closeSplashWindow, SPLASH_MAX_VISIBLE_MS);
+    void splash.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+    splashCloseTimer = setTimeout(closeSplashWindow, maxVisibleMs);
     splashCloseTimer.unref?.();
   } catch (error) {
     console.warn("splash window skipped:", error);

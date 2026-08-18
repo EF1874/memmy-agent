@@ -740,6 +740,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain("await writePreparedRequiredUpdate(update, preparedFilePath)");
     expect(mainSource).toContain("async function installPreparedRequiredUpdateOnQuit");
     expect(mainSource).toContain("await installPreparedRequiredUpdateOnQuit()");
+    expect(mainSource).toContain("showUpdateInstallSplashWindow(targetVersion)");
     expect(mainSource).toContain("openAfterInstall: false");
     expect(mainSource).not.toContain('openAfterInstall: process.platform === "win32"');
     expect(mainSource).toContain("function resolvePreparedRequiredUpdateLockPath");
@@ -778,6 +779,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).not.toContain("Memmy 正在更新");
     expect(mainSource).toContain("boot:prepared-required-update win32");
     expect(mainSource).toContain("async function waitForPreparedRequiredUpdateLockStart");
+    expect(mainSource).toContain("quit:prepared-required-update lock-start-timeout");
     expect(windowsPreparedUpdateSource).toContain("openBackgroundUpdateInstaller(safeFilePath");
     expect(mainSource).toContain("$arguments = @('/S', '--updated', '/currentuser', ('/D=' + $appDir))");
     expect(mainSource).not.toContain("app reopened before install; deferring update");
