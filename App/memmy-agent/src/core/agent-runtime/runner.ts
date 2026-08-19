@@ -132,6 +132,7 @@ export class AgentRunSpec {
   maxIterationsFinalPrompt: string | null;
   workspace?: string | null;
   sessionKey?: string | null;
+  hostProjectId?: string | null;
   contextWindowTokens?: number | null;
   contextBlockLimit?: number | null;
   providerRetryMode: string;
@@ -168,6 +169,7 @@ export class AgentRunSpec {
     maxIterationsFinalPrompt?: string | null;
     workspace?: string | null;
     sessionKey?: string | null;
+    hostProjectId?: string | null;
     contextWindowTokens?: number | null;
     contextBlockLimit?: number | null;
     providerRetryMode?: string;
@@ -202,6 +204,7 @@ export class AgentRunSpec {
     this.maxIterationsFinalPrompt = init.maxIterationsFinalPrompt ?? null;
     this.workspace = init.workspace ?? null;
     this.sessionKey = init.sessionKey ?? null;
+    this.hostProjectId = init.hostProjectId ?? null;
     this.contextWindowTokens = init.contextWindowTokens ?? null;
     this.contextBlockLimit = init.contextBlockLimit ?? null;
     this.providerRetryMode = init.providerRetryMode ?? "standard";

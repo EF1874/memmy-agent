@@ -11,6 +11,10 @@ import { MEMORY_SUMMARY_MAX_TOKENS } from "../config/index.js";
 import { memoryVector } from "../storage/memory-vector-state.js";
 import { stableHash } from "../utils/id.js";
 import { formatZonedTime } from "../utils/time.js";
+import {
+  renderL3WorldModelFields,
+  type L3WorldModelFields
+} from "@memmy/local-api-contracts";
 
 export interface CapturedTraceStep {
   key: string;
@@ -1536,6 +1540,8 @@ export interface WorldModelMemoryMeta {
   summary?: string;
   body: string;
   vec: number[] | null;
+  schemaVersion?: 2;
+  fields?: L3WorldModelFields;
 }
 
 export interface WorldModelStructureEntry {
@@ -3398,6 +3404,28 @@ export function worldModelMetaFromMemory(memory: MemoryRow): WorldModelMemoryMet
   if (memory.memoryLayer !== "L3") return null;
   const wm = getInternal<Record<string, unknown>>(memory, "world_model");
   if (!wm) return null;
+  const v2Fields = l3WorldModelV2Fields(memory, wm);
+  if (v2Fields) {
+    const project = typeof memory.info.project_id === "string" && memory.info.project_id.length > 0;
+    const sourceMemoryIds = stringArrayField(memory.properties.internal_info as Record<string, unknown>, "source_memory_ids");
+    return {
+      id: memory.id,
+      memory,
+      title: project ? "项目场域认知" : "通用规则与安全约束",
+      domainKey: project ? `project:${memory.info.project_id as string}` : "general:no_project",
+      domainTags: project ? ["project"] : ["general_rules"],
+      policyIds: sourceMemoryIds,
+      confidence: 0,
+      cohesion: 1,
+      admission: "strict",
+      structure: { environment: [], inference: [], constraints: [] },
+      summary: renderL3WorldModelFields(v2Fields),
+      body: memory.memoryValue,
+      vec: memoryVector(memory, "vec"),
+      schemaVersion: 2,
+      fields: v2Fields
+    };
+  }
   return {
     id: memory.id,
     memory,
@@ -3413,6 +3441,32 @@ export function worldModelMetaFromMemory(memory: MemoryRow): WorldModelMemoryMet
     body: stringField(wm, "body") ?? memory.memoryValue,
     vec: memoryVector(memory, "vec")
   };
+}
+
+function l3WorldModelV2Fields(
+  memory: MemoryRow,
+  worldModel: Record<string, unknown>
+): L3WorldModelFields | null {
+  if (memory.properties.internal_info.schema_version !== 2) return null;
+  const expectedKeys = [
+    "domain_knowledge",
+    "general_rules_and_safety_constraints",
+    "project_contract",
+    "project_environment_profile"
+  ];
+  if (Object.keys(worldModel).sort().join(",") !== expectedKeys.join(",")) return null;
+  const value = (key: string): string | null | undefined => {
+    const field = worldModel[key];
+    return field === null || typeof field === "string" ? field : undefined;
+  };
+  const fields = {
+    generalRulesAndSafetyConstraints: value("general_rules_and_safety_constraints"),
+    projectEnvironmentProfile: value("project_environment_profile"),
+    projectContract: value("project_contract"),
+    domainKnowledge: value("domain_knowledge")
+  };
+  if (Object.values(fields).some((field) => field === undefined)) return null;
+  return fields as L3WorldModelFields;
 }
 
 export const RETRIEVAL_DOCUMENT_VERSION = 2;

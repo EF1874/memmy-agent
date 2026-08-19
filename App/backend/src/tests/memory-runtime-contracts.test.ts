@@ -37,6 +37,83 @@ import type { ZodType } from "zod";
 const ISO = "2026-05-29T10:00:00.000Z";
 
 describe("memory runtime contracts", () => {
+  it("accepts optional L3 feature versions while preserving old health responses", () => {
+    expect(() => MemoryHealthSnapshotSchema.parse(healthOutput())).not.toThrow();
+    expect(() => MemoryHealthSnapshotSchema.parse({
+      ...healthOutput(),
+      features: {
+        l3WorldModelProtocolVersions: [2],
+        workspaceBridgeProtocolVersions: ["1"]
+      }
+    })).not.toThrow();
+    expect(() => MemoryHealthSnapshotSchema.parse({
+      ...healthOutput(),
+      features: {
+        l3WorldModelProtocolVersions: ["2"],
+        workspaceBridgeProtocolVersions: [1]
+      }
+    })).toThrow();
+  });
+
+  it("keeps legacy open-session input and strictly validates protocol v2", () => {
+    expect(() => OpenSessionInputSchema.parse({
+      sessionId: "host-session-1",
+      workspacePath: "/tmp/project",
+      source: "codex"
+    })).not.toThrow();
+    const v2 = {
+      requestId: "86af17ba-8eed-4a3a-9d09-2cc1a9db7b3f",
+      adapterId: "codex-memory",
+      source: "codex",
+      namespace: {
+        source: "codex",
+        profileId: "default",
+        sessionKey: "codex:session-1"
+      },
+      l3WorldModelProtocolVersion: 2,
+      l3WorldModelTransition: "resume_only",
+      workspaceUri: "file:///tmp/project",
+      workspaceHostId: "a".repeat(64)
+    } as const;
+    expect(() => OpenSessionInputSchema.parse(v2)).not.toThrow();
+    expect(() => OpenSessionInputSchema.parse({ ...v2, l3WorldModelTransition: undefined })).toThrow();
+    expect(() => OpenSessionInputSchema.parse({
+      source: "codex",
+      workspaceUri: "file:///tmp/project",
+      workspaceHostId: "a".repeat(64)
+    })).toThrow();
+    expect(() => OpenSessionInputSchema.parse({
+      ...v2,
+      namespace: { ...v2.namespace, projectId: "host-project" }
+    })).toThrow();
+    expect(() => OpenSessionOutputSchema.parse({
+      ...openSessionOutput(),
+      projectId: "ws_project"
+    })).not.toThrow();
+  });
+
+  it("accepts strict four-field World Model details and preserves legacy details", () => {
+    expect(() => GetMemoryOutputSchema.parse(getMemoryOutput())).not.toThrow();
+    const v2 = getMemoryOutput();
+    v2.item.worldModel = {
+      schemaVersion: 2,
+      sourceMemoryIds: ["memory-1"],
+      summary: "project context",
+      generalRulesAndSafetyConstraints: null,
+      projectEnvironmentProfile: "语言：TypeScript",
+      projectContract: "Run tests before commit.",
+      domainKnowledge: null
+    } as typeof v2.item.worldModel;
+    expect(() => GetMemoryOutputSchema.parse(v2)).not.toThrow();
+    expect(() => GetMemoryOutputSchema.parse({
+      ...v2,
+      item: {
+        ...v2.item,
+        worldModel: { ...v2.item.worldModel, domainKnowledge: 1 }
+      }
+    })).toThrow();
+  });
+
   it("parses Span memories and Span processing jobs", () => {
     expect(() => MemoryListItemSchema.parse(memoryListItem({ kind: "span" }))).not.toThrow();
     expect(() => PanelItemsOutputSchema.parse({

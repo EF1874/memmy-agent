@@ -64,6 +64,28 @@ const worldDetail: GetMemoryOutput = {
   etag: "world-detail"
 };
 
+const worldDetailV2: GetMemoryOutput = {
+  item: {
+    ...worldItems.items[0]!,
+    title: "项目场域认知",
+    body: "统一渲染正文",
+    createdAt: "2026-06-03T07:30:00.000Z",
+    sourceMemoryIds: ["memory-trace-1"],
+    metadata: {},
+    worldModel: {
+      schemaVersion: 2,
+      sourceMemoryIds: ["memory-trace-1"],
+      summary: "项目场域摘要",
+      generalRulesAndSafetyConstraints: null,
+      projectEnvironmentProfile: "语言：TypeScript\n测试入口：npm test",
+      projectContract: "修改后必须运行测试。",
+      domainKnowledge: "Alpine 使用 musl libc。"
+    }
+  },
+  version: 3,
+  etag: "world-detail-v2"
+};
+
 describe("WorldModelSubPage", () => {
   it("从 panel items/detail 读取场域认知数据", async () => {
     const client = createMemoryRuntimeClientStub({
@@ -159,6 +181,24 @@ describe("WorldModelSubPage", () => {
     expect(html).toContain("memory-policy-id--link");
     expect(html).toContain('title="memory-policy-1"');
     expect(html).not.toContain("来源记忆");
+  });
+
+  it("按四字段渲染新场域认知并隐藏 legacy 指标和结构", () => {
+    const html = renderWorldModel(
+      { status: "ready", data: worldItems },
+      { status: "ready", data: worldDetailV2 }
+    );
+    expect(html).toContain("项目环境画像");
+    expect(html).toContain("语言：TypeScript");
+    expect(html).toContain("项目契约");
+    expect(html).toContain("修改后必须运行测试。");
+    expect(html).toContain("领域知识");
+    expect(html).toContain("Alpine 使用 musl libc。");
+    expect(html).not.toContain("通用规则与安全约束");
+    expect(html).not.toContain("关联经验");
+    expect(html).not.toContain("结构化认知");
+    expect(html).not.toContain("环境拓扑");
+    expect(html).not.toContain("memory-policy-1");
   });
 });
 

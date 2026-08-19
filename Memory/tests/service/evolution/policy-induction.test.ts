@@ -1210,10 +1210,7 @@ describe("MemoryService / evolution / policy induction", () => {
          )
        ORDER BY job_type`
     ).all(userId, l2Rows[0]!.id) as Array<{ job_type: string }>;
-    expect(downstreamJobs.map((item) => item.job_type)).toEqual([
-      "embedding",
-      "l3_abstraction"
-    ]);
+    expect(downstreamJobs.map((item) => item.job_type)).toEqual(["embedding"]);
 
     db.close();
   });

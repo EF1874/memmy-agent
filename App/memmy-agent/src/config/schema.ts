@@ -1066,6 +1066,21 @@ export class GatewayConfig extends Base {
   }
 }
 
+export class MemmyMemoryWorkspaceBridgeConfig extends Base {
+  enabled = false;
+
+  constructor(init: Dict = {}) {
+    super();
+    this.enabled = Object.prototype.hasOwnProperty.call(init, "enabled")
+      ? assertBoolean("memmyMemory.workspaceBridge.enabled", init.enabled)
+      : false;
+  }
+
+  override toObject(): Dict {
+    return { enabled: this.enabled };
+  }
+}
+
 export class MemmyMemoryConfig extends Base {
   enabled = true;
   userId = "local-user";
@@ -1075,6 +1090,7 @@ export class MemmyMemoryConfig extends Base {
   evolution?: Dict;
   embedding?: Dict;
   algorithm?: Dict;
+  workspaceBridge: MemmyMemoryWorkspaceBridgeConfig;
 
   constructor(init: Dict = {}, options: { userId?: string } = {}) {
     super();
@@ -1091,6 +1107,13 @@ export class MemmyMemoryConfig extends Base {
     this.evolution = undefined;
     this.embedding = undefined;
     this.algorithm = pick<Dict | undefined>(init, ["algorithm"], undefined);
+    this.workspaceBridge = init.workspaceBridge instanceof MemmyMemoryWorkspaceBridgeConfig
+      ? init.workspaceBridge
+      : new MemmyMemoryWorkspaceBridgeConfig(
+          Object.prototype.hasOwnProperty.call(init, "workspaceBridge")
+            ? assertPlainObject("memmyMemory.workspaceBridge", init.workspaceBridge)
+            : {},
+        );
   }
 
   override toObject(): Dict {
@@ -1100,6 +1123,7 @@ export class MemmyMemoryConfig extends Base {
       version: this.version,
       storage: this.storage,
       algorithm: this.algorithm,
+      workspaceBridge: this.workspaceBridge.toObject(),
     });
   }
 }

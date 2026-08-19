@@ -68,6 +68,7 @@ import {
   namespaceForRawTurn,
   namespaceForSession,
   normalizeNamespace,
+  resolveV2WorkspaceIdentityForOpenRequest,
   sessionScopeForOpenRequest
 } from "../namespace/namespace-scope.js";
 import {
@@ -473,7 +474,7 @@ export class SessionTurnService {
     userId: string;
     source: string;
     profileId: string;
-    projectId?: string;
+    projectId?: string | null;
     workspaceId?: string;
     conversationId?: string;
     status: "open";
@@ -502,6 +503,20 @@ export class SessionTurnService {
     }
     const namespace = normalizeNamespace(request.namespace);
     const at = nowIso();
+    if (request.l3WorldModelProtocolVersion === undefined && (
+      request.l3WorldModelTransition !== undefined ||
+      request.workspaceUri !== undefined ||
+      request.workspaceHostId !== undefined
+    )) {
+      throw new MemoryServiceError("invalid_argument", "L3 World Model v2 fields require protocol version 2");
+    }
+    if (request.l3WorldModelProtocolVersion === 2) {
+      const body = this.openV2Session(request, namespace, at);
+      if (idempotencyKey) {
+        this.deps.repos.runtime.saveIdempotency(idempotencyKey, requestHash, body, at);
+      }
+      return body;
+    }
     if (request.sessionId) {
       const existingSession = this.deps.repos.runtime.getSession(request.sessionId);
       if (existingSession) {
@@ -580,7 +595,7 @@ export class SessionTurnService {
       conversationId: this.deps.stringFromMeta(request.meta, "conversationId"),
       status: "open" as const,
       meta: {
-        ...(request.meta ?? {}),
+        ...sanitizedSessionMeta(request.meta),
         ...(request.timeZone ? { time_zone: request.timeZone } : {})
       },
       openedAt: at,
@@ -622,6 +637,190 @@ export class SessionTurnService {
     return body;
   }
 
+  private openV2Session(
+    request: SessionOpenRequest,
+    namespace: ReturnType<typeof normalizeNamespace>,
+    at: string
+  ): ReturnType<SessionTurnService["openSession"]> {
+    if (!request.l3WorldModelTransition) {
+      throw new MemoryServiceError("invalid_argument", "l3WorldModelTransition is required for protocol v2");
+    }
+    if (!namespace.sessionKey) {
+      throw new MemoryServiceError("invalid_argument", "namespace.sessionKey is required for protocol v2");
+    }
+    let workspace: ReturnType<typeof resolveV2WorkspaceIdentityForOpenRequest>;
+    try {
+      workspace = resolveV2WorkspaceIdentityForOpenRequest(request, namespace);
+    } catch (error) {
+      throw new MemoryServiceError(
+        "invalid_argument",
+        error instanceof Error ? error.message : "invalid workspace identity"
+      );
+    }
+
+    return this.deps.repos.transaction(() => {
+      const source = request.source ?? namespace.source;
+      const profileId = request.profileId ?? namespace.profileId;
+      let existing = request.sessionId
+        ? this.deps.repos.runtime.getSession(request.sessionId)
+        : this.deps.repos.runtime.findOpenSessionByHostKey({
+            userId: namespace.userId,
+            source,
+            profileId,
+            hostSessionKey: namespace.sessionKey!
+          });
+
+      if (request.sessionId && !existing) {
+        throw new MemoryServiceError("conflict", "l3_world_model_v2_session_not_open");
+      }
+      if (existing) {
+        if (existing.status !== "open") {
+          throw new MemoryServiceError("conflict", "l3_world_model_v2_session_not_open");
+        }
+        const protocol = existing.meta.l3_world_model_protocol_version;
+        if (protocol === 2) {
+          this.assertV2SessionIdentity(existing, request, namespace, workspace);
+          const touched = this.deps.repos.runtime.updateSessionScope(existing.id, {}, at) ?? existing;
+          return this.v2SessionOpenBody(touched, true);
+        }
+        if (request.sessionId || request.l3WorldModelTransition !== "allow_legacy_rollover") {
+          throw new MemoryServiceError("conflict", "l3_world_model_v2_session_not_open");
+        }
+        this.closeLegacySessionForV2Rollover(existing, at);
+        existing = undefined;
+      }
+
+      const explicitProjectId = request.projectId ?? request.namespace?.projectId;
+      const explicitWorkspaceId = request.workspaceId ?? request.namespace?.workspaceId;
+      if (explicitProjectId || explicitWorkspaceId) {
+        throw new MemoryServiceError(
+          "invalid_argument",
+          "protocol v2 derives projectId and workspaceId from workspace identity"
+        );
+      }
+      const session: SessionRecord = {
+        id: newId("session"),
+        userId: namespace.userId,
+        source,
+        profileId,
+        profileLabel: namespace.profileLabel,
+        projectId: workspace.projectId ?? undefined,
+        workspaceId: workspace.workspaceId ?? undefined,
+        workspacePath: request.workspacePath ?? namespace.workspacePath,
+        hostSessionKey: namespace.sessionKey,
+        conversationId: this.deps.stringFromMeta(request.meta, "conversationId"),
+        status: "open",
+        meta: v2SessionMeta(request, workspace, request.timeZone),
+        openedAt: at,
+        lastSeenAt: at,
+        updatedAt: at
+      };
+      this.deps.repos.runtime.createSession(session);
+      const scopedNamespace = {
+        ...namespace,
+        projectId: session.projectId,
+        workspaceId: session.workspaceId
+      };
+      const changeSeq = this.deps.repos.runtime.appendChange({
+        memoryId: session.id,
+        namespaceId: this.deps.namespaceIdFromContext(scopedNamespace),
+        kind: "session",
+        op: "created",
+        entityId: session.id,
+        userId: session.userId,
+        changeType: "session_opened",
+        after: session,
+        source: "session.open",
+        createdAt: at
+      });
+      return {
+        ...this.v2SessionOpenBody(session, false),
+        changeSeq,
+        syncCursor: this.deps.encodeChangeCursor(changeSeq, scopedNamespace)
+      };
+    });
+  }
+
+  private assertV2SessionIdentity(
+    session: SessionRecord,
+    request: SessionOpenRequest,
+    namespace: ReturnType<typeof normalizeNamespace>,
+    workspace: ReturnType<typeof resolveV2WorkspaceIdentityForOpenRequest>
+  ): void {
+    const savedWorkspaceUri = optionalMetaString(session.meta, "workspace_uri");
+    const savedWorkspaceHostId = optionalMetaString(session.meta, "workspace_host_id");
+    const requestProjectId = request.projectId ?? request.namespace?.projectId;
+    const requestWorkspaceId = request.workspaceId ?? request.namespace?.workspaceId;
+    const mismatch = session.userId !== namespace.userId ||
+      session.source !== (request.source ?? namespace.source) ||
+      session.profileId !== (request.profileId ?? namespace.profileId) ||
+      session.hostSessionKey !== namespace.sessionKey ||
+      (requestProjectId !== undefined && requestProjectId !== session.projectId) ||
+      (requestWorkspaceId !== undefined && requestWorkspaceId !== session.workspaceId) ||
+      (request.workspaceUri !== undefined && request.workspaceUri !== savedWorkspaceUri) ||
+      (request.workspaceHostId !== undefined && request.workspaceHostId !== savedWorkspaceHostId) ||
+      (request.workspaceUri !== undefined && workspace.projectId !== (session.projectId ?? null));
+    if (mismatch) {
+      throw new MemoryServiceError("conflict", "l3_world_model_v2_session_scope_conflict");
+    }
+  }
+
+  private closeLegacySessionForV2Rollover(session: SessionRecord, at: string): void {
+    const closedEpisodes = this.deps.repos.runtime.closeOpenEpisodesForSession(session.id, at);
+    const closed = this.deps.repos.runtime.closeSession(session.id, at);
+    if (!closed) throw new MemoryServiceError("conflict", "l3_world_model_v2_session_not_open");
+    const closedWithMeta = this.deps.repos.runtime.updateSessionMeta(session.id, {
+      close_reason: "l3_world_model_protocol_v2"
+    }, at) ?? closed;
+    for (const episode of closedEpisodes) {
+      this.deps.repos.runtime.appendChange({
+        memoryId: episode.id,
+        namespaceId: this.deps.namespaceIdFromSession(closedWithMeta),
+        kind: "episode",
+        op: "updated",
+        entityId: episode.id,
+        userId: episode.userId,
+        changeType: "episode_closed",
+        after: episode,
+        source: "session.open.v2_rollover",
+        createdAt: at
+      });
+      this.deps.finalizeClosedEpisode(episode, at, "session_closed");
+    }
+    this.deps.repos.runtime.appendChange({
+      memoryId: session.id,
+      namespaceId: this.deps.namespaceIdFromSession(closedWithMeta),
+      kind: "session",
+      op: "updated",
+      entityId: session.id,
+      userId: session.userId,
+      changeType: "session_closed",
+      before: session,
+      after: closedWithMeta,
+      source: "session.open.v2_rollover",
+      createdAt: at
+    });
+  }
+
+  private v2SessionOpenBody(
+    session: SessionRecord,
+    resumed: boolean
+  ): ReturnType<SessionTurnService["openSession"]> {
+    return {
+      sessionId: session.id,
+      userId: session.userId,
+      source: session.source,
+      profileId: session.profileId,
+      projectId: session.projectId ?? null,
+      workspaceId: session.workspaceId,
+      conversationId: session.conversationId,
+      status: "open",
+      resumed,
+      openedAt: session.openedAt,
+      serverTime: nowIso()
+    };
+  }
+
   closeSession(sessionId: string, request: RequestEnvelope = {}): {
     ok: true;
     sessionId: string;
@@ -635,55 +834,64 @@ export class SessionTurnService {
     if (!this.deps.memoryAddEnabled()) {
       return this.deps.closeSessionNoWrite(sessionId, request);
     }
-    const existing = this.deps.repos.runtime.getSession(sessionId);
-    if (!existing) {
-      throw new MemoryServiceError("not_found", `session not found: ${sessionId}`);
-    }
-    this.deps.assertSessionInScope(existing, request.namespace);
-    const at = nowIso();
-    const closedEpisodes = this.deps.repos.runtime.closeOpenEpisodesForSession(sessionId, at);
-    const session = this.deps.repos.runtime.closeSession(sessionId, at);
-    if (!session) {
-      throw new MemoryServiceError("not_found", `session not found: ${sessionId}`);
-    }
-    for (const episode of closedEpisodes) {
-      this.deps.repos.runtime.appendChange({
-        memoryId: episode.id,
+    return this.deps.repos.transaction(() => {
+      const existing = this.deps.repos.runtime.getSession(sessionId);
+      if (!existing) {
+        throw new MemoryServiceError("not_found", `session not found: ${sessionId}`);
+      }
+      this.deps.assertSessionInScope(existing, request.namespace);
+      const at = nowIso();
+      const closedEpisodes = this.deps.repos.runtime.closeOpenEpisodesForSession(sessionId, at);
+      const session = this.deps.repos.runtime.closeSession(sessionId, at);
+      if (!session) {
+        throw new MemoryServiceError("not_found", `session not found: ${sessionId}`);
+      }
+      for (const episode of closedEpisodes) {
+        this.deps.repos.runtime.appendChange({
+          memoryId: episode.id,
+          namespaceId: this.deps.namespaceIdFromSession(session),
+          kind: "episode",
+          op: "updated",
+          entityId: episode.id,
+          userId: episode.userId,
+          changeType: "episode_closed",
+          after: episode,
+          source: "session.close",
+          createdAt: at
+        });
+        this.deps.finalizeClosedEpisode(episode, at, "session_closed");
+      }
+      if (session.meta.l3_world_model_protocol_version === 2) {
+        this.deps.repos.l3WorldModels.freezeBatches({
+          sessionId,
+          trigger: "session_close",
+          at
+        });
+      }
+      const changeSeq = this.deps.repos.runtime.appendChange({
+        memoryId: sessionId,
         namespaceId: this.deps.namespaceIdFromSession(session),
-        kind: "episode",
+        kind: "session",
         op: "updated",
-        entityId: episode.id,
-        userId: episode.userId,
-        changeType: "episode_closed",
-        after: episode,
+        entityId: sessionId,
+        userId: session.userId,
+        changeType: "session_closed",
+        before: existing,
+        after: session,
         source: "session.close",
         createdAt: at
       });
-      this.deps.finalizeClosedEpisode(episode, at, "session_closed");
-    }
-    const changeSeq = this.deps.repos.runtime.appendChange({
-      memoryId: sessionId,
-      namespaceId: this.deps.namespaceIdFromSession(session),
-      kind: "session",
-      op: "updated",
-      entityId: sessionId,
-      userId: session.userId,
-      changeType: "session_closed",
-      before: existing,
-      after: session,
-      source: "session.close",
-      createdAt: at
+      return {
+        ok: true,
+        sessionId,
+        status: "closed" as const,
+        closedEpisodeIds: closedEpisodes.map((episode) => episode.id),
+        changeSeq,
+        syncCursor: this.deps.encodeChangeCursor(changeSeq, namespaceForSession(session)),
+        closedAt: session.closedAt ?? nowIso(),
+        serverTime: nowIso()
+      };
     });
-    return {
-      ok: true,
-      sessionId,
-      status: "closed",
-      closedEpisodeIds: closedEpisodes.map((episode) => episode.id),
-      changeSeq,
-      syncCursor: this.deps.encodeChangeCursor(changeSeq, namespaceForSession(session)),
-      closedAt: session.closedAt ?? nowIso(),
-      serverTime: nowIso()
-    };
   }
 
   compactSession(sessionId: string, request: SessionCompactRequest = {}): {
@@ -858,20 +1066,6 @@ export class SessionTurnService {
         createdAt: at
       }));
     }
-    jobs.push(this.deps.enqueueJob({
-      jobType: "l3_abstraction",
-      userId: session.userId,
-      sessionId,
-      episodeId: episode.id,
-      payload: {
-        reason: "manual_compaction",
-        targetKind: "policy_cluster",
-        sourceMemoryId: l1MemoryId,
-        episodeId: episode.id,
-        rawTurnId: rawTurn.id
-      },
-      createdAt: at
-    }));
     this.deps.repos.runtime.insertAudit({
       userId: session.userId,
       sessionId: session.id,
@@ -1393,6 +1587,15 @@ export class SessionTurnService {
 
         const upsert = this.deps.repos.memories.upsertByKey(l1Memory);
         l1MemoryIds.push(upsert.memory.id);
+        if (session.meta.l3_world_model_protocol_version === 2) {
+          this.deps.repos.l3WorldModels.registerInputTrace({
+            sessionId: session.id,
+            l1MemoryId: upsert.memory.id,
+            rawTurnId: stepRawTurnId,
+            episodeId: episode.id,
+            createdAt: at
+          });
+        }
         changeSeq = this.deps.repos.runtime.appendChange({
           memoryId: upsert.memory.id,
           namespaceId: this.deps.namespaceIdFromMemory(upsert.memory),
@@ -2639,9 +2842,23 @@ export class SessionTurnService {
         });
         jobs.push(...this.deps.finalizeClosedEpisode(closed, at, "topic_boundary"));
         closedEpisodeIds.push(closed.id);
+        if (decision.relation === "new_task" && session.meta.l3_world_model_protocol_version === 2) {
+          this.deps.repos.l3WorldModels.freezeBatches({
+            sessionId: session.id,
+            trigger: "new_task",
+            at
+          });
+        }
       }
     } else {
       jobs.push(...this.deps.finalizeClosedEpisode(latest, at, "topic_boundary"));
+      if (decision.relation === "new_task" && session.meta.l3_world_model_protocol_version === 2) {
+        this.deps.repos.l3WorldModels.freezeBatches({
+          sessionId: session.id,
+          trigger: "new_task",
+          at
+        });
+      }
     }
     const next = this.ensureEpisode(session);
     const episode = this.deps.repos.runtime.updateEpisodeMeta(next.id, {
@@ -2940,4 +3157,31 @@ export class SessionTurnService {
     });
     return episode;
   }
+}
+
+function sanitizedSessionMeta(meta?: Record<string, unknown>): Record<string, unknown> {
+  const sanitized = { ...(meta ?? {}) };
+  delete sanitized.l3_world_model_protocol_version;
+  delete sanitized.workspace_uri;
+  delete sanitized.workspace_host_id;
+  return sanitized;
+}
+
+function v2SessionMeta(
+  request: SessionOpenRequest,
+  workspace: ReturnType<typeof resolveV2WorkspaceIdentityForOpenRequest>,
+  timeZone?: string
+): Record<string, unknown> {
+  return {
+    ...sanitizedSessionMeta(request.meta),
+    l3_world_model_protocol_version: 2,
+    ...(workspace.workspaceUri ? { workspace_uri: workspace.workspaceUri } : {}),
+    ...(workspace.workspaceHostId ? { workspace_host_id: workspace.workspaceHostId } : {}),
+    ...(timeZone ? { time_zone: timeZone } : {})
+  };
+}
+
+function optionalMetaString(meta: Record<string, unknown>, key: string): string | undefined {
+  const value = meta[key];
+  return typeof value === "string" && value ? value : undefined;
 }

@@ -111,7 +111,7 @@ import { AgentHook, AgentHookContext, CompositeAgentHook } from "./hook.js";
 import { SubagentManager } from "./subagent.js";
 import { AutoCompact } from "./autocompact.js";
 import { configuredModelPresets, defaultSelectionSignature, makePresetSnapshotLoader, normalizePresetName } from "./model-presets.js";
-import { installMemmyMemory } from "../../memmy-memory/index.js";
+import { installMemmyMemory, type MemmyMemoryIntegration } from "../../memmy-memory/index.js";
 import { createByokTokenUsageRecorder, installByokTokenUsage } from "../../integrations/byok-token-usage/index.js";
 import {
   SessionDagQueueManager,
@@ -733,6 +733,7 @@ export class AgentLoop {
   mcpConnected: boolean;
   mcpConnecting: boolean;
   private browserRegistryInitialized = false;
+  private readonly memmyMemoryIntegration: MemmyMemoryIntegration;
   subagentPendingWaitMs = 300_000;
   static readonly RUNTIME_CHECKPOINT_KEY = "runtimeCheckpoint";
   static readonly PENDING_USER_TURN_KEY = "pendingUserTurn";
@@ -772,7 +773,11 @@ export class AgentLoop {
     this.fileMemoryEnabled = this.config.fileMemory.enabled;
     const defaults = this.config.agents.defaults;
     this.workspace = path.resolve(getWorkspacePath(init.workspace ?? defaults.workspace ?? process.cwd()));
-    installMemmyMemory(this.config, { workspace: this.workspace, hooks: this.extraHooks });
+    this.memmyMemoryIntegration = installMemmyMemory(this.config, {
+      workspace: this.workspace,
+      workspaceBridgeEnabled: this.config.memmyMemory.workspaceBridge.enabled,
+      hooks: this.extraHooks,
+    });
     installByokTokenUsage(this.config, { hooks: this.extraHooks });
     this.provider = init.provider ?? makeProvider(this.config);
     this.model = init.model ?? defaults.model ?? this.provider?.model ?? null;
@@ -1109,6 +1114,7 @@ export class AgentLoop {
   async closeRuntimeTools(): Promise<void> {
     await this.browserSessionManager.close();
     await this.closeMcp();
+    await this.memmyMemoryIntegration.dispose?.();
   }
 
   async closeBrowserSession(
@@ -3300,6 +3306,7 @@ export class AgentLoop {
       boundary = null,
       tools = null,
       sessionWorkspace = this.workspace,
+      hostProjectId = null,
       modelSelection = null,
       internalTurnContext = null,
       onMaxFinalizationStarting = null,
@@ -3320,6 +3327,7 @@ export class AgentLoop {
       boundary?: TurnCancellationBoundary | null;
       tools?: ToolRegistryInstance | null;
       sessionWorkspace?: string;
+      hostProjectId?: string | null;
       modelSelection?: ResolvedModelSelection | null;
       internalTurnContext?: AgentInternalTurnContext | null;
       onMaxFinalizationStarting?: (() => void) | null;
@@ -3371,6 +3379,7 @@ export class AgentLoop {
         toolResultMaxCharsByName: SESSION_TOOL_RESULT_MAX_CHARS_BY_NAME,
         workspace: sessionWorkspace,
         sessionKey: activeSessionKey,
+        hostProjectId,
         contextWindowTokens: activeContextWindowTokens,
         contextBlockLimit: this.contextBlockLimit,
         providerRetryMode: this.providerRetryMode,
@@ -3707,6 +3716,13 @@ export class AgentLoop {
     if (revalidated.cwd !== sessionWorkspace || revalidated.projectId !== ctx.sessionProjectId) {
       throw new SessionWorkspaceError("workspace_conflict");
     }
+    await this.lifecycleHook().beforeBuildSystemPrompt(new AgentHookContext({
+      session: ctx.session,
+      sessionKey: ctx.sessionKey,
+      reason: "system_prompt_build",
+      spec: { hostProjectId: ctx.sessionProjectId, workspace: sessionWorkspace },
+      metadata: { lifecycle: "system_prompt" },
+    }));
     const compactionOptions: {
       replayMaxMessages: number | null;
       notifyOnLockWait?: boolean;
@@ -3853,6 +3869,7 @@ export class AgentLoop {
       boundary: ctx.boundary,
       tools: ctx.tools,
       sessionWorkspace: ctx.sessionWorkspace ?? this.workspace,
+      hostProjectId: ctx.sessionProjectId,
       modelSelection: ctx.modelSelection,
       internalTurnContext: ctx.msg.internal?.kind === "goal_continuation" && ctx.dagGoalContext
         ? {
@@ -4109,6 +4126,13 @@ export class AgentLoop {
       sessionBindingOverride ?? null,
     );
     const sessionWorkspace = sessionBinding.cwd;
+    await this.lifecycleHook().beforeBuildSystemPrompt(new AgentHookContext({
+      session,
+      sessionKey: key,
+      reason: "system_prompt_build",
+      spec: { hostProjectId: sessionBinding.projectId, workspace: sessionWorkspace },
+      metadata: { lifecycle: "system_prompt" },
+    }));
     if (this.restoreRuntimeCheckpoint(session)) this.sessions.save(session);
     if (this.restorePendingUserTurn(session)) this.sessions.save(session);
 
@@ -4200,6 +4224,7 @@ export class AgentLoop {
       abortSignal,
       tools,
       sessionWorkspace,
+      hostProjectId: sessionBinding.projectId,
       modelSelection,
     });
     if (abortSignal?.aborted || stopReason === "cancelled") {
@@ -4466,6 +4491,7 @@ export class AgentLoop {
       this.lastUsageBySession.delete(sessionKey);
       await prepare();
       await this.goalRuntime.drainSessionDeletion(sessionKey);
+      void this.memmyMemoryIntegration.closeSession?.(sessionKey, "deleted").catch(() => undefined);
       const result = await this.withSessionTurnBarrier(sessionKey, operation);
       this.scheduledGoalSessions.delete(sessionKey);
       this.lastUsageBySession.delete(sessionKey);

@@ -6,6 +6,7 @@ export function resolveMemmyMemoryConfig(config: Config | Record<string, any> | 
   return {
     enabled: Boolean(raw?.enabled ?? raw?.enable ?? true),
     userId: stringOrUndefined(raw?.userId) ?? "local-user",
+    workspaceBridgeEnabled: raw?.workspaceBridge?.enabled === true,
   };
 }
 

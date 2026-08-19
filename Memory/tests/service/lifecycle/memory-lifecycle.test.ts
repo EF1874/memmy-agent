@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { Repositories } from "../../../src/storage/repositories.js";
 import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
 import {
   insertActivePolicyMemory,
@@ -120,7 +121,7 @@ describe("MemoryService / lifecycle / governance", () => {
     expect(memoryState(db, "policy_orphaned")).toBe("archived");
     expect(memoryProperties(db, "policy_orphaned").internal_info?.policy?.status)
       .toBe("quarantined");
-    expect(memoryState(db, "world_orphaned")).toBe("archived");
+    expect(memoryState(db, "world_orphaned")).toBe("activated");
     expect(memoryState(db, "skill_orphaned")).toBe("archived");
     expect(memoryProperties(db, "skill_orphaned").internal_info?.skill?.status)
       .toBe("suspended");
@@ -215,7 +216,7 @@ describe("MemoryService / lifecycle / governance", () => {
     expect(memoryState(db, "policy_dependency_p1")).toBe("archived");
     expect(memoryProperties(db, "policy_dependency_p1").internal_info?.policy?.status)
       .toBe("quarantined");
-    expect(memoryState(db, "world_dependency_p1")).toBe("archived");
+    expect(memoryState(db, "world_dependency_p1")).toBe("activated");
     expect(memoryState(db, "skill_dependency_p1")).toBe("archived");
     expect(memoryProperties(db, "skill_dependency_p1").internal_info?.skill?.status)
       .toBe("suspended");
@@ -435,3 +436,67 @@ function memoryProperties(
   };
   return JSON.parse(row.properties_json);
 }
+
+
+describe("L3 World Model scope deletion", () => {
+  it("detaches the unique scope and makes already queued field work no-change", () => {
+    const { db, service } = createTestService();
+    const namespace = {
+      source: "codex",
+      profileId: "default",
+      sessionKey: "l3-delete-session",
+      userId: "l3-delete-user"
+    };
+    const opened = service.openSession({
+      l3WorldModelProtocolVersion: 2,
+      l3WorldModelTransition: "resume_only",
+      namespace
+    });
+    const completed = service.completeTurn("l3-delete-turn", {
+      sessionId: opened.sessionId,
+      query: "Never destroy source data without confirmation.",
+      answer: "The source data was preserved.",
+      toolCalls: [{ name: "delete", input: { path: "source.csv" } }],
+      toolResults: [{ name: "delete", output: "confirmation required", exitCode: 1 }]
+    });
+    service.l3WorldModelBoundary(opened.sessionId, {
+      requestId: "b14640a4-3f57-4fb4-9007-ad2f6bd22bc4",
+      adapterId: "codex-memory",
+      source: "codex",
+      namespace,
+      trigger: "token_compaction",
+      throughL1MemoryId: completed.l1MemoryId
+    });
+    const repos = new Repositories(db.db);
+    const existing = repos.l3WorldModels.upsertField({
+      userId: namespace.userId,
+      targetField: "general_rules_and_safety_constraints",
+      value: "Never destroy source data without confirmation."
+    })!;
+
+    service.deleteMemory(existing.id, { namespace });
+
+    expect(repos.l3WorldModels.getScope(namespace.userId, null)?.memoryId).toBeUndefined();
+    expect(db.db.prepare(`SELECT status FROM memories WHERE id = ?`).get(existing.id))
+      .toEqual({ status: "deleted" });
+    expect(db.db.prepare(
+      `SELECT status, no_change FROM l3_world_model_batch_targets`
+    ).get()).toEqual({ status: "applied", no_change: 1 });
+    expect(db.db.prepare(
+      `SELECT status, leased_until FROM evolution_jobs WHERE job_type = 'l3_world_model_update'`
+    ).get()).toEqual({ status: "succeeded", leased_until: null });
+    expect(db.db.prepare(
+      `SELECT terminal_outcome FROM l3_world_model_evidence_batches`
+    ).get()).toEqual({ terminal_outcome: "applied" });
+
+    const recreated = repos.l3WorldModels.upsertField({
+      userId: namespace.userId,
+      targetField: "general_rules_and_safety_constraints",
+      value: "Keep deletions recoverable."
+    });
+    expect(recreated?.id).not.toBe(existing.id);
+    expect(recreated?.status).toBe("activated");
+
+    db.close();
+  });
+});

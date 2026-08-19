@@ -34,6 +34,7 @@ import {
 import { createMemoryLogger, memoryErrorFields } from "../../logging/logger.js";
 import type { Embedder, LlmClient } from "../../model/types.js";
 import {
+  isStrictL3WorldModelV2Memory,
   kindFromMemory,
   Repositories,
   type EpisodeRecord
@@ -1782,7 +1783,8 @@ export class RetrievalService {
           currentAgentId: context.namespace.source
         });
     const memories = retrievalOutput.memories.filter((memory) =>
-      !memoryUsesStalePolicy(memory, stalePolicyIds)
+      !memoryUsesStalePolicy(memory, stalePolicyIds) &&
+      (retrievalMode !== "turn_start" || !isStrictL3WorldModelV2Memory(memory))
     );
     const allowedMemoryIds = new Set(memories.map((memory) => memory.id));
     const allowedEpisodeIds = new Set(memories.flatMap((memory) => {

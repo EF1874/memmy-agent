@@ -1,3 +1,44 @@
+import type {
+  L3WorldModelFeatures,
+  L3WorldModelProtocolVersion,
+  L3WorldModelTransition,
+  WorkspaceHostId,
+  WorkspaceUri
+} from "@memmy/local-api-contracts";
+
+export type {
+  InventoryEntry,
+  L3WorldModelBoundaryRequest,
+  L3WorldModelBoundaryResponse,
+  L3WorldModelBoundaryTrigger,
+  L3WorldModelFeatures,
+  L3WorldModelFieldName,
+  L3WorldModelFields,
+  L3WorldModelProtocolVersion,
+  L3WorldModelRequestEnvelope,
+  L3WorldModelRuntimeNamespace,
+  L3WorldModelTraceHeadResponse,
+  L3WorldModelTransition,
+  ProjectEnvironmentScanPolicy,
+  ProjectEnvironmentSyncEvidenceRequest,
+  ProjectEnvironmentSyncResponse,
+  ProjectEnvironmentSyncStartRequest,
+  ProjectEnvironmentSyncStatus,
+  ProjectEnvironmentSyncStatusQuery,
+  ProjectEnvironmentSyncTrigger,
+  ProjectWorkspaceEvidence,
+  ProjectWorkspaceOperation,
+  ProjectWorkspaceUnsupportedReason,
+  RuntimeProbe,
+  SessionL3WorldModelContextResponse,
+  WorkspaceBridgeCapabilities,
+  WorkspaceBridgeOperationKind,
+  WorkspaceHostId,
+  WorkspaceIdentityFields,
+  WorkspaceRelativePath,
+  WorkspaceUri
+} from "@memmy/local-api-contracts";
+
 export type IsoTime = string;
 export const DEFAULT_NAMESPACE_SOURCE = "unknown";
 export type Cursor = string;
@@ -52,6 +93,8 @@ export type JobType =
   | "l2_association"
   | "l2_induction"
   | "l3_abstraction"
+  | "l3_world_model_update"
+  | "project_environment_profile"
   | "skill_crystallization"
   | "skill_trial_resolve";
 
@@ -276,6 +319,10 @@ export interface SessionCompactRequest extends RequestEnvelope {
 export interface SessionOpenRequest extends RequestEnvelope {
   source?: string;
   profileId?: string;
+  l3WorldModelProtocolVersion?: L3WorldModelProtocolVersion;
+  l3WorldModelTransition?: L3WorldModelTransition;
+  workspaceUri?: WorkspaceUri;
+  workspaceHostId?: WorkspaceHostId;
   projectId?: string;
   workspaceId?: string;
   workspacePath?: string;
@@ -510,6 +557,7 @@ export interface HealthResponse {
     memoryLayers: MemoryLayer[];
     supportsCli: boolean;
   };
+  features?: L3WorldModelFeatures;
   serverTime: IsoTime;
 }
 

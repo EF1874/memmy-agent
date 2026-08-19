@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { canonicalJson, sha256Hex } from "@memmy/local-api-contracts";
 import {
   DEFAULT_MEMMY_CONFIG,
   MemoryDb,
@@ -129,6 +130,10 @@ describe("MemoryService / REST contract", () => {
         fullText?: string;
         vector?: string;
       };
+      features?: {
+        l3WorldModelProtocolVersions: number[];
+        workspaceBridgeProtocolVersions: string[];
+      };
     };
     expect(response.status).toBe(200);
     expect(body.ok).toBe(true);
@@ -136,6 +141,10 @@ describe("MemoryService / REST contract", () => {
     expect(body.storage.backendId).toBe("sqlite-local");
     expect(body.storage.fullText).toBe("fts5");
     expect(body.storage.vector).toBe("native");
+    expect(body.features).toEqual({
+      l3WorldModelProtocolVersions: [2],
+      workspaceBridgeProtocolVersions: ["1"]
+    });
     const client = new MemoryRestClient({
       endpoint: `http://127.0.0.1:${address.port}`
     });
@@ -156,6 +165,108 @@ describe("MemoryService / REST contract", () => {
       "panel.items"
     ]);
 
+    });
+    db.close();
+  });
+
+  it("serves strict v2 L3 and project environment routes through MemoryRestClient", async () => {
+    const { db, service } = createTestService();
+    const server = createMemoryHttpServer({ service });
+    await withServerClosed(server, async () => {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP address");
+      const client = new MemoryRestClient({ endpoint: `http://127.0.0.1:${address.port}` });
+      const namespace = {
+        source: "codex",
+        profileId: "default",
+        sessionKey: "codex:rest-v2",
+        userId: "rest-v2-user"
+      } as const;
+      const opened = await client.openSession({
+        requestId: "8c960b93-852f-4182-833c-d07591bb7c21",
+        adapterId: "codex-memory",
+        source: "codex",
+        namespace,
+        l3WorldModelProtocolVersion: 2,
+        l3WorldModelTransition: "resume_only",
+        workspaceUri: "file:///tmp/rest-v2-project",
+        workspaceHostId: "c".repeat(64)
+      }) as { sessionId: string; projectId: string };
+      expect(opened.projectId).toMatch(/^ws_/u);
+      const envelope = {
+        requestId: "91ae733d-25af-4ab0-8cbd-49c447b34d98",
+        adapterId: "codex-memory",
+        source: "codex",
+        namespace: { ...namespace, projectId: opened.projectId }
+      } as const;
+      const startRequest = {
+        ...envelope,
+        sessionId: opened.sessionId,
+        trigger: "session_start" as const,
+        capabilities: {
+          protocolVersion: "1" as const,
+          operations: ["inventory"] as ["inventory"],
+          maxTextBytes: 1024
+        }
+      };
+      const started = await client.projectEnvironmentSyncStart(opened.projectId, startRequest);
+      expect(started).toMatchObject({ status: "collecting_inventory", scanId: null });
+      await expect(client.projectEnvironmentSyncStart(opened.projectId, startRequest)).resolves.toEqual(started);
+      await expect(client.projectEnvironmentSyncStatus(
+        opened.projectId,
+        started.syncId,
+        opened.sessionId,
+        { ...envelope, requestId: "c78462e8-0298-4781-bd59-d697c2d73516" }
+      )).resolves.toEqual(started);
+      await expect(client.l3WorldModelTraceHead(opened.sessionId, {
+        ...envelope,
+        requestId: "b539776a-867d-42da-b11c-fc6ab94fd65a"
+      })).resolves.toMatchObject({ throughL1MemoryId: null, traceSeq: null });
+      await expect(client.l3WorldModelContext(opened.sessionId, {
+        ...envelope,
+        requestId: "66fb88a6-66a4-4b67-8b60-fe9e68b9e82a"
+      })).resolves.toMatchObject({ schemaVersion: 2, projectId: opened.projectId });
+
+      const inventory = started.operations[0];
+      if (!inventory || inventory.kind !== "inventory") throw new Error("missing inventory operation");
+      const entries = [{ relativePath: "需求.docx", type: "file" as const, size: 1, mtimeMs: 1 }];
+      const hashInput = {
+        operationId: inventory.operationId,
+        pageIndex: 0,
+        isLast: true,
+        omittedCount: null,
+        entries
+      };
+      const evidence = await client.projectEnvironmentSyncEvidence(opened.projectId, started.syncId, {
+        ...envelope,
+        requestId: "932ec7eb-96c8-4021-b37b-2c491567072c",
+        sessionId: opened.sessionId,
+        evidence: {
+          operationId: inventory.operationId,
+          kind: "inventory",
+          status: "accepted",
+          pageIndex: 0,
+          isLast: true,
+          pageHash: sha256Hex(canonicalJson(hashInput)),
+          entries
+        }
+      });
+      expect(evidence.status).toBe("summarizing");
+      await expect(client.projectEnvironmentSyncEvidence(opened.projectId, started.syncId, {
+        ...envelope,
+        requestId: "932ec7eb-96c8-4021-b37b-2c491567072c",
+        sessionId: opened.sessionId,
+        evidence: {
+          operationId: inventory.operationId,
+          kind: "inventory",
+          status: "accepted",
+          pageIndex: 0,
+          isLast: true,
+          pageHash: sha256Hex(canonicalJson(hashInput)),
+          entries
+        }
+      })).resolves.toEqual(evidence);
     });
     db.close();
   });

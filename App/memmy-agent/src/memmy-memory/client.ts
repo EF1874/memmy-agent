@@ -1,5 +1,22 @@
 import type { MemmyMemoryConnection, MemmyMemoryRequestEnvelope, JsonRecord } from "./types.js";
 import { normalizeTimeZoneOffset } from "../utils/time-zone.js";
+import {
+  L3WorldModelBoundaryResponseSchema,
+  L3WorldModelTraceHeadResponseSchema,
+  MemoryHealthSnapshotSchema,
+  ProjectEnvironmentSyncResponseSchema,
+  SessionL3WorldModelContextResponseSchema,
+  l3WorldModelGetTransport,
+  type L3WorldModelBoundaryRequest,
+  type L3WorldModelBoundaryResponse,
+  type L3WorldModelRequestEnvelope,
+  type L3WorldModelTraceHeadResponse,
+  type MemoryHealthSnapshot,
+  type ProjectEnvironmentSyncEvidenceRequest,
+  type ProjectEnvironmentSyncResponse,
+  type ProjectEnvironmentSyncStartRequest,
+  type SessionL3WorldModelContextResponse
+} from "@memmy/local-api-contracts";
 
 export class MemmyMemoryHttpError extends Error {
   status: number;
@@ -41,8 +58,12 @@ export class MemmyMemoryClient {
     return url.toString();
   }
 
-  private async request<T>(method: string, path: string, opts: { query?: Record<string, any>; body?: any } = {}): Promise<T> {
-    const headers: Record<string, string> = { accept: "application/json" };
+  private async request<T>(method: string, path: string, opts: {
+    query?: Record<string, any>;
+    body?: any;
+    headers?: Record<string, string>;
+  } = {}): Promise<T> {
+    const headers: Record<string, string> = { accept: "application/json", ...(opts.headers ?? {}) };
     headers["x-memmy-time-zone"] = this.timeZone;
     if (this.token) headers.authorization = `Bearer ${this.token}`;
     if (opts.body !== undefined) headers["content-type"] = "application/json";
@@ -73,8 +94,8 @@ export class MemmyMemoryClient {
     return this.request<T>("POST", path, { body });
   }
 
-  health(): Promise<JsonRecord> {
-    return this.get("/api/v1/health");
+  async health(): Promise<MemoryHealthSnapshot> {
+    return MemoryHealthSnapshotSchema.parse(await this.get("/api/v1/health"));
   }
 
   openSession(body: JsonRecord & MemmyMemoryRequestEnvelope): Promise<JsonRecord> {
@@ -103,6 +124,78 @@ export class MemmyMemoryClient {
 
   getMemory(id: string): Promise<JsonRecord> {
     return this.get(`/api/v1/memory/${encodeURIComponent(id)}`);
+  }
+
+  async l3WorldModelTraceHead(
+    sessionId: string,
+    envelope: L3WorldModelRequestEnvelope
+  ): Promise<L3WorldModelTraceHeadResponse> {
+    const transport = l3WorldModelGetTransport(envelope);
+    const value = await this.request<unknown>(
+      "GET",
+      `/api/v1/sessions/${encodeURIComponent(sessionId)}/l3-world-model-trace-head`,
+      { query: transport.query, headers: transport.headers }
+    );
+    return L3WorldModelTraceHeadResponseSchema.parse(value);
+  }
+
+  async l3WorldModelBoundary(
+    sessionId: string,
+    request: L3WorldModelBoundaryRequest
+  ): Promise<L3WorldModelBoundaryResponse> {
+    return L3WorldModelBoundaryResponseSchema.parse(await this.post(
+      `/api/v1/sessions/${encodeURIComponent(sessionId)}/l3-world-model-boundary`,
+      request
+    ));
+  }
+
+  async l3WorldModelContext(
+    sessionId: string,
+    envelope: L3WorldModelRequestEnvelope
+  ): Promise<SessionL3WorldModelContextResponse> {
+    const transport = l3WorldModelGetTransport(envelope);
+    const value = await this.request<unknown>(
+      "GET",
+      `/api/v1/l3-world-model/sessions/${encodeURIComponent(sessionId)}/context`,
+      { query: transport.query, headers: transport.headers }
+    );
+    return SessionL3WorldModelContextResponseSchema.parse(value);
+  }
+
+  async projectEnvironmentSyncStart(
+    projectId: string,
+    request: ProjectEnvironmentSyncStartRequest
+  ): Promise<ProjectEnvironmentSyncResponse> {
+    return ProjectEnvironmentSyncResponseSchema.parse(await this.post(
+      `/api/v1/l3-world-model/projects/${encodeURIComponent(projectId)}/environment-sync/start`,
+      request
+    ));
+  }
+
+  async projectEnvironmentSyncEvidence(
+    projectId: string,
+    syncId: string,
+    request: ProjectEnvironmentSyncEvidenceRequest
+  ): Promise<ProjectEnvironmentSyncResponse> {
+    return ProjectEnvironmentSyncResponseSchema.parse(await this.post(
+      `/api/v1/l3-world-model/projects/${encodeURIComponent(projectId)}/environment-sync/${encodeURIComponent(syncId)}/evidence`,
+      request
+    ));
+  }
+
+  async projectEnvironmentSyncStatus(
+    projectId: string,
+    syncId: string,
+    sessionId: string,
+    envelope: L3WorldModelRequestEnvelope
+  ): Promise<ProjectEnvironmentSyncResponse> {
+    const transport = l3WorldModelGetTransport(envelope, { sessionId });
+    const value = await this.request<unknown>(
+      "GET",
+      `/api/v1/l3-world-model/projects/${encodeURIComponent(projectId)}/environment-sync/${encodeURIComponent(syncId)}`,
+      { query: transport.query, headers: transport.headers }
+    );
+    return ProjectEnvironmentSyncResponseSchema.parse(value);
   }
 
 }

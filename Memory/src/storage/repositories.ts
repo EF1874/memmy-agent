@@ -1,5 +1,22 @@
 import type Database from "better-sqlite3";
+import {
+  PROJECT_ENVIRONMENT_SCAN_POLICY_V1,
+  canonicalJson,
+  renderL3WorldModelFields,
+  sha256Hex,
+  type InventoryEntry,
+  type JsonValue,
+  type L3WorldModelFieldName,
+  type L3WorldModelFields,
+  type L3WorldModelTraceHeadResponse,
+  type ProjectEnvironmentSyncResponse,
+  type ProjectEnvironmentSyncStatus,
+  type ProjectWorkspaceEvidence,
+  type ProjectWorkspaceOperation,
+  type WorkspaceBridgeCapabilities
+} from "@memmy/local-api-contracts";
 import { retrievalDocumentForMemory } from "../algorithm/plugin-algorithms.js";
+import { renderProjectEnvironmentProfile } from "../service/project-environment/profile-renderer.js";
 import type {
   FeedbackRequest,
   JobRef,
@@ -40,11 +57,16 @@ import {
 type SqlValue = string | number | Buffer | null;
 const BUNDLE_TABLES = [
   "memories",
+  "l3_world_model_scopes",
   "user_memories",
   "sessions",
+  "l3_world_model_session_cursors",
   "episodes",
   "raw_turns",
+  "l3_world_model_input_traces",
   "feedback",
+  "l3_world_model_evidence_batches",
+  "l3_world_model_batch_targets",
   "decision_repairs",
   "l2_candidate_pool",
   "trace_policy_links",
@@ -52,6 +74,8 @@ const BUNDLE_TABLES = [
   "recall_events",
   "api_logs",
   "memory_change_log",
+  "l3_world_model_project_environment_sync_state",
+  "l3_world_model_project_environment_operations",
   "evolution_jobs",
   "embedding_retry_queue",
   "memory_processing_state",
@@ -243,6 +267,8 @@ export interface EvolutionJobRecord {
   sessionId?: string;
   episodeId?: string;
   targetMemoryId?: string;
+  scopeKey?: string;
+  scopeSeq?: number;
   payload: Record<string, unknown>;
   attempts: number;
   maxAttempts: number;
@@ -250,6 +276,86 @@ export interface EvolutionJobRecord {
   lastError?: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export type L3WorldModelBatchTrigger =
+  | "new_task"
+  | "token_compaction"
+  | "token_compaction_attempt"
+  | "session_close"
+  | "episode_idle_close";
+
+export type L3WorldModelTargetField = Exclude<L3WorldModelFieldName, "project_environment_profile">;
+
+export interface L3WorldModelScopeRecord {
+  scopeKey: string;
+  userId: string;
+  projectId?: string;
+  memoryId?: string;
+  nextScopeSeq: number;
+  updatedAt: string;
+}
+
+export interface L3WorldModelInputTraceRecord {
+  sessionId: string;
+  traceSeq: number;
+  l1MemoryId: string;
+  rawTurnId: string;
+  episodeId?: string;
+  createdAt: string;
+}
+
+export interface L3WorldModelEvidenceBatchRecord {
+  id: string;
+  scopeKey: string;
+  scopeSeq: number;
+  userId: string;
+  projectId?: string;
+  sessionId: string;
+  trigger: L3WorldModelBatchTrigger;
+  startTraceSeq: number;
+  endTraceSeq: number;
+  l1MemoryIds: string[];
+  rawTurnIds: string[];
+  feedbackIds: string[];
+  payloadHash: string;
+  terminalOutcome?: "applied" | "partial_dead_letter" | "dead_letter";
+  completedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface L3WorldModelBatchTargetRecord {
+  batchId: string;
+  targetField: L3WorldModelTargetField;
+  fieldScopeKey: string;
+  scopeSeq: number;
+  status: "queued" | "applied" | "dead_letter";
+  noChange: boolean;
+  appliedAt?: string;
+  updatedAt: string;
+}
+
+export interface FreezeL3WorldModelBatchesResult {
+  scheduled: boolean;
+  throughL1MemoryId?: string;
+  throughTraceSeq?: number;
+  batchIds: string[];
+  targetCount: number;
+}
+
+export type L3WorldModelTraceTargetOperation = "noop" | "create" | "update";
+
+export interface ApplyL3WorldModelTraceTargetResult {
+  alreadyApplied: boolean;
+  noChange: boolean;
+  memory?: MemoryRow;
+}
+
+export interface DeleteL3WorldModelScopeResult {
+  before: MemoryRow;
+  deleted: MemoryRow;
+  scope: L3WorldModelScopeRecord;
 }
 
 export type EmbeddingRetryTargetKind = "trace" | "policy" | "world_model" | "skill";
@@ -1592,6 +1698,19 @@ export class RuntimeRepository {
     return this.getSession(id);
   }
 
+  updateSessionMeta(
+    id: string,
+    patch: Record<string, unknown>,
+    at = nowIso()
+  ): SessionRecord | undefined {
+    const existing = this.getSession(id);
+    if (!existing) return undefined;
+    this.db.prepare(
+      `UPDATE sessions SET meta_json = ?, updated_at = ? WHERE id = ?`
+    ).run(toJson({ ...existing.meta, ...patch }), at, id);
+    return this.getSession(id);
+  }
+
   closeSession(id: string, at = nowIso()): SessionRecord | undefined {
     this.db
       .prepare(
@@ -2464,11 +2583,11 @@ export class RuntimeRepository {
         .prepare(
           `INSERT INTO evolution_jobs (
             id, job_type, status, dedupe_key, user_id, session_id, episode_id, target_memory_id,
-            payload_json, attempts, max_attempts, leased_until, last_error,
+            scope_key, scope_seq, payload_json, attempts, max_attempts, leased_until, last_error,
             created_at, updated_at
           ) VALUES (
             @id, @jobType, @status, @dedupeKey, @userId, @sessionId, @episodeId, @targetMemoryId,
-            @payloadJson, @attempts, @maxAttempts, @leasedUntil, @lastError,
+            @scopeKey, @scopeSeq, @payloadJson, @attempts, @maxAttempts, @leasedUntil, @lastError,
             @createdAt, @updatedAt
           )`
         )
@@ -2478,6 +2597,8 @@ export class RuntimeRepository {
           sessionId: job.sessionId ?? null,
           episodeId: job.episodeId ?? null,
           targetMemoryId: job.targetMemoryId ?? null,
+          scopeKey: job.scopeKey ?? null,
+          scopeSeq: job.scopeSeq ?? null,
           payloadJson: toJson(job.payload),
           leasedUntil: job.leasedUntil ?? null,
           lastError: job.lastError ?? null
@@ -2594,6 +2715,18 @@ export class RuntimeRepository {
     return row ? jobFromSql(row) : undefined;
   }
 
+  getJobByDedupeKey(dedupeKey: string): EvolutionJobRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM evolution_jobs
+         WHERE dedupe_key = ?
+         ORDER BY created_at ASC, id ASC
+         LIMIT 1`
+      )
+      .get(dedupeKey) as SqlJobRow | undefined;
+    return row ? jobFromSql(row) : undefined;
+  }
+
   getPendingJob(
     targetMemoryId: string,
     jobType: JobType,
@@ -2687,6 +2820,29 @@ export class RuntimeRepository {
              AND (
                json_extract(payload_json, '$.runAfter') IS NULL
                OR CAST(json_extract(payload_json, '$.runAfter') AS TEXT) <= ?
+             )
+             AND (
+               job_type <> 'l3_world_model_update'
+               OR (
+                 scope_key IS NOT NULL
+                 AND scope_seq IS NOT NULL
+                 AND NOT EXISTS (
+                   SELECT 1
+                   FROM evolution_jobs AS leased_l3_job
+                   WHERE leased_l3_job.job_type = 'l3_world_model_update'
+                     AND leased_l3_job.scope_key = evolution_jobs.scope_key
+                     AND leased_l3_job.status = 'leased'
+                     AND leased_l3_job.id <> evolution_jobs.id
+                 )
+                 AND NOT EXISTS (
+                   SELECT 1
+                   FROM evolution_jobs AS earlier_l3_job
+                   WHERE earlier_l3_job.job_type = 'l3_world_model_update'
+                     AND earlier_l3_job.scope_key = evolution_jobs.scope_key
+                     AND earlier_l3_job.scope_seq < evolution_jobs.scope_seq
+                     AND earlier_l3_job.status IN ('queued', 'leased', 'failed')
+                 )
+               )
              )
              ${targetFilter}
            ORDER BY ${evolutionJobOrderSql()}
@@ -2827,23 +2983,66 @@ export class RuntimeRepository {
     return transaction();
   }
 
-  failJob(id: string, error: string, at = nowIso()): EvolutionJobRecord | undefined {
-    const row = this.db
-      .prepare(`SELECT attempts, max_attempts FROM evolution_jobs WHERE id = ?`)
-      .get(id) as { attempts: number; max_attempts: number } | undefined;
-    const status: JobStatus =
-      row && row.attempts >= row.max_attempts ? "dead_letter" : "failed";
-    this.db
-      .prepare(
-        `UPDATE evolution_jobs
-         SET status = ?,
-             leased_until = NULL,
-             last_error = ?,
-             updated_at = ?
-         WHERE id = ?`
-      )
-      .run(status, error, at, id);
-    return this.getJob(id);
+  failJob(
+    id: string,
+    error: string,
+    at = nowIso(),
+    forceDeadLetter = false
+  ): EvolutionJobRecord | undefined {
+    return this.db.transaction(() => {
+      const row = this.db
+        .prepare(`SELECT * FROM evolution_jobs WHERE id = ?`)
+        .get(id) as SqlJobRow | undefined;
+      if (!row) return undefined;
+      if (row.status === "dead_letter") return jobFromSql(row);
+      const status: JobStatus = forceDeadLetter || row.attempts >= row.max_attempts
+        ? "dead_letter"
+        : "failed";
+      this.db
+        .prepare(
+          `UPDATE evolution_jobs
+           SET status = ?,
+               leased_until = NULL,
+               last_error = ?,
+               updated_at = ?
+           WHERE id = ?`
+        )
+        .run(status, error, at, id);
+      if (status === "dead_letter" && row.job_type === "l3_world_model_update") {
+        const payload = parseJson<Record<string, unknown>>(row.payload_json, {});
+        const batchId = typeof payload.batchId === "string" ? payload.batchId : undefined;
+        const targetField = typeof payload.targetField === "string" ? payload.targetField : undefined;
+        if (batchId && isL3WorldModelTargetField(targetField)) {
+          this.db.prepare(
+            `UPDATE l3_world_model_batch_targets
+             SET status = 'dead_letter', no_change = 0, applied_at = NULL, updated_at = ?
+             WHERE batch_id = ? AND target_field = ? AND status = 'queued'`
+          ).run(at, batchId, targetField);
+          updateL3WorldModelBatchTerminalOutcome(this.db, batchId, at);
+        }
+      }
+      if (status === "dead_letter" && row.job_type === "project_environment_profile") {
+        const payload = parseJson<Record<string, unknown>>(row.payload_json, {});
+        const userId = typeof payload.userId === "string" ? payload.userId : undefined;
+        const projectId = typeof payload.projectId === "string" ? payload.projectId : undefined;
+        const scanId = typeof payload.scanId === "string" ? payload.scanId : undefined;
+        const syncId = typeof payload.syncId === "string" ? payload.syncId : undefined;
+        if (userId && projectId && scanId) {
+          this.db.prepare(
+            `UPDATE l3_world_model_project_environment_sync_state
+             SET status = 'failed', active_adapter_id = NULL,
+                 sync_lease_expires_at = NULL, updated_at = ?
+            WHERE user_id = ? AND project_id = ? AND current_scan_id = ?`
+          ).run(at, userId, projectId, scanId);
+        }
+        if (syncId) {
+          this.db.prepare(
+            `DELETE FROM l3_world_model_project_environment_operations WHERE sync_id = ?`
+          ).run(syncId);
+        }
+      }
+      return this.getJob(id);
+    })();
   }
 
   enqueueEmbeddingRetry(input: {
@@ -3685,7 +3884,7 @@ export class RuntimeRepository {
         includeRawText ? row : redactBundleRow(table, row)
       ));
     }
-    return tables;
+    return includeRawText ? tables : normalizeRedactedL3WorldModelBundle(tables);
   }
 
   importBundleTables(
@@ -3725,20 +3924,17 @@ export class RuntimeRepository {
         const rows = Array.isArray(tables[table]) ? tables[table] as Array<Record<string, unknown>> : [];
         for (const row of rows) {
           const normalized = applyBundleDefaults(table, deserializeBundleRow(row));
-          const primaryKey = primaryKeyColumn(table);
-          const primaryValue = primaryKey ? normalized[primaryKey] : undefined;
-          if (primaryKey && (typeof primaryValue === "string" || typeof primaryValue === "number")) {
-            recordMigrationMap(result.migrationMap, table, primaryValue, primaryValue);
+          const identity = bundleIdentity(table, normalized);
+          if (identity) {
+            recordMigrationMap(result.migrationMap, table, identity.sourceId, identity.sourceId);
           }
-          const existed = primaryKey !== undefined &&
-            (typeof primaryValue === "string" || typeof primaryValue === "number") &&
-            this.rowExists(table, primaryKey, primaryValue);
+          const existed = identity !== undefined && this.rowExists(table, identity.columns, identity.values);
           if (existed && conflictStrategy === "skip") {
             result.conflicts.push({
               table,
-              primaryKey: primaryKey!,
-              sourceId: String(primaryValue),
-              targetId: String(primaryValue),
+              primaryKey: identity!.primaryKey,
+              sourceId: identity!.sourceId,
+              targetId: identity!.sourceId,
               action: "skipped"
             });
             result.skipped[table] = (result.skipped[table] ?? 0) + 1;
@@ -3747,12 +3943,12 @@ export class RuntimeRepository {
           if (existed && conflictStrategy === "error") {
             result.conflicts.push({
               table,
-              primaryKey: primaryKey!,
-              sourceId: String(primaryValue),
-              targetId: String(primaryValue),
+              primaryKey: identity!.primaryKey,
+              sourceId: identity!.sourceId,
+              targetId: identity!.sourceId,
               action: "error"
             });
-            throw new Error(`import conflict for ${table}.${primaryKey}=${String(primaryValue)}`);
+            throw new Error(`import conflict for ${table}.${identity!.primaryKey}=${identity!.sourceId}`);
           }
           const columns = Object.keys(normalized)
             .filter((column) => this.tableColumns(table).includes(column));
@@ -3768,9 +3964,9 @@ export class RuntimeRepository {
           if (existed) {
             result.conflicts.push({
               table,
-              primaryKey: primaryKey!,
-              sourceId: String(primaryValue),
-              targetId: String(primaryValue),
+              primaryKey: identity!.primaryKey,
+              sourceId: identity!.sourceId,
+              targetId: identity!.sourceId,
               action: "replaced"
             });
             result.replaced[table] = (result.replaced[table] ?? 0) + 1;
@@ -3784,11 +3980,13 @@ export class RuntimeRepository {
     return result;
   }
 
-  private rowExists(table: BundleTableName, column: string, value: string | number): boolean {
-    if (!this.tableColumns(table).includes(column)) {
+  private rowExists(table: BundleTableName, columns: string[], values: Array<string | number>): boolean {
+    const tableColumns = this.tableColumns(table);
+    if (columns.length === 0 || columns.some((column) => !tableColumns.includes(column))) {
       return false;
     }
-    const row = this.db.prepare(`SELECT 1 AS ok FROM ${table} WHERE ${column} = ? LIMIT 1`).get(value) as
+    const where = columns.map((column) => `${column} = ?`).join(" AND ");
+    const row = this.db.prepare(`SELECT 1 AS ok FROM ${table} WHERE ${where} LIMIT 1`).get(...values) as
       | { ok: number }
       | undefined;
     return Boolean(row);
@@ -3876,11 +4074,1507 @@ export class RuntimeRepository {
   }
 }
 
+export class L3WorldModelRepository {
+  constructor(
+    private readonly db: Database.Database,
+    private readonly memories: MemoryRepository
+  ) {}
+
+  getScope(userId: string, projectId?: string | null): L3WorldModelScopeRecord | undefined {
+    const row = this.db.prepare(
+      `SELECT * FROM l3_world_model_scopes
+       WHERE user_id = ? AND project_id IS ?`
+    ).get(userId, projectId ?? null) as SqlL3WorldModelScopeRow | undefined;
+    return row ? l3WorldModelScopeFromSql(row) : undefined;
+  }
+
+  ensureScope(userId: string, projectId?: string | null, at = nowIso()): L3WorldModelScopeRecord {
+    const scopeKey = l3WorldModelScopeKey(userId, projectId);
+    this.db.prepare(
+      `INSERT INTO l3_world_model_scopes (
+         scope_key, user_id, project_id, memory_id, next_scope_seq, updated_at
+       ) VALUES (?, ?, ?, NULL, 1, ?)
+       ON CONFLICT(scope_key) DO NOTHING`
+    ).run(scopeKey, userId, projectId ?? null, at);
+    const scope = this.getScope(userId, projectId);
+    if (!scope || scope.scopeKey !== scopeKey || scope.userId !== userId || (scope.projectId ?? null) !== (projectId ?? null)) {
+      throw new Error("corrupt L3 World Model scope ownership");
+    }
+    return scope;
+  }
+
+  registerInputTrace(input: {
+    sessionId: string;
+    l1MemoryId: string;
+    rawTurnId: string;
+    episodeId?: string | null;
+    createdAt?: string;
+  }): L3WorldModelInputTraceRecord {
+    const session = this.requireV2Session(input.sessionId);
+    const existing = this.db.prepare(
+      `SELECT * FROM l3_world_model_input_traces
+       WHERE session_id = ? AND l1_memory_id = ?`
+    ).get(input.sessionId, input.l1MemoryId) as SqlL3WorldModelInputTraceRow | undefined;
+    if (existing) return l3WorldModelInputTraceFromSql(existing);
+    const next = this.db.prepare(
+      `SELECT COALESCE(MAX(trace_seq), 0) + 1 AS trace_seq
+       FROM l3_world_model_input_traces WHERE session_id = ?`
+    ).get(session.id) as { trace_seq: number };
+    const createdAt = input.createdAt ?? nowIso();
+    this.db.prepare(
+      `INSERT INTO l3_world_model_input_traces (
+         session_id, trace_seq, l1_memory_id, raw_turn_id, episode_id, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?)`
+    ).run(session.id, next.trace_seq, input.l1MemoryId, input.rawTurnId, input.episodeId ?? null, createdAt);
+    return {
+      sessionId: session.id,
+      traceSeq: next.trace_seq,
+      l1MemoryId: input.l1MemoryId,
+      rawTurnId: input.rawTurnId,
+      episodeId: input.episodeId ?? undefined,
+      createdAt
+    };
+  }
+
+  traceHead(sessionId: string): L3WorldModelTraceHeadResponse {
+    this.requireV2Session(sessionId);
+    const row = this.db.prepare(
+      `SELECT l1_memory_id, trace_seq
+       FROM l3_world_model_input_traces
+       WHERE session_id = ?
+       ORDER BY trace_seq DESC LIMIT 1`
+    ).get(sessionId) as { l1_memory_id: string; trace_seq: number } | undefined;
+    return row
+      ? { throughL1MemoryId: row.l1_memory_id, traceSeq: row.trace_seq }
+      : { throughL1MemoryId: null, traceSeq: null };
+  }
+
+  inputTraceByL1MemoryId(
+    sessionId: string,
+    l1MemoryId: string
+  ): L3WorldModelInputTraceRecord | undefined {
+    this.requireV2Session(sessionId);
+    const row = this.db.prepare(
+      `SELECT * FROM l3_world_model_input_traces
+       WHERE session_id = ? AND l1_memory_id = ?`
+    ).get(sessionId, l1MemoryId) as SqlL3WorldModelInputTraceRow | undefined;
+    return row ? l3WorldModelInputTraceFromSql(row) : undefined;
+  }
+
+  freezeBatches(input: {
+    sessionId: string;
+    trigger: L3WorldModelBatchTrigger;
+    throughL1MemoryId?: string;
+    episodeId?: string;
+    at?: string;
+  }): FreezeL3WorldModelBatchesResult {
+    return this.db.transaction(() => this.freezeBatchesInTransaction(input))();
+  }
+
+  getBatch(batchId: string): L3WorldModelEvidenceBatchRecord | undefined {
+    const row = this.db.prepare(
+      `SELECT * FROM l3_world_model_evidence_batches WHERE id = ?`
+    ).get(batchId) as SqlL3WorldModelEvidenceBatchRow | undefined;
+    return row ? l3WorldModelEvidenceBatchFromSql(row) : undefined;
+  }
+
+  getTarget(batchId: string, targetField: L3WorldModelTargetField): L3WorldModelBatchTargetRecord | undefined {
+    const row = this.db.prepare(
+      `SELECT * FROM l3_world_model_batch_targets
+       WHERE batch_id = ? AND target_field = ?`
+    ).get(batchId, targetField) as SqlL3WorldModelBatchTargetRow | undefined;
+    return row ? l3WorldModelBatchTargetFromSql(row) : undefined;
+  }
+
+  listBatchTraces(batchId: string): L3WorldModelInputTraceRecord[] {
+    const batch = this.getBatch(batchId);
+    if (!batch) return [];
+    return (this.db.prepare(
+      `SELECT *
+       FROM l3_world_model_input_traces
+       WHERE session_id = ? AND trace_seq >= ? AND trace_seq <= ?
+       ORDER BY trace_seq ASC`
+    ).all(batch.sessionId, batch.startTraceSeq, batch.endTraceSeq) as SqlL3WorldModelInputTraceRow[])
+      .map(l3WorldModelInputTraceFromSql);
+  }
+
+  getMemory(userId: string, projectId?: string | null): MemoryRow | undefined {
+    const scope = this.getScope(userId, projectId);
+    if (!scope?.memoryId) return undefined;
+    const memory = this.memories.get(scope.memoryId);
+    if (!memory) throw new Error(`corrupt L3 World Model scope memory: ${scope.memoryId}`);
+    validateL3WorldModelMemory(memory, userId, projectId);
+    return memory;
+  }
+
+  fields(userId: string, projectId?: string | null): L3WorldModelFields {
+    const memory = this.getMemory(userId, projectId);
+    return memory ? fieldsFromL3WorldModelMemory(memory) : emptyL3WorldModelFields();
+  }
+
+  upsertField(input: {
+    userId: string;
+    projectId?: string | null;
+    targetField: L3WorldModelFieldName;
+    value: string | null;
+    eligibleL1MemoryIds?: string[];
+    projectEnvironmentAppliedScanId?: string | null;
+    at?: string;
+    source?: string;
+  }): MemoryRow | undefined {
+    return this.db.transaction(() => this.upsertFieldInTransaction(input))();
+  }
+
+  applyTraceTarget(input: {
+    batchId: string;
+    targetField: L3WorldModelTargetField;
+    operation: L3WorldModelTraceTargetOperation;
+    value: string;
+    expectedFieldHash: string;
+    expectedProfileHash?: string;
+    eligibleL1MemoryIds: string[];
+    at?: string;
+  }): ApplyL3WorldModelTraceTargetResult {
+    return this.db.transaction(() => {
+      const at = input.at ?? nowIso();
+      const batch = this.getBatch(input.batchId);
+      if (!batch) throw new Error(`L3 World Model batch not found: ${input.batchId}`);
+      const target = this.getTarget(input.batchId, input.targetField);
+      if (!target) throw new Error(`L3 World Model target not found: ${input.batchId}:${input.targetField}`);
+      if (target.status === "applied") {
+        return {
+          alreadyApplied: true,
+          noChange: target.noChange,
+          memory: this.getMemory(batch.userId, batch.projectId)
+        };
+      }
+      if (target.status === "dead_letter") {
+        throw new Error(`L3 World Model target is terminal: ${input.batchId}:${input.targetField}`);
+      }
+      const expectedScopeKey = l3WorldModelFieldScopeKey(
+        l3WorldModelScopeKey(batch.userId, batch.projectId),
+        input.targetField
+      );
+      if (target.fieldScopeKey !== expectedScopeKey || target.scopeSeq !== batch.scopeSeq) {
+        throw new Error("corrupt L3 World Model target ownership");
+      }
+      assertL3WorldModelFieldOwnership(batch.projectId ?? null, input.targetField);
+
+      const fields = this.fields(batch.userId, batch.projectId);
+      const currentField = fields[l3WorldModelFieldProperty(input.targetField)];
+      if (sha256Hex(currentField ?? "") !== input.expectedFieldHash) {
+        throw new Error("stale_l3_base");
+      }
+      if (input.targetField !== "general_rules_and_safety_constraints") {
+        if (!input.expectedProfileHash) throw new TypeError("project target requires expectedProfileHash");
+        if (sha256Hex(fields.projectEnvironmentProfile ?? "") !== input.expectedProfileHash) {
+          throw new Error("stale_l3_base");
+        }
+      }
+
+      let noChange = false;
+      let memory = this.getMemory(batch.userId, batch.projectId);
+      if (input.operation === "noop") {
+        if (input.value !== "") throw new TypeError("noop L3 World Model output must be empty");
+        noChange = true;
+      } else if (input.operation === "create") {
+        if (currentField !== null || !input.value.trim()) {
+          throw new TypeError("create L3 World Model output requires an empty base and non-empty value");
+        }
+        memory = this.upsertFieldInTransaction({
+          userId: batch.userId,
+          projectId: batch.projectId,
+          targetField: input.targetField,
+          value: input.value,
+          eligibleL1MemoryIds: input.eligibleL1MemoryIds,
+          at
+        });
+      } else {
+        if (currentField === null || input.value === currentField) {
+          throw new TypeError("update L3 World Model output requires a non-empty changed base");
+        }
+        memory = this.upsertFieldInTransaction({
+          userId: batch.userId,
+          projectId: batch.projectId,
+          targetField: input.targetField,
+          value: input.value || null,
+          eligibleL1MemoryIds: input.eligibleL1MemoryIds,
+          at
+        });
+      }
+      this.db.prepare(
+        `UPDATE l3_world_model_batch_targets
+         SET status = 'applied', no_change = ?, applied_at = ?, updated_at = ?
+         WHERE batch_id = ? AND target_field = ? AND status = 'queued'`
+      ).run(noChange ? 1 : 0, at, at, input.batchId, input.targetField);
+      updateL3WorldModelBatchTerminalOutcome(this.db, input.batchId, at);
+      return { alreadyApplied: false, noChange, memory };
+    })();
+  }
+
+  deleteScopeMemory(memoryId: string, at = nowIso()): DeleteL3WorldModelScopeResult | undefined {
+    return this.db.transaction(() => {
+      const scopeRow = this.db.prepare(
+        `SELECT * FROM l3_world_model_scopes WHERE memory_id = ?`
+      ).get(memoryId) as SqlL3WorldModelScopeRow | undefined;
+      if (!scopeRow) return undefined;
+      const scope = l3WorldModelScopeFromSql(scopeRow);
+      const before = this.memories.get(memoryId);
+      if (!before) throw new Error(`corrupt L3 World Model scope memory: ${memoryId}`);
+      validateL3WorldModelMemory(before, scope.userId, scope.projectId);
+      const deleted = this.memories.softDelete(memoryId, at);
+      if (!deleted) throw new Error(`failed to delete L3 World Model memory: ${memoryId}`);
+      this.db.prepare(
+        `UPDATE l3_world_model_scopes SET memory_id = NULL, updated_at = ? WHERE scope_key = ?`
+      ).run(at, scope.scopeKey);
+
+      const pendingTargets = this.db.prepare(
+        `SELECT target.batch_id, target.target_field
+         FROM l3_world_model_batch_targets AS target
+         JOIN l3_world_model_evidence_batches AS batch ON batch.id = target.batch_id
+         WHERE batch.scope_key = ? AND target.status = 'queued'`
+      ).all(scope.scopeKey) as Array<{ batch_id: string; target_field: L3WorldModelTargetField }>;
+      const affectedBatchIds = new Set<string>();
+      for (const target of pendingTargets) {
+        const job = this.db.prepare(
+          `SELECT id FROM evolution_jobs
+           WHERE job_type = 'l3_world_model_update'
+             AND json_extract(payload_json, '$.batchId') = ?
+             AND json_extract(payload_json, '$.targetField') = ?
+             AND status IN ('queued', 'leased', 'failed')`
+        ).get(target.batch_id, target.target_field) as { id: string } | undefined;
+        if (!job) continue;
+        this.db.prepare(
+          `UPDATE l3_world_model_batch_targets
+           SET status = 'applied', no_change = 1, applied_at = ?, updated_at = ?
+           WHERE batch_id = ? AND target_field = ? AND status = 'queued'`
+        ).run(at, at, target.batch_id, target.target_field);
+        this.db.prepare(
+          `UPDATE evolution_jobs
+           SET status = 'succeeded', leased_until = NULL, updated_at = ? WHERE id = ?`
+        ).run(at, job.id);
+        affectedBatchIds.add(target.batch_id);
+      }
+      for (const batchId of affectedBatchIds) {
+        updateL3WorldModelBatchTerminalOutcome(this.db, batchId, at);
+      }
+
+      if (scope.projectId) {
+        this.db.prepare(
+          `UPDATE l3_world_model_project_environment_sync_state
+           SET status = 'uninitialized', current_sync_id = NULL, current_scan_id = NULL,
+               applied_scan_id = NULL, fingerprint = NULL, summary_text = NULL,
+               summary_scan_id = NULL, active_adapter_id = NULL,
+               sync_lease_expires_at = NULL, updated_at = ?
+           WHERE user_id = ? AND project_id = ?`
+        ).run(at, scope.userId, scope.projectId);
+        this.db.prepare(
+          `UPDATE l3_world_model_project_environment_operations
+           SET status = 'expired', last_error = 'l3_world_model_deleted', updated_at = ?
+           WHERE user_id = ? AND project_id = ? AND status = 'pending'`
+        ).run(at, scope.userId, scope.projectId);
+      }
+      return { before, deleted, scope };
+    })();
+  }
+
+  insertImmutableJob(job: EvolutionJobRecord): EvolutionJobRecord {
+    if (job.jobType !== "l3_world_model_update" && job.jobType !== "project_environment_profile") {
+      throw new TypeError("immutable L3 job must use an L3 World Model job type");
+    }
+    if (!job.dedupeKey) {
+      throw new TypeError("immutable L3 job requires dedupeKey");
+    }
+    if (job.jobType === "l3_world_model_update" && (!job.scopeKey || job.scopeSeq === undefined)) {
+      throw new TypeError("L3 field update job requires scopeKey and scopeSeq");
+    }
+    if (job.jobType === "project_environment_profile" && (job.scopeKey || job.scopeSeq !== undefined)) {
+      throw new TypeError("project environment job must not enter Trace field FIFO");
+    }
+    if (job.status !== "queued" || job.attempts !== 0) {
+      throw new TypeError("immutable L3 job must start queued with zero attempts");
+    }
+    this.db.prepare(
+      `INSERT INTO evolution_jobs (
+         id, job_type, status, dedupe_key, user_id, session_id, episode_id,
+         target_memory_id, scope_key, scope_seq, payload_json, attempts,
+         max_attempts, leased_until, last_error, created_at, updated_at
+       ) VALUES (
+         @id, @jobType, @status, @dedupeKey, @userId, @sessionId, @episodeId,
+         @targetMemoryId, @scopeKey, @scopeSeq, @payloadJson, @attempts,
+         @maxAttempts, @leasedUntil, @lastError, @createdAt, @updatedAt
+       )`
+    ).run({
+      ...job,
+      sessionId: job.sessionId ?? null,
+      episodeId: job.episodeId ?? null,
+      targetMemoryId: job.targetMemoryId ?? null,
+      scopeKey: job.scopeKey ?? null,
+      scopeSeq: job.scopeSeq ?? null,
+      payloadJson: toJson(job.payload),
+      leasedUntil: job.leasedUntil ?? null,
+      lastError: job.lastError ?? null
+    });
+    return job;
+  }
+
+  private freezeBatchesInTransaction(input: {
+    sessionId: string;
+    trigger: L3WorldModelBatchTrigger;
+    throughL1MemoryId?: string;
+    episodeId?: string;
+    at?: string;
+  }): FreezeL3WorldModelBatchesResult {
+    const session = this.requireV2Session(input.sessionId);
+    const at = input.at ?? nowIso();
+    this.db.prepare(
+      `INSERT INTO l3_world_model_session_cursors (session_id, last_scheduled_seq, updated_at)
+       VALUES (?, 0, ?)
+       ON CONFLICT(session_id) DO NOTHING`
+    ).run(session.id, at);
+    const cursor = this.db.prepare(
+      `SELECT last_scheduled_seq FROM l3_world_model_session_cursors WHERE session_id = ?`
+    ).get(session.id) as { last_scheduled_seq: number };
+
+    let endTraceSeq: number;
+    if (input.throughL1MemoryId) {
+      const through = this.db.prepare(
+        `SELECT trace_seq FROM l3_world_model_input_traces
+         WHERE session_id = ? AND l1_memory_id = ?`
+      ).get(session.id, input.throughL1MemoryId) as { trace_seq: number } | undefined;
+      if (!through) throw new Error("through L1 memory does not belong to the L3 World Model session trace");
+      endTraceSeq = through.trace_seq;
+    } else if (input.trigger === "episode_idle_close") {
+      if (!input.episodeId) throw new TypeError("episode_idle_close requires episodeId");
+      const end = this.db.prepare(
+        `SELECT COALESCE(MAX(trace_seq), 0) AS trace_seq
+         FROM l3_world_model_input_traces
+         WHERE session_id = ? AND episode_id = ?`
+      ).get(session.id, input.episodeId) as { trace_seq: number };
+      endTraceSeq = end.trace_seq;
+    } else {
+      const end = this.db.prepare(
+        `SELECT COALESCE(MAX(trace_seq), 0) AS trace_seq
+         FROM l3_world_model_input_traces WHERE session_id = ?`
+      ).get(session.id) as { trace_seq: number };
+      endTraceSeq = end.trace_seq;
+    }
+
+    if (endTraceSeq <= cursor.last_scheduled_seq) {
+      return {
+        scheduled: false,
+        throughL1MemoryId: input.throughL1MemoryId,
+        throughTraceSeq: endTraceSeq || undefined,
+        batchIds: [],
+        targetCount: 0
+      };
+    }
+    const traces = (this.db.prepare(
+      `SELECT * FROM l3_world_model_input_traces
+       WHERE session_id = ? AND trace_seq > ? AND trace_seq <= ?
+       ORDER BY trace_seq ASC`
+    ).all(session.id, cursor.last_scheduled_seq, endTraceSeq) as SqlL3WorldModelInputTraceRow[])
+      .map(l3WorldModelInputTraceFromSql);
+    if (traces.length === 0) {
+      return { scheduled: false, batchIds: [], targetCount: 0 };
+    }
+
+    const chunks = splitL3TracesByRawTurn(traces, 20);
+    const scope = this.ensureScope(session.userId, session.projectId, at);
+    const batchIds: string[] = [];
+    let targetCount = 0;
+    for (const chunk of chunks) {
+      const claimed = this.db.prepare(
+        `UPDATE l3_world_model_scopes
+         SET next_scope_seq = next_scope_seq + 1, updated_at = ?
+         WHERE scope_key = ?
+         RETURNING next_scope_seq - 1 AS scope_seq`
+      ).get(at, scope.scopeKey) as { scope_seq: number } | undefined;
+      if (!claimed) throw new Error("failed to claim L3 World Model scope sequence");
+      const l1MemoryIds = chunk.map((trace) => trace.l1MemoryId);
+      const rawTurnIds = [...new Set(chunk.map((trace) => trace.rawTurnId))];
+      const feedbackIds = this.feedbackIdsForBatch(l1MemoryIds, rawTurnIds);
+      const payload = {
+        scopeKey: scope.scopeKey,
+        scopeSeq: claimed.scope_seq,
+        userId: session.userId,
+        projectId: session.projectId ?? null,
+        sessionId: session.id,
+        trigger: input.trigger,
+        startTraceSeq: chunk[0]!.traceSeq,
+        endTraceSeq: chunk.at(-1)!.traceSeq,
+        l1MemoryIds,
+        rawTurnIds,
+        feedbackIds
+      };
+      const batchId = newId("l3wm_batch");
+      const payloadHash = sha256Hex(canonicalJson(payload));
+      this.db.prepare(
+        `INSERT INTO l3_world_model_evidence_batches (
+           id, scope_key, scope_seq, user_id, project_id, session_id, trigger,
+           start_trace_seq, end_trace_seq, l1_memory_ids_json, raw_turn_ids_json,
+           feedback_ids_json, payload_hash, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        batchId,
+        scope.scopeKey,
+        claimed.scope_seq,
+        session.userId,
+        session.projectId ?? null,
+        session.id,
+        input.trigger,
+        payload.startTraceSeq,
+        payload.endTraceSeq,
+        toJson(l1MemoryIds),
+        toJson(rawTurnIds),
+        toJson(feedbackIds),
+        payloadHash,
+        at,
+        at
+      );
+      const targetFields: L3WorldModelTargetField[] = session.projectId
+        ? ["project_contract", "domain_knowledge"]
+        : ["general_rules_and_safety_constraints"];
+      for (const targetField of targetFields) {
+        const fieldScopeKey = l3WorldModelFieldScopeKey(scope.scopeKey, targetField);
+        this.db.prepare(
+          `INSERT INTO l3_world_model_batch_targets (
+             batch_id, target_field, field_scope_key, scope_seq, status, no_change, updated_at
+           ) VALUES (?, ?, ?, ?, 'queued', 0, ?)`
+        ).run(batchId, targetField, fieldScopeKey, claimed.scope_seq, at);
+        this.insertImmutableJob({
+          id: newId("job"),
+          jobType: "l3_world_model_update",
+          status: "queued",
+          dedupeKey: `l3_world_model:${batchId}:${targetField}`,
+          userId: session.userId,
+          sessionId: session.id,
+          scopeKey: fieldScopeKey,
+          scopeSeq: claimed.scope_seq,
+          payload: { batchId, targetField },
+          attempts: 0,
+          maxAttempts: 3,
+          createdAt: at,
+          updatedAt: at
+        });
+        targetCount += 1;
+      }
+      batchIds.push(batchId);
+    }
+    this.db.prepare(
+      `UPDATE l3_world_model_session_cursors
+       SET last_scheduled_seq = ?, updated_at = ? WHERE session_id = ?`
+    ).run(endTraceSeq, at, session.id);
+    return {
+      scheduled: true,
+      throughL1MemoryId: traces.at(-1)?.l1MemoryId,
+      throughTraceSeq: endTraceSeq,
+      batchIds,
+      targetCount
+    };
+  }
+
+  private upsertFieldInTransaction(input: {
+    userId: string;
+    projectId?: string | null;
+    targetField: L3WorldModelFieldName;
+    value: string | null;
+    eligibleL1MemoryIds?: string[];
+    projectEnvironmentAppliedScanId?: string | null;
+    at?: string;
+    source?: string;
+  }): MemoryRow | undefined {
+    const projectId = input.projectId ?? null;
+    assertL3WorldModelFieldOwnership(projectId, input.targetField);
+    const at = input.at ?? nowIso();
+    const scope = this.ensureScope(input.userId, projectId, at);
+    const existing = scope.memoryId ? this.memories.get(scope.memoryId) : undefined;
+    if (scope.memoryId && !existing) throw new Error(`corrupt L3 World Model scope memory: ${scope.memoryId}`);
+    if (existing) validateL3WorldModelMemory(existing, input.userId, projectId);
+    const fields = existing ? fieldsFromL3WorldModelMemory(existing) : emptyL3WorldModelFields();
+    const property = l3WorldModelFieldProperty(input.targetField);
+    fields[property] = normalizeL3WorldModelFieldValue(input.value);
+    const memoryValue = renderL3WorldModelFields(fields);
+    if (!existing && !memoryValue) return undefined;
+
+    const existingSourceMemoryIds = l3WorldModelSourceMemoryIds(existing);
+    const sourceMemoryIds = input.eligibleL1MemoryIds === undefined
+      ? existingSourceMemoryIds
+      : this.orderedRecentSourceMemoryIds(
+          scope.scopeKey,
+          existingSourceMemoryIds,
+          input.eligibleL1MemoryIds,
+          256
+        );
+    const title = projectId ? "项目场域认知" : "通用规则与安全约束";
+    const summary = [...memoryValue.replace(/\s+/gu, " ").trim()].slice(0, 240).join("");
+    const tags = ["world_model", "l3_world_model", projectId ? "scope:project" : "scope:no_project"];
+    const info: Record<string, unknown> = {
+      ...(projectId ? { project_id: projectId } : {}),
+      source_memory_ids: sourceMemoryIds
+    };
+    const existingScanId = existing?.info.project_environment_applied_scan_id;
+    const scanId = input.projectEnvironmentAppliedScanId === undefined
+      ? existingScanId
+      : input.projectEnvironmentAppliedScanId;
+    if (projectId && typeof scanId === "string" && scanId) {
+      info.project_environment_applied_scan_id = scanId;
+    }
+    const status = memoryValue ? "activated" as const : "archived" as const;
+    const memory: MemoryRow = {
+      id: existing?.id ?? newId("memory"),
+      timeline: existing?.timeline ?? at,
+      userId: input.userId,
+      memoryType: "LongTermMemory",
+      status,
+      visibility: "private",
+      memoryKey: l3WorldModelMemoryKey(input.userId, projectId),
+      memoryValue,
+      tags,
+      info,
+      properties: {
+        memory_type: "LongTermMemory",
+        status,
+        tags,
+        info: { ...info },
+        internal_info: {
+          memory_layer: "L3",
+          memory_kind: "world_model",
+          schema_version: 2,
+          source: "worker.l3_world_model.v1",
+          plugin_algorithm: "l3_world_model.v1",
+          source_memory_ids: sourceMemoryIds,
+          title,
+          summary,
+          body: memoryValue,
+          world_model: {
+            general_rules_and_safety_constraints: fields.generalRulesAndSafetyConstraints,
+            project_environment_profile: fields.projectEnvironmentProfile,
+            project_contract: fields.projectContract,
+            domain_knowledge: fields.domainKnowledge
+          }
+        }
+      },
+      memoryLayer: "L3",
+      contentHash: sha256Hex(memoryValue),
+      version: existing?.version ?? 1,
+      createdAt: existing?.createdAt ?? at,
+      updatedAt: at,
+      deletedAt: null
+    };
+    const saved = existing ? this.memories.update(memory) : this.memories.insert(memory);
+    this.db.prepare(
+      `UPDATE l3_world_model_scopes SET memory_id = ?, updated_at = ? WHERE scope_key = ?`
+    ).run(saved.id, at, scope.scopeKey);
+    this.db.prepare(
+      `INSERT INTO memory_change_log (
+         memory_id, namespace_id, kind, op, entity_id, user_id,
+         change_type, version, before_json, after_json, source, created_at
+       ) VALUES (?, ?, 'world_model', ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      saved.id,
+      scope.scopeKey,
+      existing ? (status === "archived" ? "archived" : "updated") : "created",
+      saved.id,
+      input.userId,
+      existing ? "l3_world_model_update" : "l3_world_model_create",
+      saved.version,
+      existing ? toJson(existing) : null,
+      toJson(saved),
+      input.source ?? "worker.l3_world_model.v1",
+      at
+    );
+    return saved;
+  }
+
+  private feedbackIdsForBatch(l1MemoryIds: string[], rawTurnIds: string[]): string[] {
+    const l1Placeholders = l1MemoryIds.map(() => "?").join(", ");
+    const rawPlaceholders = rawTurnIds.map(() => "?").join(", ");
+    const rows = this.db.prepare(
+      `SELECT id FROM feedback
+       WHERE raw_turn_id IN (${rawPlaceholders})
+          OR l1_memory_id IN (${l1Placeholders})
+       ORDER BY created_at ASC, id ASC`
+    ).all(...rawTurnIds, ...l1MemoryIds) as Array<{ id: string }>;
+    return [...new Set(rows.map((row) => row.id))];
+  }
+
+  private orderedRecentSourceMemoryIds(
+    scopeKey: string,
+    existing: string[],
+    incoming: string[],
+    limit: number
+  ): string[] {
+    const candidates = new Set([...existing, ...incoming.filter(Boolean)]);
+    if (candidates.size === 0) return [];
+    const rows = this.db.prepare(
+      `SELECT batch.scope_seq, trace.trace_seq, trace.l1_memory_id
+       FROM l3_world_model_evidence_batches AS batch
+       JOIN l3_world_model_input_traces AS trace
+         ON trace.session_id = batch.session_id
+        AND trace.trace_seq BETWEEN batch.start_trace_seq AND batch.end_trace_seq
+       WHERE batch.scope_key = ?
+       ORDER BY batch.scope_seq ASC, trace.trace_seq ASC, trace.l1_memory_id ASC`
+    ).all(scopeKey) as Array<{ scope_seq: number; trace_seq: number; l1_memory_id: string }>;
+    const ordered: string[] = [];
+    const ranked = new Set<string>();
+    for (const row of rows) {
+      if (!candidates.has(row.l1_memory_id) || ranked.has(row.l1_memory_id)) continue;
+      ranked.add(row.l1_memory_id);
+      ordered.push(row.l1_memory_id);
+    }
+    const unranked = [...candidates].filter((id) => !ranked.has(id));
+    const merged = [...unranked, ...ordered];
+    return merged.slice(Math.max(0, merged.length - limit));
+  }
+
+  private requireV2Session(sessionId: string): SessionRecord {
+    const row = this.db.prepare(`SELECT * FROM sessions WHERE id = ?`).get(sessionId) as SqlSessionRow | undefined;
+    if (!row) throw new Error(`session not found: ${sessionId}`);
+    const session = sessionFromSql(row);
+    if (session.meta.l3_world_model_protocol_version !== 2) {
+      throw new Error("l3_world_model_protocol_v2_required");
+    }
+    return session;
+  }
+}
+
+const SYNC_LEASE_MS = 10 * 60 * 1000;
+const EVIDENCE_TTL_MS = 24 * 60 * 60 * 1000;
+
+export type ProjectEnvironmentKind = "unknown" | "code" | "folder";
+
+export interface ProjectEnvironmentStateRecord {
+  userId: string;
+  projectId: string;
+  projectKind: ProjectEnvironmentKind;
+  status: ProjectEnvironmentSyncStatus;
+  currentSyncId?: string;
+  currentScanId?: string;
+  appliedScanId?: string;
+  fingerprint?: string;
+  summaryText?: string;
+  summaryScanId?: string;
+  activeAdapterId?: string;
+  syncLeaseExpiresAt?: string;
+  updatedAt: string;
+}
+
+export interface ProjectEnvironmentOperationRecord {
+  syncId: string;
+  operationId: string;
+  userId: string;
+  projectId: string;
+  adapterId: string;
+  operation: ProjectWorkspaceOperation;
+  status: "pending" | "accepted" | "unsupported" | "failed" | "expired";
+  evidence: Record<string, unknown>;
+  resultHash?: string;
+  nextPageIndex: number;
+  isComplete: boolean;
+  attempts: number;
+  lastError?: string;
+  expiresAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProjectEnvironmentDerivedEvidence {
+  projectKind: Exclude<ProjectEnvironmentKind, "unknown">;
+  fingerprint: string;
+  compactFileTree: string;
+  omittedCount: number;
+  deterministicProfile: string | null;
+}
+
+export interface AcceptProjectEnvironmentEvidenceResult {
+  response: ProjectEnvironmentSyncResponse;
+  inventoryComplete: boolean;
+  deterministicEvidenceComplete: boolean;
+  stale: boolean;
+  progressed: boolean;
+}
+
+interface SqlStateRow {
+  user_id: string;
+  project_id: string;
+  project_kind: ProjectEnvironmentKind;
+  status: ProjectEnvironmentSyncStatus;
+  current_sync_id: string | null;
+  current_scan_id: string | null;
+  applied_scan_id: string | null;
+  fingerprint: string | null;
+  summary_text: string | null;
+  summary_scan_id: string | null;
+  active_adapter_id: string | null;
+  sync_lease_expires_at: string | null;
+  updated_at: string;
+}
+
+interface SqlOperationRow {
+  sync_id: string;
+  operation_id: string;
+  user_id: string;
+  project_id: string;
+  adapter_id: string;
+  operation_kind: ProjectWorkspaceOperation["kind"];
+  request_json: string;
+  status: ProjectEnvironmentOperationRecord["status"];
+  evidence_json: string;
+  result_hash: string | null;
+  next_page_index: number;
+  is_complete: number;
+  attempts: number;
+  last_error: string | null;
+  expires_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export class ProjectEnvironmentRepository {
+  constructor(
+    private readonly db: Database.Database,
+    private readonly l3WorldModels: L3WorldModelRepository,
+    private readonly runtime: RuntimeRepository
+  ) {}
+
+  getState(userId: string, projectId: string): ProjectEnvironmentStateRecord | undefined {
+    const row = this.db.prepare(
+      `SELECT * FROM l3_world_model_project_environment_sync_state
+       WHERE user_id = ? AND project_id = ?`
+    ).get(userId, projectId) as SqlStateRow | undefined;
+    return row ? stateFromSql(row) : undefined;
+  }
+
+  getOperation(syncId: string, operationId: string): ProjectEnvironmentOperationRecord | undefined {
+    const row = this.db.prepare(
+      `SELECT * FROM l3_world_model_project_environment_operations
+       WHERE sync_id = ? AND operation_id = ?`
+    ).get(syncId, operationId) as SqlOperationRow | undefined;
+    return row ? operationFromSql(row) : undefined;
+  }
+
+  listOperations(syncId: string): ProjectEnvironmentOperationRecord[] {
+    return (this.db.prepare(
+      `SELECT * FROM l3_world_model_project_environment_operations
+       WHERE sync_id = ? ORDER BY created_at ASC, operation_id ASC`
+    ).all(syncId) as SqlOperationRow[]).map(operationFromSql);
+  }
+
+  start(input: {
+    userId: string;
+    projectId: string;
+    adapterId: string;
+    capabilities: WorkspaceBridgeCapabilities;
+    at?: string;
+  }): ProjectEnvironmentSyncResponse {
+    return this.db.transaction(() => this.startInTransaction(input))();
+  }
+
+  startIdempotent(input: {
+    userId: string;
+    projectId: string;
+    adapterId: string;
+    capabilities: WorkspaceBridgeCapabilities;
+    idempotencyKey: string;
+    requestHash: string;
+    at?: string;
+  }): ProjectEnvironmentSyncResponse {
+    return this.db.transaction(() => {
+      const existing = this.runtime.getIdempotency(input.idempotencyKey);
+      if (existing) {
+        if (existing.requestHash !== input.requestHash) {
+          throw new ProjectEnvironmentIdempotencyConflictError();
+        }
+        return existing.response as ProjectEnvironmentSyncResponse;
+      }
+      const at = input.at ?? nowIso();
+      const response = this.startInTransaction({ ...input, at });
+      this.runtime.saveIdempotency(input.idempotencyKey, input.requestHash, response, at);
+      return response;
+    })();
+  }
+
+  private startInTransaction(input: {
+    userId: string;
+    projectId: string;
+    adapterId: string;
+    capabilities: WorkspaceBridgeCapabilities;
+    at?: string;
+  }): ProjectEnvironmentSyncResponse {
+    const at = input.at ?? nowIso();
+    this.l3WorldModels.ensureScope(input.userId, input.projectId, at);
+    this.db.prepare(
+        `INSERT INTO l3_world_model_project_environment_sync_state (
+           user_id, project_id, project_kind, status, updated_at
+         ) VALUES (?, ?, 'unknown', 'uninitialized', ?)
+         ON CONFLICT(user_id, project_id) DO NOTHING`
+    ).run(input.userId, input.projectId, at);
+    const state = this.requireState(input.userId, input.projectId);
+    if (state.currentSyncId && leaseIsActive(state.syncLeaseExpiresAt, at) &&
+        state.status !== "clean" && state.status !== "failed") {
+      if (state.activeAdapterId === input.adapterId) {
+        return this.response(input.userId, input.projectId, input.adapterId, at);
+      }
+      return responseFromState(state, []);
+    }
+
+    if (state.currentSyncId) {
+      this.db.prepare(
+        `DELETE FROM l3_world_model_project_environment_operations WHERE sync_id = ?`
+      ).run(state.currentSyncId);
+    }
+    const syncId = newId("l3wm_sync");
+    const inventory: ProjectWorkspaceOperation = {
+      operationId: newId("l3wm_op"),
+      kind: "inventory",
+      policy: PROJECT_ENVIRONMENT_SCAN_POLICY_V1,
+      mode: "full"
+    };
+    if (!input.capabilities.operations.includes("inventory")) {
+      this.db.prepare(
+        `UPDATE l3_world_model_project_environment_sync_state
+         SET status = 'failed', current_sync_id = ?, active_adapter_id = NULL,
+             sync_lease_expires_at = NULL, updated_at = ?
+         WHERE user_id = ? AND project_id = ?`
+      ).run(syncId, at, input.userId, input.projectId);
+      return this.response(input.userId, input.projectId, input.adapterId, at);
+    }
+    this.db.prepare(
+      `UPDATE l3_world_model_project_environment_sync_state
+       SET status = 'collecting_inventory', current_sync_id = ?, active_adapter_id = ?,
+           sync_lease_expires_at = ?, updated_at = ?
+       WHERE user_id = ? AND project_id = ?`
+    ).run(syncId, input.adapterId, plusMs(at, SYNC_LEASE_MS), at, input.userId, input.projectId);
+    this.insertOperation(input.userId, input.projectId, input.adapterId, syncId, inventory, at);
+    this.db.prepare(
+      `UPDATE l3_world_model_project_environment_operations
+       SET evidence_json = ? WHERE sync_id = ? AND operation_id = ?`
+    ).run(JSON.stringify({ capabilities: input.capabilities }), syncId, inventory.operationId);
+    return this.response(input.userId, input.projectId, input.adapterId, at);
+  }
+
+  response(
+    userId: string,
+    projectId: string,
+    adapterId: string,
+    at = nowIso()
+  ): ProjectEnvironmentSyncResponse {
+    const state = this.requireState(userId, projectId);
+    const canExecute = state.activeAdapterId === adapterId && leaseIsActive(state.syncLeaseExpiresAt, at);
+    const operations = canExecute && state.currentSyncId
+      ? this.listOperations(state.currentSyncId)
+        .filter((record) => record.status === "pending" && !record.isComplete)
+        .map((record) => record.operation)
+      : [];
+    return responseFromState(state, operations);
+  }
+
+  acceptEvidence(input: {
+    userId: string;
+    projectId: string;
+    adapterId: string;
+    syncId: string;
+    evidence: ProjectWorkspaceEvidence;
+    at?: string;
+  }): AcceptProjectEnvironmentEvidenceResult {
+    return this.db.transaction(() => {
+      const at = input.at ?? nowIso();
+      const state = this.requireState(input.userId, input.projectId);
+      if (state.currentSyncId !== input.syncId || state.activeAdapterId !== input.adapterId) {
+        throw new Error("project_environment_sync_conflict");
+      }
+      if (!leaseIsActive(state.syncLeaseExpiresAt, at)) {
+        throw new Error("project_environment_sync_lease_expired");
+      }
+      const record = this.getOperation(input.syncId, input.evidence.operationId);
+      if (!record || record.userId !== input.userId || record.projectId !== input.projectId ||
+          record.adapterId !== input.adapterId || record.operation.kind !== input.evidence.kind) {
+        throw new Error("project_environment_operation_conflict");
+      }
+      if (record.status === "expired" || record.status === "failed") {
+        throw new Error("project_environment_operation_expired");
+      }
+      if (Date.parse(record.expiresAt) <= Date.parse(at)) {
+        throw new Error("project_environment_operation_expired");
+      }
+
+      let stale = false;
+      let madeProgress = false;
+      if (input.evidence.kind === "inventory" && input.evidence.status === "accepted") {
+        madeProgress = this.acceptInventoryPage(record, input.evidence, at);
+      } else {
+        const evidenceHash = sha256Hex(canonicalJson(input.evidence));
+        if (record.isComplete) {
+          if (record.resultHash !== evidenceHash) throw new Error("project_environment_evidence_conflict");
+        } else if (input.evidence.kind === "read_text" && input.evidence.status === "stale") {
+          stale = true;
+          madeProgress = true;
+          this.db.prepare(
+            `UPDATE l3_world_model_project_environment_operations
+             SET status = 'accepted', evidence_json = ?, result_hash = ?, is_complete = 1,
+                 attempts = attempts + 1, expires_at = ?, updated_at = ?
+             WHERE sync_id = ? AND operation_id = ?`
+          ).run(JSON.stringify(input.evidence), evidenceHash, plusMs(at, EVIDENCE_TTL_MS), at,
+            input.syncId, input.evidence.operationId);
+        } else {
+          madeProgress = true;
+          validateEvidenceAgainstOperation(record.operation, input.evidence);
+          const status = input.evidence.status === "unsupported" ? "unsupported" : "accepted";
+          this.db.prepare(
+            `UPDATE l3_world_model_project_environment_operations
+             SET status = ?, evidence_json = ?, result_hash = ?, is_complete = 1,
+                 attempts = attempts + 1, expires_at = ?, updated_at = ?
+             WHERE sync_id = ? AND operation_id = ?`
+          ).run(status, JSON.stringify(input.evidence), evidenceHash, plusMs(at, EVIDENCE_TTL_MS), at,
+            input.syncId, input.evidence.operationId);
+        }
+      }
+      if (madeProgress) this.renewLease(input.userId, input.projectId, at);
+      const operations = this.listActiveOperations(input.syncId);
+      const inventory = operations.find((candidate) => candidate.operation.kind === "inventory");
+      const inventoryComplete = Boolean(inventory?.isComplete);
+      const deterministicEvidenceComplete = inventoryComplete && operations.every((candidate) => candidate.isComplete);
+      return {
+        response: this.response(input.userId, input.projectId, input.adapterId, at),
+        inventoryComplete,
+        deterministicEvidenceComplete,
+        stale,
+        progressed: madeProgress
+      };
+    })();
+  }
+
+  replaceAfterStale(input: {
+    userId: string;
+    projectId: string;
+    adapterId: string;
+    syncId: string;
+    at?: string;
+  }): ProjectEnvironmentSyncResponse {
+    return this.db.transaction(() => {
+      const at = input.at ?? nowIso();
+      const state = this.requireCurrentOwner(input);
+      const capabilities = this.listActiveOperations(input.syncId)
+        .find((record) => record.operation.kind === "inventory")?.evidence.capabilities;
+      this.db.prepare(
+        `UPDATE l3_world_model_project_environment_operations
+         SET status = 'expired', last_error = 'stale_inventory', updated_at = ?
+         WHERE sync_id = ? AND status <> 'expired'`
+      ).run(at, input.syncId);
+      const operation: ProjectWorkspaceOperation = {
+        operationId: newId("l3wm_op"),
+        kind: "inventory",
+        policy: PROJECT_ENVIRONMENT_SCAN_POLICY_V1,
+        mode: "full"
+      };
+      this.insertOperation(input.userId, input.projectId, input.adapterId, input.syncId, operation, at);
+      this.db.prepare(
+        `UPDATE l3_world_model_project_environment_operations
+         SET evidence_json = ? WHERE sync_id = ? AND operation_id = ?`
+      ).run(JSON.stringify({ capabilities }), input.syncId, operation.operationId);
+      this.db.prepare(
+        `UPDATE l3_world_model_project_environment_sync_state
+         SET status = 'collecting_inventory', sync_lease_expires_at = ?, updated_at = ?
+         WHERE user_id = ? AND project_id = ?`
+      ).run(plusMs(at, SYNC_LEASE_MS), at, state.userId, state.projectId);
+      return this.response(input.userId, input.projectId, input.adapterId, at);
+    })();
+  }
+
+  planDeterministicOperations(input: {
+    userId: string;
+    projectId: string;
+    adapterId: string;
+    syncId: string;
+    operations: ProjectWorkspaceOperation[];
+    at?: string;
+  }): ProjectEnvironmentSyncResponse {
+    return this.db.transaction(() => {
+      const at = input.at ?? nowIso();
+      this.requireCurrentOwner(input);
+      for (const operation of input.operations) {
+        const existing = this.getOperation(input.syncId, operation.operationId);
+        if (!existing) this.insertOperation(input.userId, input.projectId, input.adapterId, input.syncId, operation, at);
+      }
+      this.renewLease(input.userId, input.projectId, at);
+      return this.response(input.userId, input.projectId, input.adapterId, at);
+    })();
+  }
+
+  inventoryEntries(syncId: string): { entries: InventoryEntry[]; omittedCount: number } {
+    const inventory = this.listOperations(syncId).find((record) =>
+      record.operation.kind === "inventory" && record.status === "accepted" && record.isComplete
+    );
+    if (!inventory) throw new Error("project_environment_inventory_incomplete");
+    const pages = Array.isArray(inventory.evidence.pages) ? inventory.evidence.pages : [];
+    const entries: InventoryEntry[] = [];
+    let omittedCount = 0;
+    for (const page of pages) {
+      if (!isRecord(page)) continue;
+      if (Array.isArray(page.entries)) entries.push(...page.entries as InventoryEntry[]);
+      if (page.isLast === true && typeof page.omittedCount === "number") omittedCount = page.omittedCount;
+    }
+    return { entries, omittedCount };
+  }
+
+  deterministicEvidence(syncId: string): ProjectEnvironmentOperationRecord[] {
+    return this.listActiveOperations(syncId).filter((record) => record.operation.kind !== "inventory");
+  }
+
+  commitDeterministic(input: {
+    userId: string;
+    projectId: string;
+    adapterId: string;
+    syncId: string;
+    derived: ProjectEnvironmentDerivedEvidence;
+    sessionId?: string;
+    at?: string;
+  }): ProjectEnvironmentSyncResponse {
+    return this.db.transaction(() => {
+      const at = input.at ?? nowIso();
+      const previous = this.requireCurrentOwner(input);
+      const inventory = this.listOperations(input.syncId).find((record) =>
+        record.operation.kind === "inventory" && record.status === "accepted"
+      );
+      if (!inventory?.isComplete) throw new Error("project_environment_inventory_incomplete");
+      const changed = previous.fingerprint !== input.derived.fingerprint || previous.projectKind !== input.derived.projectKind;
+      const scanId = changed || !previous.currentScanId ? newId("l3wm_scan") : previous.currentScanId;
+      const typeChanged = previous.projectKind !== "unknown" && previous.projectKind !== input.derived.projectKind;
+      const alreadyApplied = !changed && previous.appliedScanId === scanId && previous.summaryScanId === scanId;
+
+      const nextEvidence = {
+        ...inventory.evidence,
+        derived: input.derived
+      };
+      this.db.prepare(
+        `UPDATE l3_world_model_project_environment_operations
+         SET evidence_json = ?, expires_at = ?, updated_at = ?
+         WHERE sync_id = ? AND operation_id = ?`
+      ).run(JSON.stringify(nextEvidence), plusMs(at, EVIDENCE_TTL_MS), at, inventory.syncId, inventory.operationId);
+
+      if (alreadyApplied) {
+        this.db.prepare(
+          `UPDATE l3_world_model_project_environment_sync_state
+           SET status = 'clean', current_scan_id = ?, active_adapter_id = NULL,
+               sync_lease_expires_at = NULL, updated_at = ?
+           WHERE user_id = ? AND project_id = ?`
+        ).run(scanId, at, input.userId, input.projectId);
+        this.cleanupOperations(input.syncId);
+        return this.response(input.userId, input.projectId, input.adapterId, at);
+      }
+
+      let appliedScanId = previous.appliedScanId ?? null;
+      if (input.derived.projectKind === "code") {
+        this.l3WorldModels.upsertField({
+          userId: input.userId,
+          projectId: input.projectId,
+          targetField: "project_environment_profile",
+          value: input.derived.deterministicProfile,
+          projectEnvironmentAppliedScanId: scanId,
+          at,
+          source: "project_environment"
+        });
+        appliedScanId = scanId;
+      } else if (typeChanged) {
+        this.l3WorldModels.upsertField({
+          userId: input.userId,
+          projectId: input.projectId,
+          targetField: "project_environment_profile",
+          value: null,
+          projectEnvironmentAppliedScanId: scanId,
+          at,
+          source: "project_environment"
+        });
+        appliedScanId = scanId;
+      }
+
+      this.db.prepare(
+        `UPDATE l3_world_model_project_environment_sync_state
+         SET project_kind = ?, status = 'summarizing', current_scan_id = ?,
+             applied_scan_id = ?, fingerprint = ?,
+             summary_text = CASE WHEN ? THEN NULL ELSE summary_text END,
+             summary_scan_id = CASE WHEN ? THEN NULL ELSE summary_scan_id END,
+             sync_lease_expires_at = ?, updated_at = ?
+         WHERE user_id = ? AND project_id = ?`
+      ).run(
+        input.derived.projectKind,
+        scanId,
+        appliedScanId,
+        input.derived.fingerprint,
+        typeChanged ? 1 : 0,
+        typeChanged ? 1 : 0,
+        plusMs(at, SYNC_LEASE_MS),
+        at,
+        input.userId,
+        input.projectId
+      );
+      this.enqueueSummaryJob({
+        userId: input.userId,
+        projectId: input.projectId,
+        sessionId: input.sessionId,
+        syncId: input.syncId,
+        scanId,
+        projectKind: input.derived.projectKind,
+        at
+      });
+      return this.response(input.userId, input.projectId, input.adapterId, at);
+    })();
+  }
+
+  derivedEvidence(syncId: string): ProjectEnvironmentDerivedEvidence {
+    const inventory = this.listOperations(syncId).find((record) =>
+      record.operation.kind === "inventory" && record.status === "accepted"
+    );
+    const derived = inventory?.evidence.derived;
+    if (!isProjectEnvironmentDerivedEvidence(derived)) {
+      throw new Error("project_environment_derived_evidence_missing");
+    }
+    return derived;
+  }
+
+  applySummary(input: {
+    userId: string;
+    projectId: string;
+    syncId: string;
+    scanId: string;
+    expectedCurrentSummary: string | null;
+    operation: "noop" | "create" | "update";
+    summary: string;
+    at?: string;
+  }): { stale: boolean } {
+    return this.db.transaction(() => {
+      const at = input.at ?? nowIso();
+      const state = this.requireState(input.userId, input.projectId);
+      if (state.currentSyncId !== input.syncId || state.currentScanId !== input.scanId) {
+        return { stale: true };
+      }
+      const currentSummary = state.summaryText ?? null;
+      if (currentSummary !== input.expectedCurrentSummary) return { stale: true };
+      let nextSummary = currentSummary;
+      if (input.operation === "noop") {
+        if (input.summary !== "") throw new TypeError("noop project summary must be empty");
+      } else if (input.operation === "create") {
+        if (currentSummary !== null || !input.summary.trim()) throw new TypeError("invalid project summary create");
+        nextSummary = input.summary;
+      } else {
+        if (currentSummary === null || input.summary === currentSummary) throw new TypeError("invalid project summary update");
+        nextSummary = input.summary || null;
+      }
+      const derived = this.derivedEvidence(input.syncId);
+      const profile = renderProjectEnvironmentProfile({
+        projectKind: derived.projectKind,
+        deterministicProfile: derived.deterministicProfile,
+        summary: nextSummary,
+        omittedCount: derived.omittedCount
+      });
+      this.l3WorldModels.upsertField({
+        userId: input.userId,
+        projectId: input.projectId,
+        targetField: "project_environment_profile",
+        value: profile,
+        projectEnvironmentAppliedScanId: input.scanId,
+        at,
+        source: "project_environment"
+      });
+      this.db.prepare(
+        `UPDATE l3_world_model_project_environment_sync_state
+         SET status = 'clean', applied_scan_id = ?, summary_text = ?, summary_scan_id = ?,
+             active_adapter_id = NULL, sync_lease_expires_at = NULL, updated_at = ?
+         WHERE user_id = ? AND project_id = ? AND current_scan_id = ?`
+      ).run(input.scanId, nextSummary, input.scanId, at, input.userId, input.projectId, input.scanId);
+      this.cleanupOperations(input.syncId);
+      return { stale: false };
+    })();
+  }
+
+  renewSummaryEvidence(syncId: string, at = nowIso()): void {
+    this.db.prepare(
+      `UPDATE l3_world_model_project_environment_operations
+       SET expires_at = ?, updated_at = ?
+       WHERE sync_id = ? AND status IN ('accepted', 'unsupported')`
+    ).run(plusMs(at, EVIDENCE_TTL_MS), at, syncId);
+  }
+
+  failCurrentSync(input: {
+    userId: string;
+    projectId: string;
+    adapterId: string;
+    syncId: string;
+    at?: string;
+  }): ProjectEnvironmentSyncResponse {
+    return this.db.transaction(() => {
+      const at = input.at ?? nowIso();
+      this.requireCurrentOwner(input);
+      this.db.prepare(
+        `UPDATE l3_world_model_project_environment_sync_state
+         SET status = 'failed', active_adapter_id = NULL,
+             sync_lease_expires_at = NULL, updated_at = ?
+         WHERE user_id = ? AND project_id = ?`
+      ).run(at, input.userId, input.projectId);
+      this.cleanupOperations(input.syncId);
+      return this.response(input.userId, input.projectId, input.adapterId, at);
+    })();
+  }
+
+  private requireState(userId: string, projectId: string): ProjectEnvironmentStateRecord {
+    const state = this.getState(userId, projectId);
+    if (!state) throw new Error("project_environment_state_not_found");
+    return state;
+  }
+
+  private requireCurrentOwner(input: {
+    userId: string;
+    projectId: string;
+    adapterId: string;
+    syncId: string;
+  }): ProjectEnvironmentStateRecord {
+    const state = this.requireState(input.userId, input.projectId);
+    if (state.currentSyncId !== input.syncId || state.activeAdapterId !== input.adapterId) {
+      throw new Error("project_environment_sync_conflict");
+    }
+    return state;
+  }
+
+  private renewLease(userId: string, projectId: string, at: string): void {
+    this.db.prepare(
+      `UPDATE l3_world_model_project_environment_sync_state
+       SET sync_lease_expires_at = ?, updated_at = ? WHERE user_id = ? AND project_id = ?`
+    ).run(plusMs(at, SYNC_LEASE_MS), at, userId, projectId);
+  }
+
+  private insertOperation(
+    userId: string,
+    projectId: string,
+    adapterId: string,
+    syncId: string,
+    operation: ProjectWorkspaceOperation,
+    at: string
+  ): void {
+    this.db.prepare(
+      `INSERT INTO l3_world_model_project_environment_operations (
+         sync_id, operation_id, user_id, project_id, adapter_id, operation_kind,
+         request_json, status, evidence_json, result_hash, next_page_index,
+         is_complete, attempts, last_error, expires_at, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', '{}', NULL, 0, 0, 0, NULL, ?, ?, ?)`
+    ).run(
+      syncId,
+      operation.operationId,
+      userId,
+      projectId,
+      adapterId,
+      operation.kind,
+      JSON.stringify(operation),
+      plusMs(at, EVIDENCE_TTL_MS),
+      at,
+      at
+    );
+  }
+
+  private acceptInventoryPage(
+    record: ProjectEnvironmentOperationRecord,
+    evidence: Extract<ProjectWorkspaceEvidence, { kind: "inventory"; status: "accepted" }>,
+    at: string
+  ): boolean {
+    const expectedHash = sha256Hex(canonicalJson({
+      operationId: evidence.operationId,
+      pageIndex: evidence.pageIndex,
+      isLast: evidence.isLast,
+      omittedCount: evidence.omittedCount ?? null,
+      entries: evidence.entries
+    }));
+    if (expectedHash !== evidence.pageHash) throw new Error("project_environment_page_hash_mismatch");
+    const pages = Array.isArray(record.evidence.pages) ? record.evidence.pages as Array<Record<string, unknown>> : [];
+    const existing = pages.find((page) => page.pageIndex === evidence.pageIndex);
+    if (existing) {
+      if (existing.pageHash !== evidence.pageHash) throw new Error("project_environment_evidence_conflict");
+      return false;
+    }
+    if (record.isComplete || evidence.pageIndex !== record.nextPageIndex) {
+      throw new Error("project_environment_page_sequence_conflict");
+    }
+    pages.push(evidence);
+    const complete = evidence.isLast;
+    const resultHash = complete ? sha256Hex(canonicalJson(pages as JsonValue)) : null;
+    this.db.prepare(
+      `UPDATE l3_world_model_project_environment_operations
+       SET status = ?, evidence_json = ?, result_hash = ?, next_page_index = ?, is_complete = ?,
+           attempts = attempts + 1, expires_at = ?, updated_at = ?
+       WHERE sync_id = ? AND operation_id = ?`
+    ).run(
+      complete ? "accepted" : "pending",
+      JSON.stringify({ ...record.evidence, pages }),
+      resultHash,
+      evidence.pageIndex + 1,
+      complete ? 1 : 0,
+      plusMs(at, EVIDENCE_TTL_MS),
+      at,
+      record.syncId,
+      record.operationId
+    );
+    return true;
+  }
+
+  private enqueueSummaryJob(input: {
+    userId: string;
+    projectId: string;
+    sessionId?: string;
+    syncId: string;
+    scanId: string;
+    projectKind: "code" | "folder";
+    at: string;
+  }): void {
+    const dedupeKey = [
+      "project_environment_profile",
+      input.userId,
+      input.projectId,
+      input.scanId,
+      input.syncId
+    ].join(":");
+    const existing = this.runtime.getJobByDedupeKey(dedupeKey);
+    if (existing) return;
+    this.l3WorldModels.insertImmutableJob({
+      id: newId("job"),
+      jobType: "project_environment_profile",
+      status: "queued",
+      dedupeKey,
+      userId: input.userId,
+      sessionId: input.sessionId,
+      payload: {
+        userId: input.userId,
+        projectId: input.projectId,
+        syncId: input.syncId,
+        scanId: input.scanId,
+        projectKind: input.projectKind
+      },
+      attempts: 0,
+      maxAttempts: 3,
+      createdAt: input.at,
+      updatedAt: input.at
+    });
+  }
+
+  private cleanupOperations(syncId: string): void {
+    this.db.prepare(
+      `DELETE FROM l3_world_model_project_environment_operations WHERE sync_id = ?`
+    ).run(syncId);
+  }
+
+  listActiveOperations(syncId: string): ProjectEnvironmentOperationRecord[] {
+    return this.listOperations(syncId).filter((record) =>
+      record.status !== "expired" && record.status !== "failed"
+    );
+  }
+}
+
+export class ProjectEnvironmentIdempotencyConflictError extends Error {
+  constructor() {
+    super("project_environment_start_idempotency_conflict");
+    this.name = "ProjectEnvironmentIdempotencyConflictError";
+  }
+}
+
+function validateEvidenceAgainstOperation(
+  operation: ProjectWorkspaceOperation,
+  evidence: ProjectWorkspaceEvidence
+): void {
+  if (operation.kind === "read_text" && evidence.kind === "read_text" && evidence.status === "accepted") {
+    if (operation.relativePath !== evidence.relativePath || operation.expectedSha256 !== evidence.sha256) {
+      throw new Error("project_environment_read_evidence_mismatch");
+    }
+  }
+  if (operation.kind === "runtime_probe" && evidence.kind === "runtime_probe" && evidence.status === "accepted") {
+    if (operation.probe !== evidence.probe) throw new Error("project_environment_probe_evidence_mismatch");
+    if (evidence.exitCode === 0 && evidence.versionText === null) {
+      throw new Error("project_environment_probe_version_invalid");
+    }
+  }
+}
+
+function responseFromState(
+  state: ProjectEnvironmentStateRecord,
+  operations: ProjectWorkspaceOperation[]
+): ProjectEnvironmentSyncResponse {
+  if (!state.currentSyncId) throw new Error("project_environment_sync_not_initialized");
+  return {
+    syncId: state.currentSyncId,
+    scanId: state.currentScanId ?? null,
+    status: state.status,
+    operations
+  };
+}
+
+function stateFromSql(row: SqlStateRow): ProjectEnvironmentStateRecord {
+  return {
+    userId: row.user_id,
+    projectId: row.project_id,
+    projectKind: row.project_kind,
+    status: row.status,
+    currentSyncId: row.current_sync_id ?? undefined,
+    currentScanId: row.current_scan_id ?? undefined,
+    appliedScanId: row.applied_scan_id ?? undefined,
+    fingerprint: row.fingerprint ?? undefined,
+    summaryText: row.summary_text ?? undefined,
+    summaryScanId: row.summary_scan_id ?? undefined,
+    activeAdapterId: row.active_adapter_id ?? undefined,
+    syncLeaseExpiresAt: row.sync_lease_expires_at ?? undefined,
+    updatedAt: row.updated_at
+  };
+}
+
+function operationFromSql(row: SqlOperationRow): ProjectEnvironmentOperationRecord {
+  return {
+    syncId: row.sync_id,
+    operationId: row.operation_id,
+    userId: row.user_id,
+    projectId: row.project_id,
+    adapterId: row.adapter_id,
+    operation: JSON.parse(row.request_json) as ProjectWorkspaceOperation,
+    status: row.status,
+    evidence: JSON.parse(row.evidence_json) as Record<string, unknown>,
+    resultHash: row.result_hash ?? undefined,
+    nextPageIndex: row.next_page_index,
+    isComplete: row.is_complete !== 0,
+    attempts: row.attempts,
+    lastError: row.last_error ?? undefined,
+    expiresAt: row.expires_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function leaseIsActive(expiresAt: string | undefined, at: string): boolean {
+  return Boolean(expiresAt && Date.parse(expiresAt) > Date.parse(at));
+}
+
+function plusMs(at: string, milliseconds: number): string {
+  return new Date(Date.parse(at) + milliseconds).toISOString();
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isProjectEnvironmentDerivedEvidence(value: unknown): value is ProjectEnvironmentDerivedEvidence {
+  if (!isRecord(value)) return false;
+  return (value.projectKind === "code" || value.projectKind === "folder") &&
+    typeof value.fingerprint === "string" &&
+    typeof value.compactFileTree === "string" &&
+    typeof value.omittedCount === "number" &&
+    (typeof value.deterministicProfile === "string" || value.deterministicProfile === null);
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value ? value : undefined;
+}
+
 export class Repositories {
   readonly memories: MemoryRepository;
   readonly userMemories: UserMemoryRepository;
   readonly processing: MemoryProcessingRepository;
   readonly runtime: RuntimeRepository;
+  readonly l3WorldModels: L3WorldModelRepository;
+  readonly projectEnvironments: ProjectEnvironmentRepository;
   readonly vectors: SqliteVecStore;
 
   constructor(readonly db: Database.Database) {
@@ -3889,11 +5583,283 @@ export class Repositories {
     this.userMemories = new UserMemoryRepository(db);
     this.processing = new MemoryProcessingRepository(db);
     this.runtime = new RuntimeRepository(db);
+    this.l3WorldModels = new L3WorldModelRepository(db, this.memories);
+    this.projectEnvironments = new ProjectEnvironmentRepository(db, this.l3WorldModels, this.runtime);
   }
 
   transaction<T>(fn: () => T): T {
     return this.db.transaction(fn)();
   }
+}
+
+interface SqlL3WorldModelScopeRow {
+  scope_key: string;
+  user_id: string;
+  project_id: string | null;
+  memory_id: string | null;
+  next_scope_seq: number;
+  updated_at: string;
+}
+
+interface SqlL3WorldModelInputTraceRow {
+  session_id: string;
+  trace_seq: number;
+  l1_memory_id: string;
+  raw_turn_id: string;
+  episode_id: string | null;
+  created_at: string;
+}
+
+interface SqlL3WorldModelEvidenceBatchRow {
+  id: string;
+  scope_key: string;
+  scope_seq: number;
+  user_id: string;
+  project_id: string | null;
+  session_id: string;
+  trigger: L3WorldModelBatchTrigger;
+  start_trace_seq: number;
+  end_trace_seq: number;
+  l1_memory_ids_json: string;
+  raw_turn_ids_json: string;
+  feedback_ids_json: string;
+  payload_hash: string;
+  terminal_outcome: L3WorldModelEvidenceBatchRecord["terminalOutcome"] | null;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface SqlL3WorldModelBatchTargetRow {
+  batch_id: string;
+  target_field: L3WorldModelTargetField;
+  field_scope_key: string;
+  scope_seq: number;
+  status: L3WorldModelBatchTargetRecord["status"];
+  no_change: number;
+  applied_at: string | null;
+  updated_at: string;
+}
+
+export function l3WorldModelScopeKey(userId: string, projectId?: string | null): string {
+  return `l3wm:${sha256Hex(canonicalJson({ userId, projectId: projectId ?? null }))}`;
+}
+
+export function l3WorldModelFieldScopeKey(
+  scopeKey: string,
+  targetField: L3WorldModelTargetField
+): string {
+  return `${scopeKey}:${targetField}`;
+}
+
+export function l3WorldModelMemoryKey(userId: string, projectId?: string | null): string {
+  return projectId
+    ? `world_model:project:${userId}:${projectId}`
+    : `world_model:general_rules:${userId}:no_project`;
+}
+
+export function isL3WorldModelV2Memory(memory: MemoryRow): boolean {
+  try {
+    validateL3WorldModelMemory(
+      memory,
+      memory.userId,
+      projectIdFromL3WorldModelMemory(memory)
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function fieldsFromL3WorldModelMemory(memory: MemoryRow): L3WorldModelFields {
+  const world = memory.properties.internal_info.world_model;
+  if (!isRecordLike(world)) throw new Error(`invalid L3 World Model v2 fields: ${memory.id}`);
+  return {
+    generalRulesAndSafetyConstraints: nullableString(world.general_rules_and_safety_constraints, memory.id),
+    projectEnvironmentProfile: nullableString(world.project_environment_profile, memory.id),
+    projectContract: nullableString(world.project_contract, memory.id),
+    domainKnowledge: nullableString(world.domain_knowledge, memory.id)
+  };
+}
+
+function validateL3WorldModelMemory(
+  memory: MemoryRow,
+  expectedUserId: string,
+  expectedProjectId?: string | null
+): void {
+  const internal = memory.properties.internal_info;
+  const world = internal.world_model;
+  const expectedFields = [
+    "general_rules_and_safety_constraints",
+    "project_environment_profile",
+    "project_contract",
+    "domain_knowledge"
+  ];
+  if (internal.schema_version !== 2 || !isRecordLike(world)) {
+    throw new Error(`memory is not an L3 World Model v2 record: ${memory.id}`);
+  }
+  const actualKeys = Object.keys(world).sort();
+  if (actualKeys.length !== expectedFields.length || expectedFields.some((field) => !actualKeys.includes(field))) {
+    throw new Error(`invalid L3 World Model v2 field set: ${memory.id}`);
+  }
+  const fields = fieldsFromL3WorldModelMemory(memory);
+  const projectId = expectedProjectId ?? null;
+  if (memory.memoryLayer !== "L3" || internal.memory_kind !== "world_model") {
+    throw new Error(`invalid L3 World Model layer or kind: ${memory.id}`);
+  }
+  if (memory.userId !== expectedUserId || projectIdFromL3WorldModelMemory(memory) !== projectId) {
+    throw new Error(`invalid L3 World Model owner: ${memory.id}`);
+  }
+  if (memory.memoryKey !== l3WorldModelMemoryKey(expectedUserId, projectId)) {
+    throw new Error(`invalid L3 World Model key: ${memory.id}`);
+  }
+  if (projectId && fields.generalRulesAndSafetyConstraints !== null) {
+    throw new Error(`project L3 World Model contains general rules: ${memory.id}`);
+  }
+  if (!projectId && (
+    fields.projectEnvironmentProfile !== null || fields.projectContract !== null || fields.domainKnowledge !== null
+  )) {
+    throw new Error(`general L3 World Model contains project fields: ${memory.id}`);
+  }
+}
+
+export function isStrictL3WorldModelV2Memory(memory: MemoryRow): boolean {
+  if (memory.properties.internal_info.schema_version !== 2) return false;
+  try {
+    validateL3WorldModelMemory(memory, memory.userId, projectIdFromL3WorldModelMemory(memory));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function projectIdFromL3WorldModelMemory(memory: MemoryRow): string | null {
+  const value = memory.info.project_id;
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || !value) throw new Error(`invalid L3 World Model project ID: ${memory.id}`);
+  return value;
+}
+
+function nullableString(value: unknown, memoryId: string): string | null {
+  if (value === null || typeof value === "string") return value;
+  throw new Error(`invalid L3 World Model field value: ${memoryId}`);
+}
+
+function emptyL3WorldModelFields(): L3WorldModelFields {
+  return {
+    generalRulesAndSafetyConstraints: null,
+    projectEnvironmentProfile: null,
+    projectContract: null,
+    domainKnowledge: null
+  };
+}
+
+function l3WorldModelFieldProperty(field: L3WorldModelFieldName): keyof L3WorldModelFields {
+  if (field === "general_rules_and_safety_constraints") return "generalRulesAndSafetyConstraints";
+  if (field === "project_environment_profile") return "projectEnvironmentProfile";
+  if (field === "project_contract") return "projectContract";
+  return "domainKnowledge";
+}
+
+function assertL3WorldModelFieldOwnership(projectId: string | null, field: L3WorldModelFieldName): void {
+  if (projectId === null && field !== "general_rules_and_safety_constraints") {
+    throw new TypeError("a no-project L3 World Model can only own general rules");
+  }
+  if (projectId !== null && field === "general_rules_and_safety_constraints") {
+    throw new TypeError("a project L3 World Model cannot own general rules");
+  }
+}
+
+function normalizeL3WorldModelFieldValue(value: string | null): string | null {
+  if (value === null) return null;
+  return value.trim() ? value : null;
+}
+
+function l3WorldModelSourceMemoryIds(memory?: MemoryRow): string[] {
+  if (!memory) return [];
+  const value = memory.properties.internal_info.source_memory_ids;
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && Boolean(item)) : [];
+}
+
+function splitL3TracesByRawTurn(
+  traces: L3WorldModelInputTraceRecord[],
+  maxRawTurns: number
+): L3WorldModelInputTraceRecord[][] {
+  const groups: L3WorldModelInputTraceRecord[][] = [];
+  for (const trace of traces) {
+    const last = groups.at(-1);
+    if (last?.[0]?.rawTurnId === trace.rawTurnId) {
+      last.push(trace);
+    } else {
+      groups.push([trace]);
+    }
+  }
+  const chunks: L3WorldModelInputTraceRecord[][] = [];
+  for (let index = 0; index < groups.length; index += maxRawTurns) {
+    chunks.push(groups.slice(index, index + maxRawTurns).flat());
+  }
+  return chunks;
+}
+
+function l3WorldModelScopeFromSql(row: SqlL3WorldModelScopeRow): L3WorldModelScopeRecord {
+  return {
+    scopeKey: row.scope_key,
+    userId: row.user_id,
+    projectId: row.project_id ?? undefined,
+    memoryId: row.memory_id ?? undefined,
+    nextScopeSeq: row.next_scope_seq,
+    updatedAt: row.updated_at
+  };
+}
+
+function l3WorldModelInputTraceFromSql(row: SqlL3WorldModelInputTraceRow): L3WorldModelInputTraceRecord {
+  return {
+    sessionId: row.session_id,
+    traceSeq: row.trace_seq,
+    l1MemoryId: row.l1_memory_id,
+    rawTurnId: row.raw_turn_id,
+    episodeId: row.episode_id ?? undefined,
+    createdAt: row.created_at
+  };
+}
+
+function l3WorldModelEvidenceBatchFromSql(
+  row: SqlL3WorldModelEvidenceBatchRow
+): L3WorldModelEvidenceBatchRecord {
+  return {
+    id: row.id,
+    scopeKey: row.scope_key,
+    scopeSeq: row.scope_seq,
+    userId: row.user_id,
+    projectId: row.project_id ?? undefined,
+    sessionId: row.session_id,
+    trigger: row.trigger,
+    startTraceSeq: row.start_trace_seq,
+    endTraceSeq: row.end_trace_seq,
+    l1MemoryIds: asStringArray(parseJson(row.l1_memory_ids_json, [])),
+    rawTurnIds: asStringArray(parseJson(row.raw_turn_ids_json, [])),
+    feedbackIds: asStringArray(parseJson(row.feedback_ids_json, [])),
+    payloadHash: row.payload_hash,
+    terminalOutcome: row.terminal_outcome ?? undefined,
+    completedAt: row.completed_at ?? undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function l3WorldModelBatchTargetFromSql(
+  row: SqlL3WorldModelBatchTargetRow
+): L3WorldModelBatchTargetRecord {
+  return {
+    batchId: row.batch_id,
+    targetField: row.target_field,
+    fieldScopeKey: row.field_scope_key,
+    scopeSeq: row.scope_seq,
+    status: row.status,
+    noChange: row.no_change === 1,
+    appliedAt: row.applied_at ?? undefined,
+    updatedAt: row.updated_at
+  };
 }
 
 export function memoryFromSql(row: MemorySqlRow): MemoryRow {
@@ -4864,6 +6830,8 @@ interface SqlJobRow {
   session_id: string | null;
   episode_id: string | null;
   target_memory_id: string | null;
+  scope_key: string | null;
+  scope_seq: number | null;
   payload_json: string;
   attempts: number;
   max_attempts: number;
@@ -4995,6 +6963,8 @@ function jobFromSql(row: SqlJobRow): EvolutionJobRecord {
     sessionId: row.session_id ?? undefined,
     episodeId: row.episode_id ?? undefined,
     targetMemoryId: row.target_memory_id ?? undefined,
+    scopeKey: row.scope_key ?? undefined,
+    scopeSeq: row.scope_seq ?? undefined,
     payload: parseJson(row.payload_json, {}),
     attempts: row.attempts,
     maxAttempts: row.max_attempts,
@@ -5247,6 +7217,57 @@ function primaryKeyColumn(table: BundleTableName): string | undefined {
   return "id";
 }
 
+interface BundleIdentity {
+  primaryKey: string;
+  sourceId: string;
+  columns: string[];
+  values: Array<string | number>;
+}
+
+function bundleIdentity(
+  table: BundleTableName,
+  row: Record<string, unknown>
+): BundleIdentity | undefined {
+  const newTableIdentityColumns: Partial<Record<BundleTableName, string[]>> = {
+    l3_world_model_scopes: ["scope_key"],
+    l3_world_model_session_cursors: ["session_id"],
+    l3_world_model_input_traces: ["session_id", "trace_seq"],
+    l3_world_model_evidence_batches: ["id"],
+    l3_world_model_batch_targets: ["batch_id", "target_field"],
+    l3_world_model_project_environment_sync_state: ["user_id", "project_id"],
+    l3_world_model_project_environment_operations: ["sync_id", "operation_id"]
+  };
+  const newColumns = newTableIdentityColumns[table];
+  if (newColumns) {
+    const values = newColumns.map((column) => row[column]);
+    if (values.some((value) => typeof value !== "string" && typeof value !== "number")) {
+      return undefined;
+    }
+    const identity: Record<string, string | number> = {};
+    for (const [index, column] of newColumns.entries()) {
+      identity[column] = values[index] as string | number;
+    }
+    return {
+      primaryKey: newColumns.join("+"),
+      sourceId: canonicalJson(identity),
+      columns: newColumns,
+      values: values as Array<string | number>
+    };
+  }
+
+  const primaryKey = primaryKeyColumn(table);
+  const value = primaryKey ? row[primaryKey] : undefined;
+  if (!primaryKey || (typeof value !== "string" && typeof value !== "number")) {
+    return undefined;
+  }
+  return {
+    primaryKey,
+    sourceId: String(value),
+    columns: [primaryKey],
+    values: [value]
+  };
+}
+
 function recordMigrationMap(
   migrationMap: Record<string, Record<string, string>>,
   table: string,
@@ -5288,6 +7309,58 @@ function redactBundleRow(table: BundleTableName, row: Record<string, unknown>): 
     tool_results_json: "[]",
     redacted_at: row.redacted_at ?? nowIso()
   };
+}
+
+function normalizeRedactedL3WorldModelBundle(
+  tables: Record<string, Array<Record<string, unknown>>>
+): Record<string, Array<Record<string, unknown>>> {
+  const batches = tables.l3_world_model_evidence_batches ?? [];
+  const terminalBatchIds = new Set(
+    batches
+      .filter((row) => typeof row.terminal_outcome === "string" && row.terminal_outcome)
+      .map((row) => String(row.id))
+  );
+  tables.l3_world_model_evidence_batches = batches.filter((row) => terminalBatchIds.has(String(row.id)));
+  tables.l3_world_model_batch_targets = (tables.l3_world_model_batch_targets ?? [])
+    .filter((row) => terminalBatchIds.has(String(row.batch_id)));
+  tables.evolution_jobs = (tables.evolution_jobs ?? []).filter((row) => {
+    const jobType = row.job_type;
+    if (jobType !== "l3_world_model_update" && jobType !== "project_environment_profile") return true;
+    return row.status === "succeeded" || row.status === "dead_letter";
+  });
+  tables.l3_world_model_project_environment_operations = [];
+  tables.l3_world_model_project_environment_sync_state = (
+    tables.l3_world_model_project_environment_sync_state ?? []
+  ).map((row) => ({
+    ...row,
+    status: "dirty",
+    current_sync_id: null,
+    current_scan_id: null,
+    active_adapter_id: null,
+    sync_lease_expires_at: null
+  }));
+
+  const exportedAt = nowIso();
+  const cursors = new Map<string, Record<string, unknown>>();
+  for (const row of tables.l3_world_model_session_cursors ?? []) {
+    if (typeof row.session_id === "string") cursors.set(row.session_id, row);
+  }
+  for (const trace of tables.l3_world_model_input_traces ?? []) {
+    if (typeof trace.session_id !== "string" || typeof trace.trace_seq !== "number") continue;
+    const current = cursors.get(trace.session_id);
+    const lastScheduledSeq = typeof current?.last_scheduled_seq === "number"
+      ? current.last_scheduled_seq
+      : 0;
+    if (trace.trace_seq <= lastScheduledSeq) continue;
+    cursors.set(trace.session_id, {
+      ...(current ?? { __table: "l3_world_model_session_cursors" }),
+      session_id: trace.session_id,
+      last_scheduled_seq: trace.trace_seq,
+      updated_at: exportedAt
+    });
+  }
+  tables.l3_world_model_session_cursors = [...cursors.values()];
+  return tables;
 }
 
 function serializeBundleRow(table: BundleTableName, row: Record<string, unknown>): Record<string, unknown> {
@@ -5357,6 +7430,34 @@ function normalizeBundleSqlValue(value: unknown): SqlValue {
   return toJson(value);
 }
 
+function isL3WorldModelTargetField(value: unknown): value is L3WorldModelTargetField {
+  return value === "general_rules_and_safety_constraints" ||
+    value === "project_contract" ||
+    value === "domain_knowledge";
+}
+
+function updateL3WorldModelBatchTerminalOutcome(
+  db: Database.Database,
+  batchId: string,
+  at: string
+): void {
+  const rows = db.prepare(
+    `SELECT status FROM l3_world_model_batch_targets WHERE batch_id = ?`
+  ).all(batchId) as Array<{ status: L3WorldModelBatchTargetRecord["status"] }>;
+  if (rows.length === 0 || rows.some((row) => row.status === "queued")) return;
+  const applied = rows.filter((row) => row.status === "applied").length;
+  const terminalOutcome: NonNullable<L3WorldModelEvidenceBatchRecord["terminalOutcome"]> = applied === rows.length
+    ? "applied"
+    : applied === 0
+      ? "dead_letter"
+      : "partial_dead_letter";
+  db.prepare(
+    `UPDATE l3_world_model_evidence_batches
+     SET terminal_outcome = ?, completed_at = ?, updated_at = ?
+     WHERE id = ?`
+  ).run(terminalOutcome, at, at, batchId);
+}
+
 function isSerializedBuffer(value: unknown): value is { __memmy_type: "buffer"; base64: string } {
   return typeof value === "object" &&
     value !== null &&
@@ -5407,7 +7508,8 @@ function evolutionJobPrioritySql(): string {
              WHEN job_type = 'span_big_turn' THEN 35
              WHEN job_type = 'l2_association' THEN 40
              WHEN job_type = 'l2_induction' THEN 50
-             WHEN job_type = 'l3_abstraction' THEN 60
+             WHEN job_type = 'project_environment_profile' THEN 55
+             WHEN job_type IN ('l3_abstraction', 'l3_world_model_update') THEN 60
              WHEN job_type = 'skill_crystallization' THEN 70
              WHEN job_type = 'skill_trial_resolve' THEN 80
              ELSE 100

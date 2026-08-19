@@ -1,4 +1,9 @@
 import {
+  assertJsonValue,
+  canonicalJson,
+  sha256Hex
+} from "@memmy/local-api-contracts";
+import {
   skillMetaFromMemory,
   traceMetaFromMemory
 } from "../algorithm/plugin-algorithms.js";
@@ -26,6 +31,7 @@ import {
 import type { MemoryDb } from "../storage/db.js";
 import {
   Repositories,
+  isStrictL3WorldModelV2Memory,
   jobToRef,
   kindFromMemory,
   type ChangeLogRecord,
@@ -40,6 +46,10 @@ import type {
   HealthResponse,
   InjectedContext,
   JobRef,
+  L3WorldModelBoundaryRequest,
+  L3WorldModelBoundaryResponse,
+  L3WorldModelRequestEnvelope,
+  L3WorldModelTraceHeadResponse,
   MemoryAddRequest,
   MemoryDetailItem,
   MemoryExportRequest,
@@ -49,6 +59,9 @@ import type {
   MemoryLayer,
   MemoryListItem,
   PanelMemoryListItem,
+  ProjectEnvironmentSyncEvidenceRequest,
+  ProjectEnvironmentSyncResponse,
+  ProjectEnvironmentSyncStartRequest,
   MemoryProcessingRecord,
   MemoryReloadConfigRequest,
   MemoryReloadConfigResponse,
@@ -62,6 +75,7 @@ import type {
   RetrievalMode,
   RuntimeNamespace,
   SessionCompactRequest,
+  SessionL3WorldModelContextResponse,
   SessionOpenRequest,
   SkillUseRequest,
   SubagentCompleteRequest,
@@ -101,6 +115,7 @@ import {
   toolCallsFromUnknown
 } from "./import/memory-import-pipeline.js";
 import { recordApiLog } from "./model-audit/model-call-audit.js";
+import { ProjectEnvironmentService } from "./project-environment/project-environment-service.js";
 import {
   namespaceForMemory,
   namespaceForRawTurn,
@@ -118,6 +133,7 @@ import {
   memoryEtag,
   procedureFromSkillMemory
 } from "./read-model/memory.js";
+import { L3WorldModelContextReadModel } from "./read-model/l3-world-model-context.js";
 import { PanelReadModel } from "./read-model/panel-read.js";
 import {
   SkillReadModel
@@ -237,6 +253,8 @@ export class MemoryService {
   private readonly skillTrials: SkillTrialResolver;
   private readonly episodeReadModel: EpisodeReadModel;
   private readonly importJobs: ImportJobProcessor;
+  private readonly l3WorldModelContextReadModel: L3WorldModelContextReadModel;
+  private readonly projectEnvironment: ProjectEnvironmentService;
   private readonly panelReadModel: PanelReadModel;
   private readonly retrieval: RetrievalService;
   private readonly sessionTurns: SessionTurnService;
@@ -255,12 +273,18 @@ export class MemoryService {
 
   constructor(private readonly options: MemoryServiceOptions) {
     this.repos = options.backend?.repositories() ?? new Repositories(requireMemoryDb(options).db);
+    this.l3WorldModelContextReadModel = new L3WorldModelContextReadModel(this.repos);
     this.mode = options.mode ?? "local";
     this.config = cloneMemmyConfig(options.config ?? DEFAULT_MEMMY_CONFIG);
     this.modelTasks = new MemoryModelTaskRouter(() => this.resolveModelTaskContext());
     this.llm = this.modelTasks.client("summary");
     this.skillLlm = this.modelTasks.client("evolution");
     this.embedder = this.modelTasks.embedder();
+    const projectEnvironmentOwner = this;
+    this.projectEnvironment = new ProjectEnvironmentService({
+      repos: this.repos,
+      get llm() { return projectEnvironmentOwner.skillLlm; }
+    });
     const workerHandlerOwner = this;
     this.workerHandlers = createWorkerJobHandlers({
       repos: this.repos,
@@ -280,6 +304,8 @@ export class MemoryService {
           induceL2: (job) => this.evolutionJobs.induceL2(job),
           materializeNegativeExperience: (job) => this.evolutionJobs.materializeNegativeExperience(job),
           abstractL3: (job) => this.evolutionJobs.abstractL3(job),
+          updateL3WorldModel: (job) => this.evolutionJobs.updateL3WorldModel(job),
+          updateProjectEnvironment: (job) => this.projectEnvironment.processSummaryJob(job),
           crystallizeSkill: (job) => this.evolutionJobs.crystallizeSkill(job),
           associateL2: (job) => this.evolutionJobs.associateL2(job),
           splitBigTurn: (job) => this.evolutionJobs.splitBigTurn(job)
@@ -660,6 +686,14 @@ export class MemoryService {
         memoryLayers: ["L1", "L2", "L3", "Skill"],
         supportsCli: true
       },
+      ...(backend.backendId === "sqlite-local" && schema.version >= 6
+        ? {
+            features: {
+              l3WorldModelProtocolVersions: [2],
+              workspaceBridgeProtocolVersions: ["1"]
+            }
+          }
+        : {}),
       serverTime: nowIso()
     };
   }
@@ -755,6 +789,31 @@ export class MemoryService {
     return response;
   }
 
+  async idempotentExact<T>(
+    operation: string,
+    request: RequestEnvelope,
+    fingerprint: unknown,
+    run: () => T | Promise<T>
+  ): Promise<T> {
+    const scopedRun = () => this.withModelTaskContext(run);
+    if (!this.memoryAddEnabled()) return scopedRun();
+    const idempotencyKey = request.adapterId && request.requestId
+      ? `${operation}:${request.adapterId}:${request.requestId}`
+      : undefined;
+    if (!idempotencyKey) return scopedRun();
+    const requestHash = sha256Hex(canonicalJson(assertJsonValue({ operation, fingerprint })));
+    const existing = this.repos.runtime.getIdempotency(idempotencyKey);
+    if (existing) {
+      if (existing.requestHash !== requestHash) {
+        throw new MemoryServiceError("conflict", "idempotency key reused with different request body");
+      }
+      return existing.response as T;
+    }
+    const response = await scopedRun();
+    this.repos.runtime.saveIdempotency(idempotencyKey, requestHash, response);
+    return response;
+  }
+
   adapterActivate(request: RequestEnvelope & {
     capabilities?: {
       lifecycle?: boolean;
@@ -805,7 +864,7 @@ export class MemoryService {
     userId: string;
     source: string;
     profileId: string;
-    projectId?: string;
+    projectId?: string | null;
     workspaceId?: string;
     conversationId?: string;
     status: "open";
@@ -830,6 +889,87 @@ export class MemoryService {
     serverTime: string;
   } {
     return this.sessionTurns.closeSession(sessionId, this.withTimeZone(request));
+  }
+
+  l3WorldModelTraceHead(
+    sessionId: string,
+    request: L3WorldModelRequestEnvelope
+  ): L3WorldModelTraceHeadResponse {
+    this.assertMemorySearchEnabled();
+    const session = this.requireSession(sessionId);
+    this.assertL3WorldModelSessionScope(session, request.namespace);
+    return this.repos.l3WorldModels.traceHead(sessionId);
+  }
+
+  l3WorldModelBoundary(
+    sessionId: string,
+    request: L3WorldModelBoundaryRequest
+  ): L3WorldModelBoundaryResponse {
+    this.assertMemoryAddEnabled();
+    const session = this.requireSession(sessionId);
+    this.assertL3WorldModelSessionScope(session, request.namespace);
+    if (!this.repos.l3WorldModels.inputTraceByL1MemoryId(sessionId, request.throughL1MemoryId)) {
+      throw new MemoryServiceError("conflict", "through L1 memory was not registered for this Session");
+    }
+    const result = this.repos.l3WorldModels.freezeBatches({
+      sessionId,
+      trigger: request.trigger,
+      throughL1MemoryId: request.throughL1MemoryId
+    });
+    if (!result.throughTraceSeq) {
+      throw new MemoryServiceError("conflict", "through L1 memory was not registered");
+    }
+    return {
+      scheduled: result.scheduled,
+      throughL1MemoryId: request.throughL1MemoryId,
+      throughTraceSeq: result.throughTraceSeq,
+      batchIds: result.batchIds,
+      targetCount: result.targetCount,
+      serverTime: nowIso()
+    };
+  }
+
+  l3WorldModelContext(
+    sessionId: string,
+    request: L3WorldModelRequestEnvelope
+  ): SessionL3WorldModelContextResponse {
+    this.assertMemorySearchEnabled();
+    const session = this.requireSession(sessionId);
+    this.assertL3WorldModelSessionScope(session, request.namespace);
+    if (session.status !== "open") {
+      throw new MemoryServiceError("conflict", "l3_world_model_session_not_open");
+    }
+    return this.l3WorldModelContextReadModel.load(session);
+  }
+
+  projectEnvironmentSyncStart(
+    projectId: string,
+    request: ProjectEnvironmentSyncStartRequest
+  ): ProjectEnvironmentSyncResponse {
+    this.assertMemoryAddEnabled();
+    const session = this.requireProjectEnvironmentSession(request.sessionId, projectId, request.namespace);
+    return this.projectEnvironment.start(session, projectId, request);
+  }
+
+  projectEnvironmentSyncEvidence(
+    projectId: string,
+    syncId: string,
+    request: ProjectEnvironmentSyncEvidenceRequest
+  ): ProjectEnvironmentSyncResponse {
+    this.assertMemoryAddEnabled();
+    const session = this.requireProjectEnvironmentSession(request.sessionId, projectId, request.namespace);
+    return this.projectEnvironment.evidence(session, projectId, syncId, request);
+  }
+
+  projectEnvironmentSyncStatus(
+    projectId: string,
+    syncId: string,
+    sessionId: string,
+    request: L3WorldModelRequestEnvelope
+  ): ProjectEnvironmentSyncResponse {
+    this.assertMemorySearchEnabled();
+    const session = this.requireProjectEnvironmentSession(sessionId, projectId, request.namespace);
+    return this.projectEnvironment.status(session, projectId, syncId, request.adapterId);
   }
 
   compactSession(sessionId: string, request: SessionCompactRequest = {}): {
@@ -1351,10 +1491,29 @@ export class MemoryService {
       };
     }
     const memory = this.requireExistingMemory(id);
-    this.assertMemoryInScope(memory, request.namespace);
+    const claimsV2WorldModel = memory.properties.internal_info.schema_version === 2 &&
+      memory.memoryLayer === "L3";
+    const strictV2WorldModel = isStrictL3WorldModelV2Memory(memory);
+    if (claimsV2WorldModel && !strictV2WorldModel) {
+      throw new MemoryServiceError("conflict", "invalid L3 World Model v2 record");
+    }
+    if (strictV2WorldModel) {
+      const effectiveUserId = normalizeNamespace(request.namespace).userId;
+      const projectId = typeof memory.info.project_id === "string" ? memory.info.project_id : null;
+      if (effectiveUserId !== memory.userId) {
+        throw new MemoryServiceError("forbidden", "L3 World Model belongs to a different user");
+      }
+      if (request.namespace?.projectId && request.namespace.projectId !== projectId) {
+        throw new MemoryServiceError("forbidden", "L3 World Model belongs to a different project");
+      }
+    } else {
+      this.assertMemoryInScope(memory, request.namespace);
+    }
     const kind = kindFromMemory(memory);
     const at = nowIso();
-    const deleted = this.repos.memories.softDelete(memory.id, at);
+    const deleted = strictV2WorldModel
+      ? this.repos.l3WorldModels.deleteScopeMemory(memory.id, at)?.deleted
+      : this.repos.memories.softDelete(memory.id, at);
     if (!deleted) {
       throw new MemoryServiceError("not_found", `memory not found: ${id}`);
     }
@@ -2177,6 +2336,40 @@ export class MemoryService {
   private assertSessionInScope(session: SessionRecord, namespace?: RuntimeNamespace): void {
     void session;
     void namespace;
+  }
+
+  private assertL3WorldModelSessionScope(session: SessionRecord, namespace: RuntimeNamespace): void {
+    if (session.meta.l3_world_model_protocol_version !== 2) {
+      throw new MemoryServiceError("conflict", "l3_world_model_protocol_v2_required");
+    }
+    const normalized = normalizeNamespace(namespace);
+    const conflicts = [
+      normalized.userId !== session.userId,
+      normalized.source !== session.source,
+      normalized.profileId !== session.profileId,
+      (normalized.projectId ?? null) !== (session.projectId ?? null),
+      Boolean(namespace.workspaceId && namespace.workspaceId !== session.workspaceId),
+      Boolean(namespace.sessionKey && namespace.sessionKey !== session.hostSessionKey)
+    ];
+    if (conflicts.some(Boolean)) {
+      throw new MemoryServiceError("conflict", "l3_world_model_session_scope_conflict");
+    }
+  }
+
+  private requireProjectEnvironmentSession(
+    sessionId: string,
+    projectId: string,
+    namespace: RuntimeNamespace
+  ): SessionRecord {
+    const session = this.requireSession(sessionId);
+    this.assertL3WorldModelSessionScope(session, namespace);
+    if (session.status !== "open") {
+      throw new MemoryServiceError("conflict", "l3_world_model_session_not_open");
+    }
+    if (!session.projectId || session.projectId !== projectId) {
+      throw new MemoryServiceError("conflict", "project_environment_project_scope_conflict");
+    }
+    return session;
   }
 
   private assertMemoryInScope(memory: MemoryRow, namespace?: RuntimeNamespace): void {

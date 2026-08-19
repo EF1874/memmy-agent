@@ -1,4 +1,5 @@
 import type { Config } from "../config/schema.js";
+import { AgentHookContext } from "../core/agent-runtime/hook.js";
 import {
   resolveAnalyticsUserModeFromConfig,
   resolveLiveAnalyticsUserMode,
@@ -15,6 +16,8 @@ export type MemmyMemoryIntegration = {
   enabled: boolean;
   client?: MemmyMemoryClient;
   hook?: MemmyMemoryHook;
+  dispose?: () => Promise<void>;
+  closeSession?: (sessionKey: string, reason?: string) => Promise<void>;
 };
 
 export {
@@ -40,6 +43,7 @@ export function createMemmyMemoryIntegration(
   const client = new MemmyMemoryClient(connection);
   const hook = new MemmyMemoryHook(client, {
     workspace: options.workspace ?? null,
+    workspaceBridgeEnabled: options.workspaceBridgeEnabled ?? resolved.workspaceBridgeEnabled,
     userId: resolved.userId,
     // Prefer disk config: AgentLoop keeps a cloned in-memory Config that stays
     // stale after desktop switches account ↔ byok and rewrites config.yaml.
@@ -49,7 +53,17 @@ export function createMemmyMemoryIntegration(
   void hook.initialize().catch((error) => {
     hook.lastError = error instanceof Error ? error.message : String(error);
   });
-  return { enabled: true, client, hook };
+  return {
+    enabled: true,
+    client,
+    hook,
+    dispose: () => hook.dispose(),
+    closeSession: (sessionKey, reason = "deleted") => hook.sessionEnd(new AgentHookContext({
+      sessionKey,
+      reason,
+      metadata: { lifecycle: "session" },
+    })),
+  };
 }
 
 export function installMemmyMemory(

@@ -98,6 +98,7 @@ describe("memmy memory discovery", () => {
       enabled: true,
       userId: "user_config_1",
       version: 1,
+      workspaceBridge: { enabled: false },
       storage: { endpoint: "http://127.0.0.1:18960", token: "service-token" },
     });
     expect(enabled.toObject().app).toEqual({

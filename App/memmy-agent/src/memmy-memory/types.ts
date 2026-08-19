@@ -1,4 +1,30 @@
+import type {
+  L3WorldModelBoundaryRequest,
+  L3WorldModelBoundaryResponse,
+  L3WorldModelRequestEnvelope,
+  L3WorldModelTraceHeadResponse,
+  ProjectEnvironmentSyncEvidenceRequest,
+  ProjectEnvironmentSyncResponse,
+  ProjectEnvironmentSyncStartRequest,
+  SessionL3WorldModelContextResponse,
+  WorkspaceHostId,
+  WorkspaceUri
+} from "@memmy/local-api-contracts";
+
 export type JsonRecord = Record<string, any>;
+
+export type {
+  L3WorldModelBoundaryRequest,
+  L3WorldModelBoundaryResponse,
+  L3WorldModelRequestEnvelope,
+  L3WorldModelTraceHeadResponse,
+  ProjectEnvironmentSyncEvidenceRequest,
+  ProjectEnvironmentSyncResponse,
+  ProjectEnvironmentSyncStartRequest,
+  SessionL3WorldModelContextResponse,
+  WorkspaceHostId,
+  WorkspaceUri
+};
 
 export type MemmyMemoryRuntimeNamespace = {
   source: string;
@@ -30,15 +56,44 @@ export type MemmyMemoryConnection = {
 export type MemmyMemoryResolvedConfig = {
   enabled: boolean;
   userId?: string;
+  workspaceBridgeEnabled: boolean;
 };
 
 export type MemmyMemoryInstallOptions = {
   workspace?: string | null;
+  workspaceBridgeEnabled?: boolean;
   hooks?: any[];
+};
+
+export type MemmyMemorySessionProtocol = "legacy" | "v2";
+
+export type MemmyMemorySessionState = {
+  hostSessionKey: string;
+  memorySessionId: string;
+  memoryProjectId: string | null;
+  protocol: MemmyMemorySessionProtocol;
+  workspaceRoot: string | null;
+  workspaceUri: WorkspaceUri | null;
+  workspaceHostId: WorkspaceHostId | null;
+  l3Cache: SessionL3WorldModelCacheEntry;
+  bridgeEnabled: boolean;
+  healthChecked: boolean;
+};
+
+export type SessionL3WorldModelCacheEntry = {
+  sessionId: string;
+  projectId: string | null;
+  status: "loaded" | "empty" | "unavailable";
+  memoryId: string | null;
+  memoryVersion: number | null;
+  renderedContext: string;
+  sourceMemoryIds: string[];
+  loadedAt: string;
 };
 
 export type MemmyMemoryHookOptions = {
   workspace?: string | null;
+  workspaceBridgeEnabled?: boolean;
   adapterId?: string;
   source?: string;
   profileId?: string;

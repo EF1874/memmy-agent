@@ -9,6 +9,90 @@ const {
 afterEach(cleanup);
 
 describe("MemoryService / bundle", () => {
+  it("redacts in-flight L3 evidence while full bundles preserve recoverable runtime state", () => {
+    const first = createTestService();
+    const namespace = {
+      source: "codex",
+      profileId: "default",
+      sessionKey: "bundle-l3-session",
+      userId: "bundle-l3-user",
+    };
+    const opened = first.service.openSession({
+      l3WorldModelProtocolVersion: 2,
+      l3WorldModelTransition: "resume_only",
+      workspaceUri: "file:///tmp/bundle-l3-project",
+      workspaceHostId: "a".repeat(64),
+      namespace,
+    });
+    const firstTurn = first.service.completeTurn("bundle-l3-turn-1", {
+      sessionId: opened.sessionId,
+      query: "Keep project edits inside the configured module boundary.",
+      answer: "The edit stayed inside the configured module.",
+    });
+    first.service.l3WorldModelBoundary(opened.sessionId, {
+      requestId: "53126537-2c75-48be-91f5-d32a6d93f6f7",
+      adapterId: "codex-memory",
+      source: "codex",
+      namespace: { ...namespace, projectId: opened.projectId! },
+      trigger: "token_compaction",
+      throughL1MemoryId: firstTurn.l1MemoryId,
+    });
+    first.service.completeTurn("bundle-l3-turn-2", {
+      sessionId: opened.sessionId,
+      query: "A later turn has not reached a boundary yet.",
+      answer: "It remains an unfrozen trace.",
+    });
+    first.service.projectEnvironmentSyncStart(opened.projectId!, {
+      requestId: "619226b9-e87d-4012-ab6f-5f5728573755",
+      adapterId: "codex-memory",
+      source: "codex",
+      namespace: { ...namespace, projectId: opened.projectId! },
+      sessionId: opened.sessionId,
+      trigger: "session_start",
+      capabilities: {
+        protocolVersion: "1",
+        operations: ["inventory", "read_text", "runtime_probe"],
+        maxTextBytes: 1024 * 1024,
+      },
+    });
+
+    const full = first.service.exportBundle({ includeRawText: true });
+    expect(full.tables.l3_world_model_evidence_batches).toHaveLength(1);
+    expect(full.tables.l3_world_model_batch_targets).toHaveLength(2);
+    expect((full.tables.evolution_jobs as Array<Record<string, unknown>>)
+      .filter((row) => row.job_type === "l3_world_model_update")).toHaveLength(2);
+    expect(full.tables.l3_world_model_project_environment_operations).toHaveLength(1);
+
+    const redacted = first.service.exportBundle();
+    expect(redacted.tables.l3_world_model_evidence_batches).toEqual([]);
+    expect(redacted.tables.l3_world_model_batch_targets).toEqual([]);
+    expect((redacted.tables.evolution_jobs as Array<Record<string, unknown>>)
+      .filter((row) => row.job_type === "l3_world_model_update" || row.job_type === "project_environment_profile"))
+      .toEqual([]);
+    expect(redacted.tables.l3_world_model_project_environment_operations).toEqual([]);
+    expect(redacted.tables.l3_world_model_project_environment_sync_state).toEqual([
+      expect.objectContaining({
+        status: "dirty",
+        current_sync_id: null,
+        current_scan_id: null,
+        active_adapter_id: null,
+        sync_lease_expires_at: null,
+      }),
+    ]);
+    expect(redacted.tables.l3_world_model_session_cursors).toEqual([
+      expect.objectContaining({ session_id: opened.sessionId, last_scheduled_seq: 2 }),
+    ]);
+    expect(first.db.db.prepare(
+      `SELECT last_scheduled_seq FROM l3_world_model_session_cursors WHERE session_id = ?`
+    ).get(opened.sessionId)).toEqual({ last_scheduled_seq: 1 });
+
+    const second = createTestService();
+    expect(second.service.importBundle({ bundle: redacted }).ok).toBe(true);
+    expect(second.db.db.prepare(
+      `SELECT last_scheduled_seq FROM l3_world_model_session_cursors WHERE session_id = ?`
+    ).get(opened.sessionId)).toEqual({ last_scheduled_seq: 2 });
+  });
+
   it("exports bundles across namespaces", async () => {
     const { db, service } = createTestService();
     const namespaceA = {

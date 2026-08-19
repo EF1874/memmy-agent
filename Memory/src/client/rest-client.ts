@@ -10,6 +10,21 @@ import type {
   TurnCompleteRequest,
   TurnStartRequest
 } from "../types.js";
+import {
+  L3WorldModelBoundaryResponseSchema,
+  L3WorldModelTraceHeadResponseSchema,
+  ProjectEnvironmentSyncResponseSchema,
+  SessionL3WorldModelContextResponseSchema,
+  l3WorldModelGetTransport,
+  type L3WorldModelBoundaryRequest,
+  type L3WorldModelBoundaryResponse,
+  type L3WorldModelRequestEnvelope,
+  type L3WorldModelTraceHeadResponse,
+  type ProjectEnvironmentSyncEvidenceRequest,
+  type ProjectEnvironmentSyncResponse,
+  type ProjectEnvironmentSyncStartRequest,
+  type SessionL3WorldModelContextResponse
+} from "@memmy/local-api-contracts";
 import { resolveTimeZone } from "../utils/time.js";
 
 export type MemoryRestQueryValue =
@@ -57,6 +72,87 @@ export class MemoryRestClient {
     return this.request("POST", `/api/v1/sessions/${encodeURIComponent(sessionId)}/close`, request);
   }
 
+  async l3WorldModelTraceHead(
+    sessionId: string,
+    envelope: L3WorldModelRequestEnvelope
+  ): Promise<L3WorldModelTraceHeadResponse> {
+    const transport = l3WorldModelGetTransport(envelope);
+    const payload = await this.request(
+      "GET",
+      `/api/v1/sessions/${encodeURIComponent(sessionId)}/l3-world-model-trace-head${queryString(transport.query)}`,
+      undefined,
+      transport.headers
+    );
+    return L3WorldModelTraceHeadResponseSchema.parse(payload);
+  }
+
+  async l3WorldModelBoundary(
+    sessionId: string,
+    request: L3WorldModelBoundaryRequest
+  ): Promise<L3WorldModelBoundaryResponse> {
+    const payload = await this.request(
+      "POST",
+      `/api/v1/sessions/${encodeURIComponent(sessionId)}/l3-world-model-boundary`,
+      request
+    );
+    return L3WorldModelBoundaryResponseSchema.parse(payload);
+  }
+
+  async l3WorldModelContext(
+    sessionId: string,
+    envelope: L3WorldModelRequestEnvelope
+  ): Promise<SessionL3WorldModelContextResponse> {
+    const transport = l3WorldModelGetTransport(envelope);
+    const payload = await this.request(
+      "GET",
+      `/api/v1/l3-world-model/sessions/${encodeURIComponent(sessionId)}/context${queryString(transport.query)}`,
+      undefined,
+      transport.headers
+    );
+    return SessionL3WorldModelContextResponseSchema.parse(payload);
+  }
+
+  async projectEnvironmentSyncStart(
+    projectId: string,
+    request: ProjectEnvironmentSyncStartRequest
+  ): Promise<ProjectEnvironmentSyncResponse> {
+    const payload = await this.request(
+      "POST",
+      `/api/v1/l3-world-model/projects/${encodeURIComponent(projectId)}/environment-sync/start`,
+      request
+    );
+    return ProjectEnvironmentSyncResponseSchema.parse(payload);
+  }
+
+  async projectEnvironmentSyncEvidence(
+    projectId: string,
+    syncId: string,
+    request: ProjectEnvironmentSyncEvidenceRequest
+  ): Promise<ProjectEnvironmentSyncResponse> {
+    const payload = await this.request(
+      "POST",
+      `/api/v1/l3-world-model/projects/${encodeURIComponent(projectId)}/environment-sync/${encodeURIComponent(syncId)}/evidence`,
+      request
+    );
+    return ProjectEnvironmentSyncResponseSchema.parse(payload);
+  }
+
+  async projectEnvironmentSyncStatus(
+    projectId: string,
+    syncId: string,
+    sessionId: string,
+    envelope: L3WorldModelRequestEnvelope
+  ): Promise<ProjectEnvironmentSyncResponse> {
+    const transport = l3WorldModelGetTransport(envelope, { sessionId });
+    const payload = await this.request(
+      "GET",
+      `/api/v1/l3-world-model/projects/${encodeURIComponent(projectId)}/environment-sync/${encodeURIComponent(syncId)}${queryString(transport.query)}`,
+      undefined,
+      transport.headers
+    );
+    return ProjectEnvironmentSyncResponseSchema.parse(payload);
+  }
+
   startTurn(request: TurnStartRequest): Promise<unknown> {
     return this.request("POST", "/api/v1/turns/start", request);
   }
@@ -93,11 +189,17 @@ export class MemoryRestClient {
     return this.request("GET", `/api/v1/panel/items${queryString(query)}`);
   }
 
-  private async request(method: "GET" | "POST" | "DELETE", path: string, body?: unknown): Promise<unknown> {
+  private async request(
+    method: "GET" | "POST" | "DELETE",
+    path: string,
+    body?: unknown,
+    requestHeaders: Record<string, string> = {}
+  ): Promise<unknown> {
     const response = await fetch(`${this.endpoint}${path}`, {
       method,
       headers: {
         ...this.headers,
+        ...requestHeaders,
         "x-memmy-time-zone": this.timeZone,
         ...(body === undefined ? {} : { "content-type": "application/json" }),
         ...(this.token ? { authorization: `Bearer ${this.token}` } : {})

@@ -24,6 +24,7 @@ import {
   projectIdFromMemory
 } from "../namespace/namespace-scope.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
+import { L3WorldModelTraceFieldPipeline } from "./l3-world-model-pipeline.js";
 import { NegativeExperiencePipeline } from "./negative-experience-pipeline.js";
 import { BigTurnSpanPipeline } from "./big-turn-span-pipeline.js";
 import { PolicyInductionEngine } from "./policy-induction.js";
@@ -34,7 +35,6 @@ import {
 import { SkillPipeline } from "./skill-pipeline.js";
 import { SpanPipeline } from "./span-pipeline.js";
 import type { TurnMemoryCaptureDecision } from "./span-pipeline.js";
-import { WorldModelPipeline } from "./world-model-pipeline.js";
 
 type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
 type PolicyMeta = NonNullable<ReturnType<typeof policyMetaFromMemory>>;
@@ -85,7 +85,7 @@ export class EvolutionJobProcessor {
   private readonly skill: SkillPipeline;
   private readonly span: SpanPipeline;
   private readonly bigTurnSpan: BigTurnSpanPipeline;
-  private readonly worldModel: WorldModelPipeline;
+  private readonly l3WorldModel: L3WorldModelTraceFieldPipeline;
 
   constructor(private readonly deps: EvolutionJobProcessorDeps) {
     const owner = this;
@@ -115,16 +115,9 @@ export class EvolutionJobProcessor {
       namespaceIdFromMemory: deps.namespaceIdFromMemory,
       onSkillRewardDrift: this.skill.applySkillRewardDriftForPolicy.bind(this.skill)
     });
-    this.worldModel = new WorldModelPipeline({
+    this.l3WorldModel = new L3WorldModelTraceFieldPipeline({
       repos: deps.repos,
-      get config() { return owner.deps.config; },
-      get skillLlm() { return owner.deps.skillLlm; },
-      traceMeta: deps.traceMeta,
-      buildMemory: deps.buildMemory,
-      upsertEvolutionMemory: this.upsertEvolutionMemory.bind(this),
-      isArchivedEvolutionMemory: this.isArchivedEvolutionMemory.bind(this),
-      enqueueJob: deps.enqueueJob,
-      namespaceIdFromMemory: deps.namespaceIdFromMemory
+      get skillLlm() { return owner.deps.skillLlm; }
     });
     this.span = new SpanPipeline({
       repos: deps.repos,
@@ -181,7 +174,12 @@ export class EvolutionJobProcessor {
   }
 
   abstractL3(job: EvolutionJobRecord): Promise<void> {
-    return this.worldModel.abstractL3(job);
+    void job;
+    return Promise.resolve();
+  }
+
+  updateL3WorldModel(job: EvolutionJobRecord): Promise<void> {
+    return this.l3WorldModel.updateField(job);
   }
 
   crystallizeSkill(job: EvolutionJobRecord): Promise<void> {
@@ -354,7 +352,6 @@ export class EvolutionJobProcessor {
   }
 
   private invalidatePolicyDependencies(policyId: string, at: string): void {
-    this.worldModel.invalidatePolicySource(policyId, at);
     this.skill.invalidatePolicySource(policyId, at);
   }
 

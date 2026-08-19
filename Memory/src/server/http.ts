@@ -1,6 +1,13 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
+import {
+  L3WorldModelBoundaryRequestSchema,
+  L3WorldModelRequestEnvelopeSchema,
+  OpenSessionInputSchema,
+  ProjectEnvironmentSyncEvidenceRequestSchema,
+  ProjectEnvironmentSyncStartRequestSchema
+} from "@memmy/local-api-contracts";
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import { memoryPanelHtml } from "../viewer/static.js";
 import type {
@@ -39,6 +46,12 @@ export const API_ROUTES = [
   "POST /api/v1/admin/shutdown",
   "POST /api/v1/sessions/open",
   "POST /api/v1/sessions/:sessionId/close",
+  "GET /api/v1/sessions/:sessionId/l3-world-model-trace-head",
+  "POST /api/v1/sessions/:sessionId/l3-world-model-boundary",
+  "GET /api/v1/l3-world-model/sessions/:sessionId/context",
+  "POST /api/v1/l3-world-model/projects/:projectId/environment-sync/start",
+  "POST /api/v1/l3-world-model/projects/:projectId/environment-sync/:syncId/evidence",
+  "GET /api/v1/l3-world-model/projects/:projectId/environment-sync/:syncId",
   "POST /api/v1/turns/start",
   "POST /api/v1/turns/:turnId/complete",
   "POST /api/v1/memory/search",
@@ -141,7 +154,8 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
         body,
         principal,
         Boolean(options.onShutdownRequested),
-        pluginRuntimeAnalytics
+        pluginRuntimeAnalytics,
+        requestId
       );
       if (request.method === "POST" && url.pathname === "/api/v1/admin/shutdown") {
         response.once("finish", () => options.onShutdownRequested?.());
@@ -371,7 +385,8 @@ async function routeRequest(
   body: unknown,
   principal: AuthPrincipal,
   canShutdown: boolean,
-  pluginRuntimeAnalytics: PluginRuntimeAnalytics
+  pluginRuntimeAnalytics: PluginRuntimeAnalytics,
+  requestId: string
 ): Promise<unknown> {
   const path = url.pathname;
 
@@ -405,15 +420,21 @@ async function routeRequest(
   }
   if (method === "POST" && path === "/api/v1/sessions/open") {
     requireMemoryWrite(principal);
-    const request = envelopeWithPrincipal(asObject(body, "sessions.create"), principal) as SessionOpenRequest;
-    const publicRequest: SessionOpenRequest = {
-      requestId: request.requestId,
-      adapterId: request.adapterId,
-      namespace: request.namespace,
-      timeZone: request.timeZone,
-      sessionId: request.sessionId,
-      workspacePath: request.workspacePath
-    };
+    const rawRequest = asObject(body, "sessions.create");
+    const request = rawRequest.l3WorldModelProtocolVersion === 2
+      ? parseV2OpenSessionRequest(strictEnvelopeWithPrincipal(rawRequest, principal))
+      : envelopeWithPrincipal(rawRequest, principal) as SessionOpenRequest;
+    const publicRequest: SessionOpenRequest = request.l3WorldModelProtocolVersion === 2
+      ? request
+      : {
+          requestId: request.requestId,
+          adapterId: request.adapterId,
+          namespace: request.namespace,
+          timeZone: request.timeZone,
+          sessionId: request.sessionId,
+          workspacePath: request.workspacePath,
+          meta: request.meta
+        };
     return publicOpenSessionResponse(
       await service.idempotent("sessions.create", publicRequest, publicRequest, () => service.openSession(publicRequest))
     );
@@ -429,6 +450,104 @@ async function routeRequest(
     );
     scheduleAutoWorkerForEvolution(result, autoWorker);
     return publicCloseSessionResponse(result);
+  }
+
+  const l3TraceHead = match(path, /^\/api\/v1\/sessions\/([^/]+)\/l3-world-model-trace-head$/);
+  if (method === "GET" && l3TraceHead) {
+    requireMemoryRead(principal);
+    const sessionId = decodeMatchSegment(l3TraceHead, 1);
+    const request = L3WorldModelRequestEnvelopeSchema.parse(strictEnvelopeWithPrincipal({
+      requestId,
+      adapterId: url.searchParams.get("adapterId"),
+      source: url.searchParams.get("source") ?? undefined,
+      namespace: principal.namespace
+    }, principal));
+    return service.l3WorldModelTraceHead(sessionId, request);
+  }
+
+  const l3Boundary = match(path, /^\/api\/v1\/sessions\/([^/]+)\/l3-world-model-boundary$/);
+  if (method === "POST" && l3Boundary) {
+    requireMemoryWrite(principal);
+    const sessionId = decodeMatchSegment(l3Boundary, 1);
+    const request = L3WorldModelBoundaryRequestSchema.parse(
+      strictEnvelopeWithPrincipal(asObject(body, "l3-world-model.boundary"), principal)
+    );
+    const result = await service.idempotent(
+      "l3-world-model.boundary",
+      request,
+      { sessionId, request },
+      () => service.l3WorldModelBoundary(sessionId, request)
+    );
+    scheduleAutoWorkerForEvolution(result, autoWorker);
+    return result;
+  }
+
+  const l3Context = match(path, /^\/api\/v1\/l3-world-model\/sessions\/([^/]+)\/context$/);
+  if (method === "GET" && l3Context) {
+    requireMemoryRead(principal);
+    const sessionId = decodeMatchSegment(l3Context, 1);
+    const request = L3WorldModelRequestEnvelopeSchema.parse(strictEnvelopeWithPrincipal({
+      requestId,
+      adapterId: url.searchParams.get("adapterId"),
+      source: url.searchParams.get("source") ?? undefined,
+      namespace: principal.namespace
+    }, principal));
+    return service.l3WorldModelContext(sessionId, request);
+  }
+
+  const projectEnvironmentStart = match(
+    path,
+    /^\/api\/v1\/l3-world-model\/projects\/([^/]+)\/environment-sync\/start$/
+  );
+  if (method === "POST" && projectEnvironmentStart) {
+    requireMemoryWrite(principal);
+    const projectId = decodeMatchSegment(projectEnvironmentStart, 1);
+    const request = ProjectEnvironmentSyncStartRequestSchema.parse(
+      strictEnvelopeWithPrincipal(asObject(body, "project-environment.start"), principal)
+    );
+    const result = service.projectEnvironmentSyncStart(projectId, request);
+    scheduleAutoWorkerForEvolution(result, autoWorker);
+    return result;
+  }
+
+  const projectEnvironmentEvidence = match(
+    path,
+    /^\/api\/v1\/l3-world-model\/projects\/([^/]+)\/environment-sync\/([^/]+)\/evidence$/
+  );
+  if (method === "POST" && projectEnvironmentEvidence) {
+    requireMemoryWrite(principal);
+    const projectId = decodeMatchSegment(projectEnvironmentEvidence, 1);
+    const syncId = decodeMatchSegment(projectEnvironmentEvidence, 2);
+    const request = ProjectEnvironmentSyncEvidenceRequestSchema.parse(
+      strictEnvelopeWithPrincipal(asObject(body, "project-environment.evidence"), principal)
+    );
+    const result = await service.idempotentExact(
+      "project-environment.evidence",
+      request,
+      { projectId, syncId, request },
+      () => service.projectEnvironmentSyncEvidence(projectId, syncId, request)
+    );
+    scheduleAutoWorkerForEvolution(result, autoWorker);
+    return result;
+  }
+
+  const projectEnvironmentStatus = match(
+    path,
+    /^\/api\/v1\/l3-world-model\/projects\/([^/]+)\/environment-sync\/([^/]+)$/
+  );
+  if (method === "GET" && projectEnvironmentStatus) {
+    requireMemoryRead(principal);
+    const projectId = decodeMatchSegment(projectEnvironmentStatus, 1);
+    const syncId = decodeMatchSegment(projectEnvironmentStatus, 2);
+    const sessionId = url.searchParams.get("sessionId");
+    if (!sessionId) throw new MemoryServiceError("invalid_argument", "sessionId is required");
+    const request = L3WorldModelRequestEnvelopeSchema.parse(strictEnvelopeWithPrincipal({
+      requestId,
+      adapterId: url.searchParams.get("adapterId"),
+      source: url.searchParams.get("source") ?? undefined,
+      namespace: principal.namespace
+    }, principal));
+    return service.projectEnvironmentSyncStatus(projectId, syncId, sessionId, request);
   }
 
   if (method === "POST" && path === "/api/v1/turns/start") {
@@ -738,6 +857,7 @@ function publicOpenSessionResponse(result: unknown): Record<string, unknown> {
     sessionId: record.sessionId,
     status: record.status,
     resumed: record.resumed,
+    projectId: record.projectId ?? null,
     serverTime: record.serverTime
   };
 }
@@ -1124,6 +1244,57 @@ function envelopeWithPrincipal<T extends Record<string, unknown>>(
     namespace,
     timeZone: principal.timeZone ?? (typeof body.timeZone === "string" ? body.timeZone : undefined)
   } as T & RequestEnvelope;
+}
+
+function strictEnvelopeWithPrincipal(
+  body: Record<string, unknown>,
+  principal: AuthPrincipal
+): Record<string, unknown> {
+  const requestNamespace = isRecord(body.namespace)
+    ? body.namespace as unknown as RuntimeNamespace
+    : undefined;
+  const principalNamespace = principal.namespace;
+  const fields: Array<keyof RuntimeNamespace> = [
+    "userId",
+    "tenantId",
+    "projectId",
+    "workspaceId",
+    "profileId",
+    "sessionKey",
+    "source"
+  ];
+  for (const field of fields) {
+    const requested = requestNamespace?.[field];
+    const scoped = principalNamespace?.[field];
+    if (typeof requested === "string" && requested && typeof scoped === "string" && scoped && requested !== scoped) {
+      throw new MemoryServiceError("forbidden", `namespace.${field} conflicts with authenticated scope`);
+    }
+  }
+  const namespace = mergeNamespaces(
+    mergeNamespaces(requestNamespace, namespaceFromSource(body.source)),
+    principalNamespace
+  );
+  if (!namespace) {
+    throw new MemoryServiceError("invalid_argument", "protocol v2 requires namespace");
+  }
+  const source = namespace.source ?? (typeof body.source === "string" ? body.source : undefined);
+  return {
+    ...body,
+    ...(source ? { source } : {}),
+    namespace,
+    timeZone: principal.timeZone ?? (typeof body.timeZone === "string" ? body.timeZone : undefined)
+  };
+}
+
+function parseV2OpenSessionRequest(value: Record<string, unknown>): SessionOpenRequest {
+  const parsed = OpenSessionInputSchema.safeParse(value);
+  if (!parsed.success || !("l3WorldModelProtocolVersion" in parsed.data) || parsed.data.l3WorldModelProtocolVersion !== 2) {
+    const message = parsed.success
+      ? "invalid protocol v2 session open request"
+      : parsed.error.issues.map((issue) => `${issue.path.join(".") || "request"}: ${issue.message}`).join("; ");
+    throw new MemoryServiceError("invalid_argument", message);
+  }
+  return parsed.data as SessionOpenRequest;
 }
 
 function requestTimeZone(request: IncomingMessage, configuredTimeZone?: string): string {

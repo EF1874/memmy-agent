@@ -422,19 +422,6 @@ export class PolicyInductionEngine {
         });
       }
       this.deps.enqueueJob({
-        jobType: "l3_abstraction",
-        userId: source.userId,
-        sessionId: source.sessionId,
-        episodeId: sourceTrace.episodeId,
-        payload: {
-          targetKind: "policy_cluster",
-          seedPolicyId: upsert.memory.id,
-          policyIds: [upsert.memory.id],
-          signature
-        },
-        createdAt: at
-      });
-      this.deps.enqueueJob({
         jobType: "skill_crystallization",
         userId: source.userId,
         sessionId: source.sessionId,
@@ -754,21 +741,6 @@ export class PolicyInductionEngine {
     const savedPolicy = policyMetaFromMemory(saved);
     if (savedPolicy) {
       if (savedPolicy.status === "active") {
-        this.deps.enqueueJob({
-          jobType: "l3_abstraction",
-          userId: saved.userId,
-          sessionId: saved.sessionId,
-          episodeId: triggerEpisodeId,
-          payload: {
-            reason: "l2.policy.updated",
-            targetKind: "policy_cluster",
-            seedPolicyId: saved.id,
-            policyIds: [saved.id],
-            previousStatus: policy.status,
-            status: savedPolicy.status
-          },
-          createdAt: at
-        });
         this.deps.enqueueJob({
           jobType: "skill_crystallization",
           userId: saved.userId,
