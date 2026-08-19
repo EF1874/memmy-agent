@@ -90,6 +90,7 @@ import {
   type LogLevel
 } from "./logger.js";
 import { persistSharedAnalyticsClientId } from "./analytics-client-id-store.js";
+import { getOrCreateInstallationId } from "./installation-id-store.js";
 import { backupSqliteDatabase } from "./sqlite-backup.js";
 import {
   resolveStartupSplashHtml,
@@ -841,6 +842,7 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.handle("memmy:get-app-info", () => getDesktopAppInfo());
+  ipcMain.handle("memmy:get-installation-id", () => getOrCreateInstallationId());
 
   ipcMain.handle("memmy:check-for-updates", async () => checkForUpdates());
 
@@ -4759,6 +4761,7 @@ async function cleanupBeforeQuit(): Promise<void> {
   await installPreparedRequiredUpdateOnQuit();
   ipcMain.removeHandler("memmy:get-runtime-config");
   ipcMain.removeHandler("memmy:get-app-info");
+  ipcMain.removeHandler("memmy:get-installation-id");
   ipcMain.removeHandler("memmy:check-for-updates");
   ipcMain.removeHandler("memmy:download-update");
   ipcMain.removeHandler("memmy:open-update-installer");
