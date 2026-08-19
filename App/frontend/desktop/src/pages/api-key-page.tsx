@@ -387,11 +387,12 @@ function endpointCredentialSignature(
   apiKeyMasked: string
 ): string {
   const normalizedApiKey = apiKey.trim();
+  const normalizedMaskedApiKey = apiKeyMasked.trim();
   return JSON.stringify({
     provider: provider.trim().toLowerCase(),
     protocol,
     endpoint: endpoint.trim().replace(/\/+$/, ""),
-    credential: normalizedApiKey ? `raw:${normalizedApiKey}` : `masked:${apiKeyMasked.trim()}`
+    credential: normalizedMaskedApiKey ? `masked:${normalizedMaskedApiKey}` : `raw:${normalizedApiKey}`
   });
 }
 
