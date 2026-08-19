@@ -86,6 +86,13 @@ export const app = new Command("memmy")
   .option("--standalone", "Create a new standalone terminal session")
   .option("--project <path>", "Create a terminal session bound to a project path");
 
+export function resolveCliActionOptions<T extends Record<string, any>>(
+  localOptions: T,
+  command: Pick<Command, "optsWithGlobals">,
+): T {
+  return { ...localOptions, ...command.optsWithGlobals() };
+}
+
 export type GatewayRuntime = {
   bus: MessageBus;
   loop: AgentLoop;
@@ -605,7 +612,8 @@ export async function main(argv: string[] = process.argv): Promise<void> {
     .option("--no-markdown", "Render final responses as plain text")
     .option("--logs", "Enable runtime logs", false)
     .option("--no-logs", "Disable runtime logs")
-    .action(async (opts) => {
+    .action(async (localOpts, actionCommand) => {
+      const opts = resolveCliActionOptions(localOpts, actionCommand);
       await agent({ ...opts, sessionId: opts.session });
     });
 
@@ -624,9 +632,12 @@ export async function main(argv: string[] = process.argv): Promise<void> {
     .option("-c, --config <path>", "Path to config file")
     .option("--logs", "Enable runtime logs", false)
     .option("--no-logs", "Disable runtime logs")
-    .action(async (opts) => {
+    .action(async (localOpts, actionCommand) => {
+      const opts = resolveCliActionOptions(localOpts, actionCommand);
       const result = await goal({ ...opts, sessionId: opts.session });
-      if (result.status === "error") throw new Error(result.summary);
+      if (result.status !== "success") {
+        throw new Error(`Goal stopped with ${result.goal.status}: ${result.summary}`);
+      }
     });
 
   const sessionsCommand = app.command("sessions").description("Manage terminal sessions.");
@@ -1657,6 +1668,15 @@ export async function goal({
       project,
       invocationCwd,
     });
+    if (project) {
+      const requestedProject = fs.realpathSync(path.resolve(invocationCwd, expandHomePath(project)));
+      const actualProject = fs.realpathSync(target.cwd);
+      if (target.target !== "project" || actualProject !== requestedProject) {
+        throw new Error(
+          `Goal project binding mismatch: requested ${requestedProject}, resolved ${actualProject}`,
+        );
+      }
+    }
     if (loop.sessions instanceof SessionManager) {
       loop.guiTranscriptMirror = new GuiTranscriptMirror(loop.sessions, target.cwd);
       loop.guiTranscriptMirror.sessionUpdated(target.sessionId);

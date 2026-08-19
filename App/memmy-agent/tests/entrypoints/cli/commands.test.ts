@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { Command } from "commander";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import YAML from "yaml";
 import { buildHelpText, builtinCommandPalette } from "../../../src/command/builtin.js";
@@ -43,6 +44,7 @@ import {
   pluginsListRows,
   providerLogin,
   providerLogout,
+  resolveCliActionOptions,
   resolveOauthProvider,
   runInternalCommand,
   serve,
@@ -241,6 +243,34 @@ describe("CLI command helpers", () => {
     expect(help).toContain("-s, --session <sessionId>");
     expect(help).toContain("--standalone");
     expect(help).toContain("--project <path>");
+  });
+
+  it("merges terminal target options parsed by the root command into subcommand options", async () => {
+    const program = new Command("memmy")
+      .option("--project <path>");
+    let resolved: Record<string, any> | null = null;
+    program
+      .command("goal")
+      .option("--message-file <path>")
+      .option("--project <path>")
+      .action((localOpts, actionCommand) => {
+        resolved = resolveCliActionOptions(localOpts, actionCommand);
+      });
+
+    await program.parseAsync([
+      "node",
+      "memmy",
+      "goal",
+      "--message-file",
+      "/tmp/objective.txt",
+      "--project",
+      "/app",
+    ]);
+
+    expect(resolved).toEqual(expect.objectContaining({
+      messageFile: "/tmp/objective.txt",
+      project: "/app",
+    }));
   });
 
   it("stops before the root TUI when startup migrations fail", async () => {
