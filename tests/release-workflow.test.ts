@@ -101,14 +101,24 @@ describe("Memmy release workflow metadata", () => {
     expect(result.status).toBe(1);
   });
 
-  it("embeds the repository .env required by packaged desktop runtimes", () => {
+  it("keeps repository and dependency env files outside packaged desktop artifacts", () => {
     for (const config of packagingConfigs) {
       const packagingSource = readFileSync(
         resolve(repoRoot, `App/shell/desktop/${config}`),
         "utf8",
       );
-      expect(packagingSource).toMatch(/from:\s+\.\.\/\.\.\/\.\.\/\.env(?:\s|$)/);
-      expect(packagingSource).toMatch(/to:\s+\.env(?:\s|$)/);
+      expect(packagingSource).not.toMatch(/from:\s+\.\.\/\.\.\/\.\.\/\.env(?:\s|$)/);
+      expect(packagingSource).not.toMatch(/to:\s+\.env(?:\s|$)/);
+      expect(packagingSource).toContain('- "!**/.env"');
+      expect(packagingSource).toContain('- "!**/.env.*"');
+    }
+
+    const macSource = readFileSync(resolve(repoRoot, "scripts/internal/mac/build-dmg.sh"), "utf8");
+    const winSource = readFileSync(resolve(repoRoot, "scripts/internal/win/build-nsis.sh"), "utf8");
+    for (const source of [macSource, winSource]) {
+      expect(source).toContain("write-desktop-edition-manifest.mjs");
+      expect(source).toContain("prune-runtime-env-files.mjs");
+      expect(source).toContain("verify-package-version.mjs");
     }
   });
 });
@@ -223,7 +233,7 @@ describe("GitHub Draft Release v2 workflow", () => {
     }
   });
 
-  it("creates Draft Releases from merged vX.Y.Z PRs and keeps manual fallback", () => {
+  it("creates Draft Releases only from merged release/vX.Y.Z PRs and keeps manual fallback", () => {
     expect(draftWorkflow.on.pull_request_target).toEqual({
       types: ["closed"],
       branches: ["main"],
@@ -237,17 +247,22 @@ describe("GitHub Draft Release v2 workflow", () => {
       "full",
     ]);
     expect(draftWorkflow.on.workflow_dispatch.inputs.create_draft.default).toBe(false);
-    expect(draftJob.if).toContain("github.event.pull_request.merged == true");
-    expect(draftJob.if).toContain("startsWith(github.event.pull_request.head.ref, 'v')");
-    expect(draftJob.if).toContain("startsWith(github.event.pull_request.head.ref, 'release/v')");
+    const normalizedJobCondition = String(draftJob.if).replace(/\s+/g, " ").trim();
+    expect(normalizedJobCondition).toBe(
+      "github.event_name == 'workflow_dispatch' || " +
+      "(github.event.pull_request.merged == true && " +
+      "github.event.pull_request.head.repo.full_name == github.repository && " +
+      "startsWith(github.event.pull_request.head.ref, 'release/v'))",
+    );
 
     const resolve = draftScript("Resolve and validate release");
     expect(resolve).toContain('if [[ "$EVENT_NAME" == "pull_request_target" ]]');
     expect(resolve).toContain(
-      "^(release/)?v((0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*))$",
+      "^release/v((0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*))$",
     );
-    expect(resolve).toContain("vX.Y.Z or release/vX.Y.Z");
-    expect(resolve).toContain('version="${BASH_REMATCH[2]}"');
+    expect(resolve).toContain("Release branch must match release/vX.Y.Z");
+    expect(resolve).not.toContain("vX.Y.Z or release/vX.Y.Z");
+    expect(resolve).toContain('version="${BASH_REMATCH[1]}"');
     expect(resolve).toContain('target_sha="$PR_MERGE_SHA"');
     expect(resolve).toContain('preflight_level="full"');
     expect(resolve).toContain('create_draft="true"');
@@ -487,15 +502,18 @@ describe("GitHub Draft Release v2 workflow", () => {
     expect(create).toContain("trap - EXIT");
   });
 
-  it("uses the release environment, minimal permissions, and per-version concurrency", () => {
+  it("uses the release environment, minimal permissions, and global non-cancelling concurrency", () => {
     expect(draftWorkflow.permissions).toEqual({
       contents: "write",
       "pull-requests": "read",
     });
     expect(draftJob.environment).toBe("release");
-    expect(draftWorkflow.concurrency["cancel-in-progress"]).toBe(false);
-    expect(draftWorkflow.concurrency.group).toContain("inputs.version");
-    expect(draftWorkflow.concurrency.group).toContain("pull_request.head.ref");
+    expect(draftWorkflow.concurrency).toBeUndefined();
+    expect(draftJob.concurrency).toEqual({
+      group: "draft-release-v2",
+      "cancel-in-progress": false,
+      queue: "max",
+    });
   });
 
   it("records the manual Publish boundary in the workflow summary", () => {
