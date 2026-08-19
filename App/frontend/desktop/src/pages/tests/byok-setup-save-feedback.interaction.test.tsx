@@ -150,6 +150,31 @@ describe("BYOK setup save feedback", () => {
     expect(mocks.dispatch).toHaveBeenCalledWith(appActions.navigate("/api-key-models"));
   });
 
+  it("reuses existing first-step endpoints when saved keys are entered again", async () => {
+    const server = createCatalogServer(configuredCatalog(false));
+    const initialAgentEndpointId = assignedCatalogEndpointId(createModelWorkspace(server.catalog()), "byok", "agent");
+    const initialEmbeddingEndpointId = assignedCatalogEndpointId(createModelWorkspace(server.catalog()), "byok", "embedding");
+    mocks.state = { ...createInitialAppState(), modelConfig: maskedSavedModelConfig(server.catalog()) };
+    mocks.clients = createClients(server.saveModelCatalog, {
+      getModelConfig: vi.fn(async () => maskedSavedModelConfig(server.catalog()))
+    });
+    await render(<ApiKeyPage />);
+
+    await changeField("apiKey.key", "sk-primary");
+    await click(testButton());
+    await changeField("apiKey.embeddingKey", "sk-embedding");
+    await click(testButton(1));
+    await vi.waitFor(() => expect(button("apiKey.next").disabled).toBe(false));
+    await click(button("apiKey.next"));
+
+    const savedCatalog = server.catalog();
+    expect(endpointCount(savedCatalog)).toBe(2);
+    expect(assignedCatalogEndpointId(createModelWorkspace(savedCatalog), "byok", "agent"))
+      .toBe(initialAgentEndpointId);
+    expect(assignedCatalogEndpointId(createModelWorkspace(savedCatalog), "byok", "embedding"))
+      .toBe(initialEmbeddingEndpointId);
+  });
+
   it("invalidates only the changed first-step credential identity", async () => {
     const server = createCatalogServer();
     const updateSettings = vi.fn(async (settings: unknown) => settings)
@@ -275,6 +300,31 @@ describe("BYOK setup save feedback", () => {
     expect(mocks.dispatch).toHaveBeenCalledWith(appActions.navigate("/onboarding"));
   });
 
+  it("reuses existing optional endpoints when saved keys are entered again", async () => {
+    const server = createCatalogServer(configuredCatalog());
+    const initialAsrEndpointId = assignedCatalogEndpointId(createModelWorkspace(server.catalog()), "byok", "asr");
+    const initialImageEndpointId = assignedCatalogEndpointId(createModelWorkspace(server.catalog()), "byok", "image_generation");
+    mocks.state = { ...createInitialAppState(), modelConfig: maskedSavedModelConfig(server.catalog()) };
+    mocks.clients = createClients(server.saveModelCatalog, {
+      getModelConfig: vi.fn(async () => maskedSavedModelConfig(server.catalog()))
+    });
+    await render(<ApiKeyOptionalPage />);
+
+    await changeField("apiKey.asrKey", "sk-asr");
+    await click(testButton());
+    await changeField("apiKey.imageGenKey", "sk-image");
+    await click(testButton(1));
+    await vi.waitFor(() => expect(button("apiKey.next").disabled).toBe(false));
+    await click(button("apiKey.next"));
+
+    const savedCatalog = server.catalog();
+    expect(endpointCount(savedCatalog)).toBe(4);
+    expect(assignedCatalogEndpointId(createModelWorkspace(savedCatalog), "byok", "asr"))
+      .toBe(initialAsrEndpointId);
+    expect(assignedCatalogEndpointId(createModelWorkspace(savedCatalog), "byok", "image_generation"))
+      .toBe(initialImageEndpointId);
+  });
+
   it("keeps the middle step pending and retryable when its catalog save fails", async () => {
     const firstSave = deferred<ModelProviderConfig>();
     const saveModelCatalog = vi.fn()
@@ -310,6 +360,15 @@ describe("BYOK setup save feedback", () => {
       .filter((candidate) => candidate.textContent === label)[index];
     if (!(target instanceof HTMLButtonElement)) {
       throw new Error(`button not found: ${label}`);
+    }
+    return target;
+  }
+
+  function testButton(index = 0): HTMLButtonElement {
+    const target = [...container.querySelectorAll("button")]
+      .filter((candidate) => candidate.textContent?.startsWith("apiKey.test"))[index];
+    if (!(target instanceof HTMLButtonElement)) {
+      throw new Error(`test button not found: ${index}`);
     }
     return target;
   }
@@ -386,6 +445,30 @@ function savedModelConfig(catalog = configuredCatalog()): ModelProviderConfig {
       configured: true
     },
     catalog
+  };
+}
+
+function maskedSavedModelConfig(catalog = configuredCatalog()): ModelProviderConfig {
+  const saved = savedModelConfig(catalog);
+  return {
+    ...saved,
+    apiKey: "",
+    apiKeyMasked: maskApiKey("sk-primary"),
+    embedding: saved.embedding ? {
+      ...saved.embedding,
+      apiKey: "",
+      apiKeyMasked: maskApiKey("sk-embedding")
+    } : undefined,
+    asr: saved.asr ? {
+      ...saved.asr,
+      apiKey: "",
+      apiKeyMasked: maskApiKey("sk-asr")
+    } : undefined,
+    imageGen: saved.imageGen ? {
+      ...saved.imageGen,
+      apiKey: "",
+      apiKeyMasked: maskApiKey("sk-image")
+    } : undefined
   };
 }
 

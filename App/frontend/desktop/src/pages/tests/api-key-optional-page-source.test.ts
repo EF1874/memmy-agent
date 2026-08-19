@@ -40,7 +40,7 @@ describe("ApiKeyOptionalPage catalog source", () => {
     expect(source).toContain("endpointCredentialSignature(");
     expect(source).toContain("provider: provider.trim().toLowerCase()");
     expect(source).toContain('endpoint: endpoint.trim().replace(/\\/+$/, "")');
-    expect(source).toContain("credential: normalizedApiKey");
+    expect(source).toContain("credential: normalizedMaskedApiKey ?");
     expect(source).toContain('role="alert"');
     expect(source).toContain("disabled={modePersistencePending}");
   });
