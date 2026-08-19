@@ -338,10 +338,6 @@ const dependencies = { ...(memoryPackage.dependencies ?? {}) };
 delete dependencies["@memmy/local-api-contracts"];
 delete dependencies["@memmy/migrations"];
 Object.assign(dependencies, contractsPackage.dependencies, migrationsPackage.dependencies);
-const dependencies = { ...(memoryPackage.dependencies ?? {}) };
-delete dependencies["@memmy/local-api-contracts"];
-delete dependencies["@memmy/migrations"];
-Object.assign(dependencies, contractsPackage.dependencies, migrationsPackage.dependencies);
 const runtimePackage = {
   name: runtimeName,
   version: runtimeVersion,
