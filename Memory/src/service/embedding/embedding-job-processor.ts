@@ -575,27 +575,35 @@ function constrainTurnMemoryDecision(
   const text = trace.userText.trim();
   const inferredTypes = classifyUserMemory(text);
   const evidenceTypes = decision.userMemoryEvidence.map((item) => item.type);
-  const userMemoryTypes = uniq([...inferredTypes, ...evidenceTypes]);
+  const groundedUserMemoryTypes = uniq([...inferredTypes, ...evidenceTypes]);
+  const userMemoryTypes = groundedUserMemoryTypes.length > 0
+    ? groundedUserMemoryTypes
+    : decision.userMemoryTypes;
   const dynamicCurrent = isDynamicCurrentFactQuery(text);
   const userMemoryQuestion = isUserMemoryQuestion(text);
   const taskLinkedFeedback = isTaskLinkedUserFeedback(text);
-  const pureUserStatement = inferredTypes.length > 0 && !taskLinkedFeedback;
   const verifiedToolObservation = hasVerifiedDurableToolObservation(memory, trace, dynamicCurrent);
   const taskOutcome = taskLinkedFeedback && hasTaskOutcomeEvidence(trace);
 
   const createUserMemory = !dynamicCurrent && !userMemoryQuestion && userMemoryTypes.length > 0 &&
-    (decision.createUserMemory || inferredTypes.length > 0 || evidenceTypes.length > 0);
-  let createL1 = decision.createL1;
+    decision.createUserMemory && decision.userMemoryEvidence.length > 0;
+  let createL1 = decision.createL1 && decision.l1Evidence.length > 0;
   const guards: string[] = [];
+  if (decision.createUserMemory && decision.userMemoryEvidence.length === 0) {
+    guards.push("user-memory-evidence-missing");
+  }
+  if (decision.createL1 && decision.l1Evidence.length === 0) {
+    guards.push("l1-evidence-missing");
+  }
   if (dynamicCurrent) {
     createL1 = false;
     guards.push("dynamic-current");
   } else if (verifiedToolObservation) {
     createL1 = true;
     guards.push("verified-tool-evidence");
-  } else if (pureUserStatement || userMemoryQuestion) {
+  } else if (userMemoryQuestion) {
     createL1 = false;
-    guards.push(pureUserStatement ? "pure-user-memory" : "user-memory-question");
+    guards.push("user-memory-question");
   } else if (taskLinkedFeedback) {
     createL1 = taskOutcome;
     guards.push(taskOutcome ? "task-outcome" : "feedback-without-outcome");
