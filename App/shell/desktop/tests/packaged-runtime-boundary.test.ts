@@ -1190,7 +1190,21 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).toContain('delete dependencies["@memmy/migrations"]');
     expect(source).toContain('cp "$LOCAL_API_CONTRACTS_DIR/package.json"');
     expect(source).toContain('cp -R "$LOCAL_API_CONTRACTS_DIR/dist"');
-    expect(source).toContain('"$RUNTIME_DIR/memory/node_modules/@memmy/migrations/package.json"');
+    expect(source).toContain(
+      'MEMORY_RUNTIME_CONTRACTS_DIR="$RUNTIME_DIR/memory/node_modules/@memmy/local-api-contracts"',
+    );
+    expect(source).toContain(
+      'MEMORY_RUNTIME_MIGRATIONS_DIR="$RUNTIME_DIR/memory/node_modules/@memmy/migrations"',
+    );
+    expect(source).toContain(
+      'cp "$MIGRATIONS_STAGING_DIR/package.json" "$MEMORY_RUNTIME_MIGRATIONS_DIR/package.json"',
+    );
+    expect(source).toContain(
+      'require_packaged_runtime_file "$MEMORY_RUNTIME_CONTRACTS_DIR/dist/index.js"',
+    );
+    expect(source).toContain(
+      'require_packaged_runtime_file "$MEMORY_RUNTIME_MIGRATIONS_DIR/dist/index.js"',
+    );
     expect(source).toContain("node_modules/.bin/electron-rebuild");
     expect(source).toContain('-m "$RUNTIME_DIR/memory"');
     expect(source).not.toContain('cp -R "$ROOT_DIR/dist/src" "$RUNTIME_DIR/memory/src"');
