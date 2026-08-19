@@ -19,6 +19,7 @@ import {
   type WebuiSessionTarget
 } from "../api/memmy-agent-client.js";
 import type { AnalyticsEvent } from "../analytics/analytics-events.js";
+import { setAnalyticsModelSource } from "../analytics/analytics-context.js";
 import { buildOnboardingActivationEvent } from "../analytics/onboarding-analytics.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import { AgentModelSelector } from "../components/agent-model-selector.js";
@@ -895,6 +896,10 @@ export function HomePage() {
     modelWorkspaceMode,
     selectedModelPreset
   );
+  useEffect(() => {
+    setAnalyticsModelSource(resolvedConversationModel.candidate?.source ?? null);
+    return () => setAnalyticsModelSource(null);
+  }, [resolvedConversationModel.candidate?.source]);
   const input = composerDrafts[chatScopeKey] ?? "";
   const composerCommandDraft = resolveComposerCommandDraft(
     input,
