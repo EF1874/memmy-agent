@@ -1,5 +1,6 @@
 /** Home page module. */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type SetStateAction, type UIEvent } from "react";
+import type { AgentGatewayStartupIssue } from "@memmy/local-api-contracts";
 import { hydrateAgentThreadInBackground, refreshAgentTaskList, useAgentRuntimeBridge, type AgentTaskStateCoordinator } from "../app/agent-runtime-bridge.js";
 import { useApiClients } from "../app/providers.js";
 import { FOCUSED_AGENT_CHAT_STORAGE_KEY, clearFocusedAgentTarget, isAccountTokenQuotaExhausted, normalizeAgentChatId, readLaunchAgentChatId, removeLaunchAgentChatIdFromUrl } from "../app/routes.js";
@@ -1527,7 +1528,10 @@ export function HomePage() {
     : state.agent.recoveryKind === "reconnect"
       ? "reconnecting"
       : state.agent.connectionStatus;
-  const statusText = agentStatusText(displayConnectionStatus, state.agent.modelName, t);
+  const statusText = agentStatusText(displayConnectionStatus, state.agent.modelName, t, {
+    startupIssue: clients?.runtimeConfig.agentGateway?.startupIssue,
+    hasConnected: state.agent.hasConnectedSinceStartup
+  });
   const operationErrorNotice = state.agent.operationErrorNotice;
   const visibleOperationError = operationErrorNotice
     && (operationErrorNotice.scopeKey
@@ -2794,7 +2798,7 @@ export function HomePage() {
               {displayConnectionStatus !== "connected" && (
                 <div className="text-center">
                   <span className="inline-flex text-[11px] px-3 py-1 rounded-tag bg-background-paper text-text-ink/55 border border-border-stone/30">
-                    {agentStatusText(displayConnectionStatus, state.agent.modelName, t)}
+                    {statusText}
                   </span>
                 </div>
               )}
@@ -3457,12 +3461,19 @@ const AGENT_OPERATION_ERROR_MESSAGE_KEYS: Record<string, MessageKey> = {
   attachment_read_failed: "home.media.error.sendReadFailed"
 };
 
-export function agentStatusText(status: string, modelName: string | null, t: HomeTranslate): string | null {
+export function agentStatusText(
+  status: string,
+  modelName: string | null,
+  t: HomeTranslate,
+  context: { startupIssue?: AgentGatewayStartupIssue; hasConnected?: boolean } = {}
+): string | null {
   if (status === "connected") {
     return null;
   }
   if (status === "error") {
-    return t("home.agent.failed");
+    return t(context.startupIssue === "model_config_invalid" && !context.hasConnected
+      ? "home.modelSelector.unavailable"
+      : "home.agent.failed");
   }
   if (status === "reconnecting") {
     return t("home.agent.reconnecting");
