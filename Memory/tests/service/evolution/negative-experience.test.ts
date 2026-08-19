@@ -139,6 +139,7 @@ describe("MemoryService / evolution / negative experience", () => {
 
     service.closeSession(session.sessionId);
     await service.runWorkerOnce(50);
+    await service.runWorkerOnce(50);
     expect(service.panelItems({ namespace, layer: "L2" }).items).toEqual([]);
     expect(service.panelJobs({ namespace, status: "queued" }).items).toEqual(
       expect.arrayContaining([
@@ -279,6 +280,7 @@ describe("MemoryService / evolution / negative experience", () => {
     });
 
     service.closeSession(session.sessionId);
+    await service.runWorkerOnce(50);
     await service.runWorkerOnce(50);
     expect(service.panelJobs({ namespace, status: "queued" }).items).toEqual(
       expect.arrayContaining([

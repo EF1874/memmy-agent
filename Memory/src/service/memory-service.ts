@@ -394,7 +394,8 @@ export class MemoryService {
       enqueueEmbeddingRetry: this.workerHandlers.enqueueEmbeddingRetry,
       appendEmbeddingRetryChange: this.workerHandlers.appendEmbeddingRetryChange,
       summarizeTraceForCapture: this.evolutionJobs.summarizeTraceForCapture.bind(this.evolutionJobs),
-      decideTurnMemoryForCapture: this.evolutionJobs.decideTurnMemoryForCapture.bind(this.evolutionJobs)
+      decideTurnMemoryForCapture: this.evolutionJobs.decideTurnMemoryForCapture.bind(this.evolutionJobs),
+      finalizeClosedEpisode: (episode, at) => this.workerHandlers.finalizeClosedEpisode(episode, at, "capture_decided")
     });
     const workerRunnerOwner = this;
     this.workerRunner = new WorkerRunner({

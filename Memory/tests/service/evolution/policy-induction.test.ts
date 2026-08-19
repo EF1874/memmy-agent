@@ -55,7 +55,9 @@ describe("MemoryService / evolution / policy induction", () => {
       sessionId: firstSession.sessionId,
       episodeId: "bc-08-feedback-episode",
       query: "你刚才写了很多兜底代码，我更喜欢简洁的代码，以后不要写不必要的兜底代码",
-      answer: "已精简代码并通过测试。"
+      answer: "已精简代码并通过测试。",
+      toolCalls: [{ id: "bc-08-test-1", name: "run_tests", input: { scope: "changed" } }],
+      toolResults: [{ toolCallId: "bc-08-test-1", success: true, output: "passed" }]
     });
     await service.runWorkerOnce(20, { priorityCohortOnly: true });
     makeTraceEligibleForL2(db, first.l1MemoryId);
@@ -68,7 +70,7 @@ describe("MemoryService / evolution / policy induction", () => {
       `SELECT content, memory_types_json FROM user_memories WHERE status = 'active'`
     ).get()).toEqual({
       content: "你刚才写了很多兜底代码，我更喜欢简洁的代码，以后不要写不必要的兜底代码",
-      memory_types_json: '["User Preference","User Directive"]'
+      memory_types_json: '["User Preference"]'
     });
     expect(db.db.prepare(`SELECT status FROM memories WHERE id = ?`).get(first.l1MemoryId))
       .toEqual({ status: "activated" });
@@ -85,7 +87,9 @@ describe("MemoryService / evolution / policy induction", () => {
       sessionId: secondSession.sessionId,
       episodeId: "bc-08-verified-episode",
       query: "按反馈删除不必要的兜底代码并运行测试",
-      answer: "已保持实现简洁，测试验证通过。"
+      answer: "已保持实现简洁，测试验证通过。",
+      toolCalls: [{ id: "bc-08-test-2", name: "run_tests", input: { scope: "changed" } }],
+      toolResults: [{ toolCallId: "bc-08-test-2", success: true, output: "passed" }]
     });
     await service.runWorkerOnce(20, { priorityCohortOnly: true });
     makeTraceEligibleForL2(db, second.l1MemoryId);
@@ -1239,14 +1243,15 @@ function createBc08SummaryLlm(): LlmClient {
         return {
           create_l1: true,
           l1_summary: "用户要求代码保持简洁、避免不必要的兜底；本轮已精简并通过测试。",
+          policy_eligible: true,
           create_user_memory: true,
-          user_memory_types: ["User Preference", "User Directive"],
+          user_memory_types: ["User Preference"],
           user_memory_evidence: [{
             quote: "我更喜欢简洁的代码",
             type: "User Preference"
           }, {
             quote: "以后不要写不必要的兜底代码",
-            type: "User Directive"
+            type: "User Preference"
           }],
           l1_evidence: [{
             quote: "已精简代码并通过测试",
@@ -1259,6 +1264,7 @@ function createBc08SummaryLlm(): LlmClient {
       return {
         create_l1: true,
         l1_summary: "按既有反馈删除不必要兜底，并通过测试验证。",
+        policy_eligible: true,
         create_user_memory: false,
         user_memory_types: [],
         user_memory_evidence: [],
