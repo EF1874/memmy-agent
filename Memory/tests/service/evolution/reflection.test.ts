@@ -63,9 +63,12 @@ function createUnusableReflectionLlm(): LlmClient {
         } as unknown as T;
       }
       if (options.operation === "capture.summarize") {
+        const payload = messages.find((message) => message.role === "user")?.content ?? "";
+        const userQuote = payload.match(/\bUSER:\s*(.*?)\s+ASSISTANT:/)?.[1]?.trim() ?? "";
         return {
           create_l1: true,
           l1_summary: "unusable reflection summary",
+          l1_evidence: [{ quote: userQuote, source_role: "user", kind: "task_outcome" }],
           create_user_memory: false,
           user_memory_types: [],
           reason: "durable task result"
@@ -113,9 +116,12 @@ function createCapturingReflectionLlm(calls: Array<{
     ): Promise<T> {
       calls.push({ messages, options });
       if (options.operation === "capture.summarize") {
+        const payload = messages.find((message) => message.role === "user")?.content ?? "";
+        const userQuote = payload.match(/\bUSER:\s*(.*?)\s+ASSISTANT:/)?.[1]?.trim() ?? "";
         return {
           create_l1: true,
           l1_summary: "sqlite migration reflection summary",
+          l1_evidence: [{ quote: userQuote, source_role: "user", kind: "task_outcome" }],
           create_user_memory: false,
           user_memory_types: [],
           reason: "durable task result"

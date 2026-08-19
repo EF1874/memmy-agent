@@ -142,6 +142,7 @@ describe("User Memory", () => {
         l1_summary: "",
         create_user_memory: true,
         user_memory_types: ["User Preference"],
+        user_memory_evidence: [{ quote: "我最喜欢的水果是苹果", type: "User Preference" }],
         reason: "explicit durable preference without task outcome"
       })
     });
@@ -172,8 +173,16 @@ describe("User Memory", () => {
       llm: captureDecisionLlm([], {
         create_l1: true,
         l1_summary: summary,
+        l1_evidence: [{ quote: "已精简实现并通过测试", source_role: "assistant", kind: "task_outcome" }],
         create_user_memory: true,
         user_memory_types: ["User Preference", "User Directive"],
+        user_memory_evidence: [{
+          quote: "我更喜欢简洁的代码",
+          type: "User Preference"
+        }, {
+          quote: "以后不要写不必要的兜底代码",
+          type: "User Directive"
+        }],
         reason: "task outcome plus reusable user feedback"
       })
     });
@@ -234,6 +243,7 @@ describe("User Memory", () => {
         l1_summary: "",
         create_user_memory: true,
         user_memory_types: ["User Preference"],
+        user_memory_evidence: [{ quote: "我更喜欢简洁的代码", type: "User Preference" }],
         reason: "incomplete model classification"
       })
     });
@@ -265,7 +275,7 @@ describe("User Memory", () => {
     db.close();
   });
 
-  it("keeps a durable standalone directive out of L1 even when the model disagrees", async () => {
+  it("does not let User Memory classification veto an independently accepted L1", async () => {
     const { db, service } = createTestService({
       llm: captureDecisionLlm([], {
         create_l1: true,
@@ -273,11 +283,12 @@ describe("User Memory", () => {
         l1_evidence: [{
           quote: "以后不要再推荐飞盘",
           source_role: "user",
-          kind: "correction"
+          kind: "user_directive"
         }],
         create_user_memory: true,
         user_memory_types: ["User Preference"],
-        reason: "incorrect model classification"
+        user_memory_evidence: [{ quote: "以后不要再推荐飞盘", type: "User Directive" }],
+        reason: "durable directive is independently useful in both branches"
       })
     });
     const session = open(service, "model-directive-guard-user");
@@ -292,18 +303,19 @@ describe("User Memory", () => {
     expect(db.db.prepare(`SELECT memory_types_json FROM user_memories`).get())
       .toEqual({ memory_types_json: '["User Directive"]' });
     expect(db.db.prepare(`SELECT status FROM memories WHERE id = ?`).get(completed.l1MemoryIds[0]))
-      .toEqual({ status: "deleted" });
-    const rejected = db.db.prepare(`SELECT properties_json FROM memories WHERE id = ?`)
+      .toEqual({ status: "activated" });
+    const accepted = db.db.prepare(`SELECT properties_json FROM memories WHERE id = ?`)
       .get(completed.l1MemoryIds[0]) as { properties_json: string };
-    expect(JSON.parse(rejected.properties_json)).toMatchObject({
+    expect(JSON.parse(accepted.properties_json)).toMatchObject({
       internal_info: {
         capture_decision: {
-          status: "rejected",
-          create_l1: false,
+          status: "accepted",
+          create_l1: true,
+          create_user_memory: true,
           l1_evidence: [{
             quote: "以后不要再推荐飞盘",
             source_role: "user",
-            kind: "correction"
+            kind: "user_directive"
           }]
         }
       }
@@ -311,15 +323,21 @@ describe("User Memory", () => {
     db.close();
   });
 
-  it("keeps a compound user statement whole and out of L1 when the model disagrees", async () => {
+  it("keeps a compound user statement whole while independently creating both branches", async () => {
     const content = "我在大学的时候最喜欢吃苹果，我现在爱看的书是《百年孤独》";
     const { db, service } = createTestService({
       llm: captureDecisionLlm([], {
         create_l1: true,
         l1_summary: content,
-        create_user_memory: false,
-        user_memory_types: [],
-        reason: "incorrect model branch selection"
+        l1_evidence: [{
+          quote: content,
+          source_role: "user",
+          kind: "user_preference"
+        }],
+        create_user_memory: true,
+        user_memory_types: ["User Preference"],
+        user_memory_evidence: [{ quote: content, type: "User Preference" }],
+        reason: "durable compound statement is independently useful in both branches"
       })
     });
     const session = open(service, "model-compound-guard-user");
@@ -333,7 +351,35 @@ describe("User Memory", () => {
 
     expect(db.db.prepare(`SELECT content FROM user_memories`).all()).toEqual([{ content }]);
     expect(db.db.prepare(`SELECT status FROM memories WHERE id = ?`).get(completed.l1MemoryIds[0]))
-      .toEqual({ status: "deleted" });
+      .toEqual({ status: "activated" });
+    db.close();
+  });
+
+  it("does not let a regex-looking preference force User Memory or suppress L1", async () => {
+    const content = "我喜欢用 PostgreSQL 处理这个项目的数据";
+    const { db, service } = createTestService({
+      llm: captureDecisionLlm([], {
+        create_l1: true,
+        l1_summary: "项目决定使用 PostgreSQL 处理数据。",
+        l1_evidence: [{ quote: content, source_role: "user", kind: "decision" }],
+        create_user_memory: false,
+        user_memory_types: [],
+        user_memory_evidence: [],
+        reason: "project decision, not a personal preference"
+      })
+    });
+    const session = open(service, "model-independent-branches-user");
+    const completed = service.completeTurn("turn-model-independent-branches", {
+      sessionId: session.sessionId,
+      query: content,
+      answer: "已记录项目技术选择。"
+    });
+
+    await service.runWorkerOnce(20, { priorityCohortOnly: true });
+
+    expect(rowCount(db, "user_memories")).toBe(0);
+    expect(db.db.prepare(`SELECT status FROM memories WHERE id = ?`).get(completed.l1MemoryIds[0]))
+      .toEqual({ status: "activated" });
     db.close();
   });
 
@@ -444,6 +490,7 @@ describe("User Memory", () => {
         l1_summary: "",
         create_user_memory: true,
         user_memory_types: ["User Preference"],
+        user_memory_evidence: [{ quote: "我最喜欢的水果是苹果", type: "User Preference" }],
         reason: "durable preference without task evidence"
       })
     });

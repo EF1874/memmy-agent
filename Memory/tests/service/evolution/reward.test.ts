@@ -43,10 +43,11 @@ function createEmptyRewardSummaryLlm(calls: Array<{
       calls.push({ messages, options });
       if (options.operation === "capture.summarize") {
         const payload = messages.find((message) => message.role === "user")?.content ?? "";
-        const turnSummary = payload.match(/USER:\n([^\n]+)/)?.[1] ?? "completed task turn";
+        const turnSummary = payload.match(/\bUSER:\s*(.*?)\s+ASSISTANT:/)?.[1]?.trim() ?? "completed task turn";
         return {
           create_l1: true,
           l1_summary: turnSummary,
+          l1_evidence: [{ quote: turnSummary, source_role: "user", kind: "task_outcome" }],
           create_user_memory: false,
           user_memory_types: [],
           reason: "durable task result"
@@ -102,9 +103,11 @@ function createCapturingRewardSummaryLlm(calls: Array<{
           : payload.includes("now summarize the final reward result")
             ? "now summarize the final reward result"
             : "completed task turn";
+        const userQuote = payload.match(/\bUSER:\s*(.*?)\s+ASSISTANT:/)?.[1]?.trim() ?? turnSummary;
         return {
           create_l1: true,
           l1_summary: turnSummary,
+          l1_evidence: [{ quote: userQuote, source_role: "user", kind: "task_outcome" }],
           create_user_memory: false,
           user_memory_types: [],
           reason: "durable task result"
@@ -333,7 +336,7 @@ describe("MemoryService / evolution / reward", () => {
       finalExchange: { user: string; assistant: string };
       feedbackHistory: Array<{ polarity: string }>;
     };
-    expect(rewardInput.turnSummaries).toHaveLength(2);
+    expect(rewardInput.turnSummaries).toHaveLength(3);
     expect(rewardInput.finalExchange).toEqual({
       user: "哈密瓜和西瓜谁的营养价值更高",
       assistant: "综合营养密度上哈密瓜通常更高一点。"
@@ -349,8 +352,8 @@ describe("MemoryService / evolution / reward", () => {
     expect(typeof rewarded.r_task).toBe("number");
     expect(JSON.parse(rewarded.reward_detail_json)).toMatchObject({
       phase: "final",
-      traceCount: 2,
-      traceIds: [second.l1MemoryId, third.l1MemoryId]
+      traceCount: 3,
+      traceIds: [first.l1MemoryId, second.l1MemoryId, third.l1MemoryId]
     });
     db.close();
   });

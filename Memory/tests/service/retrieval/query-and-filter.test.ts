@@ -595,7 +595,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
           options: LlmCompletionOptions
         ): Promise<T> {
           if (options.operation === "capture.summarize") {
-            return acceptedCaptureDecision("Python pytest failure was inspected.") as unknown as T;
+            return acceptedCaptureDecision("Python pytest failure was inspected.", messages) as unknown as T;
           }
           return failingFilterLlm.completeJson<T>(messages, options);
         }
@@ -803,7 +803,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
       ): Promise<T> {
         calls.push({ messages, options });
         if (options.operation === "capture.summarize") {
-          return acceptedCaptureDecision("Python pytest failure was inspected.") as unknown as T;
+          return acceptedCaptureDecision("Python pytest failure was inspected.", messages) as unknown as T;
         }
         return {
           ranked: [1],
@@ -917,7 +917,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
         options: { operation: string }
       ): Promise<T> {
         if (options.operation === "capture.summarize") {
-          return acceptedCaptureDecision("Python pytest failure was inspected.") as unknown as T;
+          return acceptedCaptureDecision("Python pytest failure was inspected.", messages) as unknown as T;
         }
         summaryCalls.push({ operation: options.operation });
         if (summaryFails && options.operation === "retrieval.retrieval.filter.v5") {
@@ -1436,7 +1436,7 @@ function createRankedRetrievalFilterLlm(
       options: { operation: string }
     ): Promise<T> {
       if (options.operation === "capture.summarize") {
-        return acceptedCaptureDecision("durable retrieval test trace") as unknown as T;
+        return acceptedCaptureDecision("durable retrieval test trace", messages) as unknown as T;
       }
       if (options.operation === "retrieval.retrieval.query.extract.v2") {
         return {
@@ -1461,10 +1461,13 @@ function createRankedRetrievalFilterLlm(
   };
 }
 
-function acceptedCaptureDecision(summary: string) {
+function acceptedCaptureDecision(summary: string, messages: Array<{ role: string; content: string }>) {
+  const payload = messages.find((message) => message.role === "user")?.content ?? "";
+  const userQuote = payload.match(/\bUSER:\s*(.*?)\s+ASSISTANT:/)?.[1]?.trim() ?? "";
   return {
     create_l1: true,
     l1_summary: summary,
+    l1_evidence: [{ quote: userQuote, source_role: "user", kind: "task_outcome" }],
     create_user_memory: false,
     user_memory_types: [],
     reason: "durable task result"
