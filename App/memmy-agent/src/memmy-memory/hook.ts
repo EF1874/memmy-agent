@@ -57,6 +57,7 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
       | "workspace"
       | "profileLabel"
       | "userId"
+      | "retrievalLayers"
       | "getAnalyticsClientId"
       | "getAnalyticsUserId"
       | "getAnalyticsUserMode"
@@ -65,6 +66,7 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
     workspace: string | null;
     profileLabel: string | null;
     userId: string | null;
+    retrievalLayers: NonNullable<MemmyMemoryHookOptions["retrievalLayers"]> | null;
     getAnalyticsClientId: (() => string | null | undefined) | null;
     getAnalyticsUserId: (() => string | null | undefined) | null;
     getAnalyticsUserMode: (() => string | null | undefined) | null;
@@ -87,6 +89,7 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
       profileId: options.profileId ?? PROFILE_ID,
       profileLabel: options.profileLabel ?? PROFILE_ID,
       userId: options.userId ?? null,
+      retrievalLayers: options.retrievalLayers ?? null,
       getAnalyticsClientId: options.getAnalyticsClientId ?? null,
       getAnalyticsUserId: options.getAnalyticsUserId ?? null,
       getAnalyticsUserMode: options.getAnalyticsUserMode ?? null,
@@ -153,7 +156,12 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
       const events = this.eventsFor(sessionKey, ctx);
       this.analytics.track(events.turnStarted, this.turnAnalyticsParams(turn));
 
-      const searchBase = this.memoryOpParams(turn, MEMORY_OP_MODES.turnStart, "all", sessionKey, ctx);
+      const retrievalLayerLabel = this.options.retrievalLayers === null
+        ? "all"
+        : this.options.retrievalLayers.length > 0
+          ? this.options.retrievalLayers.join("+")
+          : "none";
+      const searchBase = this.memoryOpParams(turn, MEMORY_OP_MODES.turnStart, retrievalLayerLabel, sessionKey, ctx);
       this.analytics.track(events.searchStarted, searchBase);
       const searchStartedAt = Date.now();
       try {
@@ -161,6 +169,7 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
           ...this.requestEnvelope(sessionKey, ctx),
           sessionId,
           query: userText || "(conversation continued)",
+          layers: this.options.retrievalLayers ?? undefined,
         }));
         turn.episodeId = stringOrUndefined(response?.episodeId);
         turn.sourceMemoryIds = arrayOfStrings(response?.sourceMemoryIds);
@@ -169,7 +178,7 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
         this.injectMemoryContext(messages, response?.injectedContext);
         turn.messageStartIndex = messages.length;
         this.analytics.track(events.searchSucceeded, {
-          ...this.memoryOpParams(turn, MEMORY_OP_MODES.turnStart, "all", sessionKey, ctx),
+          ...this.memoryOpParams(turn, MEMORY_OP_MODES.turnStart, retrievalLayerLabel, sessionKey, ctx),
           duration_ms: elapsedMs(searchStartedAt),
           success: true,
           hit_count: hitCountFromSearchResponse(response),
