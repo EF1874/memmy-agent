@@ -774,12 +774,16 @@ async function startLocalApi(services: ManagedRuntimeServices | null): Promise<D
     memoryBaseUrl: memoryControl.baseUrl,
     runtimeConfigPath: process.env.MEMMY_HOME ? join(process.env.MEMMY_HOME, "runtime.json") : undefined
   });
-  const agentGateway = services?.agentGateway ?? await resolveAgentGatewayRuntimeConfig();
+  const agentGateway: NonNullable<DesktopRuntimeConfig["agentGateway"]> =
+    services?.agentGateway ?? await resolveAgentGatewayRuntimeConfig();
   const agentGatewayConfig: NonNullable<DesktopRuntimeConfig["agentGateway"]> = {
     baseUrl: agentGateway.baseUrl
   };
   if (agentGateway.bootstrapSecret) {
     agentGatewayConfig.bootstrapSecret = agentGateway.bootstrapSecret;
+  }
+  if (agentGateway.startupIssue) {
+    agentGatewayConfig.startupIssue = agentGateway.startupIssue;
   }
 
   return {

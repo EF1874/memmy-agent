@@ -476,8 +476,11 @@ describe("desktop packaged runtime boundaries", () => {
     const contractsSource = readFileSync(localApiContractsPath, "utf8");
 
     expect(contractsSource).toContain("bootstrapSecret: z.string().min(1).optional()");
+    expect(contractsSource).toContain("startupIssue: AgentGatewayStartupIssueSchema.optional()");
     expect(mainSource).toContain("if (agentGateway.bootstrapSecret) {");
     expect(mainSource).toContain("agentGatewayConfig.bootstrapSecret = agentGateway.bootstrapSecret;");
+    expect(mainSource).toContain("if (agentGateway.startupIssue) {");
+    expect(mainSource).toContain("agentGatewayConfig.startupIssue = agentGateway.startupIssue;");
     expect(mainSource).not.toContain("bootstrapSecret: agentGateway.bootstrapSecret");
   });
 
