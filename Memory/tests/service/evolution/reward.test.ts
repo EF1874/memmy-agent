@@ -41,6 +41,17 @@ function createEmptyRewardSummaryLlm(calls: Array<{
       options: { operation: string }
     ): Promise<T> {
       calls.push({ messages, options });
+      if (options.operation === "capture.summarize") {
+        const payload = messages.find((message) => message.role === "user")?.content ?? "";
+        const turnSummary = payload.match(/USER:\n([^\n]+)/)?.[1] ?? "completed task turn";
+        return {
+          create_l1: true,
+          l1_summary: turnSummary,
+          create_user_memory: false,
+          user_memory_types: [],
+          reason: "durable task result"
+        } as unknown as T;
+      }
       return {} as T;
     },
     status() {
@@ -84,6 +95,21 @@ function createCapturingRewardSummaryLlm(calls: Array<{
       }
     ): Promise<T> {
       calls.push({ messages, options });
+      if (options.operation === "capture.summarize") {
+        const payload = messages.find((message) => message.role === "user")?.content ?? "";
+        const turnSummary = payload.includes("verify reward scoring prompt")
+          ? "verify reward scoring prompt"
+          : payload.includes("now summarize the final reward result")
+            ? "now summarize the final reward result"
+            : "completed task turn";
+        return {
+          create_l1: true,
+          l1_summary: turnSummary,
+          create_user_memory: false,
+          user_memory_types: [],
+          reason: "durable task result"
+        } as unknown as T;
+      }
       if (options.operation === "reward.reward.r_human.v7") {
         return {
           goal_achievement: 1,
@@ -294,8 +320,8 @@ describe("MemoryService / evolution / reward", () => {
     const reflectedItems = service.panelItems({
       userId: "user-reward-before-reflection",
       layer: "L1"
-    }).items.filter((item) => [first.l1MemoryId, second.l1MemoryId, third.l1MemoryId].includes(item.id));
-    expect(reflectedItems).toHaveLength(3);
+    }).items.filter((item) => [second.l1MemoryId, third.l1MemoryId].includes(item.id));
+    expect(reflectedItems).toHaveLength(2);
     expect(reflectedItems.every((item) => item.metrics?.reflectionDone)).toBe(true);
     expect(calls.some((call) => call.options.operation === "capture.reflection.batch.v13")).toBe(true);
     const rewardCalls = calls.filter((call) => call.options.operation === "reward.reward.r_human.v7");
@@ -307,7 +333,7 @@ describe("MemoryService / evolution / reward", () => {
       finalExchange: { user: string; assistant: string };
       feedbackHistory: Array<{ polarity: string }>;
     };
-    expect(rewardInput.turnSummaries).toHaveLength(3);
+    expect(rewardInput.turnSummaries).toHaveLength(2);
     expect(rewardInput.finalExchange).toEqual({
       user: "哈密瓜和西瓜谁的营养价值更高",
       assistant: "综合营养密度上哈密瓜通常更高一点。"
@@ -323,8 +349,8 @@ describe("MemoryService / evolution / reward", () => {
     expect(typeof rewarded.r_task).toBe("number");
     expect(JSON.parse(rewarded.reward_detail_json)).toMatchObject({
       phase: "final",
-      traceCount: 3,
-      traceIds: [first.l1MemoryId, second.l1MemoryId, third.l1MemoryId]
+      traceCount: 2,
+      traceIds: [second.l1MemoryId, third.l1MemoryId]
     });
     db.close();
   });

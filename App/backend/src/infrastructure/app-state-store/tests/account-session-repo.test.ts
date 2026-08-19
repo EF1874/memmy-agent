@@ -265,8 +265,38 @@ describe("account session repository", () => {
         userId: "user-1"
       }
     });
-    expect(activeMissing.active_uuid).toBeNull();
+    expect(activeMissing.active_uuid).toBe("cloud-account-a");
     expect(fabricatedAccount).toBeUndefined();
+  });
+
+  it("uses the persisted login channel instead of inferring from bound contact fields", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-account-session-"));
+    const store = createAppStateStore({ databasePath: join(tempDir, "app.sqlite") });
+
+    store.repositories.accountSession.upsert({
+      profile: {
+        userId: "user-both",
+        email: "both@example.com",
+        phoneNumber: "13800138000",
+        nickname: "both",
+        avatarUrl: null,
+        planType: "free",
+        hasFinishedGuide: false,
+        region: null,
+        registeredAt: "2026-06-02T10:00:00.000Z",
+        rawProfile: { id: "user-both", email: "both@example.com", phoneNumber: "13800138000" }
+      },
+      uuid: "cloud-account-both",
+      cloudUuid: "cloud.login.uuid.both",
+      authChannel: "email"
+    });
+
+    expect(store.repositories.accountSession.getAuthChannel()).toBe("email");
+    store.repositories.accountSession.clear();
+    expect(store.repositories.accountSession.activateByCloudUuid("cloud.login.uuid.both", "phone")).toBe(false);
+    expect(store.repositories.accountSession.get()).toEqual({ authenticated: false });
+    expect(store.repositories.accountSession.activateByCloudUuid("cloud.login.uuid.both", "email")).toBe(true);
+    store.close();
   });
 
   it("repairs missing phone column from raw cloud profile", () => {

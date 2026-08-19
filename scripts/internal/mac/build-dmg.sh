@@ -331,9 +331,13 @@ const projectPackage = JSON.parse(await readFile(join(rootDir, "package.json"), 
 const runtimeVersion = projectPackage.version;
 
 const memoryPackage = JSON.parse(await readFile(join(memoryDir, "package.json"), "utf8"));
-const contractsPackage = JSON.parse(await readFile(join(contractsDir, "package.json"), "utf8"));
-const migrationsPackage = JSON.parse(await readFile(join(migrationsDir, "package.json"), "utf8"));
+const contractsPackage = JSON.parse(await readFile(join(rootDir, "App/backend/local-api-contracts/package.json"), "utf8"));
+const migrationsPackage = JSON.parse(await readFile(join(rootDir, "Migrations/package.json"), "utf8"));
 const rootLock = JSON.parse(await readFile(join(rootDir, "package-lock.json"), "utf8"));
+const dependencies = { ...(memoryPackage.dependencies ?? {}) };
+delete dependencies["@memmy/local-api-contracts"];
+delete dependencies["@memmy/migrations"];
+Object.assign(dependencies, contractsPackage.dependencies, migrationsPackage.dependencies);
 const dependencies = { ...(memoryPackage.dependencies ?? {}) };
 delete dependencies["@memmy/local-api-contracts"];
 delete dependencies["@memmy/migrations"];
@@ -739,17 +743,16 @@ cp -R "$MEMORY_DIR/dist/src" "$RUNTIME_DIR/memory/src"
 cp -R "$AGENT_DIR/dist" "$RUNTIME_DIR/memmy-agent/dist"
 create_memory_runtime_manifest "$RUNTIME_DIR/memory"
 npm ci --prefix "$RUNTIME_DIR/memory" --omit=dev --os=darwin --cpu="$TARGET_CPU"
-mkdir -p \
-  "$RUNTIME_DIR/memory/node_modules/@memmy/local-api-contracts" \
-  "$RUNTIME_DIR/memory/node_modules/@memmy/migrations"
-cp "$LOCAL_API_CONTRACTS_DIR/package.json" \
-  "$RUNTIME_DIR/memory/node_modules/@memmy/local-api-contracts/package.json"
-cp -R "$LOCAL_API_CONTRACTS_DIR/dist" \
-  "$RUNTIME_DIR/memory/node_modules/@memmy/local-api-contracts/dist"
-cp "$MIGRATIONS_STAGING_DIR/package.json" \
-  "$RUNTIME_DIR/memory/node_modules/@memmy/migrations/package.json"
-cp -R "$MIGRATIONS_STAGING_DIR/dist" \
-  "$RUNTIME_DIR/memory/node_modules/@memmy/migrations/dist"
+MEMORY_RUNTIME_CONTRACTS_DIR="$RUNTIME_DIR/memory/node_modules/@memmy/local-api-contracts"
+MEMORY_RUNTIME_MIGRATIONS_DIR="$RUNTIME_DIR/memory/node_modules/@memmy/migrations"
+rm -rf "$MEMORY_RUNTIME_CONTRACTS_DIR" "$MEMORY_RUNTIME_MIGRATIONS_DIR"
+mkdir -p "$MEMORY_RUNTIME_CONTRACTS_DIR" "$MEMORY_RUNTIME_MIGRATIONS_DIR"
+cp "$ROOT_DIR/App/backend/local-api-contracts/package.json" "$MEMORY_RUNTIME_CONTRACTS_DIR/package.json"
+cp -R "$ROOT_DIR/App/backend/local-api-contracts/dist" "$MEMORY_RUNTIME_CONTRACTS_DIR/dist"
+cp "$MIGRATIONS_STAGING_DIR/package.json" "$MEMORY_RUNTIME_MIGRATIONS_DIR/package.json"
+cp -R "$MIGRATIONS_STAGING_DIR/dist" "$MEMORY_RUNTIME_MIGRATIONS_DIR/dist"
+require_packaged_runtime_file "$MEMORY_RUNTIME_CONTRACTS_DIR/dist/index.js"
+require_packaged_runtime_file "$MEMORY_RUNTIME_MIGRATIONS_DIR/dist/index.js"
 ELECTRON_VERSION="$(node -p "require('./App/shell/desktop/node_modules/electron/package.json').version")"
 node_modules/.bin/electron-rebuild \
   -f \

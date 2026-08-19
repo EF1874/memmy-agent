@@ -64,6 +64,7 @@ describe("MemmyMemoryHook", () => {
     const hook = new MemmyMemoryHook(client as any, { workspace: "/tmp/workspace", userId: "user_hook_1" });
     const spec = {
       sessionKey: "cli:direct",
+      turnId: "agent-turn-1",
       workspace: "/tmp/workspace",
       tools: { toolNames: ["read_file", "memmy_memory_search"] },
       contextWindowTokens: 4096,
@@ -82,6 +83,7 @@ describe("MemmyMemoryHook", () => {
     const openSessionBody = (client.openSession as any).mock.calls[0][0];
     const startBody = (client.startTurn as any).mock.calls[0][1];
     expect(client.openSession).toHaveBeenCalledTimes(1);
+    expect((client.startTurn as any).mock.calls[0][0]).toBe("agent-turn-1");
     expect(openSessionBody.sessionId).toBeUndefined();
     expect(openSessionBody.namespace).toMatchObject({
       source: "memmy-agent",
