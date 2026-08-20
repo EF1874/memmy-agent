@@ -1403,6 +1403,11 @@ export class MemoryService {
     queryId: string;
     query: string;
     hits: RecallHit[];
+    diagnostics: {
+      candidateMemoryIds: string[];
+      injectedMemoryIds: string[];
+      capture?: Record<string, unknown>;
+    };
     createdAt: string;
     serverTime: string;
   } {
@@ -1432,11 +1437,27 @@ export class MemoryService {
         retrievalRoutes: [...new Set(members.map((member) => member.retrievalRoute))]
       }];
     });
+    const rawTurn = event.sessionId && event.turnId
+      ? this.repos.runtime.getRawTurnBySessionTurn(event.sessionId, event.turnId)
+      : undefined;
+    const turnComplete = rawTurn && isRecord(rawTurn.messagePayload?.turn_complete)
+      ? rawTurn.messagePayload.turn_complete
+      : undefined;
+    const recordedCapture = turnComplete && isRecord(turnComplete.memory_capture)
+      ? turnComplete.memory_capture
+      : undefined;
     return {
       recallEventId: event.id,
       queryId: event.queryId ?? queryId,
       query: event.query,
       hits,
+      diagnostics: {
+        candidateMemoryIds: event.candidateMemoryIds ?? [],
+        injectedMemoryIds: event.injectedMemoryIds ?? [],
+        ...(recordedCapture
+          ? { capture: recordedCapture }
+          : rawTurn ? { capture: { status: "pending" } } : {})
+      },
       createdAt: event.createdAt,
       serverTime: nowIso()
     };

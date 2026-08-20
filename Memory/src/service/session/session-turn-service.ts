@@ -1439,7 +1439,12 @@ export class SessionTurnService {
               source: "turn.complete.capture",
               contentHash: upsert.memory.contentHash,
               decideCapture: modelDecidesCapture,
-              captureUserMemory: modelDecidesCapture && !request.userMemoryCorrection && step.stepIndex === 0
+              captureUserMemory: modelDecidesCapture && !request.userMemoryCorrection && step.stepIndex === 0,
+              capturedUserMemoryIds: userMemoryCapture.memoryIds,
+              ...(request.userMemoryCorrection ? {
+                capturedUserMemoryAction: "corrected",
+                capturedUserMemoryTargetId: request.userMemoryCorrection.targetMemoryId
+              } : {})
             },
             maxAttempts: 3,
             createdAt: at

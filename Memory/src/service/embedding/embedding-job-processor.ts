@@ -48,10 +48,17 @@ type TurnCaptureDecision = {
   createUserMemory: boolean;
   userMemoryTypes: UserMemoryType[];
   userMemoryEvidence: Array<{ quote: string; type: UserMemoryType }>;
-  userMemoryAction: "none" | "create" | "confirm_existing";
+  userMemoryAction: "none" | "create" | "confirm_existing" | "correct_existing";
   matchedUserMemoryId?: string;
+  correctedUserMemoryContent?: string;
   l1Evidence: Array<{ quote: string; sourceRole: "user" | "assistant" | "tool"; kind: string }>;
   reason: string;
+};
+
+type UserMemoryCaptureResult = {
+  action: "created" | "updated" | "confirmed" | "corrected";
+  memoryId: string;
+  targetMemoryId?: string;
 };
 
 export interface PreparedEmbeddingJob {
@@ -356,10 +363,12 @@ export class EmbeddingJobProcessor {
 
     let finalizedEpisodeId: string | undefined;
     this.deps.repos.transaction(() => {
+      let userMemoryCapture = userMemoryCaptureFromJob(job);
       if (decision?.createUserMemory && job.payload.captureUserMemory === true) {
-        this.captureUserMemoryFromDecision(current, currentTrace, decision, job, at);
+        userMemoryCapture = this.captureUserMemoryFromDecision(current, currentTrace, decision, job, at);
       }
       if (decision && !decision.createL1) {
+        this.recordTurnCaptureDiagnostics(currentTrace, current.id, decision, userMemoryCapture, job, at);
         const rejected = this.deps.repos.memories.update(
           recordTurnMemoryDecision(current, decision, "rejected", at)
         );
@@ -380,6 +389,9 @@ export class EmbeddingJobProcessor {
         ? this.deps.repos.memories.update(acceptTurnMemoryDecision(summarized, decision, at))
         : summarized;
       if (saved !== previous) this.appendMemoryChange(saved, previous, "worker.trace_summary", at);
+      if (decision) {
+        this.recordTurnCaptureDiagnostics(currentTrace, saved.id, decision, userMemoryCapture, job, at);
+      }
       this.scheduleEmbeddingAfterTextUpdate({
         memory: saved,
         sourceJob: job,
@@ -412,10 +424,12 @@ export class EmbeddingJobProcessor {
     decision: TurnCaptureDecision,
     job: EvolutionJobRecord,
     at: string
-  ): void {
-    const content = trace.userText.trim();
+  ): UserMemoryCaptureResult | undefined {
+    const content = decision.userMemoryAction === "correct_existing"
+      ? decision.correctedUserMemoryContent?.trim() ?? ""
+      : trace.userText.trim();
     const sourceTurnId = trace.rawTurnId;
-    if (!content || !sourceTurnId || decision.userMemoryTypes.length === 0) return;
+    if (!content || !sourceTurnId || decision.userMemoryTypes.length === 0) return undefined;
     const sourceAt = Number.isFinite(trace.ts) ? new Date(trace.ts).toISOString() : at;
     if (decision.userMemoryAction === "confirm_existing" && decision.matchedUserMemoryId) {
       const confirmed = this.deps.repos.userMemories.confirmExisting({
@@ -425,7 +439,7 @@ export class EmbeddingJobProcessor {
         memoryTypes: decision.userMemoryTypes,
         updatedAt: sourceAt
       });
-      if (!confirmed) return;
+      if (!confirmed) return undefined;
       this.deps.repos.runtime.appendChange({
         memoryId: confirmed.memory.id,
         kind: "user_memory",
@@ -438,17 +452,28 @@ export class EmbeddingJobProcessor {
         source: "worker.turn_memory_decision",
         createdAt: at
       });
-      return;
+      return { action: "confirmed", memoryId: confirmed.memory.id };
     }
+    const correctionTarget = decision.userMemoryAction === "correct_existing" && decision.matchedUserMemoryId
+      ? this.deps.repos.userMemories.get(decision.matchedUserMemoryId)
+      : undefined;
+    if (
+      decision.userMemoryAction === "correct_existing" &&
+      (!correctionTarget || correctionTarget.userId !== sourceMemory.userId || correctionTarget.status !== "active")
+    ) return undefined;
     const candidate = buildUserMemory({
       id: `user_memory_${stableHash(`${sourceTurnId}:${content}`).slice(0, 20)}`,
       sourceTurnId,
       userId: sourceMemory.userId,
       memoryTypes: decision.userMemoryTypes,
       content,
-      createdAt: sourceAt
+      createdAt: sourceAt,
+      ...(correctionTarget ? { replacesMemoryId: correctionTarget.id } : {})
     });
     const upsert = this.deps.repos.userMemories.upsertExact(candidate);
+    if (correctionTarget && upsert.memory.id === correctionTarget.id) {
+      throw new Error("user memory correction must change the target content");
+    }
     this.deps.repos.runtime.appendChange({
       memoryId: upsert.memory.id,
       kind: "user_memory",
@@ -461,16 +486,94 @@ export class EmbeddingJobProcessor {
       source: "worker.turn_memory_decision",
       createdAt: at
     });
-    if (!upsert.created || !this.deps.capture.embedAfterCapture) return;
-    this.deps.enqueueJob({
-      jobType: "user_memory_embedding",
-      userId: upsert.memory.userId,
-      sessionId: sourceMemory.sessionId,
-      episodeId: job.episodeId,
-      targetMemoryId: upsert.memory.id,
-      payload: { contentHash: stableHash(upsert.memory.content) },
-      maxAttempts: 6,
-      createdAt: at
+    if (correctionTarget) {
+      const archived = this.deps.repos.userMemories.archiveForCorrection(
+        correctionTarget.id,
+        upsert.memory.id,
+        at
+      );
+      if (archived) {
+        this.deps.repos.runtime.appendChange({
+          memoryId: archived.id,
+          kind: "user_memory",
+          op: "archived",
+          entityId: archived.id,
+          userId: archived.userId,
+          changeType: "user_memory_archived",
+          before: correctionTarget,
+          after: archived,
+          source: "worker.turn_memory_decision",
+          createdAt: at
+        });
+      }
+    }
+    if (upsert.created && this.deps.capture.embedAfterCapture) {
+      this.deps.enqueueJob({
+        jobType: "user_memory_embedding",
+        userId: upsert.memory.userId,
+        sessionId: sourceMemory.sessionId,
+        episodeId: job.episodeId,
+        targetMemoryId: upsert.memory.id,
+        payload: { contentHash: stableHash(upsert.memory.content) },
+        maxAttempts: 6,
+        createdAt: at
+      });
+    }
+    return {
+      action: correctionTarget ? "corrected" : upsert.created ? "created" : "updated",
+      memoryId: upsert.memory.id,
+      ...(correctionTarget ? { targetMemoryId: correctionTarget.id } : {})
+    };
+  }
+
+  private recordTurnCaptureDiagnostics(
+    trace: TraceMeta,
+    l1MemoryId: string,
+    decision: TurnCaptureDecision,
+    userMemoryCapture: UserMemoryCaptureResult | undefined,
+    job: EvolutionJobRecord,
+    at: string
+  ): void {
+    if (!trace.rawTurnId) return;
+    const rawTurn = this.deps.repos.runtime.getRawTurn(trace.rawTurnId);
+    if (!rawTurn) return;
+    const turnComplete = isRecord(rawTurn.messagePayload?.turn_complete)
+      ? rawTurn.messagePayload.turn_complete
+      : {};
+    const previous = isRecord(turnComplete.memory_capture) ? turnComplete.memory_capture : {};
+    const previousL1 = Array.isArray(previous.l1)
+      ? previous.l1.filter(isRecord)
+      : [];
+    const l1 = [
+      ...previousL1.filter((item) => item.memory_id !== l1MemoryId),
+      {
+        memory_id: l1MemoryId,
+        written: decision.createL1,
+        policy_eligible: decision.policyEligible
+      }
+    ];
+    const recordsUserMemory = job.payload.captureUserMemory === true || Boolean(userMemoryCapture);
+    this.deps.repos.runtime.updateRawTurn({
+      ...rawTurn,
+      messagePayload: {
+        ...rawTurn.messagePayload,
+        turn_complete: {
+          ...turnComplete,
+          memory_capture: {
+            status: "completed",
+            decided_at: at,
+            l1,
+            ...(recordsUserMemory ? {
+              user_memory: {
+                written: Boolean(userMemoryCapture),
+                action: userMemoryCapture?.action ?? "none",
+                memory_id: userMemoryCapture?.memoryId,
+                target_memory_id: userMemoryCapture?.targetMemoryId
+              }
+            } : isRecord(previous.user_memory) ? { user_memory: previous.user_memory } : {})
+          }
+        }
+      }
     });
   }
 
@@ -611,6 +714,7 @@ function recordTurnMemoryDecisionFields(
     user_memory_evidence: decision.userMemoryEvidence,
     user_memory_action: decision.userMemoryAction,
     matched_user_memory_id: decision.matchedUserMemoryId,
+    corrected_user_memory_content: decision.correctedUserMemoryContent,
     l1_evidence: decision.l1Evidence.map((item) => ({
       quote: item.quote,
       source_role: item.sourceRole,
@@ -698,6 +802,21 @@ function hasVerifiedDurableToolObservation(
 
 function uniq<T>(values: readonly T[]): T[] {
   return [...new Set(values)];
+}
+
+function userMemoryCaptureFromJob(job: EvolutionJobRecord): UserMemoryCaptureResult | undefined {
+  const memoryId = Array.isArray(job.payload.capturedUserMemoryIds)
+    ? job.payload.capturedUserMemoryIds.find((id): id is string => typeof id === "string" && id.length > 0)
+    : undefined;
+  if (!memoryId) return undefined;
+  const corrected = job.payload.capturedUserMemoryAction === "corrected";
+  return {
+    action: corrected ? "corrected" : "created",
+    memoryId,
+    ...(corrected && typeof job.payload.capturedUserMemoryTargetId === "string"
+      ? { targetMemoryId: job.payload.capturedUserMemoryTargetId }
+      : {})
+  };
 }
 
 function fallbackImportSummary(trace: TraceMeta, memory: MemoryRow): string {

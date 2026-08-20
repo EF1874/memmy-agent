@@ -99,11 +99,32 @@ export const RecallHitSchema = z.object({
 });
 export type RecallHit = z.infer<typeof RecallHitSchema>;
 
+const MemoryCaptureDiagnosticsSchema = z.object({
+  status: z.enum(["pending", "completed"]),
+  decided_at: IsoTimeSchema.optional(),
+  l1: z.array(z.object({
+    memory_id: NonEmptyStringSchema,
+    written: z.boolean(),
+    policy_eligible: z.boolean()
+  })).optional(),
+  user_memory: z.object({
+    written: z.boolean(),
+    action: z.enum(["none", "created", "updated", "confirmed", "corrected"]),
+    memory_id: NonEmptyStringSchema.optional(),
+    target_memory_id: NonEmptyStringSchema.optional()
+  }).optional()
+});
+
 export const RecallEvidenceOutputSchema = z.object({
   recallEventId: NonEmptyStringSchema,
   queryId: NonEmptyStringSchema,
   query: z.string(),
   hits: z.array(RecallHitSchema),
+  diagnostics: z.object({
+    candidateMemoryIds: z.array(NonEmptyStringSchema),
+    injectedMemoryIds: z.array(NonEmptyStringSchema),
+    capture: MemoryCaptureDiagnosticsSchema.optional()
+  }).optional(),
   createdAt: IsoTimeSchema,
   serverTime: IsoTimeSchema
 });
