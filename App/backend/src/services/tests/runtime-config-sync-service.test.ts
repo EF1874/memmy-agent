@@ -79,6 +79,31 @@ describe("syncRuntimeConfigWithAppState", () => {
     expect(context.store.db.prepare("SELECT uuid FROM cloud_accounts WHERE uuid = ?").get("cloud-token-a")).toBeUndefined();
   });
 
+  it("keeps an unmarked legacy email session when the INTL package starts", async () => {
+    const context = createContext();
+    context.store.repositories.accountSession.upsert({
+      profile: {
+        userId: "owner-a", email: "a@example.test", phoneNumber: null, nickname: "a", avatarUrl: null,
+        planType: "free", hasFinishedGuide: false, region: null, registeredAt: "2026-06-02T10:00:00.000Z",
+        rawProfile: { id: "owner-a", email: "a@example.test", userName: "a" }
+      },
+      uuid: "account-a",
+      cloudUuid: "cloud-token-a"
+    });
+    context.writeConfig(currentAccountCatalog());
+
+    await expect(syncRuntimeConfigWithAppState({
+      ...context,
+      accountChannel: "email"
+    })).resolves.toMatchObject({
+      source: "runtime_config", mode: "account", hydratedAppState: true, wroteConfig: false
+    });
+    expect(context.store.repositories.accountSession.get()).toMatchObject({
+      authenticated: true,
+      profile: { userId: "owner-a" }
+    });
+  });
+
   it("clears an email session before CN startup hydrates the shared account projection", async () => {
     const context = createContext();
     context.store.repositories.accountSession.upsert({

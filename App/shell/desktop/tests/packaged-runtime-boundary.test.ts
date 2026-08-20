@@ -32,6 +32,7 @@ const packageWinPath = fileURLToPath(new URL("../../../../scripts/package-win.sh
 const packageWinX64Path = fileURLToPath(new URL("../../../../scripts/internal/win/build-nsis.sh", import.meta.url));
 const winUnsignedBuilderPath = fileURLToPath(new URL("../electron-builder.win.unsigned.yml", import.meta.url));
 const winUnsignedInstallerIncludePath = fileURLToPath(new URL("../build/installer-win-unsigned.nsh", import.meta.url));
+const winUpgradeRelayScriptPath = fileURLToPath(new URL("../build/MemmyWindowsUpgradeRelay.ps1", import.meta.url));
 const desktopInterfacePath = fileURLToPath(new URL("../interface/src/index.ts", import.meta.url));
 const localApiContractsPath = fileURLToPath(new URL("../../../../App/backend/local-api-contracts/src/index.ts", import.meta.url));
 const rootPackagePath = fileURLToPath(new URL("../../../../package.json", import.meta.url));
@@ -546,6 +547,61 @@ describe("desktop packaged runtime boundaries", () => {
     expect(includeSource).toContain("CRCCheck off");
   });
 
+  it("relays legacy in-app upgrades outside the installed data directory", () => {
+    const signedBuilderConfig = readFileSync(winElectronBuilderPath, "utf8");
+    const unsignedBuilderConfig = readFileSync(winUnsignedBuilderPath, "utf8");
+    const includeSource = readFileSync(winUnsignedInstallerIncludePath, "utf8");
+    const relaySource = readFileSync(winUpgradeRelayScriptPath, "utf8");
+    const mainSource = readFileSync(mainSourcePath, "utf8");
+
+    expect(signedBuilderConfig).toContain("include: build/installer-win-unsigned.nsh");
+    expect(unsignedBuilderConfig).toContain("include: build/installer-win-unsigned.nsh");
+    expect(includeSource).toContain("!macro customInit");
+    expect(includeSource).toContain("--memmy-upgrade-relayed");
+    expect(includeSource).toContain("MemmyWindowsUpgradeRelay.ps1");
+    expect(includeSource).toContain('$LOCALAPPDATA\\Memmy\\upgrade-staging');
+    expect(includeSource).toContain("GetCurrentProcessId");
+    expect(includeSource).toContain('upgrade-staging\\$2');
+    expect(includeSource).toContain("OriginalInstallerPid $2");
+    expect(includeSource).toContain("LegacyHelperPid $3");
+    expect(includeSource).toContain("ReopenAfterInstall");
+    expect(includeSource).toContain("Call MemmyRestoreRelayedUpgradeData");
+    expect(includeSource).toContain("Call MemmyClearRelayedUpgradeMarkers");
+    expect(includeSource).toContain("Call MemmyLaunchRelayedUpgrade");
+    expect(includeSource).toContain("Call MemmyScheduleRelayedUpgradeCleanup");
+    expect(includeSource).toContain("MEMMY_UPGRADE_WORK_DIR");
+    expect(includeSource).toContain("MEMMY_UPGRADE_REOPEN_AFTER_INSTALL");
+    expect(includeSource).toContain("relay-ready");
+    expect(includeSource).toContain("ReadyPath");
+    expect(includeSource).toContain("MemmyWindowsUpgradeCleanup.ps1");
+    expect(includeSource).toContain('ExecShell "open" "$R5"');
+    expect(includeSource).toContain('ExecShell "open" "$1"');
+    expect(includeSource.match(/ExecShell "open" .* SW_HIDE/g)).toHaveLength(2);
+    expect(includeSource).not.toContain('Exec \'$\\\"$R5$\\\"');
+    expect(includeSource).toContain('Exec \'$\\\"$INSTDIR\\${PRODUCT_FILENAME}.exe$\\\" --updated\'');
+    expect(includeSource).toContain('$LOCALAPPDATA\\Memmy\\upgrade-staging\\active.lock');
+    const relayInitIndex = includeSource.indexOf("Function MemmyRelayLegacyUpgrade");
+    const earlyLaunchProxyIndex = includeSource.indexOf("Call MemmyInstallLaunchProxy", relayInitIndex);
+    const relayStartIndex = includeSource.indexOf('ExecShell "open" "$R5"', relayInitIndex);
+    expect(earlyLaunchProxyIndex).toBeGreaterThan(relayInitIndex);
+    expect(earlyLaunchProxyIndex).toBeLessThan(relayStartIndex);
+    expect(includeSource).toContain("SetErrorLevel");
+    expect(relaySource).toContain("Move-MemmyDirectory");
+    expect(relaySource).toContain("Restore-MemmyData");
+    expect(relaySource).toContain("Resolve-MemmyLegacyHelperReopenIntent");
+    expect(relaySource).toContain("MEMMY_UPGRADE_WORK_DIR");
+    expect(relaySource).toContain("MEMMY_UPGRADE_REOPEN_AFTER_INSTALL");
+    expect(relaySource).toContain("$installerProcess.WaitForExit()");
+    expect(relaySource).not.toContain("-Wait -PassThru");
+    expect(relaySource).toContain("MemmyWindowsUpgradeCleanup.ps1");
+    expect(relaySource).not.toContain("cmd.exe");
+    expect(relaySource).not.toContain("$env:ComSpec");
+    expect(relaySource).not.toContain("ping.exe");
+    expect(relaySource).toContain("--memmy-upgrade-relayed");
+    expect(relaySource).toContain("upgrade verified");
+    expect(mainSource).toContain('spawn("/bin/zsh", [helperPath, filePath, destinationAppPath, logPath, String(process.pid), options.openAfterInstall ? "1" : "0"');
+  });
+
   it("adds packaged Windows CLI launchers to the user PATH", () => {
     const signedBuilderConfig = readFileSync(winElectronBuilderPath, "utf8");
     const unsignedBuilderConfig = readFileSync(winUnsignedBuilderPath, "utf8");
@@ -586,6 +642,9 @@ describe("desktop packaged runtime boundaries", () => {
     expect(includeSource).toContain('dataRoot = $\\"$INSTDIR\\data$\\"');
     expect(includeSource).toContain('languagePath = dataRoot & $\\"\\Memmy\\update-prompt-language.txt$\\"');
     expect(includeSource).toContain('markerPath = dataRoot & $\\"\\Memmy\\prepared-required-update.json$\\"');
+    expect(includeSource).toContain('relayLockPath = shell.ExpandEnvironmentStrings($\\"%LOCALAPPDATA%$\\") & $\\"\\Memmy\\upgrade-staging\\active.lock$\\"');
+    expect(includeSource).toContain("If fso.FolderExists(relayLockPath) Then");
+    expect(includeSource).toContain("lockPath = relayLockPath");
     expect(includeSource).toContain("WindowsPowerShell\\v1.0\\powershell.exe");
     expect(includeSource).toContain('promptMarkerPath = markerPath & $\\".prompt$\\"');
     expect(includeSource).toContain("If fso.FolderExists(lockPath) And fso.FileExists(promptMarkerPath) Then");
@@ -825,6 +884,8 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain("openAfterInstall: false");
     expect(mainSource).not.toContain('openAfterInstall: process.platform === "win32"');
     expect(mainSource).toContain("function resolvePreparedRequiredUpdateLockPath");
+    expect(mainSource).toContain("function resolveWindowsUpgradeRelayLockPath");
+    expect(mainSource).toContain('join(localAppData, "Memmy", "upgrade-staging", "active.lock")');
     expect(mainSource).toContain("async function waitForPreparedRequiredUpdateLock");
     expect(mainSource).toContain("async function waitForWindowsPreparedRequiredUpdateBeforeBoot");
     expect(mainSource).toContain('boot:prepared-required-update waiting-for-lock win32');
