@@ -32,7 +32,7 @@ afterEach(() => {
 });
 
 describe("workspace bridge runtime", () => {
-  it("keeps workspace scanning disabled unless the YAML value is explicitly true", async () => {
+  it("defaults workspace scanning on and honors explicit boolean settings", async () => {
     const fixture = createFixture();
     const configUrl = pathToFileURL(join(fixture, "memmy-memory-config.json"));
     const configPath = join(fixture, "config.yaml");
@@ -42,10 +42,11 @@ describe("workspace bridge runtime", () => {
       workspaceHostId: "a".repeat(64)
     }));
 
-    for (const value of [undefined, "true", 1, null]) {
-      writeFileSync(configPath, value === undefined
-        ? "memmyMemory: {}\n"
-        : `memmyMemory:\n  workspaceBridge:\n    enabled: ${JSON.stringify(value)}\n`);
+    writeFileSync(configPath, "memmyMemory: {}\n");
+    expect((await readRuntimeConfig(configUrl, true)).workspaceBridgeEnabled).toBe(true);
+
+    for (const value of ["true", 1, null]) {
+      writeFileSync(configPath, `memmyMemory:\n  workspaceBridge:\n    enabled: ${JSON.stringify(value)}\n`);
       expect((await readRuntimeConfig(configUrl, true)).workspaceBridgeEnabled).toBe(false);
     }
 
@@ -53,6 +54,9 @@ describe("workspace bridge runtime", () => {
     const enabled = await readRuntimeConfig(configUrl, true);
     expect(enabled.workspaceBridgeEnabled).toBe(true);
     expect(enabled.userId).toBe("installed-owner");
+
+    writeFileSync(configPath, "memmyMemory:\n  workspaceBridge:\n    enabled: false\n");
+    expect((await readRuntimeConfig(configUrl, true)).workspaceBridgeEnabled).toBe(false);
   });
 
   it("builds a stable, bounded inventory without reading ordinary source or sensitive files", async () => {

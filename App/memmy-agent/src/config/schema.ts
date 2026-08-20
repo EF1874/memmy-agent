@@ -1067,13 +1067,13 @@ export class GatewayConfig extends Base {
 }
 
 export class MemmyMemoryWorkspaceBridgeConfig extends Base {
-  enabled = false;
+  enabled = true;
 
   constructor(init: Dict = {}) {
     super();
     this.enabled = Object.prototype.hasOwnProperty.call(init, "enabled")
       ? assertBoolean("memmyMemory.workspaceBridge.enabled", init.enabled)
-      : false;
+      : true;
   }
 
   override toObject(): Dict {

@@ -183,11 +183,11 @@ describe("config schema validation", () => {
     }
   });
 
-  it("defaults Workspace Bridge off and round-trips only explicit booleans", () => {
+  it("defaults Workspace Bridge on and round-trips only explicit booleans", () => {
     const defaults = new Config();
     const enabled = new Config({ memmyMemory: { workspaceBridge: { enabled: true } } });
     const disabled = new Config({ memmyMemory: { workspaceBridge: { enabled: false } } });
-    expect(defaults.memmyMemory.workspaceBridge.enabled).toBe(false);
+    expect(defaults.memmyMemory.workspaceBridge.enabled).toBe(true);
     expect(enabled.memmyMemory.workspaceBridge.enabled).toBe(true);
     expect(disabled.memmyMemory.workspaceBridge.enabled).toBe(false);
     expect(enabled.toObject().memmyMemory).toMatchObject({ workspaceBridge: { enabled: true } });
