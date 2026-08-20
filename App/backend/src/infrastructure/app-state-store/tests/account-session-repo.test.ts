@@ -269,6 +269,47 @@ describe("account session repository", () => {
     expect(fabricatedAccount).toBeUndefined();
   });
 
+  it("infers a legacy login channel only from one unambiguous bound contact", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-account-session-"));
+    const store = createAppStateStore({ databasePath: join(tempDir, "app.sqlite") });
+    const createProfile = (input: { userId: string; email: string | null; phoneNumber: string | null }) => ({
+      ...input,
+      nickname: input.userId,
+      avatarUrl: null,
+      planType: "free",
+      hasFinishedGuide: false,
+      region: null,
+      registeredAt: "2026-06-02T10:00:00.000Z",
+      rawProfile: {
+        id: input.userId,
+        ...(input.email ? { email: input.email } : {}),
+        ...(input.phoneNumber ? { phoneNumber: input.phoneNumber } : {})
+      }
+    });
+
+    store.repositories.accountSession.upsert({
+      profile: createProfile({ userId: "legacy-email", email: "legacy@example.com", phoneNumber: null }),
+      uuid: "legacy-email",
+      cloudUuid: "legacy.email.credential"
+    });
+    expect(store.repositories.accountSession.getAuthChannel()).toBe("email");
+
+    store.repositories.accountSession.upsert({
+      profile: createProfile({ userId: "legacy-phone", email: null, phoneNumber: "13800138000" }),
+      uuid: "legacy-phone",
+      cloudUuid: "legacy.phone.credential"
+    });
+    expect(store.repositories.accountSession.getAuthChannel()).toBe("phone");
+
+    store.repositories.accountSession.upsert({
+      profile: createProfile({ userId: "legacy-ambiguous", email: "both@example.com", phoneNumber: "13800138000" }),
+      uuid: "legacy-ambiguous",
+      cloudUuid: "legacy.ambiguous.credential"
+    });
+    expect(store.repositories.accountSession.getAuthChannel()).toBeNull();
+    store.close();
+  });
+
   it("uses the persisted login channel instead of inferring from bound contact fields", () => {
     tempDir = mkdtempSync(join(tmpdir(), "memmy-account-session-"));
     const store = createAppStateStore({ databasePath: join(tempDir, "app.sqlite") });

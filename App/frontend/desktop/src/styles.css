@@ -4565,6 +4565,12 @@ code {
   gap: 10px;
 }
 
+.memory-log-tour-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
 .memory-card {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -7585,6 +7591,58 @@ input[type="checkbox"].check-sky:checked::after {
   font-size: 12px;
 }
 
+.task-model-picker__choice {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+}
+
+.task-model-picker__default-button {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  justify-content: center;
+  margin-left: 8px;
+  padding: 3px 9px;
+  border-width: 1px;
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--color-action-sky) 42%, transparent);
+  border-radius: var(--radius-pill);
+  background: var(--color-background-paper);
+  color: var(--color-action-sky-hover);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  transition: border-color var(--duration-fast), background var(--duration-fast), color var(--duration-fast);
+}
+
+.task-model-picker__default-button:hover {
+  border-color: var(--color-action-sky);
+  background: color-mix(in srgb, var(--color-action-sky) 10%, transparent);
+}
+
+.task-model-picker__default-button[aria-pressed="true"] {
+  border-color: var(--color-action-sky);
+  background: var(--color-action-sky);
+  color: white;
+  font-weight: 700;
+}
+
+.task-model-picker__default-button[aria-pressed="true"]:hover {
+  border-color: var(--color-action-sky-hover);
+  background: var(--color-action-sky-hover);
+}
+
+.task-model-picker__default-button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-action-sky) 55%, transparent);
+  outline-offset: 2px;
+}
+
 .task-model-picker__option:hover:not(:disabled) {
   background: var(--color-background-paper);
 }
@@ -10099,7 +10157,7 @@ input[type="checkbox"].check-sky:checked::after {
   appearance: none;
   background: transparent;
   cursor: pointer;
-  font: inherit;
+  font-family: inherit;
 }
 
 .app-frame-profile-settings-button:hover,
@@ -10133,7 +10191,7 @@ input[type="checkbox"].check-sky:checked::after {
   background: #2f8fff;
   color: #fff;
   cursor: pointer;
-  font: inherit;
+  font-family: inherit;
   font-size: 12px;
   font-weight: 700;
   line-height: 1;
@@ -10596,6 +10654,10 @@ input[type="checkbox"].check-sky:checked::after {
 /* Settings page shell styles. */
 .settings-page-shell {
   color: var(--color-text-ink);
+}
+
+.settings-page > .app-frame-page-content {
+  padding-top: calc(var(--codex-toolbar-height) + 10px);
 }
 
 .model-workspace-layout {
@@ -11293,32 +11355,13 @@ input[type="checkbox"].check-sky:checked::after {
   }
 }
 
-.agent-goal-bar__usage,
-.agent-goal-bar__usage-full,
-.agent-goal-bar__usage-compact {
-  align-items: center;
-  white-space: nowrap;
-}
-
-.agent-goal-bar__usage {
+.agent-goal-bar__time {
   display: inline-flex;
+  align-items: center;
   flex: 0 0 auto;
   color: color-mix(in srgb, var(--color-text-ink) 58%, transparent);
   font-size: 0.72rem;
-}
-
-.agent-goal-bar__usage-full {
-  display: inline-flex;
-  gap: 0.3rem;
-}
-
-.agent-goal-bar__usage-compact {
-  display: none;
-  gap: 0.25rem;
-}
-
-.agent-goal-bar__separator {
-  color: color-mix(in srgb, var(--color-text-ink) 34%, transparent);
+  white-space: nowrap;
 }
 
 .agent-goal-bar__actions {
@@ -11390,8 +11433,7 @@ input[type="checkbox"].check-sky:checked::after {
   padding: 0.75rem;
 }
 
-.agent-goal-bar__form textarea,
-.agent-goal-bar__form input {
+.agent-goal-bar__form textarea {
   width: 100%;
   border: 1px solid color-mix(in srgb, var(--color-border-stone) 45%, transparent);
   border-radius: 0.5rem;
@@ -11446,14 +11488,6 @@ input[type="checkbox"].check-sky:checked::after {
 
   .agent-goal-bar__objective-viewport {
     flex-basis: 7rem;
-  }
-
-  .agent-goal-bar__usage-full {
-    display: none;
-  }
-
-  .agent-goal-bar__usage-compact {
-    display: inline-flex;
   }
 
   .agent-goal-bar__actions {
