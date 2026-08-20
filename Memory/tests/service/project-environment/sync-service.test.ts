@@ -9,6 +9,7 @@ import {
 } from "@memmy/local-api-contracts";
 import type { LlmClient } from "../../../src/model/types.js";
 import type { MemoryService } from "../../../src/service/memory-service.js";
+import { Repositories } from "../../../src/storage/repositories.js";
 import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
 
 const {
@@ -21,10 +22,10 @@ afterEach(() => {
 });
 
 describe("project environment profile pipeline", () => {
-  it("publishes deterministic code facts before asynchronously adding a tree-only summary", async () => {
+  it("keeps the first profile empty until the model publishes one complete code profile", async () => {
     const complete = vi.fn().mockResolvedValue(JSON.stringify({
       op: "create",
-      summary: "源码集中在 src，入口为 src/index.ts；测试位于 tests。"
+      profile: "## 项目概览\nNode.js/TypeScript 项目。\n\n## 主要入口\n主构建入口为 npm run build，测试入口为 npm run test，检查入口为 npm run typecheck。\n\n## 代码组织\n源码集中在 src，测试位于 tests。"
     }));
     const { db, service } = createTestService({ skillLlm: fakeLlm(complete) });
     const opened = openProject(service, "code-profile-session");
@@ -98,10 +99,7 @@ describe("project environment profile pipeline", () => {
     }
     expect(latest.status).toBe("summarizing");
     expect(latest.scanId).toMatch(/^l3wm_scan_/u);
-    const beforeSummary = service.l3WorldModelContext(opened.sessionId, envelope);
-    expect(beforeSummary.projectEnvironmentProfile).toContain("语言：Node.js/JavaScript、TypeScript(.ts)=2");
-    expect(beforeSummary.projectEnvironmentProfile).toContain("构建入口：npm run build");
-    expect(beforeSummary.projectEnvironmentProfile).not.toContain("代码摘要：");
+    expect(service.l3WorldModelContext(opened.sessionId, envelope).projectEnvironmentProfile).toBeNull();
 
     await service.runWorkerOnce(10);
 
@@ -109,15 +107,23 @@ describe("project environment profile pipeline", () => {
       ...envelope,
       requestId: "8bf0318f-4514-4eb1-8cb1-2a440c867620"
     });
-    expect(afterSummary.projectEnvironmentProfile).toContain("代码摘要：源码集中在 src");
+    expect(afterSummary.projectEnvironmentProfile).toContain("## 项目概览");
+    expect(afterSummary.projectEnvironmentProfile).toContain("主构建入口为 npm run build");
+    expect(afterSummary.projectEnvironmentProfile).toContain("源码集中在 src");
     expect(complete).toHaveBeenCalledTimes(1);
-    expect(JSON.parse(complete.mock.calls[0]![0][1]!.content)).toEqual({
-      compact_file_tree: ".git/\npackage.json\nsrc/\n  index.ts\ntests/\n  index.test.ts"
-    });
+    expect(JSON.parse(complete.mock.calls[0]![0][1]!.content)).toEqual(expect.objectContaining({
+      compact_file_tree: ".git/\npackage.json\nsrc/\n  index.ts\ntests/\n  index.test.ts",
+      project_kind: "code",
+      scan_evidence: expect.objectContaining({
+        build_candidates: [{ source_relative_path: "package.json", value: "npm run build" }],
+        test_candidates: [{ source_relative_path: "package.json", value: "npm run test" }],
+        check_candidates: [{ source_relative_path: "package.json", value: "npm run typecheck" }]
+      })
+    }));
     expect(db.db.prepare(
-      `SELECT status, applied_scan_id, summary_scan_id
+      `SELECT status, applied_scan_id, profile_scan_id
        FROM l3_world_model_project_environment_sync_state`
-    ).get()).toMatchObject({ status: "clean", applied_scan_id: latest.scanId, summary_scan_id: latest.scanId });
+    ).get()).toMatchObject({ status: "clean", applied_scan_id: latest.scanId, profile_scan_id: latest.scanId });
     expect(db.db.prepare(
       `SELECT COUNT(*) AS count FROM l3_world_model_project_environment_operations`
     ).get()).toEqual({ count: 0 });
@@ -172,7 +178,7 @@ describe("project environment profile pipeline", () => {
   });
 
   it("classifies an ordinary folder without requesting file contents or probes", async () => {
-    const complete = vi.fn().mockResolvedValue('{"op":"create","summary":"包含需求与排期材料。"}');
+    const complete = vi.fn().mockResolvedValue('{"op":"create","profile":"包含需求与排期材料。"}');
     const { service } = createTestService({ skillLlm: fakeLlm(complete) });
     const opened = openProject(service, "folder-profile-session");
     const envelope = projectEnvelope(opened.projectId!, "folder-profile-session");
@@ -205,13 +211,110 @@ describe("project environment profile pipeline", () => {
     expect(service.l3WorldModelContext(opened.sessionId, {
       ...envelope,
       requestId: "ac0063b0-d22c-40ea-ad9b-f1bf6c6fd07e"
-    }).projectEnvironmentProfile).toBe("项目摘要：包含需求与排期材料。");
+    }).projectEnvironmentProfile).toBe("包含需求与排期材料。");
+  });
+
+  it("keeps the previous same-kind profile until a noop atomically advances both scan records", async () => {
+    const complete = vi.fn()
+      .mockResolvedValueOnce('{"op":"create","profile":"Initial folder profile."}')
+      .mockResolvedValueOnce('{"op":"noop","profile":""}');
+    const { db, service } = createTestService({ skillLlm: fakeLlm(complete) });
+    const opened = openProject(service, "same-kind-noop-session");
+    const envelope = projectEnvelope(opened.projectId!, "same-kind-noop-session");
+    const first = completeFolderScan(service, opened, envelope, {
+      startRequestId: "fcd966cf-ff2e-46e6-9646-326778547f8a",
+      evidenceRequestId: "2bf311f2-e122-411b-87b9-40561ea1e302",
+      entries: [fileEntry("需求.docx")]
+    });
+    await service.runWorkerOnce(10);
+    const repos = new Repositories(db.db);
+    const before = repos.l3WorldModels.getMemory("project-profile-user", opened.projectId)!;
+    expect(repos.l3WorldModels.fields("project-profile-user", opened.projectId).projectEnvironmentProfile)
+      .toBe("Initial folder profile.");
+
+    const second = completeFolderScan(service, opened, envelope, {
+      startRequestId: "a49bb6ef-278a-4739-abf0-43a62efb57d0",
+      evidenceRequestId: "68f7513c-8916-49bf-9200-8f58a03c8ef4",
+      entries: [fileEntry("需求.docx"), fileEntry("排期.xlsx")]
+    });
+    expect(second.status).toBe("summarizing");
+    expect(second.scanId).not.toBe(first.scanId);
+    expect(repos.l3WorldModels.fields("project-profile-user", opened.projectId).projectEnvironmentProfile)
+      .toBe("Initial folder profile.");
+
+    await service.runWorkerOnce(10);
+
+    const after = repos.l3WorldModels.getMemory("project-profile-user", opened.projectId)!;
+    expect(after.memoryValue).toBe(before.memoryValue);
+    expect(after.version).toBeGreaterThan(before.version);
+    expect(after.info.project_environment_applied_scan_id).toBe(second.scanId);
+    expect(db.db.prepare(
+      `SELECT status, applied_scan_id, profile_scan_id
+       FROM l3_world_model_project_environment_sync_state`
+    ).get()).toEqual({
+      status: "clean",
+      applied_scan_id: second.scanId,
+      profile_scan_id: second.scanId
+    });
+    expect(JSON.parse(complete.mock.calls[1]![0][1]!.content)).toMatchObject({
+      current_profile: "Initial folder profile."
+    });
+  });
+
+  it("advances an empty-profile noop without creating an empty L3 memory", async () => {
+    const complete = vi.fn().mockResolvedValue('{"op":"noop","profile":""}');
+    const { db, service } = createTestService({ skillLlm: fakeLlm(complete) });
+    const existingProject = openProject(service, "empty-noop-existing-session");
+    const repos = new Repositories(db.db);
+    const contract = repos.l3WorldModels.upsertField({
+      userId: "project-profile-user",
+      projectId: existingProject.projectId,
+      targetField: "project_contract",
+      value: "Keep the contract."
+    })!;
+    const existingResult = completeFolderScan(
+      service,
+      existingProject,
+      projectEnvelope(existingProject.projectId!, "empty-noop-existing-session"),
+      {
+        startRequestId: "65232aec-1eb6-4acd-abee-0c49c3344471",
+        evidenceRequestId: "4681dbf1-ad40-49b4-a3ae-5133bfdba312",
+        entries: []
+      }
+    );
+    await service.runWorkerOnce(10);
+    const existingMemory = repos.l3WorldModels.getMemory("project-profile-user", existingProject.projectId)!;
+    expect(existingMemory.id).toBe(contract.id);
+    expect(existingMemory.info.project_environment_applied_scan_id).toBe(existingResult.scanId);
+    expect(repos.l3WorldModels.fields("project-profile-user", existingProject.projectId)).toMatchObject({
+      projectEnvironmentProfile: null,
+      projectContract: "Keep the contract."
+    });
+
+    const emptyProject = openProject(service, "empty-noop-no-memory-session");
+    const emptyResult = completeFolderScan(
+      service,
+      emptyProject,
+      projectEnvelope(emptyProject.projectId!, "empty-noop-no-memory-session"),
+      {
+        startRequestId: "e6e1ce90-b0fd-4eb6-a1ab-a1ca84df0155",
+        evidenceRequestId: "80949af3-8409-4218-9da2-d751817e4dbc",
+        entries: []
+      }
+    );
+    await service.runWorkerOnce(10);
+    expect(repos.l3WorldModels.getScope("project-profile-user", emptyProject.projectId)?.memoryId).toBeUndefined();
+    expect(repos.projectEnvironments.getState("project-profile-user", emptyProject.projectId!)).toMatchObject({
+      status: "clean",
+      appliedScanId: emptyResult.scanId,
+      profileScanId: emptyResult.scanId
+    });
   });
 
   it("clears an incompatible summary when the same project changes type", async () => {
     const complete = vi.fn()
-      .mockResolvedValueOnce('{"op":"create","summary":"TypeScript service code."}')
-      .mockResolvedValueOnce('{"op":"create","summary":"Planning documents and schedules."}');
+      .mockResolvedValueOnce('{"op":"create","profile":"TypeScript service code."}')
+      .mockResolvedValueOnce('{"op":"create","profile":"Planning documents and schedules."}');
     const { db, service } = createTestService({ skillLlm: fakeLlm(complete) });
     const opened = openProject(service, "type-change-session");
     const envelope = projectEnvelope(opened.projectId!, "type-change-session");
@@ -268,17 +371,19 @@ describe("project environment profile pipeline", () => {
       requestId: "774dff70-b23b-476a-9ed0-aa393fc77b34"
     }).projectEnvironmentProfile).toBeNull();
     expect(db.db.prepare(
-      `SELECT project_kind, summary_text, summary_scan_id
+      `SELECT project_kind, profile_scan_id
        FROM l3_world_model_project_environment_sync_state`
-    ).get()).toEqual({ project_kind: "folder", summary_text: null, summary_scan_id: null });
+    ).get()).toEqual({ project_kind: "folder", profile_scan_id: null });
 
     await service.runWorkerOnce(10);
     expect(service.l3WorldModelContext(opened.sessionId, {
       ...envelope,
       requestId: "44886a60-c96d-438f-9a34-8ef297085ec4"
-    }).projectEnvironmentProfile).toBe("项目摘要：Planning documents and schedules.");
+    }).projectEnvironmentProfile).toBe("Planning documents and schedules.");
     expect(JSON.parse(complete.mock.calls[1]![0][1]!.content)).toEqual({
-      compact_file_tree: "排期.xlsx\n需求.docx"
+      compact_file_tree: "排期.xlsx\n需求.docx",
+      project_kind: "folder",
+      scan_evidence: { omitted_count: 0 }
     });
 
     db.close();
@@ -587,6 +692,35 @@ function inventoryCapabilities(): WorkspaceBridgeCapabilities {
     operations: ["inventory", "read_text", "runtime_probe"],
     maxTextBytes: 1024 * 1024
   };
+}
+
+function completeFolderScan(
+  service: MemoryService,
+  opened: ReturnType<typeof openProject>,
+  envelope: ReturnType<typeof projectEnvelope>,
+  input: {
+    startRequestId: string;
+    evidenceRequestId: string;
+    entries: InventoryEntry[];
+  }
+) {
+  const started = service.projectEnvironmentSyncStart(opened.projectId!, {
+    ...envelope,
+    requestId: input.startRequestId,
+    sessionId: opened.sessionId,
+    trigger: "token_compaction",
+    capabilities: {
+      protocolVersion: "1",
+      operations: ["inventory"],
+      maxTextBytes: 1024
+    }
+  });
+  return service.projectEnvironmentSyncEvidence(opened.projectId!, started.syncId, {
+    ...envelope,
+    requestId: input.evidenceRequestId,
+    sessionId: opened.sessionId,
+    evidence: inventoryEvidence(onlyOperation(started.operations, "inventory").operationId, input.entries)
+  });
 }
 
 function fakeLlm(complete: LlmClient["complete"]): LlmClient {

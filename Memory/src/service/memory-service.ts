@@ -305,7 +305,7 @@ export class MemoryService {
           materializeNegativeExperience: (job) => this.evolutionJobs.materializeNegativeExperience(job),
           abstractL3: (job) => this.evolutionJobs.abstractL3(job),
           updateL3WorldModel: (job) => this.evolutionJobs.updateL3WorldModel(job),
-          updateProjectEnvironment: (job) => this.projectEnvironment.processSummaryJob(job),
+          updateProjectEnvironment: (job) => this.projectEnvironment.processProfileJob(job),
           crystallizeSkill: (job) => this.evolutionJobs.crystallizeSkill(job),
           associateL2: (job) => this.evolutionJobs.associateL2(job),
           splitBigTurn: (job) => this.evolutionJobs.splitBigTurn(job)

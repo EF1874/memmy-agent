@@ -65,9 +65,11 @@ const statements = [
     scope_key TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
     project_id TEXT,
+    workspace_uri TEXT,
     memory_id TEXT UNIQUE REFERENCES memories(id) ON DELETE SET NULL,
     next_scope_seq INTEGER NOT NULL DEFAULT 1 CHECK (next_scope_seq >= 1),
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    CHECK (workspace_uri IS NULL OR (project_id IS NOT NULL AND length(workspace_uri) > 0))
   )`,
   `CREATE UNIQUE INDEX IF NOT EXISTS uq_l3_world_model_scopes_general
     ON l3_world_model_scopes (user_id)
@@ -477,8 +479,7 @@ const statements = [
     current_scan_id TEXT,
     applied_scan_id TEXT,
     fingerprint TEXT,
-    summary_text TEXT,
-    summary_scan_id TEXT,
+    profile_scan_id TEXT,
     active_adapter_id TEXT,
     sync_lease_expires_at TEXT,
     updated_at TEXT NOT NULL,

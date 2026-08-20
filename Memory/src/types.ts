@@ -270,8 +270,17 @@ export interface MemoryListItem {
   processing?: MemoryProcessingRecord;
 }
 
+export type WorldModelScope =
+  | { kind: "general" }
+  | {
+      kind: "project";
+      projectLabel: string | null;
+      workspaceDisplayPath: string | null;
+    };
+
 export interface PanelMemoryListItem extends Omit<MemoryListItem, "memoryLayer"> {
   memoryLayer: RecallMemoryLayer;
+  worldModelScope?: WorldModelScope;
 }
 
 export interface MemoryDetailItem extends MemoryListItem {

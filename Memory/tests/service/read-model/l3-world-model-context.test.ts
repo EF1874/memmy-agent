@@ -92,11 +92,13 @@ describe("Session L3 World Model context read model", () => {
        ) VALUES (?, ?, 'code', 'clean', 'scan-1', ?)`
     ).run(namespace.userId, projectId, "2026-01-01T00:00:00.000Z");
 
-    expect(service.l3WorldModelContext(opened.sessionId, envelope(scopedNamespace))).toMatchObject({
+    const context = service.l3WorldModelContext(opened.sessionId, envelope(scopedNamespace));
+    expect(context).toMatchObject({
       projectEnvironmentProfile: "语言：TypeScript",
       projectContract: "提交前运行测试。",
       domainKnowledge: "Node 22 -> 可使用原生 TypeScript strip types。"
     });
+    expect(JSON.stringify(context)).not.toContain("file:///tmp/context-project");
     const before = repos.memories.get(memory.id)!;
     db.db.prepare(
       `UPDATE l3_world_model_project_environment_sync_state

@@ -1,107 +1,108 @@
 import { describe, expect, it, vi } from "vitest";
 import type { LlmClient } from "../../../src/model/types.js";
 import {
-  CODE_SUMMARY_PROMPT,
-  FOLDER_SUMMARY_PROMPT,
+  CODE_PROFILE_PROMPT,
+  FOLDER_PROFILE_PROMPT,
   ProjectEnvironmentProfilePipeline,
-  validateProjectEnvironmentSummaryOutput
+  validateProjectEnvironmentProfileOutput
 } from "../../../src/service/project-environment/profile-pipeline.js";
-import { L3_WORLD_MODEL_MAX_TOKENS } from "../../../src/service/l3-world-model/strict-json-completion.js";
-import type { EvolutionJobRecord,Repositories } from "../../../src/storage/repositories.js";
+import type { EvolutionJobRecord, Repositories } from "../../../src/storage/repositories.js";
 
 describe("project environment profile pipeline", () => {
-  it("generates a code summary from only the canonical file-tree input", async () => {
-    const complete = vi.fn().mockResolvedValue('{"op":"create","summary":"Source lives in src."}');
-    const { applySummary, pipeline, renewSummaryEvidence } = fixture({ complete, projectKind: "code" });
+  it("generates one complete code profile from structured evidence and the compact tree", async () => {
+    const complete = vi.fn().mockResolvedValue(JSON.stringify({
+      op: "create",
+      profile: "## Project overview\nTypeScript service."
+    }));
+    const { applyProfile, pipeline, renewProfileEvidence } = fixture({ complete, projectKind: "code" });
+
     await pipeline.process(job("code"));
 
-    expect(renewSummaryEvidence).toHaveBeenCalledWith("sync-1");
+    expect(renewProfileEvidence).toHaveBeenCalledWith("sync-1");
     expect(complete).toHaveBeenCalledTimes(1);
-    expect(complete.mock.calls[0]?.[0]).toEqual([
-      { role: "system", content: CODE_SUMMARY_PROMPT },
-      { role: "user", content: '{"compact_file_tree":"src/\\n  index.ts"}' }
-    ]);
+    expect(complete.mock.calls[0]?.[0]?.[0]).toEqual({ role: "system", content: CODE_PROFILE_PROMPT });
+    const input = JSON.parse(complete.mock.calls[0]![0][1]!.content) as Record<string, unknown>;
+    expect(input).toEqual({
+      compact_file_tree: "package.json\nsrc/\n  index.ts",
+      project_kind: "code",
+      scan_evidence: {
+        build_candidates: [{ source_relative_path: "package.json", value: "npm run build" }],
+        check_candidates: [{ source_relative_path: "package.json", value: "npm run typecheck" }],
+        language_counts: { TypeScript: 1 },
+        manifest_languages: [{ source_relative_path: "package.json", value: "Node.js/JavaScript" }],
+        omitted_count: 2,
+        runtime_declarations: [{ source_relative_path: "package.json", value: "node >=22" }],
+        runtime_probes: [{ probe: "node_version", value: "v22.23.1" }],
+        test_candidates: [{ source_relative_path: "package.json", value: "npm test" }],
+        toolchains: [{ source_relative_path: "package.json", value: "pnpm@10" }]
+      }
+    });
+    expect(complete.mock.calls[0]?.[0][1]?.content).not.toContain("sourceSha256");
+    expect(complete.mock.calls[0]?.[0][1]?.content).not.toContain("workspace_uri");
     expect(complete.mock.calls[0]?.[1]).toEqual({
-      operation: "project_profile_code_summary",
+      operation: "project_environment_code_profile",
       temperature: 0,
-      maxTokens: L3_WORLD_MODEL_MAX_TOKENS,
+      maxTokens: 65_536,
       jsonMode: true
     });
-    expect(applySummary).toHaveBeenCalledWith(expect.objectContaining({
-      expectedCurrentSummary: null,
+    expect(applyProfile).toHaveBeenCalledWith(expect.objectContaining({
+      expectedCurrentProfile: null,
       operation: "create",
-      summary: "Source lives in src."
+      profile: "## Project overview\nTypeScript service."
     }));
   });
 
-  it("includes the complete current folder summary and advances a noop without repeating it", async () => {
-    const complete = vi.fn().mockResolvedValue('{"op":"noop","summary":""}');
-    const { applySummary, pipeline } = fixture({
+  it("passes the current complete profile and advances a folder noop without repeating it", async () => {
+    const complete = vi.fn().mockResolvedValue('{"op":"noop","profile":""}');
+    const { applyProfile, pipeline } = fixture({
       complete,
       projectKind: "folder",
-      currentSummary: "已有项目摘要"
+      currentProfile: "已有项目画像"
     });
+
     await pipeline.process(job("folder"));
-    expect(complete.mock.calls[0]?.[0]).toEqual([
-      { role: "system", content: FOLDER_SUMMARY_PROMPT },
-      {
-        role: "user",
-        content: '{"compact_file_tree":"src/\\n  index.ts","current_summary":"已有项目摘要"}'
-      }
-    ]);
-    expect(applySummary).toHaveBeenCalledWith(expect.objectContaining({
-      expectedCurrentSummary: "已有项目摘要",
-      operation: "noop",
-      summary: ""
+
+    expect(complete.mock.calls[0]?.[0]?.[0]).toEqual({ role: "system", content: FOLDER_PROFILE_PROMPT });
+    expect(JSON.parse(complete.mock.calls[0]![0][1]!.content)).toEqual({
+      compact_file_tree: "package.json\nsrc/\n  index.ts",
+      current_profile: "已有项目画像",
+      project_kind: "folder",
+      scan_evidence: { omitted_count: 2 }
+    });
+    expect(complete.mock.calls[0]?.[1]).toEqual(expect.objectContaining({
+      operation: "project_environment_folder_profile",
+      maxTokens: 65_536
     }));
-  });
-
-  it("uses the folder prompt and creates the complete first summary", async () => {
-    const complete = vi.fn().mockResolvedValue('{"op":"create","summary":"客户材料按月份组织。"}');
-    const { applySummary, pipeline } = fixture({ complete, projectKind: "folder" });
-
-    await pipeline.process(job("folder"));
-
-    expect(complete.mock.calls[0]?.[0]).toEqual([
-      { role: "system", content: FOLDER_SUMMARY_PROMPT },
-      { role: "user", content: '{"compact_file_tree":"src/\\n  index.ts"}' }
-    ]);
-    expect(complete.mock.calls[0]?.[1]).toEqual({
-      operation: "project_profile_folder_summary",
-      temperature: 0,
-      maxTokens: L3_WORLD_MODEL_MAX_TOKENS,
-      jsonMode: true
-    });
-    expect(applySummary).toHaveBeenCalledWith(expect.objectContaining({
-      expectedCurrentSummary: null,
-      operation: "create",
-      summary: "客户材料按月份组织。"
+    expect(applyProfile).toHaveBeenCalledWith(expect.objectContaining({
+      expectedCurrentProfile: "已有项目画像",
+      operation: "noop",
+      profile: ""
     }));
   });
 
   it.each([
-    ["update", "新的完整摘要"],
+    ["update", "新的完整画像"],
     ["update", ""]
-  ] as const)("applies %s as a complete replacement, including clear", async (operation, summary) => {
-    const complete = vi.fn().mockResolvedValue(JSON.stringify({ op: operation, summary }));
-    const { applySummary, pipeline } = fixture({
+  ] as const)("applies %s as a complete replacement, including clear", async (operation, profile) => {
+    const complete = vi.fn().mockResolvedValue(JSON.stringify({ op: operation, profile }));
+    const { applyProfile, pipeline } = fixture({
       complete,
       projectKind: "code",
-      currentSummary: "旧摘要"
+      currentProfile: "旧画像"
     });
 
     await pipeline.process(job("code"));
 
-    expect(applySummary).toHaveBeenCalledWith(expect.objectContaining({
-      expectedCurrentSummary: "旧摘要",
+    expect(applyProfile).toHaveBeenCalledWith(expect.objectContaining({
+      expectedCurrentProfile: "旧画像",
       operation,
-      summary
+      profile
     }));
   });
 
   it("drops a late scan before loading evidence or calling the model", async () => {
     const complete = vi.fn();
-    const { pipeline, renewSummaryEvidence } = fixture({
+    const { pipeline, renewProfileEvidence } = fixture({
       complete,
       projectKind: "code",
       currentSyncId: "sync-new"
@@ -110,90 +111,136 @@ describe("project environment profile pipeline", () => {
     await pipeline.process(job("code"));
 
     expect(complete).not.toHaveBeenCalled();
-    expect(renewSummaryEvidence).not.toHaveBeenCalled();
+    expect(renewProfileEvidence).not.toHaveBeenCalled();
+  });
+
+  it("repairs an invalid response once with the same output limit", async () => {
+    const complete = vi.fn()
+      .mockResolvedValueOnce("not-json")
+      .mockResolvedValueOnce('{"op":"create","profile":"Recovered profile"}');
+    const { pipeline } = fixture({ complete, projectKind: "code" });
+
+    await pipeline.process(job("code"));
+
+    expect(complete).toHaveBeenCalledTimes(2);
+    expect(complete.mock.calls[1]?.[1]).toEqual(expect.objectContaining({
+      operation: "project_environment_code_profile.repair",
+      maxTokens: 65_536
+    }));
   });
 
   it("rejects unknown output fields after the one strict repair", async () => {
-    const complete = vi.fn().mockResolvedValue('{"op":"create","summary":"摘要","extra":true}');
+    const complete = vi.fn().mockResolvedValue('{"op":"create","profile":"profile","extra":true}');
     const { pipeline } = fixture({ complete, projectKind: "code" });
 
-    await expect(pipeline.process(job("code"))).rejects.toThrow("summary output must contain exactly op and summary");
+    await expect(pipeline.process(job("code"))).rejects.toThrow("profile output must contain exactly op and profile");
     expect(complete).toHaveBeenCalledTimes(2);
-    expect(complete.mock.calls[1]?.[1]).toEqual(expect.objectContaining({
-      operation: "project_profile_code_summary.repair",
-      maxTokens: L3_WORLD_MODEL_MAX_TOKENS
-    }));
   });
 
-  it("uses one strict repair and rejects a stale apply base", async () => {
-    const complete = vi.fn()
-      .mockResolvedValueOnce("not-json")
-      .mockResolvedValueOnce('{"op":"create","summary":"Recovered"}');
+  it("treats a stale apply as a successfully superseded job", async () => {
+    const complete = vi.fn().mockResolvedValue('{"op":"create","profile":"profile"}');
     const { pipeline } = fixture({ complete, projectKind: "code", staleApply: true });
-    await expect(pipeline.process(job("code"))).rejects.toThrow("stale_project_environment_summary_base");
-    expect(complete).toHaveBeenCalledTimes(2);
-    expect(complete.mock.calls[1]?.[1]).toEqual(expect.objectContaining({
-      operation: "project_profile_code_summary.repair",
-      maxTokens: L3_WORLD_MODEL_MAX_TOKENS
-    }));
+
+    await expect(pipeline.process(job("code"))).resolves.toBeUndefined();
+  });
+
+  it("does not retry a failed model call after a newer sync supersedes the job", async () => {
+    const complete = vi.fn().mockRejectedValue(new Error("provider unavailable"));
+    const { pipeline } = fixture({
+      complete,
+      projectKind: "code",
+      latestCurrentSyncId: "sync-new"
+    });
+
+    await expect(pipeline.process(job("code"))).resolves.toBeUndefined();
   });
 
   it("does not call the model again after the same scan was atomically applied", async () => {
     const complete = vi.fn();
-    const { pipeline, renewSummaryEvidence } = fixture({
+    const { pipeline, renewProfileEvidence } = fixture({
       complete,
       projectKind: "code",
       status: "clean",
-      summaryScanId: "scan-1"
+      profileScanId: "scan-1"
     });
+
     await pipeline.process(job("code"));
+
     expect(complete).not.toHaveBeenCalled();
-    expect(renewSummaryEvidence).not.toHaveBeenCalled();
+    expect(renewProfileEvidence).not.toHaveBeenCalled();
   });
 
   it("strictly validates noop, create, update and clear operations", () => {
-    expect(validateProjectEnvironmentSummaryOutput({ op: "noop", summary: "" }, null)).toEqual({
-      op: "noop", summary: ""
+    expect(validateProjectEnvironmentProfileOutput({ op: "noop", profile: "" }, null)).toEqual({
+      op: "noop", profile: ""
     });
-    expect(validateProjectEnvironmentSummaryOutput({ op: "create", summary: "new" }, null)).toEqual({
-      op: "create", summary: "new"
+    expect(validateProjectEnvironmentProfileOutput({ op: "create", profile: "new" }, null)).toEqual({
+      op: "create", profile: "new"
     });
-    expect(validateProjectEnvironmentSummaryOutput({ op: "update", summary: "" }, "old")).toEqual({
-      op: "update", summary: ""
+    expect(validateProjectEnvironmentProfileOutput({ op: "update", profile: "" }, "old")).toEqual({
+      op: "update", profile: ""
     });
-    expect(() => validateProjectEnvironmentSummaryOutput({ op: "noop", summary: "old" }, "old")).toThrow();
-    expect(() => validateProjectEnvironmentSummaryOutput({ op: "create", summary: "new", extra: true }, null)).toThrow();
-    expect(() => validateProjectEnvironmentSummaryOutput({ op: "update", summary: "old" }, "old")).toThrow();
+    expect(() => validateProjectEnvironmentProfileOutput({ op: "noop", profile: "old" }, "old")).toThrow();
+    expect(() => validateProjectEnvironmentProfileOutput({ op: "update", profile: "   " }, "old")).toThrow();
+    expect(() => validateProjectEnvironmentProfileOutput({ op: "create", profile: "new", extra: true }, null)).toThrow();
+    expect(() => validateProjectEnvironmentProfileOutput({ op: "update", profile: "old" }, "old")).toThrow();
   });
 });
 
 function fixture(input: {
   complete: LlmClient["complete"];
   projectKind: "code" | "folder";
-  currentSummary?: string;
+  currentProfile?: string;
   currentSyncId?: string;
+  latestCurrentSyncId?: string;
   status?: "summarizing" | "clean";
-  summaryScanId?: string;
+  profileScanId?: string;
   staleApply?: boolean;
 }) {
-  const renewSummaryEvidence = vi.fn();
-  const applySummary = vi.fn().mockReturnValue({ stale: input.staleApply ?? false });
+  const renewProfileEvidence = vi.fn();
+  const applyProfile = vi.fn().mockReturnValue({ stale: input.staleApply ?? false });
+  const currentState = {
+    currentSyncId: input.currentSyncId ?? "sync-1",
+    currentScanId: "scan-1",
+    status: input.status ?? "summarizing",
+    profileScanId: input.profileScanId
+  };
+  const getState = vi.fn().mockReturnValue(currentState);
+  if (input.latestCurrentSyncId) {
+    getState
+      .mockReturnValueOnce(currentState)
+      .mockReturnValue({ ...currentState, currentSyncId: input.latestCurrentSyncId });
+  }
   const projectEnvironments = {
-    getState: vi.fn().mockReturnValue({
-      currentSyncId: input.currentSyncId ?? "sync-1",
-      currentScanId: "scan-1",
-      status: input.status ?? "summarizing",
-      summaryScanId: input.summaryScanId,
-      summaryText: input.currentSummary
-    }),
-    renewSummaryEvidence,
+    getState,
+    renewProfileEvidence,
     derivedEvidence: vi.fn().mockReturnValue({
       projectKind: input.projectKind,
-      compactFileTree: "src/\n  index.ts"
+      fingerprint: "fingerprint-1",
+      compactFileTree: "package.json\nsrc/\n  index.ts",
+      omittedCount: 2,
+      deterministicFacts: {
+        languageCounts: { TypeScript: 1 },
+        manifestLanguages: [sourcedFact("Node.js/JavaScript")],
+        runtimeDeclarations: [sourcedFact("node >=22")],
+        runtimeProbes: [{ probe: "node_version", value: "v22.23.1" }],
+        toolchains: [sourcedFact("pnpm@10")],
+        buildEntries: [sourcedFact("npm run build")],
+        testEntries: [sourcedFact("npm test")],
+        checkEntries: [sourcedFact("npm run typecheck")]
+      }
     }),
-    applySummary
+    applyProfile
   };
-  const repos = { projectEnvironments } as unknown as Repositories;
+  const l3WorldModels = {
+    fields: vi.fn().mockReturnValue({
+      generalRulesAndSafetyConstraints: null,
+      projectEnvironmentProfile: input.currentProfile ?? null,
+      projectContract: null,
+      domainKnowledge: null
+    })
+  };
+  const repos = { projectEnvironments, l3WorldModels } as unknown as Repositories;
   const llm: LlmClient = {
     config: {} as LlmClient["config"],
     isConfigured: () => true,
@@ -202,9 +249,17 @@ function fixture(input: {
     status: () => ({ provider: "test", configured: true, remote: false })
   };
   return {
-    applySummary,
-    renewSummaryEvidence,
+    applyProfile,
+    renewProfileEvidence,
     pipeline: new ProjectEnvironmentProfilePipeline({ repos, llm })
+  };
+}
+
+function sourcedFact(value: string) {
+  return {
+    value,
+    sourceRelativePath: "package.json",
+    sourceSha256: "sha256-do-not-send"
   };
 }
 

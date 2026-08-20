@@ -438,6 +438,14 @@ describe("MemoryService / session / lifecycle", () => {
       workspace_host_id: workspaceHostId,
       custom: "preserved"
     });
+    expect(db.db.prepare(
+      `SELECT user_id, project_id, workspace_uri
+       FROM l3_world_model_scopes WHERE project_id = ?`
+    ).get(opened.projectId)).toEqual({
+      user_id: "v2-user",
+      project_id: opened.projectId,
+      workspace_uri: base.workspaceUri
+    });
     expect(() => service.openSession({
       ...base,
       l3WorldModelTransition: "resume_only",
@@ -469,6 +477,55 @@ describe("MemoryService / session / lifecycle", () => {
       { job_type: "l3_world_model_update", scope_seq: 1, target_field: "domain_knowledge" },
       { job_type: "l3_world_model_update", scope_seq: 1, target_field: "project_contract" }
     ]);
+    db.close();
+  });
+
+  it("rejects a conflicting or missing saved workspace binding without touching the resumed session", () => {
+    const { db, service } = createTestService();
+    const request = {
+      l3WorldModelProtocolVersion: 2 as const,
+      l3WorldModelTransition: "resume_only" as const,
+      workspaceUri: "file:///workspace/transactional-binding" as const,
+      workspaceHostId: deriveWorkspaceHostId("transactional-binding-host"),
+      namespace: {
+        source: "codex",
+        profileId: "default",
+        sessionKey: "codex-memory-v2-transactional-binding",
+        userId: "transactional-binding-user"
+      }
+    };
+    const opened = service.openSession(request);
+    const before = db.db.prepare(
+      `SELECT last_seen_at, updated_at FROM sessions WHERE id = ?`
+    ).get(opened.sessionId);
+
+    db.db.prepare(
+      `UPDATE l3_world_model_scopes SET workspace_uri = 'file:///workspace/conflict'
+       WHERE user_id = ? AND project_id = ?`
+    ).run(request.namespace.userId, opened.projectId);
+    expect(() => service.openSession({
+      ...request,
+      sessionId: opened.sessionId,
+      workspaceUri: undefined,
+      workspaceHostId: undefined
+    })).toThrow(/scope_conflict/u);
+    expect(db.db.prepare(
+      `SELECT last_seen_at, updated_at FROM sessions WHERE id = ?`
+    ).get(opened.sessionId)).toEqual(before);
+
+    db.db.prepare(
+      `UPDATE l3_world_model_scopes SET workspace_uri = ? WHERE user_id = ? AND project_id = ?`
+    ).run(request.workspaceUri, request.namespace.userId, opened.projectId);
+    db.db.prepare(
+      `UPDATE sessions SET meta_json = json_remove(meta_json, '$.workspace_uri') WHERE id = ?`
+    ).run(opened.sessionId);
+    expect(() => service.openSession({
+      ...request,
+      sessionId: opened.sessionId,
+      workspaceUri: undefined,
+      workspaceHostId: undefined
+    })).toThrow(/workspace_missing/u);
+
     db.close();
   });
 

@@ -1,6 +1,11 @@
 /** World model sub page module. */
 import { useEffect, useState } from "react";
-import type { GetMemoryOutput, MemoryListItem, PanelItemsOutput } from "@memmy/local-api-contracts";
+import type {
+  GetMemoryOutput,
+  MemoryListItem,
+  PanelItemsOutput,
+  PanelMemoryListItem
+} from "@memmy/local-api-contracts";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
 import { formatUserDateTime } from "../../lib/user-time-zone.js";
 import {
@@ -307,7 +312,12 @@ export function WorldModelSubPageView(props: WorldModelSubPageViewProps) {
               className={`memory-card${props.selectedWorldModelId === item.id ? " memory-card--selected" : ""}`}
             >
               <div className="memory-card__body">
-                <div className="memory-card__title">{displayWorldModelTitle(item)}</div>
+                <div className="memory-card__title">{displayWorldModelListTitle(item, t)}</div>
+                {item.worldModelScope?.kind === "project" && item.worldModelScope.workspaceDisplayPath !== null && (
+                  <div className="memory-card__summary" title={item.worldModelScope.workspaceDisplayPath}>
+                    {item.worldModelScope.workspaceDisplayPath}
+                  </div>
+                )}
                 <div className="memory-card__meta">
                   <WorldModelStatusPill status={item.status} />
                   <span>{t("memory.memories.updatedAt")}: {formatDateTime(item.updatedAt)}</span>
@@ -637,6 +647,18 @@ function displayWorldModelTitle(
   }
 
   return displayMemoryId(item.id);
+}
+
+export function displayWorldModelListTitle(
+  item: PanelMemoryListItem,
+  t: (key: MessageKey) => string
+): string {
+  if (item.worldModelScope?.kind === "general") return t("memory.worldModel.generalRules");
+  if (item.worldModelScope?.kind === "project") {
+    const title = t("memory.worldModel.projectTitle");
+    return item.worldModelScope.projectLabel ? `${title} · ${item.worldModelScope.projectLabel}` : title;
+  }
+  return displayWorldModelTitle(item);
 }
 
 function firstReadableWorldBodyLine(body?: string): string | undefined {

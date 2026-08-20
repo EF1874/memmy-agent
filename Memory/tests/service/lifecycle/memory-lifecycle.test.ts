@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { canonicalJson, sha256Hex } from "@memmy/local-api-contracts";
 import { Repositories } from "../../../src/storage/repositories.js";
 import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
 import {
@@ -496,6 +497,105 @@ describe("L3 World Model scope deletion", () => {
     });
     expect(recreated?.id).not.toBe(existing.id);
     expect(recreated?.status).toBe("activated");
+
+    db.close();
+  });
+
+  it("resets project profile state and prevents an old profile job from recreating the deleted L3", async () => {
+    const { db, service } = createTestService();
+    const userId = "l3-project-delete-user";
+    const workspaceUri = "file:///workspace/project-delete";
+    const opened = service.openSession({
+      l3WorldModelProtocolVersion: 2,
+      l3WorldModelTransition: "resume_only",
+      workspaceUri,
+      workspaceHostId: "d".repeat(64),
+      namespace: {
+        source: "codex",
+        profileId: "default",
+        sessionKey: "l3-project-delete-session",
+        userId
+      }
+    });
+    const namespace = {
+      source: "codex",
+      profileId: "default",
+      sessionKey: "l3-project-delete-session",
+      userId,
+      projectId: opened.projectId!
+    };
+    const repos = new Repositories(db.db);
+    const existing = repos.l3WorldModels.upsertField({
+      userId,
+      projectId: opened.projectId,
+      targetField: "project_contract",
+      value: "Run project tests before commit."
+    })!;
+    const started = service.projectEnvironmentSyncStart(opened.projectId!, {
+      requestId: "db25209b-bcc8-4515-a11e-79b6ad980e50",
+      adapterId: "codex-memory",
+      source: "codex",
+      namespace,
+      sessionId: opened.sessionId,
+      trigger: "session_start",
+      capabilities: {
+        protocolVersion: "1",
+        operations: ["inventory"],
+        maxTextBytes: 1024
+      }
+    });
+    const operationId = started.operations[0]!.operationId;
+    const inventory = {
+      operationId,
+      pageIndex: 0,
+      isLast: true,
+      entries: [{ relativePath: "需求.docx", type: "file" as const, size: 1, mtimeMs: 1 }]
+    };
+    const pending = service.projectEnvironmentSyncEvidence(opened.projectId!, started.syncId, {
+      requestId: "ab87329e-b550-444b-8bdb-9fa5cdf0f3f5",
+      adapterId: "codex-memory",
+      source: "codex",
+      namespace,
+      sessionId: opened.sessionId,
+      evidence: {
+        ...inventory,
+        kind: "inventory",
+        status: "accepted",
+        pageHash: sha256Hex(canonicalJson({ ...inventory, omittedCount: null }))
+      }
+    });
+    expect(pending.status).toBe("summarizing");
+
+    service.deleteMemory(existing.id, { namespace });
+
+    expect(repos.l3WorldModels.getScope(userId, opened.projectId)).toMatchObject({
+      workspaceUri,
+      memoryId: undefined
+    });
+    expect(db.db.prepare(
+      `SELECT status, current_sync_id, current_scan_id, applied_scan_id,
+              profile_scan_id, fingerprint, active_adapter_id, sync_lease_expires_at
+       FROM l3_world_model_project_environment_sync_state`
+    ).get()).toEqual({
+      status: "uninitialized",
+      current_sync_id: null,
+      current_scan_id: null,
+      applied_scan_id: null,
+      profile_scan_id: null,
+      fingerprint: null,
+      active_adapter_id: null,
+      sync_lease_expires_at: null
+    });
+    expect(db.db.prepare(
+      `SELECT COUNT(*) AS count FROM l3_world_model_project_environment_operations`
+    ).get()).toEqual({ count: 0 });
+    expect(service.panelItems({ layer: "L3" }).items.some((item) => item.id === existing.id)).toBe(false);
+
+    await service.runWorkerOnce(10);
+    expect(db.db.prepare(
+      `SELECT status FROM evolution_jobs WHERE job_type = 'project_environment_profile'`
+    ).get()).toEqual({ status: "succeeded" });
+    expect(repos.l3WorldModels.getScope(userId, opened.projectId)?.memoryId).toBeUndefined();
 
     db.close();
   });

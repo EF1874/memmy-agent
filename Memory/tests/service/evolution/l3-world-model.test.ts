@@ -6,8 +6,7 @@ import {
   L3WorldModelTraceFieldPipeline
 } from "../../../src/service/evolution/l3-world-model-pipeline.js";
 import {
-  completeStrictJson,
-  L3_WORLD_MODEL_MAX_TOKENS
+  completeStrictJson
 } from "../../../src/service/l3-world-model/strict-json-completion.js";
 import { Repositories } from "../../../src/storage/repositories.js";
 import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
@@ -87,7 +86,7 @@ describe("L3 World Model trace field pipeline", () => {
       }));
       expect(options).toEqual(expect.objectContaining({
         temperature: 0,
-        maxTokens: 200_000,
+        maxTokens: 65_536,
         jsonMode: true
       }));
     }
@@ -169,6 +168,7 @@ describe("L3 World Model trace field pipeline", () => {
     expect(reactivated.status).toBe("activated");
     expect(reactivated.memoryValue).toContain("Confirm irreversible operations");
     expect(complete).toHaveBeenCalledTimes(3);
+    expect(complete.mock.calls.map((call) => call[1]?.maxTokens)).toEqual([65_536, 65_536, 65_536]);
 
     db.close();
   });
@@ -358,24 +358,27 @@ describe("L3 World Model trace field pipeline", () => {
 describe("strict L3 World Model JSON completion", () => {
   it("uses a fixed system message and canonical JSON user input", async () => {
     const complete = vi.fn().mockResolvedValue('{"op":"noop","value":""}');
+    const largeInput = "x".repeat(200_001);
     const result = await completeStrictJson({
       llm: strictCompletionLlm(complete),
       operation: "l3_world_model.general",
       systemPrompt: "fixed prompt",
-      dynamicInput: { z: 1, a: "two" },
+      dynamicInput: { z: 1, a: "two", blob: largeInput },
       expectedSchema: { op: "noop|create|update", value: "string" },
       validate: validateStrictOutput
     });
 
     expect(result).toEqual({ op: "noop", value: "" });
     expect(complete).toHaveBeenCalledTimes(1);
-    expect(complete.mock.calls[0]?.[0]).toEqual([
-      { role: "system", content: "fixed prompt" },
-      { role: "user", content: '{"a":"two","z":1}' }
-    ]);
+    expect(complete.mock.calls[0]?.[0]?.[0]).toEqual({ role: "system", content: "fixed prompt" });
+    expect(JSON.parse(complete.mock.calls[0]![0][1]!.content)).toEqual({
+      a: "two",
+      blob: largeInput,
+      z: 1
+    });
     expect(complete.mock.calls[0]?.[1]).toEqual(expect.objectContaining({
       temperature: 0,
-      maxTokens: L3_WORLD_MODEL_MAX_TOKENS,
+      maxTokens: 65_536,
       jsonMode: true
     }));
   });
@@ -396,6 +399,7 @@ describe("strict L3 World Model JSON completion", () => {
 
     expect(result).toEqual({ op: "create", value: "规则" });
     expect(complete).toHaveBeenCalledTimes(2);
+    expect(complete.mock.calls[1]?.[1]).toEqual(expect.objectContaining({ maxTokens: 65_536 }));
     expect(complete.mock.calls[1]?.[0]?.[0]?.content).toContain("exactly matches the expected JSON schema");
     expect(complete.mock.calls[1]?.[0]?.[1]?.content).toContain("candidate_output");
     expect(llm.completeJson).not.toHaveBeenCalled();

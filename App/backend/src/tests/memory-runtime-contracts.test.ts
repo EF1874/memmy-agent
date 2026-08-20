@@ -23,6 +23,7 @@ import {
   PanelAnalysisOutputSchema,
   PanelItemsInputSchema,
   PanelItemsOutputSchema,
+  PanelMemoryListItemSchema,
   PanelOverviewOutputSchema,
   RawTurnSummarySchema,
   RecallHitSchema,
@@ -30,7 +31,8 @@ import {
   SearchInputSchema,
   SearchOutputSchema,
   StartTurnInputSchema,
-  StartTurnOutputSchema
+  StartTurnOutputSchema,
+  WorldModelScopeSchema
 } from "@memmy/local-api-contracts";
 import type { ZodType } from "zod";
 
@@ -132,6 +134,27 @@ describe("memory runtime contracts", () => {
       kind: "user_memory",
       memoryLayer: "UserMemory"
     }))).not.toThrow();
+  });
+
+  it("keeps world model scope typed and exclusive to panel list items", () => {
+    const general = { kind: "general" };
+    const project = {
+      kind: "project",
+      projectLabel: "deepseek-harness",
+      workspaceDisplayPath: "/Users/test/deepseek-harness"
+    };
+    expect(WorldModelScopeSchema.parse(general)).toEqual(general);
+    expect(WorldModelScopeSchema.parse(project)).toEqual(project);
+    expect(() => WorldModelScopeSchema.parse({ ...general, projectLabel: null })).toThrow();
+    expect(() => WorldModelScopeSchema.parse({ ...project, projectId: "internal" })).toThrow();
+
+    const panelItem = { ...memoryListItem({ memoryLayer: "L3" }), worldModelScope: project };
+    expect(PanelMemoryListItemSchema.parse(panelItem)).toEqual(panelItem);
+    expect(PanelItemsOutputSchema.parse({ ...panelItemsOutput(), items: [panelItem] }).items[0])
+      .toHaveProperty("worldModelScope", project);
+    expect(MemoryListItemSchema.parse(panelItem)).not.toHaveProperty("worldModelScope");
+    expect(MemoryDetailItemSchema.parse({ ...memoryDetailItem(), worldModelScope: project }))
+      .not.toHaveProperty("worldModelScope");
   });
 
   const outputCases: Array<{ name: string; schema: ZodType<unknown>; valid: unknown; invalid: unknown }> = [

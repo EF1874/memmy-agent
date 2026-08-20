@@ -175,6 +175,21 @@ export const MemoryListItemSchema = z.object({
 });
 export type MemoryListItem = z.infer<typeof MemoryListItemSchema>;
 
+export const WorldModelScopeSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("general") }).strict(),
+  z.object({
+    kind: z.literal("project"),
+    projectLabel: z.string().nullable(),
+    workspaceDisplayPath: z.string().nullable()
+  }).strict()
+]);
+export type WorldModelScope = z.infer<typeof WorldModelScopeSchema>;
+
+export const PanelMemoryListItemSchema = MemoryListItemSchema.extend({
+  worldModelScope: WorldModelScopeSchema.optional()
+});
+export type PanelMemoryListItem = z.infer<typeof PanelMemoryListItemSchema>;
+
 /** Definition for memory detail item. */
 export const MemoryDetailItemSchema = MemoryListItemSchema.extend({
   body: z.string(),
@@ -755,7 +770,7 @@ export type PanelAnalysisOutput = z.infer<typeof PanelAnalysisOutputSchema>;
 
 /** Schema for panel items output. */
 export const PanelItemsOutputSchema = z.object({
-  items: z.array(MemoryListItemSchema),
+  items: z.array(PanelMemoryListItemSchema),
   page: z.number().int().positive(),
   pageSize: z.literal(20),
   total: z.number().int().nonnegative(),

@@ -149,6 +149,71 @@ describe("WorldModelSubPage", () => {
     expect(html).not.toContain(">activated<");
   });
 
+  it("在列表中显示 typed 项目名称和目录，详情不重复消费目录", () => {
+    const workspaceDisplayPath = "/Users/yuan.wang/localcode/deepseek-harness";
+    const projectItems = panelItemsOutput([{
+      ...worldItems.items[0]!,
+      worldModelScope: {
+        kind: "project" as const,
+        projectLabel: "deepseek-harness",
+        workspaceDisplayPath
+      }
+    }]);
+    const html = renderWorldModel(
+      { status: "ready", data: projectItems },
+      { status: "ready", data: worldDetailV2 }
+    );
+
+    expect(html).toContain("项目场域认知 · deepseek-harness");
+    expect(html).toContain(`title="${workspaceDisplayPath}"`);
+    expect(html).toContain("memory-card__summary");
+    expect(html.match(new RegExp(workspaceDisplayPath, "gu"))).toHaveLength(2);
+  });
+
+  it("使用 typed general scope 显示通用规则标题", () => {
+    const html = renderWorldModel({
+      status: "ready",
+      data: panelItemsOutput([{
+        ...worldItems.items[0]!,
+        worldModelScope: { kind: "general" as const }
+      }])
+    });
+
+    expect(html).toContain("通用规则与安全约束");
+    expect(html).not.toContain("memory-card__summary");
+  });
+
+  it("项目 URI 缺失时只显示通用项目标题，长路径沿用摘要样式和完整 title", () => {
+    const missingUriHtml = renderWorldModel({
+      status: "ready",
+      data: panelItemsOutput([{
+        ...worldItems.items[0]!,
+        worldModelScope: {
+          kind: "project" as const,
+          projectLabel: null,
+          workspaceDisplayPath: null
+        }
+      }])
+    });
+    expect(missingUriHtml).toContain('memory-card__title">项目场域认知</div>');
+    expect(missingUriHtml).not.toContain("memory-card__summary");
+
+    const longPath = `/Users/test/${"very-long-segment/".repeat(12)}project`;
+    const longPathHtml = renderWorldModel({
+      status: "ready",
+      data: panelItemsOutput([{
+        ...worldItems.items[0]!,
+        worldModelScope: {
+          kind: "project" as const,
+          projectLabel: "project",
+          workspaceDisplayPath: longPath
+        }
+      }])
+    });
+    expect(longPathHtml).toContain("memory-card__summary");
+    expect(longPathHtml).toContain(`title="${longPath}"`);
+  });
+
   it("场域认知状态归一到经验和技能一致的展示状态", () => {
     expect(worldModelStatusTone("activated")).toBe("active");
     expect(worldModelStatusTone("active")).toBe("active");

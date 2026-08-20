@@ -22,7 +22,6 @@ import { newId } from "../../utils/id.js";
 import {
   parseDeterministicProjectFacts
 } from "./manifest-parsers.js";
-import { renderDeterministicCodeProfile } from "./profile-renderer.js";
 import {
   buildCompactFileTree,
   deterministicReadCandidates,
@@ -135,7 +134,7 @@ export class ProjectEnvironmentService {
     return this.deps.repos.projectEnvironments.response(session.userId, projectId, adapterId);
   }
 
-  async processSummaryJob(job: EvolutionJobRecord): Promise<void> {
+  async processProfileJob(job: EvolutionJobRecord): Promise<void> {
     await this.profilePipeline.process(job);
   }
 
@@ -153,9 +152,7 @@ export class ProjectEnvironmentService {
       projectKind: classification.kind,
       compactFileTree: buildCompactFileTree(entries),
       omittedCount,
-      deterministicProfile: classification.kind === "code"
-        ? renderDeterministicCodeProfile(facts, omittedCount)
-        : null,
+      deterministicFacts: facts,
       fingerprint: projectFingerprint({
         kind: classification.kind,
         entries,

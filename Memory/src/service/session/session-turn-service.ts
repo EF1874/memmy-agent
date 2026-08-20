@@ -18,6 +18,7 @@ import {
 import type { LlmClient } from "../../model/types.js";
 import {
   jobToRef,
+  L3WorldModelScopeWorkspaceConflictError,
   Repositories,
   type EpisodeRecord,
   type EvolutionJobRecord,
@@ -680,6 +681,7 @@ export class SessionTurnService {
         const protocol = existing.meta.l3_world_model_protocol_version;
         if (protocol === 2) {
           this.assertV2SessionIdentity(existing, request, namespace, workspace);
+          this.bindV2SessionWorkspace(existing, optionalMetaString(existing.meta, "workspace_uri"), at);
           const touched = this.deps.repos.runtime.updateSessionScope(existing.id, {}, at) ?? existing;
           return this.v2SessionOpenBody(touched, true);
         }
@@ -716,6 +718,7 @@ export class SessionTurnService {
         updatedAt: at
       };
       this.deps.repos.runtime.createSession(session);
+      this.bindV2SessionWorkspace(session, workspace.workspaceUri, at);
       const scopedNamespace = {
         ...namespace,
         projectId: session.projectId,
@@ -739,6 +742,25 @@ export class SessionTurnService {
         syncCursor: this.deps.encodeChangeCursor(changeSeq, scopedNamespace)
       };
     });
+  }
+
+  private bindV2SessionWorkspace(
+    session: SessionRecord,
+    workspaceUri: SessionOpenRequest["workspaceUri"] | null,
+    at: string
+  ): void {
+    if (!session.projectId) return;
+    if (!workspaceUri) {
+      throw new MemoryServiceError("conflict", "l3_world_model_v2_session_workspace_missing");
+    }
+    try {
+      this.deps.repos.l3WorldModels.bindWorkspaceUri(session.userId, session.projectId, workspaceUri, at);
+    } catch (error) {
+      if (error instanceof L3WorldModelScopeWorkspaceConflictError) {
+        throw new MemoryServiceError("conflict", "l3_world_model_v2_session_scope_conflict");
+      }
+      throw error;
+    }
   }
 
   private assertV2SessionIdentity(

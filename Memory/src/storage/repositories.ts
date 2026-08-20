@@ -13,10 +13,11 @@ import {
   type ProjectEnvironmentSyncStatus,
   type ProjectWorkspaceEvidence,
   type ProjectWorkspaceOperation,
-  type WorkspaceBridgeCapabilities
+  type WorkspaceBridgeCapabilities,
+  type WorkspaceUri
 } from "@memmy/local-api-contracts";
 import { retrievalDocumentForMemory } from "../algorithm/plugin-algorithms.js";
-import { renderProjectEnvironmentProfile } from "../service/project-environment/profile-renderer.js";
+import type { DeterministicProjectFacts } from "../service/project-environment/manifest-parsers.js";
 import type {
   FeedbackRequest,
   JobRef,
@@ -291,6 +292,7 @@ export interface L3WorldModelScopeRecord {
   scopeKey: string;
   userId: string;
   projectId?: string;
+  workspaceUri?: WorkspaceUri;
   memoryId?: string;
   nextScopeSeq: number;
   updatedAt: string;
@@ -4074,6 +4076,13 @@ export class RuntimeRepository {
   }
 }
 
+export class L3WorldModelScopeWorkspaceConflictError extends Error {
+  constructor() {
+    super("l3_world_model_scope_workspace_conflict");
+    this.name = "L3WorldModelScopeWorkspaceConflictError";
+  }
+}
+
 export class L3WorldModelRepository {
   constructor(
     private readonly db: Database.Database,
@@ -4101,6 +4110,39 @@ export class L3WorldModelRepository {
       throw new Error("corrupt L3 World Model scope ownership");
     }
     return scope;
+  }
+
+  bindWorkspaceUri(
+    userId: string,
+    projectId: string,
+    workspaceUri: WorkspaceUri,
+    at = nowIso()
+  ): L3WorldModelScopeRecord {
+    const scope = this.ensureScope(userId, projectId, at);
+    if (scope.workspaceUri && scope.workspaceUri !== workspaceUri) {
+      throw new L3WorldModelScopeWorkspaceConflictError();
+    }
+    if (!scope.workspaceUri) {
+      this.db.prepare(
+        `UPDATE l3_world_model_scopes
+         SET workspace_uri = ?, updated_at = ?
+         WHERE scope_key = ? AND workspace_uri IS NULL`
+      ).run(workspaceUri, at, scope.scopeKey);
+    }
+    const bound = this.getScope(userId, projectId);
+    if (!bound || bound.workspaceUri !== workspaceUri) {
+      throw new L3WorldModelScopeWorkspaceConflictError();
+    }
+    return bound;
+  }
+
+  getScopesByMemoryIds(memoryIds: readonly string[]): L3WorldModelScopeRecord[] {
+    const ids = uniq(memoryIds.filter(Boolean));
+    if (ids.length === 0) return [];
+    const placeholders = ids.map(() => "?").join(", ");
+    return (this.db.prepare(
+      `SELECT * FROM l3_world_model_scopes WHERE memory_id IN (${placeholders})`
+    ).all(...ids) as SqlL3WorldModelScopeRow[]).map(l3WorldModelScopeFromSql);
   }
 
   registerInputTrace(input: {
@@ -4363,16 +4405,15 @@ export class L3WorldModelRepository {
         this.db.prepare(
           `UPDATE l3_world_model_project_environment_sync_state
            SET status = 'uninitialized', current_sync_id = NULL, current_scan_id = NULL,
-               applied_scan_id = NULL, fingerprint = NULL, summary_text = NULL,
-               summary_scan_id = NULL, active_adapter_id = NULL,
+               applied_scan_id = NULL, fingerprint = NULL, profile_scan_id = NULL,
+               active_adapter_id = NULL,
                sync_lease_expires_at = NULL, updated_at = ?
            WHERE user_id = ? AND project_id = ?`
         ).run(at, scope.userId, scope.projectId);
         this.db.prepare(
-          `UPDATE l3_world_model_project_environment_operations
-           SET status = 'expired', last_error = 'l3_world_model_deleted', updated_at = ?
-           WHERE user_id = ? AND project_id = ? AND status = 'pending'`
-        ).run(at, scope.userId, scope.projectId);
+          `DELETE FROM l3_world_model_project_environment_operations
+           WHERE user_id = ? AND project_id = ?`
+        ).run(scope.userId, scope.projectId);
       }
       return { before, deleted, scope };
     })();
@@ -4753,8 +4794,7 @@ export interface ProjectEnvironmentStateRecord {
   currentScanId?: string;
   appliedScanId?: string;
   fingerprint?: string;
-  summaryText?: string;
-  summaryScanId?: string;
+  profileScanId?: string;
   activeAdapterId?: string;
   syncLeaseExpiresAt?: string;
   updatedAt: string;
@@ -4784,7 +4824,7 @@ export interface ProjectEnvironmentDerivedEvidence {
   fingerprint: string;
   compactFileTree: string;
   omittedCount: number;
-  deterministicProfile: string | null;
+  deterministicFacts: DeterministicProjectFacts;
 }
 
 export interface AcceptProjectEnvironmentEvidenceResult {
@@ -4804,8 +4844,7 @@ interface SqlStateRow {
   current_scan_id: string | null;
   applied_scan_id: string | null;
   fingerprint: string | null;
-  summary_text: string | null;
-  summary_scan_id: string | null;
+  profile_scan_id: string | null;
   active_adapter_id: string | null;
   sync_lease_expires_at: string | null;
   updated_at: string;
@@ -5141,7 +5180,7 @@ export class ProjectEnvironmentRepository {
       const changed = previous.fingerprint !== input.derived.fingerprint || previous.projectKind !== input.derived.projectKind;
       const scanId = changed || !previous.currentScanId ? newId("l3wm_scan") : previous.currentScanId;
       const typeChanged = previous.projectKind !== "unknown" && previous.projectKind !== input.derived.projectKind;
-      const alreadyApplied = !changed && previous.appliedScanId === scanId && previous.summaryScanId === scanId;
+      const alreadyApplied = !changed && previous.appliedScanId === scanId && previous.profileScanId === scanId;
 
       const nextEvidence = {
         ...inventory.evidence,
@@ -5165,18 +5204,7 @@ export class ProjectEnvironmentRepository {
       }
 
       let appliedScanId = previous.appliedScanId ?? null;
-      if (input.derived.projectKind === "code") {
-        this.l3WorldModels.upsertField({
-          userId: input.userId,
-          projectId: input.projectId,
-          targetField: "project_environment_profile",
-          value: input.derived.deterministicProfile,
-          projectEnvironmentAppliedScanId: scanId,
-          at,
-          source: "project_environment"
-        });
-        appliedScanId = scanId;
-      } else if (typeChanged) {
+      if (typeChanged) {
         this.l3WorldModels.upsertField({
           userId: input.userId,
           projectId: input.projectId,
@@ -5193,8 +5221,7 @@ export class ProjectEnvironmentRepository {
         `UPDATE l3_world_model_project_environment_sync_state
          SET project_kind = ?, status = 'summarizing', current_scan_id = ?,
              applied_scan_id = ?, fingerprint = ?,
-             summary_text = CASE WHEN ? THEN NULL ELSE summary_text END,
-             summary_scan_id = CASE WHEN ? THEN NULL ELSE summary_scan_id END,
+             profile_scan_id = CASE WHEN ? THEN NULL ELSE profile_scan_id END,
              sync_lease_expires_at = ?, updated_at = ?
          WHERE user_id = ? AND project_id = ?`
       ).run(
@@ -5203,13 +5230,12 @@ export class ProjectEnvironmentRepository {
         appliedScanId,
         input.derived.fingerprint,
         typeChanged ? 1 : 0,
-        typeChanged ? 1 : 0,
         plusMs(at, SYNC_LEASE_MS),
         at,
         input.userId,
         input.projectId
       );
-      this.enqueueSummaryJob({
+      this.enqueueProfileJob({
         userId: input.userId,
         projectId: input.projectId,
         sessionId: input.sessionId,
@@ -5233,14 +5259,14 @@ export class ProjectEnvironmentRepository {
     return derived;
   }
 
-  applySummary(input: {
+  applyProfile(input: {
     userId: string;
     projectId: string;
     syncId: string;
     scanId: string;
-    expectedCurrentSummary: string | null;
+    expectedCurrentProfile: string | null;
     operation: "noop" | "create" | "update";
-    summary: string;
+    profile: string;
     at?: string;
   }): { stale: boolean } {
     return this.db.transaction(() => {
@@ -5249,46 +5275,49 @@ export class ProjectEnvironmentRepository {
       if (state.currentSyncId !== input.syncId || state.currentScanId !== input.scanId) {
         return { stale: true };
       }
-      const currentSummary = state.summaryText ?? null;
-      if (currentSummary !== input.expectedCurrentSummary) return { stale: true };
-      let nextSummary = currentSummary;
+      const currentProfile = this.l3WorldModels.fields(
+        input.userId,
+        input.projectId
+      ).projectEnvironmentProfile;
+      if (currentProfile !== input.expectedCurrentProfile) return { stale: true };
+      let nextProfile = currentProfile;
       if (input.operation === "noop") {
-        if (input.summary !== "") throw new TypeError("noop project summary must be empty");
+        if (input.profile !== "") throw new TypeError("noop project profile must be empty");
       } else if (input.operation === "create") {
-        if (currentSummary !== null || !input.summary.trim()) throw new TypeError("invalid project summary create");
-        nextSummary = input.summary;
+        if (currentProfile !== null || !input.profile.trim()) throw new TypeError("invalid project profile create");
+        nextProfile = input.profile;
       } else {
-        if (currentSummary === null || input.summary === currentSummary) throw new TypeError("invalid project summary update");
-        nextSummary = input.summary || null;
+        if (
+          currentProfile === null ||
+          input.profile === currentProfile ||
+          (input.profile !== "" && !input.profile.trim())
+        ) throw new TypeError("invalid project profile update");
+        nextProfile = input.profile || null;
       }
-      const derived = this.derivedEvidence(input.syncId);
-      const profile = renderProjectEnvironmentProfile({
-        projectKind: derived.projectKind,
-        deterministicProfile: derived.deterministicProfile,
-        summary: nextSummary,
-        omittedCount: derived.omittedCount
-      });
-      this.l3WorldModels.upsertField({
-        userId: input.userId,
-        projectId: input.projectId,
-        targetField: "project_environment_profile",
-        value: profile,
-        projectEnvironmentAppliedScanId: input.scanId,
-        at,
-        source: "project_environment"
-      });
+      const existingMemory = this.l3WorldModels.getMemory(input.userId, input.projectId);
+      if (nextProfile !== null || existingMemory) {
+        this.l3WorldModels.upsertField({
+          userId: input.userId,
+          projectId: input.projectId,
+          targetField: "project_environment_profile",
+          value: nextProfile,
+          projectEnvironmentAppliedScanId: input.scanId,
+          at,
+          source: "project_environment"
+        });
+      }
       this.db.prepare(
         `UPDATE l3_world_model_project_environment_sync_state
-         SET status = 'clean', applied_scan_id = ?, summary_text = ?, summary_scan_id = ?,
+         SET status = 'clean', applied_scan_id = ?, profile_scan_id = ?,
              active_adapter_id = NULL, sync_lease_expires_at = NULL, updated_at = ?
          WHERE user_id = ? AND project_id = ? AND current_scan_id = ?`
-      ).run(input.scanId, nextSummary, input.scanId, at, input.userId, input.projectId, input.scanId);
+      ).run(input.scanId, input.scanId, at, input.userId, input.projectId, input.scanId);
       this.cleanupOperations(input.syncId);
       return { stale: false };
     })();
   }
 
-  renewSummaryEvidence(syncId: string, at = nowIso()): void {
+  renewProfileEvidence(syncId: string, at = nowIso()): void {
     this.db.prepare(
       `UPDATE l3_world_model_project_environment_operations
        SET expires_at = ?, updated_at = ?
@@ -5415,7 +5444,7 @@ export class ProjectEnvironmentRepository {
     return true;
   }
 
-  private enqueueSummaryJob(input: {
+  private enqueueProfileJob(input: {
     userId: string;
     projectId: string;
     sessionId?: string;
@@ -5514,8 +5543,7 @@ function stateFromSql(row: SqlStateRow): ProjectEnvironmentStateRecord {
     currentScanId: row.current_scan_id ?? undefined,
     appliedScanId: row.applied_scan_id ?? undefined,
     fingerprint: row.fingerprint ?? undefined,
-    summaryText: row.summary_text ?? undefined,
-    summaryScanId: row.summary_scan_id ?? undefined,
+    profileScanId: row.profile_scan_id ?? undefined,
     activeAdapterId: row.active_adapter_id ?? undefined,
     syncLeaseExpiresAt: row.sync_lease_expires_at ?? undefined,
     updatedAt: row.updated_at
@@ -5561,7 +5589,32 @@ function isProjectEnvironmentDerivedEvidence(value: unknown): value is ProjectEn
     typeof value.fingerprint === "string" &&
     typeof value.compactFileTree === "string" &&
     typeof value.omittedCount === "number" &&
-    (typeof value.deterministicProfile === "string" || value.deterministicProfile === null);
+    isDeterministicProjectFacts(value.deterministicFacts);
+}
+
+function isDeterministicProjectFacts(value: unknown): value is DeterministicProjectFacts {
+  if (!isRecord(value) || !isRecord(value.languageCounts)) return false;
+  if (!Object.values(value.languageCounts).every((count) =>
+    typeof count === "number" && Number.isInteger(count) && count >= 0
+  )) return false;
+  return [
+    value.manifestLanguages,
+    value.runtimeDeclarations,
+    value.toolchains,
+    value.buildEntries,
+    value.testEntries,
+    value.checkEntries
+  ].every((facts) => Array.isArray(facts) && facts.every(isSourcedProjectFact)) &&
+    Array.isArray(value.runtimeProbes) && value.runtimeProbes.every((fact) =>
+      isRecord(fact) && typeof fact.probe === "string" && typeof fact.value === "string"
+    );
+}
+
+function isSourcedProjectFact(value: unknown): boolean {
+  return isRecord(value) &&
+    typeof value.value === "string" &&
+    typeof value.sourceRelativePath === "string" &&
+    typeof value.sourceSha256 === "string";
 }
 
 function stringValue(value: unknown): string | undefined {
@@ -5596,6 +5649,7 @@ interface SqlL3WorldModelScopeRow {
   scope_key: string;
   user_id: string;
   project_id: string | null;
+  workspace_uri: string | null;
   memory_id: string | null;
   next_scope_seq: number;
   updated_at: string;
@@ -5806,6 +5860,7 @@ function l3WorldModelScopeFromSql(row: SqlL3WorldModelScopeRow): L3WorldModelSco
     scopeKey: row.scope_key,
     userId: row.user_id,
     projectId: row.project_id ?? undefined,
+    workspaceUri: row.workspace_uri ? row.workspace_uri as WorkspaceUri : undefined,
     memoryId: row.memory_id ?? undefined,
     nextScopeSeq: row.next_scope_seq,
     updatedAt: row.updated_at

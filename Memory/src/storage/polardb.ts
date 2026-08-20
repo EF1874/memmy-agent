@@ -290,9 +290,11 @@ export function polardbMigrationSql(): string[] {
       scope_key TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
       project_id TEXT,
+      workspace_uri TEXT,
       memory_id TEXT REFERENCES memories(id) ON DELETE SET NULL,
       next_scope_seq BIGINT NOT NULL DEFAULT 1 CHECK (next_scope_seq >= 1),
-      updated_at TIMESTAMPTZ NOT NULL
+      updated_at TIMESTAMPTZ NOT NULL,
+      CHECK (workspace_uri IS NULL OR (project_id IS NOT NULL AND length(workspace_uri) > 0))
     )`,
     `CREATE UNIQUE INDEX IF NOT EXISTS uq_l3_world_model_scope_owner
       ON l3_world_model_scopes (user_id, project_id) NULLS NOT DISTINCT`,
@@ -354,8 +356,7 @@ export function polardbMigrationSql(): string[] {
       current_scan_id TEXT,
       applied_scan_id TEXT,
       fingerprint TEXT,
-      summary_text TEXT,
-      summary_scan_id TEXT,
+      profile_scan_id TEXT,
       active_adapter_id TEXT,
       sync_lease_expires_at TIMESTAMPTZ,
       updated_at TIMESTAMPTZ NOT NULL,

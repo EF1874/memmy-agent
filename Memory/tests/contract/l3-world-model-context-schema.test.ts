@@ -92,5 +92,9 @@ describe("L3 World Model shared context contract", () => {
     };
     expect(SessionL3WorldModelContextResponseSchema.safeParse(empty).success).toBe(true);
     expect(SessionL3WorldModelContextResponseSchema.safeParse({ ...empty, renderedContext: "stale" }).success).toBe(false);
+    expect(SessionL3WorldModelContextResponseSchema.safeParse({
+      ...empty,
+      workspaceUri: "file:///private/project"
+    }).success).toBe(false);
   });
 });

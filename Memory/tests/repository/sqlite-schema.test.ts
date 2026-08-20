@@ -241,9 +241,21 @@ describe("repository sqlite schema contract", () => {
       const scopeIndexes = db.db
         .prepare(`PRAGMA index_list(l3_world_model_scopes)`)
         .all() as Array<{ name: string }>;
+      const scopeColumns = db.db
+        .prepare(`PRAGMA table_info(l3_world_model_scopes)`)
+        .all() as Array<{ name: string }>;
+      expect(scopeColumns.map((column) => column.name)).toContain("workspace_uri");
       expect(scopeIndexes.map((index) => index.name)).toEqual(expect.arrayContaining([
         "uq_l3_world_model_scopes_general",
         "uq_l3_world_model_scopes_project"
+      ]));
+      const projectEnvironmentColumns = db.db
+        .prepare(`PRAGMA table_info(l3_world_model_project_environment_sync_state)`)
+        .all() as Array<{ name: string }>;
+      expect(projectEnvironmentColumns.map((column) => column.name)).toContain("profile_scan_id");
+      expect(projectEnvironmentColumns.map((column) => column.name)).not.toEqual(expect.arrayContaining([
+        "summary_text",
+        "summary_scan_id"
       ]));
       const operationForeignKeys = db.db
         .prepare(`PRAGMA foreign_key_list(l3_world_model_project_environment_operations)`)
@@ -339,6 +351,14 @@ describe("repository sqlite schema contract", () => {
            scope_key, user_id, project_id, next_scope_seq, updated_at
          ) VALUES (?, ?, ?, 1, ?)`
       ).run("project:user-1:one", "user-1", "project-1", at);
+      db.db.prepare(
+        `UPDATE l3_world_model_scopes SET workspace_uri = 'file:///project-1'
+         WHERE scope_key = 'project:user-1:one'`
+      ).run();
+      expect(() => db.db.prepare(
+        `UPDATE l3_world_model_scopes SET workspace_uri = 'file:///general'
+         WHERE scope_key = 'general:user-1'`
+      ).run()).toThrow(/CHECK/u);
       expect(() => db.db.prepare(
         `INSERT INTO l3_world_model_scopes (
            scope_key, user_id, project_id, next_scope_seq, updated_at
@@ -628,6 +648,16 @@ describe("repository sqlite schema contract", () => {
       expect(migrated.db.prepare(
         `SELECT status FROM episodes WHERE id = 'legacy-open-episode'`
       ).get()).toEqual({ status: "open" });
+      expect((migrated.db.prepare(`PRAGMA table_info(l3_world_model_scopes)`).all() as Array<{ name: string }>)
+        .map((column) => column.name)).toContain("workspace_uri");
+      const projectEnvironmentColumns = migrated.db.prepare(
+        `PRAGMA table_info(l3_world_model_project_environment_sync_state)`
+      ).all() as Array<{ name: string }>;
+      expect(projectEnvironmentColumns.map((column) => column.name)).toContain("profile_scan_id");
+      expect(projectEnvironmentColumns.map((column) => column.name)).not.toEqual(expect.arrayContaining([
+        "summary_text",
+        "summary_scan_id"
+      ]));
       expect(existsSync(`${dbPath}.pre-v${SCHEMA_VERSION}.bak`)).toBe(true);
       migrated.close();
     } finally {
