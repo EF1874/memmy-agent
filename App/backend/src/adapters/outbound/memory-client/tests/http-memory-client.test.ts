@@ -86,7 +86,15 @@ describe("HttpMemoryClient", () => {
     await expect(client.addMemory(addMemoryInput())).resolves.toMatchObject({ id: "memory-1" });
     await expect(client.getMemory({ memoryId: "memory-1" })).resolves.toMatchObject({ item: { id: "memory-1" } });
     await expect(client.deleteMemory({ memoryId: "memory-1", source: "codex" })).resolves.toMatchObject({ status: "deleted" });
-    await expect(client.recallEvidence("turn-1")).resolves.toMatchObject({ queryId: "turn-1", hits: [] });
+    await expect(client.recallEvidence("turn-1")).resolves.toMatchObject({
+      queryId: "turn-1",
+      hits: [],
+      diagnostics: {
+        candidateMemoryIds: ["memory-1"],
+        injectedMemoryIds: ["memory-1"],
+        capture: { status: "completed" }
+      }
+    });
     await expect(
       client.memoryApiLogs({ tools: ["memory_add", "memory_search"], limit: 20, offset: 0 })
     ).resolves.toMatchObject({ logs: [] });
@@ -411,6 +419,11 @@ function fixtureFor(method: string, path: string, body: unknown): unknown {
       queryId: "turn-1",
       query: "remember",
       hits: [],
+      diagnostics: {
+        candidateMemoryIds: ["memory-1"],
+        injectedMemoryIds: ["memory-1"],
+        capture: { status: "completed" }
+      },
       createdAt: now(),
       serverTime: now()
     };

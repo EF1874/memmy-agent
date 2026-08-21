@@ -13,10 +13,9 @@ const FACT_PATTERNS = [
   /(?:^|[，。；;\s])我的(?:名字|姓名|母语|职业|生日|家乡|手机号|邮箱).{0,24}(?:是|为|叫|：|:)/i,
   /\b(?:i am|i'm|i live in|i come from|i work as|i study at|my\s+(?:name|native language|job|occupation|birthday|hometown|phone number|email)\s+(?:is|are))\b/i
 ] as const;
-const DIRECTIVE_PATTERNS = [
-  /(?:以后|今后|从现在起|下次|每次|始终|永远|默认).{0,80}(?:请|要|先|不要|别|避免|保持|使用|给|回答|推荐|写)/i,
-  /(?:请)?(?:不要再|别再|务必|一定要|必须).{1,100}/i,
-  /\b(?:from now on|in future|next time|always|never|do not|don't)\b.{1,120}/i
+const STABLE_PREFERENCE_PATTERNS = [
+  /(?:以后|今后|从现在起|每次|始终|永远|默认).{0,80}(?:请|要|先|不要|别|避免|保持|使用|给|回答|推荐|写)/i,
+  /\b(?:from now on|in future|always|never)\b.{1,120}/i
 ] as const;
 const DYNAMIC_CURRENT_FACT_PATTERN = /(?:天气|气温|降雨|空气质量|股价|汇率|价格|票价|库存|余额|实时|当前.{0,8}(?:指标|数据|状态)|今天.{0,8}(?:天气|价格))|\b(?:weather|temperature|stock price|exchange rate|current price|live status|real[- ]time)\b/i;
 
@@ -24,9 +23,11 @@ export function classifyUserMemory(text: string): UserMemoryType[] {
   const content = text.trim();
   if (!content || isUserMemoryQuestion(content) || isQuestionOnly(content) || DYNAMIC_CURRENT_FACT_PATTERN.test(content)) return [];
   const types: UserMemoryType[] = [];
-  if (PREFERENCE_PATTERNS.some((pattern) => pattern.test(content))) types.push("User Preference");
+  if (
+    PREFERENCE_PATTERNS.some((pattern) => pattern.test(content)) ||
+    STABLE_PREFERENCE_PATTERNS.some((pattern) => pattern.test(content))
+  ) types.push("User Preference");
   if (FACT_PATTERNS.some((pattern) => pattern.test(content))) types.push("User Fact");
-  if (DIRECTIVE_PATTERNS.some((pattern) => pattern.test(content))) types.push("User Directive");
   return [...new Set(types)];
 }
 
@@ -95,5 +96,5 @@ function isQuestionOnly(text: string): boolean {
   if (!QUESTION_PATTERN.test(text)) return false;
   return !PREFERENCE_PATTERNS.some((pattern) => pattern.test(text)) &&
     !FACT_PATTERNS.some((pattern) => pattern.test(text)) &&
-    !DIRECTIVE_PATTERNS.some((pattern) => pattern.test(text));
+    !STABLE_PREFERENCE_PATTERNS.some((pattern) => pattern.test(text));
 }
