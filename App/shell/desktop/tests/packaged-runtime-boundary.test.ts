@@ -33,6 +33,7 @@ const packageWinX64Path = fileURLToPath(new URL("../../../../scripts/internal/wi
 const winUnsignedBuilderPath = fileURLToPath(new URL("../electron-builder.win.unsigned.yml", import.meta.url));
 const winUnsignedInstallerIncludePath = fileURLToPath(new URL("../build/installer-win-unsigned.nsh", import.meta.url));
 const winUpgradeRelayScriptPath = fileURLToPath(new URL("../build/MemmyWindowsUpgradeRelay.ps1", import.meta.url));
+const winUpgradeRecoveryScriptPath = fileURLToPath(new URL("../build/MemmyWindowsUpgradeRecovery.ps1", import.meta.url));
 const desktopInterfacePath = fileURLToPath(new URL("../interface/src/index.ts", import.meta.url));
 const localApiContractsPath = fileURLToPath(new URL("../../../../App/backend/local-api-contracts/src/index.ts", import.meta.url));
 const rootPackagePath = fileURLToPath(new URL("../../../../package.json", import.meta.url));
@@ -552,6 +553,7 @@ describe("desktop packaged runtime boundaries", () => {
     const unsignedBuilderConfig = readFileSync(winUnsignedBuilderPath, "utf8");
     const includeSource = readFileSync(winUnsignedInstallerIncludePath, "utf8");
     const relaySource = readFileSync(winUpgradeRelayScriptPath, "utf8");
+    const recoverySource = readFileSync(winUpgradeRecoveryScriptPath, "utf8");
     const mainSource = readFileSync(mainSourcePath, "utf8");
 
     expect(signedBuilderConfig).toContain("include: build/installer-win-unsigned.nsh");
@@ -559,6 +561,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(includeSource).toContain("!macro customInit");
     expect(includeSource).toContain("--memmy-upgrade-relayed");
     expect(includeSource).toContain("MemmyWindowsUpgradeRelay.ps1");
+    expect(includeSource).toContain("MemmyWindowsUpgradeRecovery.ps1");
     expect(includeSource).toContain('$LOCALAPPDATA\\Memmy\\upgrade-staging');
     expect(includeSource).toContain("GetCurrentProcessId");
     expect(includeSource).toContain('upgrade-staging\\$2');
@@ -574,12 +577,18 @@ describe("desktop packaged runtime boundaries", () => {
     expect(includeSource).toContain("relay-ready");
     expect(includeSource).toContain("ReadyPath");
     expect(includeSource).toContain("MemmyWindowsUpgradeCleanup.ps1");
+    expect(includeSource).toContain('FileOpen $0 "$R4" w');
+    expect(includeSource.indexOf('FileOpen $0 "$R4" w')).toBeLessThan(includeSource.indexOf('CopyFiles /SILENT "$EXEPATH" "$R4"'));
     expect(includeSource).toContain('ExecShell "open" "$R5"');
     expect(includeSource).toContain('ExecShell "open" "$1"');
     expect(includeSource.match(/ExecShell "open" .* SW_HIDE/g)).toHaveLength(2);
     expect(includeSource).not.toContain('Exec \'$\\\"$R5$\\\"');
     expect(includeSource).toContain('Exec \'$\\\"$INSTDIR\\${PRODUCT_FILENAME}.exe$\\\" --updated\'');
     expect(includeSource).toContain('$LOCALAPPDATA\\Memmy\\upgrade-staging\\active.lock');
+    expect(includeSource).toContain('GetFullPathName $4 "$MemmyUpgradeWorkDir"');
+    expect(includeSource).toContain('GetFullPathName $5 "$MemmyUpgradeBackupRoot"');
+    expect(includeSource).toContain('${GetFileName} "$MemmyUpgradeWorkDir" $5');
+    expect(includeSource).toContain('StrCpy $0 "$INSTDIR.memmy-upgrade-backup\\$4"');
     const relayInitIndex = includeSource.indexOf("Function MemmyRelayLegacyUpgrade");
     const earlyLaunchProxyIndex = includeSource.indexOf("Call MemmyInstallLaunchProxy", relayInitIndex);
     const relayStartIndex = includeSource.indexOf('ExecShell "open" "$R5"', relayInitIndex);
@@ -587,18 +596,26 @@ describe("desktop packaged runtime boundaries", () => {
     expect(earlyLaunchProxyIndex).toBeLessThan(relayStartIndex);
     expect(includeSource).toContain("SetErrorLevel");
     expect(relaySource).toContain("Move-MemmyDirectory");
+    expect(relaySource).toContain("Assert-MemmySameVolume");
+    expect(relaySource).toContain(".memmy-upgrade-backup");
+    expect(relaySource).toContain("active.lock\\state.json");
     expect(relaySource).toContain("Restore-MemmyData");
     expect(relaySource).toContain("Resolve-MemmyLegacyHelperReopenIntent");
     expect(relaySource).toContain("MEMMY_UPGRADE_WORK_DIR");
     expect(relaySource).toContain("MEMMY_UPGRADE_REOPEN_AFTER_INSTALL");
     expect(relaySource).toContain("$installerProcess.WaitForExit()");
     expect(relaySource).not.toContain("-Wait -PassThru");
+    expect(relaySource.indexOf("Write-MemmyRelayState", relaySource.indexOf("$installerProcess = Start-Process"))).toBe(-1);
     expect(relaySource).toContain("MemmyWindowsUpgradeCleanup.ps1");
     expect(relaySource).not.toContain("cmd.exe");
     expect(relaySource).not.toContain("$env:ComSpec");
     expect(relaySource).not.toContain("ping.exe");
     expect(relaySource).toContain("--memmy-upgrade-relayed");
     expect(relaySource).toContain("upgrade verified");
+    expect(recoverySource).toContain("Test-MemmyUpgradeProcessRunning");
+    expect(recoverySource).toContain("data-backup");
+    expect(recoverySource).toContain("installer-created-data");
+    expect(recoverySource).toContain("Remove-Item -LiteralPath $LockPath");
     expect(mainSource).toContain('spawn("/bin/zsh", [helperPath, filePath, destinationAppPath, logPath, String(process.pid), options.openAfterInstall ? "1" : "0"');
   });
 
@@ -637,12 +654,15 @@ describe("desktop packaged runtime boundaries", () => {
     expect(includeSource).toContain('StrCpy $0 "$LOCALAPPDATA\\Memmy\\launcher"');
     expect(includeSource).toContain('File /oname=Memmy.ico "${BUILD_RESOURCES_DIR}\\icon.ico"');
     expect(includeSource).toContain('File /oname=MemmyUpdatePrompt.ps1 "${BUILD_RESOURCES_DIR}\\MemmyUpdatePrompt.ps1"');
+    expect(includeSource).toContain('File /oname=MemmyWindowsUpgradeRecovery.ps1 "${BUILD_RESOURCES_DIR}\\MemmyWindowsUpgradeRecovery.ps1"');
     expect(includeSource).toContain('FileOpen $1 "$0\\MemmyLauncher.vbs" w');
     expect(includeSource).toContain('promptPath = $\\"$0\\MemmyUpdatePrompt.ps1$\\"');
     expect(includeSource).toContain('dataRoot = $\\"$INSTDIR\\data$\\"');
     expect(includeSource).toContain('languagePath = dataRoot & $\\"\\Memmy\\update-prompt-language.txt$\\"');
     expect(includeSource).toContain('markerPath = dataRoot & $\\"\\Memmy\\prepared-required-update.json$\\"');
     expect(includeSource).toContain('relayLockPath = shell.ExpandEnvironmentStrings($\\"%LOCALAPPDATA%$\\") & $\\"\\Memmy\\upgrade-staging\\active.lock$\\"');
+    expect(includeSource).toContain('recoveryPath = $\\"$0\\MemmyWindowsUpgradeRecovery.ps1$\\"');
+    expect(includeSource).toContain("If fso.FolderExists(relayLockPath) And fso.FileExists(recoveryPath) Then");
     expect(includeSource).toContain("If fso.FolderExists(relayLockPath) Then");
     expect(includeSource).toContain("lockPath = relayLockPath");
     expect(includeSource).toContain("WindowsPowerShell\\v1.0\\powershell.exe");

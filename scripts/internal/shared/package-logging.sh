@@ -46,6 +46,11 @@ package_log_init() {
   fi
 
   touch "$MEMMY_PACKAGE_LOG_FILE"
+  if [ "${MEMMY_PACKAGE_LOG_CAPTURE_ACTIVE:-}" != "1" ]; then
+    MEMMY_PACKAGE_LOG_CAPTURE_ACTIVE=1
+    export MEMMY_PACKAGE_LOG_CAPTURE_ACTIVE
+    exec > >(tee -a "$MEMMY_PACKAGE_LOG_FILE") 2> >(tee -a "$MEMMY_PACKAGE_LOG_FILE" >&2)
+  fi
   if [ -z "${MEMMY_PACKAGE_TOTAL_STARTED_AT:-}" ]; then
     MEMMY_PACKAGE_TOTAL_STARTED_AT="$(package_log_seconds)"
     export MEMMY_PACKAGE_TOTAL_STARTED_AT
@@ -58,7 +63,7 @@ package_log() {
   local line
   line="[$(package_log_now)] $*"
   printf '\n%s\n' "$line"
-  if [ -n "${MEMMY_PACKAGE_LOG_FILE:-}" ]; then
+  if [ -n "${MEMMY_PACKAGE_LOG_FILE:-}" ] && [ "${MEMMY_PACKAGE_LOG_CAPTURE_ACTIVE:-}" != "1" ]; then
     printf '%s\n' "$line" >> "$MEMMY_PACKAGE_LOG_FILE"
   fi
 }
@@ -118,6 +123,7 @@ package_log_error_trap() {
 }
 
 package_install_error_trap() {
+  set -o errtrace
   trap 'package_log_error_trap "$?" "$LINENO" "$BASH_COMMAND"' ERR
 }
 

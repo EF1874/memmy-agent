@@ -24,6 +24,7 @@
 !ifndef BUILD_UNINSTALLER
   Var MemmyIsRelayedUpgrade
   Var MemmyUpgradeWorkDir
+  Var MemmyUpgradeBackupRoot
   Var MemmyUpgradeReopenAfterInstall
 
   ; The 1.0.8 updater starts the downloaded installer from $INSTDIR\data. electron-builder's
@@ -104,6 +105,9 @@ Function MemmyRelayLegacyUpgrade
     IfFileExists "$R1\MemmyWindowsUpgradeCleanup.ps1" 0 memmy_relay_failed
 
     ClearErrors
+    FileOpen $0 "$R4" w
+    IfErrors memmy_relay_failed
+    FileClose $0
     CopyFiles /SILENT "$EXEPATH" "$R4"
     IfErrors memmy_relay_failed
     IfFileExists "$R4" 0 memmy_relay_failed
@@ -138,12 +142,18 @@ FunctionEnd
 Function MemmyReadRelayedUpgradeContext
   StrCpy $MemmyIsRelayedUpgrade "0"
   ReadEnvStr $MemmyUpgradeWorkDir "MEMMY_UPGRADE_WORK_DIR"
+  ReadEnvStr $MemmyUpgradeBackupRoot "MEMMY_UPGRADE_BACKUP_ROOT"
   ReadEnvStr $MemmyUpgradeReopenAfterInstall "MEMMY_UPGRADE_REOPEN_AFTER_INSTALL"
   StrCmp $MemmyUpgradeWorkDir "" memmy_relay_context_failed
+  StrCmp $MemmyUpgradeBackupRoot "" memmy_relay_context_failed
   StrCmp $MemmyUpgradeReopenAfterInstall "0" memmy_relay_context_validate_path
   StrCmp $MemmyUpgradeReopenAfterInstall "1" memmy_relay_context_validate_path memmy_relay_context_failed
 
   memmy_relay_context_validate_path:
+    GetFullPathName $4 "$MemmyUpgradeWorkDir"
+    StrCmp $4 $MemmyUpgradeWorkDir 0 memmy_relay_context_failed
+    GetFullPathName $5 "$MemmyUpgradeBackupRoot"
+    StrCmp $5 $MemmyUpgradeBackupRoot 0 memmy_relay_context_failed
     StrCpy $0 "$LOCALAPPDATA\Memmy\upgrade-staging\"
     StrLen $1 $0
     StrLen $2 $MemmyUpgradeWorkDir
@@ -152,6 +162,12 @@ Function MemmyReadRelayedUpgradeContext
   memmy_relay_context_compare_path:
     StrCpy $3 $MemmyUpgradeWorkDir $1
     StrCmp $3 $0 0 memmy_relay_context_failed
+    StrCpy $4 $MemmyUpgradeWorkDir "" $1
+    StrCmp $4 "" memmy_relay_context_failed
+    ${GetFileName} "$MemmyUpgradeWorkDir" $5
+    StrCmp $4 $5 0 memmy_relay_context_failed
+    StrCpy $0 "$INSTDIR.memmy-upgrade-backup\$4"
+    StrCmp $MemmyUpgradeBackupRoot $0 0 memmy_relay_context_failed
     StrCpy $MemmyIsRelayedUpgrade "1"
     Return
 
@@ -162,9 +178,9 @@ FunctionEnd
 
 Function MemmyRestoreRelayedUpgradeData
   StrCmp $MemmyIsRelayedUpgrade "1" 0 memmy_restore_relayed_data_done
-  StrCpy $0 "$MemmyUpgradeWorkDir\data-backup"
+  StrCpy $0 "$MemmyUpgradeBackupRoot\data-backup"
   StrCpy $1 "$INSTDIR\data"
-  StrCpy $2 "$MemmyUpgradeWorkDir\installer-created-data"
+  StrCpy $2 "$MemmyUpgradeBackupRoot\installer-created-data"
   IfFileExists "$0\*" 0 memmy_restore_relayed_data_failed
   IfFileExists "$2\*" memmy_restore_relayed_data_failed
   IfFileExists "$1\*" 0 memmy_restore_relayed_data_backup
@@ -211,7 +227,7 @@ Function MemmyScheduleRelayedUpgradeCleanup
   StrCpy $1 "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe"
   IfFileExists "$0" 0 memmy_schedule_relayed_cleanup_done
   IfFileExists "$1" 0 memmy_schedule_relayed_cleanup_done
-  ExecShell "open" "$1" '-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File $\"$0$\" -WorkDir $\"$MemmyUpgradeWorkDir$\"' SW_HIDE
+  ExecShell "open" "$1" '-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File $\"$0$\" -WorkDir $\"$MemmyUpgradeWorkDir$\" -BackupRoot $\"$MemmyUpgradeBackupRoot$\"' SW_HIDE
 
   memmy_schedule_relayed_cleanup_done:
 FunctionEnd
@@ -274,6 +290,7 @@ Function MemmyInstallLaunchProxy
   SetOutPath "$0"
   File /oname=Memmy.ico "${BUILD_RESOURCES_DIR}\icon.ico"
   File /oname=MemmyUpdatePrompt.ps1 "${BUILD_RESOURCES_DIR}\MemmyUpdatePrompt.ps1"
+  File /oname=MemmyWindowsUpgradeRecovery.ps1 "${BUILD_RESOURCES_DIR}\MemmyWindowsUpgradeRecovery.ps1"
 
   FileOpen $1 "$0\MemmyLauncher.vbs" w
   FileWrite $1 "Set shell = CreateObject($\"WScript.Shell$\")$\r$\n"
@@ -282,10 +299,15 @@ Function MemmyInstallLaunchProxy
   FileWrite $1 "dataRoot = $\"$INSTDIR\data$\"$\r$\n"
   FileWrite $1 "powerShellPath = shell.ExpandEnvironmentStrings($\"%SystemRoot%$\") & $\"\System32\WindowsPowerShell\v1.0\powershell.exe$\"$\r$\n"
   FileWrite $1 "promptPath = $\"$0\MemmyUpdatePrompt.ps1$\"$\r$\n"
+  FileWrite $1 "recoveryPath = $\"$0\MemmyWindowsUpgradeRecovery.ps1$\"$\r$\n"
+  FileWrite $1 "upgradeLogPath = shell.ExpandEnvironmentStrings($\"%LOCALAPPDATA%$\") & $\"\Memmy\upgrade-logs\windows-upgrade.log$\"$\r$\n"
   FileWrite $1 "languagePath = dataRoot & $\"\Memmy\update-prompt-language.txt$\"$\r$\n"
   FileWrite $1 "markerPath = dataRoot & $\"\Memmy\prepared-required-update.json$\"$\r$\n"
   FileWrite $1 "lockPath = markerPath & $\".lock$\"$\r$\n"
   FileWrite $1 "relayLockPath = shell.ExpandEnvironmentStrings($\"%LOCALAPPDATA%$\") & $\"\Memmy\upgrade-staging\active.lock$\"$\r$\n"
+  FileWrite $1 "If fso.FolderExists(relayLockPath) And fso.FileExists(recoveryPath) Then$\r$\n"
+  FileWrite $1 "  shell.Run Chr(34) & powerShellPath & Chr(34) & $\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File $\" & Chr(34) & recoveryPath & Chr(34) & $\" -InstallDir $\" & Chr(34) & fso.GetParentFolderName(appExe) & Chr(34) & $\" -LockPath $\" & Chr(34) & relayLockPath & Chr(34) & $\" -LogPath $\" & Chr(34) & upgradeLogPath & Chr(34), 0, True$\r$\n"
+  FileWrite $1 "End If$\r$\n"
   FileWrite $1 "If fso.FolderExists(relayLockPath) Then$\r$\n"
   FileWrite $1 "  lockPath = relayLockPath$\r$\n"
   FileWrite $1 "End If$\r$\n"
