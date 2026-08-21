@@ -8,9 +8,11 @@ import {
   appendTranscriptObject,
   buildWebuiThreadResponse,
   lastTranscriptTurnState,
+  readTranscriptChunk,
   readTranscriptLines,
   replayTranscriptToUiMessages,
   toolTraceLinesFromEvents,
+  webuiTranscriptPath,
 } from "../../../src/entrypoints/frontend-bridge/transcript.js";
 import { WebSocketChannel } from "../../../src/integrations/channels/websocket.js";
 
@@ -83,6 +85,29 @@ describe("webui transcript replay", () => {
 
     expect(lines).toHaveLength(1);
     expect(lines[0].text).toBe("hello");
+  });
+
+  it("accepts transcript records above the legacy 8 MiB limit", () => {
+    useDataDir();
+    const key = "websocket:t-large-record";
+    const text = "x".repeat(8 * 1024 * 1024 + 1);
+
+    appendTranscriptObject(key, { event: "message", chat_id: "t-large-record", text });
+
+    expect(readTranscriptLines(key)).toEqual([
+      { event: "message", chat_id: "t-large-record", text },
+    ]);
+  });
+
+  it("rejects transcript files above the 128 MiB limit", () => {
+    useDataDir();
+    const key = "websocket:t-oversized-file";
+    const file = webuiTranscriptPath(key);
+    fs.writeFileSync(file, "", "utf8");
+    fs.truncateSync(file, 128 * 1024 * 1024 + 1);
+
+    expect(readTranscriptLines(key)).toEqual([]);
+    expect(readTranscriptChunk(key, 0)).toBeNull();
   });
 
   it("replays assistant deltas, reasoning, and turn-end latency", () => {
