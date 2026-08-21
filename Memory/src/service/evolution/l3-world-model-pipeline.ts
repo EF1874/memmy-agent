@@ -365,7 +365,9 @@ Keep only:
 - reusable development or work guardrails demonstrated by acceptance rejection;
 - constraints explicitly enforced by CI, Hooks, or quality gates.
 
-Do not include one-off task requirements, ordinary tool errors, environment facts, implementation steps, or temporary Agent choices.
+Do not include requirements that only constrain the current task deliverable and cannot reasonably apply to future project tasks.
+If a user requirement or correction uses persistent language such as "in the future", "always", "do not act without permission", "must", or "unless explicitly permitted", or constrains a category of future operations, treat it as a long-lived project rule even if it appears only once.
+Do not include ordinary tool errors, environment facts, implementation steps, or temporary Agent choices.
 
 Use the Project Environment Profile only to understand the project type and environment. Do not modify or output it. Merge equivalent items and replace old contract content only when new evidence explicitly supersedes it. Sort by constraint strength and evidence strength.
 
