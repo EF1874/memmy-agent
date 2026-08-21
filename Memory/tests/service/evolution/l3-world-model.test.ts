@@ -36,17 +36,42 @@ describe("L3 World Model trace field pipeline", () => {
         userId: "l3-world-model-user"
       }
     });
-    service.completeTurn("l3-world-model-turn", {
+    const completed = service.completeTurn("l3-world-model-turn", {
       sessionId: opened.sessionId,
       query: "这个项目必须先运行测试；在 Alpine 中加载 glibc wheel 失败了。",
       answer: "已记录测试约束和 Alpine 动态链接错误。",
+      reasoningSummary: "PRIVATE_REASONING_TOP",
       status: "succeeded",
-      toolCalls: [{ name: "exec", input: { command: "npm test" } }],
+      toolCalls: [{
+        id: "call-1",
+        name: "exec",
+        input: { command: "npm test" },
+        success: false,
+        thinkingBefore: "PRIVATE_REASONING_TOOL",
+        assistantTextBefore: "VISIBLE_ASSISTANT_PROGRESS"
+      }],
       toolResults: [{ name: "exec", output: "dynamic linker error", exitCode: 1 }]
     });
     service.closeSession(opened.sessionId);
 
     const repos = new Repositories(db.db);
+    const captured = repos.runtime.getRawTurn(completed.rawTurnId)!;
+    const capturedToolCall = captured.toolCalls[0] as Record<string, unknown>;
+    db.db.prepare(`UPDATE raw_turns SET tool_calls_json = ? WHERE id = ?`).run(
+      JSON.stringify([{
+        ...capturedToolCall,
+        thinking_before: "PRIVATE_REASONING_TOOL_LEGACY"
+      }]),
+      completed.rawTurnId
+    );
+    const persisted = repos.runtime.getRawTurn(completed.rawTurnId)!;
+    expect(persisted.reasoningSummary).toBe("PRIVATE_REASONING_TOP");
+    expect(persisted.toolCalls[0]).toEqual(expect.objectContaining({
+      thinkingBefore: "PRIVATE_REASONING_TOOL",
+      thinking_before: "PRIVATE_REASONING_TOOL_LEGACY",
+      assistantTextBefore: "VISIBLE_ASSISTANT_PROGRESS"
+    }));
+
     const jobs = (db.db.prepare(
       `SELECT id FROM evolution_jobs
        WHERE job_type = 'l3_world_model_update'
@@ -84,12 +109,119 @@ describe("L3 World Model trace field pipeline", () => {
         project_environment_profile: "",
         raw_turns: expect.any(Array)
       }));
+      const input = JSON.parse(messages[1]!.content) as {
+        raw_turns: Array<Record<string, unknown>>;
+      };
+      const rawTurn = input.raw_turns[0]!;
+      expect(Object.keys(rawTurn).sort()).toEqual([
+        "assistant_text",
+        "feedback",
+        "raw_turn_id",
+        "status",
+        "tool_calls",
+        "tool_results",
+        "user_text"
+      ]);
+      expect(rawTurn).toEqual(expect.objectContaining({
+        raw_turn_id: completed.rawTurnId,
+        status: "succeeded",
+        user_text: "这个项目必须先运行测试；在 Alpine 中加载 glibc wheel 失败了。",
+        assistant_text: "已记录测试约束和 Alpine 动态链接错误。",
+        feedback: []
+      }));
+      const toolCall = (rawTurn.tool_calls as Array<Record<string, unknown>>)[0]!;
+      expect(toolCall).toEqual(expect.objectContaining({
+        id: "call-1",
+        name: "exec",
+        input: { command: "npm test" },
+        output: "dynamic linker error",
+        success: false,
+        assistantTextBefore: "VISIBLE_ASSISTANT_PROGRESS"
+      }));
+      expect(toolCall).not.toHaveProperty("thinkingBefore");
+      expect(toolCall).not.toHaveProperty("thinking_before");
       expect(options).toEqual(expect.objectContaining({
         temperature: 0,
         maxTokens: 65_536,
         jsonMode: true
       }));
     }
+
+    db.close();
+  });
+
+  it("removes reasoning from no-project generation and repair input", async () => {
+    const complete = vi.fn<LlmClient["complete"]>()
+      .mockResolvedValueOnce("{}")
+      .mockResolvedValueOnce(JSON.stringify({
+        op: "create",
+        general_rules_and_safety_constraints: "- Ask before destructive actions."
+      }));
+    const llm = strictCompletionLlm(complete);
+    const { db, service } = createTestService({ skillLlm: llm });
+    const opened = service.openSession({
+      l3WorldModelProtocolVersion: 2,
+      l3WorldModelTransition: "resume_only",
+      namespace: {
+        source: "codex",
+        profileId: "default",
+        sessionKey: "l3-world-model-repair-session",
+        userId: "l3-world-model-repair-user"
+      }
+    });
+    service.completeTurn("l3-world-model-repair-turn", {
+      sessionId: opened.sessionId,
+      query: "Always ask before destructive actions.",
+      answer: "Understood.",
+      reasoningSummary: "PRIVATE_REPAIR_REASONING_TOP",
+      status: "succeeded",
+      toolCalls: [{
+        name: "delete_file",
+        input: { path: "important.txt" },
+        thinkingBefore: "PRIVATE_REPAIR_REASONING_TOOL",
+        assistantTextBefore: "VISIBLE_REPAIR_PROGRESS"
+      }],
+      toolResults: [{ name: "delete_file", output: "confirmation required", exitCode: 1 }]
+    });
+    service.closeSession(opened.sessionId);
+
+    const repos = new Repositories(db.db);
+    const job = repos.runtime.listJobs("queued", 100).find(
+      (candidate) => candidate.jobType === "l3_world_model_update" &&
+        candidate.payload.targetField === "general_rules_and_safety_constraints"
+    )!;
+    await new L3WorldModelTraceFieldPipeline({ repos, skillLlm: llm }).updateField(job);
+
+    expect(complete).toHaveBeenCalledTimes(2);
+    const firstInput = JSON.parse(complete.mock.calls[0]![0][1]!.content) as {
+      raw_turns: Array<Record<string, unknown>>;
+    };
+    const repairEnvelope = JSON.parse(complete.mock.calls[1]![0][1]!.content) as {
+      original_input: { raw_turns: Array<Record<string, unknown>> };
+    };
+    for (const input of [firstInput, repairEnvelope.original_input]) {
+      const rawTurn = input.raw_turns[0]!;
+      expect(rawTurn).not.toHaveProperty("reasoning_summary");
+      expect(rawTurn).toEqual(expect.objectContaining({
+        user_text: "Always ask before destructive actions.",
+        assistant_text: "Understood."
+      }));
+      const toolCall = (rawTurn.tool_calls as Array<Record<string, unknown>>)[0]!;
+      expect(toolCall).not.toHaveProperty("thinkingBefore");
+      expect(toolCall).not.toHaveProperty("thinking_before");
+      expect(toolCall).toEqual(expect.objectContaining({
+        name: "delete_file",
+        input: { path: "important.txt" },
+        output: "confirmation required",
+        assistantTextBefore: "VISIBLE_REPAIR_PROGRESS"
+      }));
+    }
+    expect(complete.mock.calls[0]![0][1]!.content).not.toContain("PRIVATE_REPAIR_REASONING");
+    expect(complete.mock.calls[1]![0][1]!.content).not.toContain("PRIVATE_REPAIR_REASONING");
+    expect(repos.l3WorldModels.fields(
+      "l3-world-model-repair-user",
+      null
+    ).generalRulesAndSafetyConstraints).toBe("- Ask before destructive actions.");
 
     db.close();
   });

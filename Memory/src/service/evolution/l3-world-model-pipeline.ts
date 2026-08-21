@@ -222,8 +222,8 @@ function rawTurnEvidence(rawTurn: RawTurnRecord, feedback: FeedbackRecord[]): Js
     status: rawTurn.status,
     user_text: rawTurn.userText ?? null,
     assistant_text: rawTurn.assistantText ?? null,
-    reasoning_summary: rawTurn.reasoningSummary ?? null,
-    tool_calls: assertJsonArray(rawTurn.toolCalls, `RawTurn ${rawTurn.id} tool_calls`),
+    tool_calls: assertJsonArray(rawTurn.toolCalls, `RawTurn ${rawTurn.id} tool_calls`)
+      .map(stripToolCallThinking),
     tool_results: assertJsonArray(rawTurn.toolResults, `RawTurn ${rawTurn.id} tool_results`),
     feedback: feedback.map((item) => ({
       channel: item.channel,
@@ -232,6 +232,15 @@ function rawTurnEvidence(rawTurn: RawTurnRecord, feedback: FeedbackRecord[]): Js
       rationale: item.rationale ?? null
     }))
   };
+}
+
+function stripToolCallThinking(toolCall: JsonValue): JsonValue {
+  if (toolCall === null || typeof toolCall !== "object" || Array.isArray(toolCall)) {
+    return toolCall;
+  }
+  return Object.fromEntries(
+    Object.entries(toolCall).filter(([key]) => key !== "thinkingBefore" && key !== "thinking_before")
+  );
 }
 
 function assertJsonArray(value: unknown[], label: string): JsonValue[] {
