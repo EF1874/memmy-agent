@@ -47,12 +47,11 @@ function createCountingLlm(
         const payload = messages.find((message) => message.role === "user")?.content ?? "";
         const userQuote = payload.match(/\bUSER:\s*(.*?)\s+ASSISTANT:/)?.[1]?.trim() ?? "";
         return {
-          create_l1: true,
-          l1_summary: "completed task turn",
-          l1_evidence: [{ quote: userQuote, source_role: "user", kind: "task_outcome" }],
-          create_user_memory: false,
-          user_memory_types: [],
-          reason: "durable task result"
+          l1: {
+            summary: "completed task turn",
+            evidence: [{ quote: userQuote, role: "user", kind: "task_outcome" }]
+          },
+          user: null
         } as unknown as T;
       }
       if (options.operation === "reward.reward.r_human.v7" && reward) {

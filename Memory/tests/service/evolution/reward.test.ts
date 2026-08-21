@@ -46,12 +46,11 @@ function createEmptyRewardSummaryLlm(calls: Array<{
         const payload = messages.find((message) => message.role === "user")?.content ?? "";
         const turnSummary = payload.match(/\bUSER:\s*(.*?)\s+ASSISTANT:/)?.[1]?.trim() ?? "completed task turn";
         return {
-          create_l1: true,
-          l1_summary: turnSummary,
-          l1_evidence: [{ quote: turnSummary, source_role: "user", kind: "task_outcome" }],
-          create_user_memory: false,
-          user_memory_types: [],
-          reason: "durable task result"
+          l1: {
+            summary: turnSummary,
+            evidence: [{ quote: turnSummary, role: "user", kind: "task_outcome" }]
+          },
+          user: null
         } as unknown as T;
       }
       return {} as T;
@@ -106,12 +105,11 @@ function createCapturingRewardSummaryLlm(calls: Array<{
             : "completed task turn";
         const userQuote = payload.match(/\bUSER:\s*(.*?)\s+ASSISTANT:/)?.[1]?.trim() ?? turnSummary;
         return {
-          create_l1: true,
-          l1_summary: turnSummary,
-          l1_evidence: [{ quote: userQuote, source_role: "user", kind: "task_outcome" }],
-          create_user_memory: false,
-          user_memory_types: [],
-          reason: "durable task result"
+          l1: {
+            summary: turnSummary,
+            evidence: [{ quote: userQuote, role: "user", kind: "task_outcome" }]
+          },
+          user: null
         } as unknown as T;
       }
       if (options.operation === "reward.reward.r_human.v7") {
@@ -159,16 +157,8 @@ function createRejectingCaptureLlm(calls: string[]): LlmClient {
         throw new Error(`unexpected downstream model call: ${options.operation}`);
       }
       return {
-        create_l1: false,
-        l1_summary: "",
-        policy_eligible: false,
-        create_user_memory: false,
-        user_memory_types: [],
-        user_memory_evidence: [],
-        user_memory_action: "none",
-        matched_user_memory_id: "",
-        l1_evidence: [],
-        reason: "no durable agent evidence"
+        l1: null,
+        user: null
       } as unknown as T;
     },
     status() {
@@ -216,18 +206,11 @@ function createMixedCaptureLlm(calls: Array<{ operation: string; stepCount?: num
       if (options.operation === "capture.summarize") {
         const accepted = payload.includes("implement the durable migration");
         return {
-          create_l1: accepted,
-          l1_summary: accepted ? "Implement the durable migration." : "",
-          policy_eligible: false,
-          create_user_memory: false,
-          user_memory_types: [],
-          user_memory_evidence: [],
-          user_memory_action: "none",
-          matched_user_memory_id: "",
-          l1_evidence: accepted
-            ? [{ quote: "implement the durable migration", source_role: "user", kind: "task_request" }]
-            : [],
-          reason: accepted ? "concrete agent task" : "question without durable evidence"
+          l1: accepted ? {
+            summary: "Implement the durable migration.",
+            evidence: [{ quote: "implement the durable migration", role: "user", kind: "task_request" }]
+          } : null,
+          user: null
         } as unknown as T;
       }
       return {} as T;
