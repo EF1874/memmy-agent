@@ -867,6 +867,32 @@ describe("User Memory", () => {
     db.close();
   });
 
+  it("limits the User Memory recall lane to the requested TopK", async () => {
+    const { db, service } = createTestService();
+    const session = open(service, "user-memory-top-k-user");
+    for (let index = 0; index < 12; index += 1) {
+      service.completeTurn(`turn-user-memory-top-k-${index}`, {
+        sessionId: session.sessionId,
+        query: `我喜欢共同关键词主题${index}`,
+        answer: "好的。"
+      });
+    }
+
+    await service.search({
+      sessionId: session.sessionId,
+      query: "共同关键词",
+      layers: ["L1"],
+      limit: 10
+    });
+
+    const latestSearchLog = service.apiLogs({ tools: ["memory_search"], limit: 1 }).logs[0]!;
+    const output = JSON.parse(latestSearchLog.outputJson) as {
+      candidates: Array<{ tier: string }>;
+    };
+    expect(output.candidates.filter((candidate) => candidate.tier === "UserMemory")).toHaveLength(10);
+    db.close();
+  });
+
   it("excludes User Memory from automatic injection for the current session's latest 8 turns", async () => {
     const { db, service } = createTestService();
     const session = open(service, "recent-user-memory-user");
@@ -1031,6 +1057,16 @@ describe("User Memory", () => {
       "我最喜欢的水果是苹果",
       "我现在最喜欢的水果是西瓜"
     ]));
+    expect(recall.injectedContext.markdown).toContain("## User Memories");
+    expect(recall.injectedContext.markdown).not.toContain("## L1 Trace Memories");
+    expect(recall.injectedContext.markdown).toContain(
+      "Historical user statement:\n   我现在最喜欢的水果是西瓜"
+    );
+    expect(recall.injectedContext.markdown).toContain("created at:");
+    expect(recall.injectedContext.markdown).toContain("updated at:");
+    expect(recall.injectedContext.markdown).not.toContain("timestamp:");
+    expect(recall.injectedContext.markdown).not.toContain("source turn:");
+    expect(recall.injectedContext.markdown).not.toContain("raw_");
     db.close();
   });
 
@@ -1099,10 +1135,23 @@ describe("User Memory", () => {
       l1MemoryId
     ]));
     expect(sameTurnHit?.retrievalRoutes).toEqual(["user_memory", "l1"]);
-    expect(recall.injectedContext.sections.filter((section) =>
+    const sameTurnSections = recall.injectedContext.sections.filter((section) =>
       section.memoryIds.includes(userMemoryId) ||
       section.memoryIds.includes(l1MemoryId)
-    )).toHaveLength(1);
+    );
+    expect(sameTurnSections).toHaveLength(2);
+    expect(sameTurnSections.find((section) => section.memoryLayer === "UserMemory")?.memoryIds)
+      .toEqual([userMemoryId]);
+    expect(sameTurnSections.find((section) => section.memoryLayer === "L1")?.memoryIds)
+      .toEqual([l1MemoryId]);
+    expect(recall.injectedContext.markdown).toContain("## User Memories");
+    expect(recall.injectedContext.markdown).toContain("## L1 Trace Memories");
+    expect(recall.injectedContext.markdown).toContain(`1. ${userMemoryId}`);
+    expect(recall.injectedContext.markdown).toContain(`1. ${l1MemoryId}`);
+    expect(recall.injectedContext.markdown).not.toContain(`id: ${userMemoryId}`);
+    expect(recall.injectedContext.markdown).not.toContain(`id: ${l1MemoryId}`);
+    expect(recall.injectedContext.markdown).toContain("Historical user statement:");
+    expect(recall.injectedContext.markdown).not.toContain("source turn:");
 
     const event = db.db.prepare(
       `SELECT query_id, user_memory_candidate_ids_json, l1_candidate_ids_json,

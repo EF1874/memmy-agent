@@ -44,12 +44,14 @@ const {
 afterEach(cleanup);
 
 describe("MemoryService / retrieval / query and filtering", () => {
-  it("[BC-29] over-recalls each lane, merges same-turn hits by max score, then truncates once", () => {
+  it("[BC-29] over-recalls the Agent lane, keeps User Memory at TopK, then truncates once", () => {
     const finalLimit = 10;
-    const laneLimit = parallelMemoryLaneLimit(finalLimit);
-    expect(laneLimit).toBe(15);
+    const agentLaneLimit = parallelMemoryLaneLimit(finalLimit);
+    const userMemoryTopK = finalLimit;
+    expect(agentLaneLimit).toBe(15);
+    expect(userMemoryTopK).toBe(10);
 
-    const agentHits = Array.from({ length: laneLimit }, (_, index): RecallHit => ({
+    const agentHits = Array.from({ length: agentLaneLimit }, (_, index): RecallHit => ({
       id: `l1-${index}`,
       kind: "trace",
       memoryLayer: "L1",
@@ -80,7 +82,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
         }
       }
     }));
-    const userHits = Array.from({ length: laneLimit }, (_, index): RecallHit => ({
+    const userHits = Array.from({ length: userMemoryTopK }, (_, index): RecallHit => ({
       id: `user-${index}`,
       kind: "user_memory",
       memoryLayer: "UserMemory",
@@ -95,7 +97,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
     }));
 
     const merged = mergeSameTurnRecallHits(agentHits, agentMemories, userHits);
-    expect(merged.hits).toHaveLength(25);
+    expect(merged.hits).toHaveLength(20);
     expect(merged.mergedSourceTurnIds.sort()).toEqual([
       "shared-turn-0",
       "shared-turn-1",
@@ -109,7 +111,8 @@ describe("MemoryService / retrieval / query and filtering", () => {
       retrievalRoutes: ["user_memory", "l1"]
     });
     expect(merged.hits.map((hit) => hit.id)).toContain("l1-14");
-    expect(merged.hits.map((hit) => hit.id)).toContain("user-14");
+    expect(merged.hits.map((hit) => hit.id)).toContain("user-9");
+    expect(merged.hits.map((hit) => hit.id)).not.toContain("user-10");
 
     const selected = mmrRecallHits(merged.hits, finalLimit, 1);
     expect(selected).toHaveLength(finalLimit);
