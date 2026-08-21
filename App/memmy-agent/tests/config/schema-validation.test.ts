@@ -183,28 +183,6 @@ describe("config schema validation", () => {
     }
   });
 
-  it("defaults Workspace Bridge on and round-trips only explicit booleans", () => {
-    const defaults = new Config();
-    const enabled = new Config({ memmyMemory: { workspaceBridge: { enabled: true } } });
-    const disabled = new Config({ memmyMemory: { workspaceBridge: { enabled: false } } });
-    expect(defaults.memmyMemory.workspaceBridge.enabled).toBe(true);
-    expect(enabled.memmyMemory.workspaceBridge.enabled).toBe(true);
-    expect(disabled.memmyMemory.workspaceBridge.enabled).toBe(false);
-    expect(enabled.toObject().memmyMemory).toMatchObject({ workspaceBridge: { enabled: true } });
-    expect(disabled.toObject().memmyMemory).toMatchObject({ workspaceBridge: { enabled: false } });
-  });
-
-  it.each([
-    [{ memmyMemory: { workspaceBridge: null } }, /memmyMemory\.workspaceBridge must be an object/],
-    [{ memmyMemory: { workspaceBridge: [] } }, /memmyMemory\.workspaceBridge must be an object/],
-    [{ memmyMemory: { workspaceBridge: "true" } }, /memmyMemory\.workspaceBridge must be an object/],
-    [{ memmyMemory: { workspaceBridge: { enabled: "true" } } }, /memmyMemory\.workspaceBridge\.enabled/],
-    [{ memmyMemory: { workspaceBridge: { enabled: 1 } } }, /memmyMemory\.workspaceBridge\.enabled/],
-    [{ memmyMemory: { workspaceBridge: { enabled: null } } }, /memmyMemory\.workspaceBridge\.enabled/]
-  ])("rejects invalid Workspace Bridge config %#", (input, error) => {
-    expect(() => new Config(input as any)).toThrow(error);
-  });
-
   it("round-trips explicit file memory booleans through config files", () => {
     for (const enabled of [false, true]) {
       const file = configFile();

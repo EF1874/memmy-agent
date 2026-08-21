@@ -44,15 +44,13 @@ describe("memory runtime contracts", () => {
     expect(() => MemoryHealthSnapshotSchema.parse({
       ...healthOutput(),
       features: {
-        l3WorldModelProtocolVersions: [2],
-        workspaceBridgeProtocolVersions: ["1"]
+        l3WorldModelProtocolVersions: [2]
       }
     })).not.toThrow();
     expect(() => MemoryHealthSnapshotSchema.parse({
       ...healthOutput(),
       features: {
-        l3WorldModelProtocolVersions: ["2"],
-        workspaceBridgeProtocolVersions: [1]
+        l3WorldModelProtocolVersions: ["2"]
       }
     })).toThrow();
   });

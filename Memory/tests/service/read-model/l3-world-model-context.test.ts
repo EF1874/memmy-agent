@@ -87,10 +87,10 @@ describe("Session L3 World Model context read model", () => {
       value: "Node 22 -> 可使用原生 TypeScript strip types。"
     })!;
     db.db.prepare(
-      `INSERT INTO l3_world_model_project_environment_sync_state (
-         user_id, project_id, project_kind, status, applied_scan_id, updated_at
-       ) VALUES (?, ?, 'code', 'clean', 'scan-1', ?)`
-    ).run(namespace.userId, projectId, "2026-01-01T00:00:00.000Z");
+      `UPDATE l3_world_model_project_environment_state
+       SET project_kind = 'code', status = 'clean', applied_scan_id = 'scan-1', updated_at = ?
+       WHERE user_id = ? AND project_id = ?`
+    ).run("2026-01-01T00:00:00.000Z", namespace.userId, projectId);
 
     const context = service.l3WorldModelContext(opened.sessionId, envelope(scopedNamespace));
     expect(context).toMatchObject({
@@ -101,7 +101,7 @@ describe("Session L3 World Model context read model", () => {
     expect(JSON.stringify(context)).not.toContain("file:///tmp/context-project");
     const before = repos.memories.get(memory.id)!;
     db.db.prepare(
-      `UPDATE l3_world_model_project_environment_sync_state
+      `UPDATE l3_world_model_project_environment_state
        SET applied_scan_id = 'scan-2' WHERE user_id = ? AND project_id = ?`
     ).run(namespace.userId, projectId);
     const projected = service.l3WorldModelContext(opened.sessionId, envelope(scopedNamespace));

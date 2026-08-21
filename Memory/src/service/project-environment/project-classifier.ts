@@ -1,5 +1,5 @@
-import type { InventoryEntry } from "@memmy/local-api-contracts";
 import { PROJECT_SOURCE_EXTENSIONS, extensionOf } from "./scan-policy.js";
+import type { InventoryEntry } from "./types.js";
 
 const SOURCE_EXTENSION_SET = new Set<string>(PROJECT_SOURCE_EXTENSIONS);
 const TEST_DIRECTORIES = new Set(["test", "tests", "__tests__", "spec", "specs"]);

@@ -3,9 +3,6 @@ import type {
   L3WorldModelBoundaryResponse,
   L3WorldModelRequestEnvelope,
   L3WorldModelTraceHeadResponse,
-  ProjectEnvironmentSyncEvidenceRequest,
-  ProjectEnvironmentSyncResponse,
-  ProjectEnvironmentSyncStartRequest,
   SessionL3WorldModelContextResponse,
   WorkspaceHostId,
   WorkspaceUri
@@ -18,9 +15,6 @@ export type {
   L3WorldModelBoundaryResponse,
   L3WorldModelRequestEnvelope,
   L3WorldModelTraceHeadResponse,
-  ProjectEnvironmentSyncEvidenceRequest,
-  ProjectEnvironmentSyncResponse,
-  ProjectEnvironmentSyncStartRequest,
   SessionL3WorldModelContextResponse,
   WorkspaceHostId,
   WorkspaceUri
@@ -56,12 +50,10 @@ export type MemmyMemoryConnection = {
 export type MemmyMemoryResolvedConfig = {
   enabled: boolean;
   userId?: string;
-  workspaceBridgeEnabled: boolean;
 };
 
 export type MemmyMemoryInstallOptions = {
   workspace?: string | null;
-  workspaceBridgeEnabled?: boolean;
   hooks?: any[];
 };
 
@@ -76,8 +68,6 @@ export type MemmyMemorySessionState = {
   workspaceUri: WorkspaceUri | null;
   workspaceHostId: WorkspaceHostId | null;
   l3Cache: SessionL3WorldModelCacheEntry;
-  bridgeEnabled: boolean;
-  healthChecked: boolean;
 };
 
 export type SessionL3WorldModelCacheEntry = {
@@ -93,7 +83,6 @@ export type SessionL3WorldModelCacheEntry = {
 
 export type MemmyMemoryHookOptions = {
   workspace?: string | null;
-  workspaceBridgeEnabled?: boolean;
   adapterId?: string;
   source?: string;
   profileId?: string;

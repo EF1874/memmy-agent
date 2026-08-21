@@ -1,6 +1,7 @@
 import {
   assertJsonValue,
   canonicalJson,
+  isLocalWorkspaceUri,
   sha256Hex
 } from "@memmy/local-api-contracts";
 import {
@@ -59,9 +60,6 @@ import type {
   MemoryLayer,
   MemoryListItem,
   PanelMemoryListItem,
-  ProjectEnvironmentSyncEvidenceRequest,
-  ProjectEnvironmentSyncResponse,
-  ProjectEnvironmentSyncStartRequest,
   MemoryProcessingRecord,
   MemoryReloadConfigRequest,
   MemoryReloadConfigResponse,
@@ -627,6 +625,12 @@ export class MemoryService {
     return this.config.algorithm.enableMemoryAdd;
   }
 
+  private projectEnvironmentScanEnabled(): boolean {
+    return this.mode !== "cloud" &&
+      this.memoryAddEnabled() &&
+      this.storageCapabilities().backendId === "sqlite-local";
+  }
+
   private memorySearchEnabled(): boolean {
     return this.config.algorithm.enableMemorySearch;
   }
@@ -689,8 +693,7 @@ export class MemoryService {
       ...(backend.backendId === "sqlite-local" && schema.version >= 6
         ? {
             features: {
-              l3WorldModelProtocolVersions: [2],
-              workspaceBridgeProtocolVersions: ["1"]
+              l3WorldModelProtocolVersions: [2]
             }
           }
         : {}),
@@ -875,7 +878,15 @@ export class MemoryService {
     openedAt: string;
     serverTime: string;
   } {
-    return this.sessionTurns.openSession(this.withTimeZone(request));
+    const response = this.sessionTurns.openSession(this.withTimeZone(request));
+    if (this.projectEnvironmentScanEnabled() && response.projectId) {
+      const session = this.requireSession(response.sessionId);
+      const scope = this.repos.l3WorldModels.getScope(session.userId, response.projectId);
+      if (scope?.workspaceUri && isLocalWorkspaceUri(scope.workspaceUri)) {
+        this.projectEnvironment.requestSessionScan(session);
+      }
+    }
+    return response;
   }
 
   closeSession(sessionId: string, request: RequestEnvelope = {}): {
@@ -919,6 +930,16 @@ export class MemoryService {
     if (!result.throughTraceSeq) {
       throw new MemoryServiceError("conflict", "through L1 memory was not registered");
     }
+    if (
+      request.trigger === "token_compaction" &&
+      this.projectEnvironmentScanEnabled() &&
+      session.projectId
+    ) {
+      const scope = this.repos.l3WorldModels.getScope(session.userId, session.projectId);
+      if (scope?.workspaceUri && isLocalWorkspaceUri(scope.workspaceUri)) {
+        this.projectEnvironment.requestCompactionScan(session, result.throughTraceSeq);
+      }
+    }
     return {
       scheduled: result.scheduled,
       throughL1MemoryId: request.throughL1MemoryId,
@@ -940,36 +961,6 @@ export class MemoryService {
       throw new MemoryServiceError("conflict", "l3_world_model_session_not_open");
     }
     return this.l3WorldModelContextReadModel.load(session);
-  }
-
-  projectEnvironmentSyncStart(
-    projectId: string,
-    request: ProjectEnvironmentSyncStartRequest
-  ): ProjectEnvironmentSyncResponse {
-    this.assertMemoryAddEnabled();
-    const session = this.requireProjectEnvironmentSession(request.sessionId, projectId, request.namespace);
-    return this.projectEnvironment.start(session, projectId, request);
-  }
-
-  projectEnvironmentSyncEvidence(
-    projectId: string,
-    syncId: string,
-    request: ProjectEnvironmentSyncEvidenceRequest
-  ): ProjectEnvironmentSyncResponse {
-    this.assertMemoryAddEnabled();
-    const session = this.requireProjectEnvironmentSession(request.sessionId, projectId, request.namespace);
-    return this.projectEnvironment.evidence(session, projectId, syncId, request);
-  }
-
-  projectEnvironmentSyncStatus(
-    projectId: string,
-    syncId: string,
-    sessionId: string,
-    request: L3WorldModelRequestEnvelope
-  ): ProjectEnvironmentSyncResponse {
-    this.assertMemorySearchEnabled();
-    const session = this.requireProjectEnvironmentSession(sessionId, projectId, request.namespace);
-    return this.projectEnvironment.status(session, projectId, syncId, request.adapterId);
   }
 
   compactSession(sessionId: string, request: SessionCompactRequest = {}): {
@@ -2354,22 +2345,6 @@ export class MemoryService {
     if (conflicts.some(Boolean)) {
       throw new MemoryServiceError("conflict", "l3_world_model_session_scope_conflict");
     }
-  }
-
-  private requireProjectEnvironmentSession(
-    sessionId: string,
-    projectId: string,
-    namespace: RuntimeNamespace
-  ): SessionRecord {
-    const session = this.requireSession(sessionId);
-    this.assertL3WorldModelSessionScope(session, namespace);
-    if (session.status !== "open") {
-      throw new MemoryServiceError("conflict", "l3_world_model_session_not_open");
-    }
-    if (!session.projectId || session.projectId !== projectId) {
-      throw new MemoryServiceError("conflict", "project_environment_project_scope_conflict");
-    }
-    return session;
   }
 
   private assertMemoryInScope(memory: MemoryRow, namespace?: RuntimeNamespace): void {

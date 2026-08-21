@@ -1,23 +1,19 @@
 import type Database from "better-sqlite3";
 import {
-  PROJECT_ENVIRONMENT_SCAN_POLICY_V1,
   canonicalJson,
   renderL3WorldModelFields,
   sha256Hex,
-  type InventoryEntry,
   type JsonValue,
   type L3WorldModelFieldName,
   type L3WorldModelFields,
   type L3WorldModelTraceHeadResponse,
-  type ProjectEnvironmentSyncResponse,
-  type ProjectEnvironmentSyncStatus,
-  type ProjectWorkspaceEvidence,
-  type ProjectWorkspaceOperation,
-  type WorkspaceBridgeCapabilities,
   type WorkspaceUri
 } from "@memmy/local-api-contracts";
 import { retrievalDocumentForMemory } from "../algorithm/plugin-algorithms.js";
-import type { DeterministicProjectFacts } from "../service/project-environment/manifest-parsers.js";
+import type {
+  ProjectEnvironmentKind,
+  ProjectEnvironmentStateRecord
+} from "../service/project-environment/types.js";
 import type {
   FeedbackRequest,
   JobRef,
@@ -75,8 +71,7 @@ const BUNDLE_TABLES = [
   "recall_events",
   "api_logs",
   "memory_change_log",
-  "l3_world_model_project_environment_sync_state",
-  "l3_world_model_project_environment_operations",
+  "l3_world_model_project_environment_state",
   "evolution_jobs",
   "embedding_retry_queue",
   "memory_processing_state",
@@ -3028,19 +3023,12 @@ export class RuntimeRepository {
         const userId = typeof payload.userId === "string" ? payload.userId : undefined;
         const projectId = typeof payload.projectId === "string" ? payload.projectId : undefined;
         const scanId = typeof payload.scanId === "string" ? payload.scanId : undefined;
-        const syncId = typeof payload.syncId === "string" ? payload.syncId : undefined;
         if (userId && projectId && scanId) {
           this.db.prepare(
-            `UPDATE l3_world_model_project_environment_sync_state
-             SET status = 'failed', active_adapter_id = NULL,
-                 sync_lease_expires_at = NULL, updated_at = ?
+            `UPDATE l3_world_model_project_environment_state
+             SET status = 'failed', last_error = ?, updated_at = ?
             WHERE user_id = ? AND project_id = ? AND current_scan_id = ?`
-          ).run(at, userId, projectId, scanId);
-        }
-        if (syncId) {
-          this.db.prepare(
-            `DELETE FROM l3_world_model_project_environment_operations WHERE sync_id = ?`
-          ).run(syncId);
+          ).run(error, at, userId, projectId, scanId);
         }
       }
       return this.getJob(id);
@@ -4403,17 +4391,19 @@ export class L3WorldModelRepository {
 
       if (scope.projectId) {
         this.db.prepare(
-          `UPDATE l3_world_model_project_environment_sync_state
-           SET status = 'uninitialized', current_sync_id = NULL, current_scan_id = NULL,
-               applied_scan_id = NULL, fingerprint = NULL, profile_scan_id = NULL,
-               active_adapter_id = NULL,
-               sync_lease_expires_at = NULL, updated_at = ?
-           WHERE user_id = ? AND project_id = ?`
+          `UPDATE evolution_jobs
+           SET status = 'succeeded', leased_until = NULL, last_error = NULL, updated_at = ?
+           WHERE job_type = 'project_environment_profile'
+             AND user_id = ?
+             AND json_extract(payload_json, '$.projectId') = ?
+             AND status IN ('queued', 'failed')`
         ).run(at, scope.userId, scope.projectId);
         this.db.prepare(
-          `DELETE FROM l3_world_model_project_environment_operations
+          `UPDATE l3_world_model_project_environment_state
+           SET project_kind = 'unknown', status = 'uninitialized', current_scan_id = NULL,
+               applied_scan_id = NULL, fingerprint = NULL, last_error = NULL, updated_at = ?
            WHERE user_id = ? AND project_id = ?`
-        ).run(scope.userId, scope.projectId);
+        ).run(at, scope.userId, scope.projectId);
       }
       return { before, deleted, scope };
     })();
@@ -4780,93 +4770,15 @@ export class L3WorldModelRepository {
   }
 }
 
-const SYNC_LEASE_MS = 10 * 60 * 1000;
-const EVIDENCE_TTL_MS = 24 * 60 * 60 * 1000;
-
-export type ProjectEnvironmentKind = "unknown" | "code" | "folder";
-
-export interface ProjectEnvironmentStateRecord {
-  userId: string;
-  projectId: string;
-  projectKind: ProjectEnvironmentKind;
-  status: ProjectEnvironmentSyncStatus;
-  currentSyncId?: string;
-  currentScanId?: string;
-  appliedScanId?: string;
-  fingerprint?: string;
-  profileScanId?: string;
-  activeAdapterId?: string;
-  syncLeaseExpiresAt?: string;
-  updatedAt: string;
-}
-
-export interface ProjectEnvironmentOperationRecord {
-  syncId: string;
-  operationId: string;
-  userId: string;
-  projectId: string;
-  adapterId: string;
-  operation: ProjectWorkspaceOperation;
-  status: "pending" | "accepted" | "unsupported" | "failed" | "expired";
-  evidence: Record<string, unknown>;
-  resultHash?: string;
-  nextPageIndex: number;
-  isComplete: boolean;
-  attempts: number;
-  lastError?: string;
-  expiresAt: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface ProjectEnvironmentDerivedEvidence {
-  projectKind: Exclude<ProjectEnvironmentKind, "unknown">;
-  fingerprint: string;
-  compactFileTree: string;
-  omittedCount: number;
-  deterministicFacts: DeterministicProjectFacts;
-}
-
-export interface AcceptProjectEnvironmentEvidenceResult {
-  response: ProjectEnvironmentSyncResponse;
-  inventoryComplete: boolean;
-  deterministicEvidenceComplete: boolean;
-  stale: boolean;
-  progressed: boolean;
-}
-
-interface SqlStateRow {
+interface SqlProjectEnvironmentStateRow {
   user_id: string;
   project_id: string;
   project_kind: ProjectEnvironmentKind;
-  status: ProjectEnvironmentSyncStatus;
-  current_sync_id: string | null;
+  status: ProjectEnvironmentStateRecord["status"];
   current_scan_id: string | null;
   applied_scan_id: string | null;
   fingerprint: string | null;
-  profile_scan_id: string | null;
-  active_adapter_id: string | null;
-  sync_lease_expires_at: string | null;
-  updated_at: string;
-}
-
-interface SqlOperationRow {
-  sync_id: string;
-  operation_id: string;
-  user_id: string;
-  project_id: string;
-  adapter_id: string;
-  operation_kind: ProjectWorkspaceOperation["kind"];
-  request_json: string;
-  status: ProjectEnvironmentOperationRecord["status"];
-  evidence_json: string;
-  result_hash: string | null;
-  next_page_index: number;
-  is_complete: number;
-  attempts: number;
   last_error: string | null;
-  expires_at: string;
-  created_at: string;
   updated_at: string;
 }
 
@@ -4879,391 +4791,104 @@ export class ProjectEnvironmentRepository {
 
   getState(userId: string, projectId: string): ProjectEnvironmentStateRecord | undefined {
     const row = this.db.prepare(
-      `SELECT * FROM l3_world_model_project_environment_sync_state
+      `SELECT * FROM l3_world_model_project_environment_state
        WHERE user_id = ? AND project_id = ?`
-    ).get(userId, projectId) as SqlStateRow | undefined;
-    return row ? stateFromSql(row) : undefined;
+    ).get(userId, projectId) as SqlProjectEnvironmentStateRow | undefined;
+    return row ? projectEnvironmentStateFromSql(row) : undefined;
   }
 
-  getOperation(syncId: string, operationId: string): ProjectEnvironmentOperationRecord | undefined {
-    const row = this.db.prepare(
-      `SELECT * FROM l3_world_model_project_environment_operations
-       WHERE sync_id = ? AND operation_id = ?`
-    ).get(syncId, operationId) as SqlOperationRow | undefined;
-    return row ? operationFromSql(row) : undefined;
-  }
-
-  listOperations(syncId: string): ProjectEnvironmentOperationRecord[] {
-    return (this.db.prepare(
-      `SELECT * FROM l3_world_model_project_environment_operations
-       WHERE sync_id = ? ORDER BY created_at ASC, operation_id ASC`
-    ).all(syncId) as SqlOperationRow[]).map(operationFromSql);
-  }
-
-  start(input: {
+  requestScan(input: {
     userId: string;
     projectId: string;
-    adapterId: string;
-    capabilities: WorkspaceBridgeCapabilities;
+    sessionId: string;
+    trigger: "session_start" | "token_compaction";
+    dedupeKey: string;
     at?: string;
-  }): ProjectEnvironmentSyncResponse {
-    return this.db.transaction(() => this.startInTransaction(input))();
-  }
-
-  startIdempotent(input: {
-    userId: string;
-    projectId: string;
-    adapterId: string;
-    capabilities: WorkspaceBridgeCapabilities;
-    idempotencyKey: string;
-    requestHash: string;
-    at?: string;
-  }): ProjectEnvironmentSyncResponse {
+  }): { job: EvolutionJobRecord; enqueued: boolean } {
     return this.db.transaction(() => {
-      const existing = this.runtime.getIdempotency(input.idempotencyKey);
-      if (existing) {
-        if (existing.requestHash !== input.requestHash) {
-          throw new ProjectEnvironmentIdempotencyConflictError();
-        }
-        return existing.response as ProjectEnvironmentSyncResponse;
-      }
+      const existing = this.runtime.getJobByDedupeKey(input.dedupeKey);
+      if (existing) return { job: existing, enqueued: false };
       const at = input.at ?? nowIso();
-      const response = this.startInTransaction({ ...input, at });
-      this.runtime.saveIdempotency(input.idempotencyKey, input.requestHash, response, at);
-      return response;
-    })();
-  }
-
-  private startInTransaction(input: {
-    userId: string;
-    projectId: string;
-    adapterId: string;
-    capabilities: WorkspaceBridgeCapabilities;
-    at?: string;
-  }): ProjectEnvironmentSyncResponse {
-    const at = input.at ?? nowIso();
-    this.l3WorldModels.ensureScope(input.userId, input.projectId, at);
-    this.db.prepare(
-        `INSERT INTO l3_world_model_project_environment_sync_state (
-           user_id, project_id, project_kind, status, updated_at
-         ) VALUES (?, ?, 'unknown', 'uninitialized', ?)
-         ON CONFLICT(user_id, project_id) DO NOTHING`
-    ).run(input.userId, input.projectId, at);
-    const state = this.requireState(input.userId, input.projectId);
-    if (state.currentSyncId && leaseIsActive(state.syncLeaseExpiresAt, at) &&
-        state.status !== "clean" && state.status !== "failed") {
-      if (state.activeAdapterId === input.adapterId) {
-        return this.response(input.userId, input.projectId, input.adapterId, at);
-      }
-      return responseFromState(state, []);
-    }
-
-    if (state.currentSyncId) {
+      const scanId = newId("l3wm_scan");
+      this.l3WorldModels.ensureScope(input.userId, input.projectId, at);
       this.db.prepare(
-        `DELETE FROM l3_world_model_project_environment_operations WHERE sync_id = ?`
-      ).run(state.currentSyncId);
-    }
-    const syncId = newId("l3wm_sync");
-    const inventory: ProjectWorkspaceOperation = {
-      operationId: newId("l3wm_op"),
-      kind: "inventory",
-      policy: PROJECT_ENVIRONMENT_SCAN_POLICY_V1,
-      mode: "full"
-    };
-    if (!input.capabilities.operations.includes("inventory")) {
-      this.db.prepare(
-        `UPDATE l3_world_model_project_environment_sync_state
-         SET status = 'failed', current_sync_id = ?, active_adapter_id = NULL,
-             sync_lease_expires_at = NULL, updated_at = ?
-         WHERE user_id = ? AND project_id = ?`
-      ).run(syncId, at, input.userId, input.projectId);
-      return this.response(input.userId, input.projectId, input.adapterId, at);
-    }
-    this.db.prepare(
-      `UPDATE l3_world_model_project_environment_sync_state
-       SET status = 'collecting_inventory', current_sync_id = ?, active_adapter_id = ?,
-           sync_lease_expires_at = ?, updated_at = ?
-       WHERE user_id = ? AND project_id = ?`
-    ).run(syncId, input.adapterId, plusMs(at, SYNC_LEASE_MS), at, input.userId, input.projectId);
-    this.insertOperation(input.userId, input.projectId, input.adapterId, syncId, inventory, at);
-    this.db.prepare(
-      `UPDATE l3_world_model_project_environment_operations
-       SET evidence_json = ? WHERE sync_id = ? AND operation_id = ?`
-    ).run(JSON.stringify({ capabilities: input.capabilities }), syncId, inventory.operationId);
-    return this.response(input.userId, input.projectId, input.adapterId, at);
-  }
-
-  response(
-    userId: string,
-    projectId: string,
-    adapterId: string,
-    at = nowIso()
-  ): ProjectEnvironmentSyncResponse {
-    const state = this.requireState(userId, projectId);
-    const canExecute = state.activeAdapterId === adapterId && leaseIsActive(state.syncLeaseExpiresAt, at);
-    const operations = canExecute && state.currentSyncId
-      ? this.listOperations(state.currentSyncId)
-        .filter((record) => record.status === "pending" && !record.isComplete)
-        .map((record) => record.operation)
-      : [];
-    return responseFromState(state, operations);
-  }
-
-  acceptEvidence(input: {
-    userId: string;
-    projectId: string;
-    adapterId: string;
-    syncId: string;
-    evidence: ProjectWorkspaceEvidence;
-    at?: string;
-  }): AcceptProjectEnvironmentEvidenceResult {
-    return this.db.transaction(() => {
-      const at = input.at ?? nowIso();
-      const state = this.requireState(input.userId, input.projectId);
-      if (state.currentSyncId !== input.syncId || state.activeAdapterId !== input.adapterId) {
-        throw new Error("project_environment_sync_conflict");
-      }
-      if (!leaseIsActive(state.syncLeaseExpiresAt, at)) {
-        throw new Error("project_environment_sync_lease_expired");
-      }
-      const record = this.getOperation(input.syncId, input.evidence.operationId);
-      if (!record || record.userId !== input.userId || record.projectId !== input.projectId ||
-          record.adapterId !== input.adapterId || record.operation.kind !== input.evidence.kind) {
-        throw new Error("project_environment_operation_conflict");
-      }
-      if (record.status === "expired" || record.status === "failed") {
-        throw new Error("project_environment_operation_expired");
-      }
-      if (Date.parse(record.expiresAt) <= Date.parse(at)) {
-        throw new Error("project_environment_operation_expired");
-      }
-
-      let stale = false;
-      let madeProgress = false;
-      if (input.evidence.kind === "inventory" && input.evidence.status === "accepted") {
-        madeProgress = this.acceptInventoryPage(record, input.evidence, at);
-      } else {
-        const evidenceHash = sha256Hex(canonicalJson(input.evidence));
-        if (record.isComplete) {
-          if (record.resultHash !== evidenceHash) throw new Error("project_environment_evidence_conflict");
-        } else if (input.evidence.kind === "read_text" && input.evidence.status === "stale") {
-          stale = true;
-          madeProgress = true;
-          this.db.prepare(
-            `UPDATE l3_world_model_project_environment_operations
-             SET status = 'accepted', evidence_json = ?, result_hash = ?, is_complete = 1,
-                 attempts = attempts + 1, expires_at = ?, updated_at = ?
-             WHERE sync_id = ? AND operation_id = ?`
-          ).run(JSON.stringify(input.evidence), evidenceHash, plusMs(at, EVIDENCE_TTL_MS), at,
-            input.syncId, input.evidence.operationId);
-        } else {
-          madeProgress = true;
-          validateEvidenceAgainstOperation(record.operation, input.evidence);
-          const status = input.evidence.status === "unsupported" ? "unsupported" : "accepted";
-          this.db.prepare(
-            `UPDATE l3_world_model_project_environment_operations
-             SET status = ?, evidence_json = ?, result_hash = ?, is_complete = 1,
-                 attempts = attempts + 1, expires_at = ?, updated_at = ?
-             WHERE sync_id = ? AND operation_id = ?`
-          ).run(status, JSON.stringify(input.evidence), evidenceHash, plusMs(at, EVIDENCE_TTL_MS), at,
-            input.syncId, input.evidence.operationId);
-        }
-      }
-      if (madeProgress) this.renewLease(input.userId, input.projectId, at);
-      const operations = this.listActiveOperations(input.syncId);
-      const inventory = operations.find((candidate) => candidate.operation.kind === "inventory");
-      const inventoryComplete = Boolean(inventory?.isComplete);
-      const deterministicEvidenceComplete = inventoryComplete && operations.every((candidate) => candidate.isComplete);
-      return {
-        response: this.response(input.userId, input.projectId, input.adapterId, at),
-        inventoryComplete,
-        deterministicEvidenceComplete,
-        stale,
-        progressed: madeProgress
-      };
-    })();
-  }
-
-  replaceAfterStale(input: {
-    userId: string;
-    projectId: string;
-    adapterId: string;
-    syncId: string;
-    at?: string;
-  }): ProjectEnvironmentSyncResponse {
-    return this.db.transaction(() => {
-      const at = input.at ?? nowIso();
-      const state = this.requireCurrentOwner(input);
-      const capabilities = this.listActiveOperations(input.syncId)
-        .find((record) => record.operation.kind === "inventory")?.evidence.capabilities;
-      this.db.prepare(
-        `UPDATE l3_world_model_project_environment_operations
-         SET status = 'expired', last_error = 'stale_inventory', updated_at = ?
-         WHERE sync_id = ? AND status <> 'expired'`
-      ).run(at, input.syncId);
-      const operation: ProjectWorkspaceOperation = {
-        operationId: newId("l3wm_op"),
-        kind: "inventory",
-        policy: PROJECT_ENVIRONMENT_SCAN_POLICY_V1,
-        mode: "full"
-      };
-      this.insertOperation(input.userId, input.projectId, input.adapterId, input.syncId, operation, at);
-      this.db.prepare(
-        `UPDATE l3_world_model_project_environment_operations
-         SET evidence_json = ? WHERE sync_id = ? AND operation_id = ?`
-      ).run(JSON.stringify({ capabilities }), input.syncId, operation.operationId);
-      this.db.prepare(
-        `UPDATE l3_world_model_project_environment_sync_state
-         SET status = 'collecting_inventory', sync_lease_expires_at = ?, updated_at = ?
-         WHERE user_id = ? AND project_id = ?`
-      ).run(plusMs(at, SYNC_LEASE_MS), at, state.userId, state.projectId);
-      return this.response(input.userId, input.projectId, input.adapterId, at);
-    })();
-  }
-
-  planDeterministicOperations(input: {
-    userId: string;
-    projectId: string;
-    adapterId: string;
-    syncId: string;
-    operations: ProjectWorkspaceOperation[];
-    at?: string;
-  }): ProjectEnvironmentSyncResponse {
-    return this.db.transaction(() => {
-      const at = input.at ?? nowIso();
-      this.requireCurrentOwner(input);
-      for (const operation of input.operations) {
-        const existing = this.getOperation(input.syncId, operation.operationId);
-        if (!existing) this.insertOperation(input.userId, input.projectId, input.adapterId, input.syncId, operation, at);
-      }
-      this.renewLease(input.userId, input.projectId, at);
-      return this.response(input.userId, input.projectId, input.adapterId, at);
-    })();
-  }
-
-  inventoryEntries(syncId: string): { entries: InventoryEntry[]; omittedCount: number } {
-    const inventory = this.listOperations(syncId).find((record) =>
-      record.operation.kind === "inventory" && record.status === "accepted" && record.isComplete
-    );
-    if (!inventory) throw new Error("project_environment_inventory_incomplete");
-    const pages = Array.isArray(inventory.evidence.pages) ? inventory.evidence.pages : [];
-    const entries: InventoryEntry[] = [];
-    let omittedCount = 0;
-    for (const page of pages) {
-      if (!isRecord(page)) continue;
-      if (Array.isArray(page.entries)) entries.push(...page.entries as InventoryEntry[]);
-      if (page.isLast === true && typeof page.omittedCount === "number") omittedCount = page.omittedCount;
-    }
-    return { entries, omittedCount };
-  }
-
-  deterministicEvidence(syncId: string): ProjectEnvironmentOperationRecord[] {
-    return this.listActiveOperations(syncId).filter((record) => record.operation.kind !== "inventory");
-  }
-
-  commitDeterministic(input: {
-    userId: string;
-    projectId: string;
-    adapterId: string;
-    syncId: string;
-    derived: ProjectEnvironmentDerivedEvidence;
-    sessionId?: string;
-    at?: string;
-  }): ProjectEnvironmentSyncResponse {
-    return this.db.transaction(() => {
-      const at = input.at ?? nowIso();
-      const previous = this.requireCurrentOwner(input);
-      const inventory = this.listOperations(input.syncId).find((record) =>
-        record.operation.kind === "inventory" && record.status === "accepted"
-      );
-      if (!inventory?.isComplete) throw new Error("project_environment_inventory_incomplete");
-      const changed = previous.fingerprint !== input.derived.fingerprint || previous.projectKind !== input.derived.projectKind;
-      const scanId = changed || !previous.currentScanId ? newId("l3wm_scan") : previous.currentScanId;
-      const typeChanged = previous.projectKind !== "unknown" && previous.projectKind !== input.derived.projectKind;
-      const alreadyApplied = !changed && previous.appliedScanId === scanId && previous.profileScanId === scanId;
-
-      const nextEvidence = {
-        ...inventory.evidence,
-        derived: input.derived
-      };
-      this.db.prepare(
-        `UPDATE l3_world_model_project_environment_operations
-         SET evidence_json = ?, expires_at = ?, updated_at = ?
-         WHERE sync_id = ? AND operation_id = ?`
-      ).run(JSON.stringify(nextEvidence), plusMs(at, EVIDENCE_TTL_MS), at, inventory.syncId, inventory.operationId);
-
-      if (alreadyApplied) {
-        this.db.prepare(
-          `UPDATE l3_world_model_project_environment_sync_state
-           SET status = 'clean', current_scan_id = ?, active_adapter_id = NULL,
-               sync_lease_expires_at = NULL, updated_at = ?
-           WHERE user_id = ? AND project_id = ?`
-        ).run(scanId, at, input.userId, input.projectId);
-        this.cleanupOperations(input.syncId);
-        return this.response(input.userId, input.projectId, input.adapterId, at);
-      }
-
-      let appliedScanId = previous.appliedScanId ?? null;
-      if (typeChanged) {
-        this.l3WorldModels.upsertField({
+        `INSERT INTO l3_world_model_project_environment_state (
+           user_id, project_id, project_kind, status, current_scan_id,
+           applied_scan_id, fingerprint, last_error, updated_at
+         ) VALUES (?, ?, 'unknown', 'queued', ?, NULL, NULL, NULL, ?)
+         ON CONFLICT(user_id, project_id) DO UPDATE SET
+           status = 'queued', current_scan_id = excluded.current_scan_id,
+           last_error = NULL, updated_at = excluded.updated_at`
+      ).run(input.userId, input.projectId, scanId, at);
+      const job: EvolutionJobRecord = {
+        id: newId("job"),
+        jobType: "project_environment_profile",
+        status: "queued",
+        dedupeKey: input.dedupeKey,
+        userId: input.userId,
+        sessionId: input.sessionId,
+        payload: {
           userId: input.userId,
           projectId: input.projectId,
-          targetField: "project_environment_profile",
-          value: null,
-          projectEnvironmentAppliedScanId: scanId,
-          at,
-          source: "project_environment"
-        });
-        appliedScanId = scanId;
-      }
-
-      this.db.prepare(
-        `UPDATE l3_world_model_project_environment_sync_state
-         SET project_kind = ?, status = 'summarizing', current_scan_id = ?,
-             applied_scan_id = ?, fingerprint = ?,
-             profile_scan_id = CASE WHEN ? THEN NULL ELSE profile_scan_id END,
-             sync_lease_expires_at = ?, updated_at = ?
-         WHERE user_id = ? AND project_id = ?`
-      ).run(
-        input.derived.projectKind,
-        scanId,
-        appliedScanId,
-        input.derived.fingerprint,
-        typeChanged ? 1 : 0,
-        plusMs(at, SYNC_LEASE_MS),
-        at,
-        input.userId,
-        input.projectId
-      );
-      this.enqueueProfileJob({
-        userId: input.userId,
-        projectId: input.projectId,
-        sessionId: input.sessionId,
-        syncId: input.syncId,
-        scanId,
-        projectKind: input.derived.projectKind,
-        at
-      });
-      return this.response(input.userId, input.projectId, input.adapterId, at);
+          scanId,
+          trigger: input.trigger
+        },
+        attempts: 0,
+        maxAttempts: 3,
+        createdAt: at,
+        updatedAt: at
+      };
+      this.l3WorldModels.insertImmutableJob(job);
+      return { job, enqueued: true };
     })();
   }
 
-  derivedEvidence(syncId: string): ProjectEnvironmentDerivedEvidence {
-    const inventory = this.listOperations(syncId).find((record) =>
-      record.operation.kind === "inventory" && record.status === "accepted"
+  beginScan(userId: string, projectId: string, scanId: string, at = nowIso()): boolean {
+    const result = this.db.prepare(
+      `UPDATE l3_world_model_project_environment_state
+       SET status = 'scanning', last_error = NULL, updated_at = ?
+       WHERE user_id = ? AND project_id = ? AND current_scan_id = ?`
+    ).run(at, userId, projectId, scanId);
+    return result.changes === 1;
+  }
+
+  markSummarizing(userId: string, projectId: string, scanId: string, at = nowIso()): boolean {
+    const result = this.db.prepare(
+      `UPDATE l3_world_model_project_environment_state
+       SET status = 'summarizing', updated_at = ?
+       WHERE user_id = ? AND project_id = ? AND current_scan_id = ?`
+    ).run(at, userId, projectId, scanId);
+    return result.changes === 1;
+  }
+
+  markCleanWithoutModel(input: {
+    userId: string;
+    projectId: string;
+    scanId: string;
+    projectKind: Exclude<ProjectEnvironmentKind, "unknown">;
+    at?: string;
+  }): boolean {
+    const at = input.at ?? nowIso();
+    const result = this.db.prepare(
+      `UPDATE l3_world_model_project_environment_state
+       SET project_kind = ?, status = 'clean', last_error = NULL, updated_at = ?
+       WHERE user_id = ? AND project_id = ? AND current_scan_id = ?`
+    ).run(
+      input.projectKind,
+      at,
+      input.userId,
+      input.projectId,
+      input.scanId
     );
-    const derived = inventory?.evidence.derived;
-    if (!isProjectEnvironmentDerivedEvidence(derived)) {
-      throw new Error("project_environment_derived_evidence_missing");
-    }
-    return derived;
+    return result.changes === 1;
   }
 
   applyProfile(input: {
     userId: string;
     projectId: string;
-    syncId: string;
     scanId: string;
+    projectKind: Exclude<ProjectEnvironmentKind, "unknown">;
+    fingerprint: string;
     expectedCurrentProfile: string | null;
     operation: "noop" | "create" | "update";
     profile: string;
@@ -5271,15 +4896,17 @@ export class ProjectEnvironmentRepository {
   }): { stale: boolean } {
     return this.db.transaction(() => {
       const at = input.at ?? nowIso();
-      const state = this.requireState(input.userId, input.projectId);
-      if (state.currentSyncId !== input.syncId || state.currentScanId !== input.scanId) {
-        return { stale: true };
+      const state = this.getState(input.userId, input.projectId);
+      if (!state || state.currentScanId !== input.scanId) return { stale: true };
+      const currentProfile = this.l3WorldModels.fields(input.userId, input.projectId).projectEnvironmentProfile;
+      if (currentProfile !== input.expectedCurrentProfile) {
+        throw new Error("project_environment_profile_concurrent_update");
       }
-      const currentProfile = this.l3WorldModels.fields(
-        input.userId,
-        input.projectId
-      ).projectEnvironmentProfile;
-      if (currentProfile !== input.expectedCurrentProfile) return { stale: true };
+      const typeChanged = state.projectKind !== "unknown" && state.projectKind !== input.projectKind;
+      if (typeChanged && currentProfile !== null && input.operation === "noop") {
+        throw new Error("project_environment_profile_type_change_requires_update");
+      }
+
       let nextProfile = currentProfile;
       if (input.operation === "noop") {
         if (input.profile !== "") throw new TypeError("noop project profile must be empty");
@@ -5294,6 +4921,7 @@ export class ProjectEnvironmentRepository {
         ) throw new TypeError("invalid project profile update");
         nextProfile = input.profile || null;
       }
+
       const existingMemory = this.l3WorldModels.getMemory(input.userId, input.projectId);
       if (nextProfile !== null || existingMemory) {
         this.l3WorldModels.upsertField({
@@ -5306,319 +4934,45 @@ export class ProjectEnvironmentRepository {
           source: "project_environment"
         });
       }
-      this.db.prepare(
-        `UPDATE l3_world_model_project_environment_sync_state
-         SET status = 'clean', applied_scan_id = ?, profile_scan_id = ?,
-             active_adapter_id = NULL, sync_lease_expires_at = NULL, updated_at = ?
+      const result = this.db.prepare(
+        `UPDATE l3_world_model_project_environment_state
+         SET project_kind = ?, status = 'clean', applied_scan_id = ?, fingerprint = ?,
+             last_error = NULL, updated_at = ?
          WHERE user_id = ? AND project_id = ? AND current_scan_id = ?`
-      ).run(input.scanId, input.scanId, at, input.userId, input.projectId, input.scanId);
-      this.cleanupOperations(input.syncId);
-      return { stale: false };
+      ).run(
+        input.projectKind,
+        input.scanId,
+        input.fingerprint,
+        at,
+        input.userId,
+        input.projectId,
+        input.scanId
+      );
+      return { stale: result.changes !== 1 };
     })();
   }
 
-  renewProfileEvidence(syncId: string, at = nowIso()): void {
+  failCurrentScan(userId: string, projectId: string, scanId: string, error: string, at = nowIso()): void {
     this.db.prepare(
-      `UPDATE l3_world_model_project_environment_operations
-       SET expires_at = ?, updated_at = ?
-       WHERE sync_id = ? AND status IN ('accepted', 'unsupported')`
-    ).run(plusMs(at, EVIDENCE_TTL_MS), at, syncId);
-  }
-
-  failCurrentSync(input: {
-    userId: string;
-    projectId: string;
-    adapterId: string;
-    syncId: string;
-    at?: string;
-  }): ProjectEnvironmentSyncResponse {
-    return this.db.transaction(() => {
-      const at = input.at ?? nowIso();
-      this.requireCurrentOwner(input);
-      this.db.prepare(
-        `UPDATE l3_world_model_project_environment_sync_state
-         SET status = 'failed', active_adapter_id = NULL,
-             sync_lease_expires_at = NULL, updated_at = ?
-         WHERE user_id = ? AND project_id = ?`
-      ).run(at, input.userId, input.projectId);
-      this.cleanupOperations(input.syncId);
-      return this.response(input.userId, input.projectId, input.adapterId, at);
-    })();
-  }
-
-  private requireState(userId: string, projectId: string): ProjectEnvironmentStateRecord {
-    const state = this.getState(userId, projectId);
-    if (!state) throw new Error("project_environment_state_not_found");
-    return state;
-  }
-
-  private requireCurrentOwner(input: {
-    userId: string;
-    projectId: string;
-    adapterId: string;
-    syncId: string;
-  }): ProjectEnvironmentStateRecord {
-    const state = this.requireState(input.userId, input.projectId);
-    if (state.currentSyncId !== input.syncId || state.activeAdapterId !== input.adapterId) {
-      throw new Error("project_environment_sync_conflict");
-    }
-    return state;
-  }
-
-  private renewLease(userId: string, projectId: string, at: string): void {
-    this.db.prepare(
-      `UPDATE l3_world_model_project_environment_sync_state
-       SET sync_lease_expires_at = ?, updated_at = ? WHERE user_id = ? AND project_id = ?`
-    ).run(plusMs(at, SYNC_LEASE_MS), at, userId, projectId);
-  }
-
-  private insertOperation(
-    userId: string,
-    projectId: string,
-    adapterId: string,
-    syncId: string,
-    operation: ProjectWorkspaceOperation,
-    at: string
-  ): void {
-    this.db.prepare(
-      `INSERT INTO l3_world_model_project_environment_operations (
-         sync_id, operation_id, user_id, project_id, adapter_id, operation_kind,
-         request_json, status, evidence_json, result_hash, next_page_index,
-         is_complete, attempts, last_error, expires_at, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', '{}', NULL, 0, 0, 0, NULL, ?, ?, ?)`
-    ).run(
-      syncId,
-      operation.operationId,
-      userId,
-      projectId,
-      adapterId,
-      operation.kind,
-      JSON.stringify(operation),
-      plusMs(at, EVIDENCE_TTL_MS),
-      at,
-      at
-    );
-  }
-
-  private acceptInventoryPage(
-    record: ProjectEnvironmentOperationRecord,
-    evidence: Extract<ProjectWorkspaceEvidence, { kind: "inventory"; status: "accepted" }>,
-    at: string
-  ): boolean {
-    const expectedHash = sha256Hex(canonicalJson({
-      operationId: evidence.operationId,
-      pageIndex: evidence.pageIndex,
-      isLast: evidence.isLast,
-      omittedCount: evidence.omittedCount ?? null,
-      entries: evidence.entries
-    }));
-    if (expectedHash !== evidence.pageHash) throw new Error("project_environment_page_hash_mismatch");
-    const pages = Array.isArray(record.evidence.pages) ? record.evidence.pages as Array<Record<string, unknown>> : [];
-    const existing = pages.find((page) => page.pageIndex === evidence.pageIndex);
-    if (existing) {
-      if (existing.pageHash !== evidence.pageHash) throw new Error("project_environment_evidence_conflict");
-      return false;
-    }
-    if (record.isComplete || evidence.pageIndex !== record.nextPageIndex) {
-      throw new Error("project_environment_page_sequence_conflict");
-    }
-    pages.push(evidence);
-    const complete = evidence.isLast;
-    const resultHash = complete ? sha256Hex(canonicalJson(pages as JsonValue)) : null;
-    this.db.prepare(
-      `UPDATE l3_world_model_project_environment_operations
-       SET status = ?, evidence_json = ?, result_hash = ?, next_page_index = ?, is_complete = ?,
-           attempts = attempts + 1, expires_at = ?, updated_at = ?
-       WHERE sync_id = ? AND operation_id = ?`
-    ).run(
-      complete ? "accepted" : "pending",
-      JSON.stringify({ ...record.evidence, pages }),
-      resultHash,
-      evidence.pageIndex + 1,
-      complete ? 1 : 0,
-      plusMs(at, EVIDENCE_TTL_MS),
-      at,
-      record.syncId,
-      record.operationId
-    );
-    return true;
-  }
-
-  private enqueueProfileJob(input: {
-    userId: string;
-    projectId: string;
-    sessionId?: string;
-    syncId: string;
-    scanId: string;
-    projectKind: "code" | "folder";
-    at: string;
-  }): void {
-    const dedupeKey = [
-      "project_environment_profile",
-      input.userId,
-      input.projectId,
-      input.scanId,
-      input.syncId
-    ].join(":");
-    const existing = this.runtime.getJobByDedupeKey(dedupeKey);
-    if (existing) return;
-    this.l3WorldModels.insertImmutableJob({
-      id: newId("job"),
-      jobType: "project_environment_profile",
-      status: "queued",
-      dedupeKey,
-      userId: input.userId,
-      sessionId: input.sessionId,
-      payload: {
-        userId: input.userId,
-        projectId: input.projectId,
-        syncId: input.syncId,
-        scanId: input.scanId,
-        projectKind: input.projectKind
-      },
-      attempts: 0,
-      maxAttempts: 3,
-      createdAt: input.at,
-      updatedAt: input.at
-    });
-  }
-
-  private cleanupOperations(syncId: string): void {
-    this.db.prepare(
-      `DELETE FROM l3_world_model_project_environment_operations WHERE sync_id = ?`
-    ).run(syncId);
-  }
-
-  listActiveOperations(syncId: string): ProjectEnvironmentOperationRecord[] {
-    return this.listOperations(syncId).filter((record) =>
-      record.status !== "expired" && record.status !== "failed"
-    );
+      `UPDATE l3_world_model_project_environment_state
+       SET status = 'failed', last_error = ?, updated_at = ?
+       WHERE user_id = ? AND project_id = ? AND current_scan_id = ?`
+    ).run(error, at, userId, projectId, scanId);
   }
 }
 
-export class ProjectEnvironmentIdempotencyConflictError extends Error {
-  constructor() {
-    super("project_environment_start_idempotency_conflict");
-    this.name = "ProjectEnvironmentIdempotencyConflictError";
-  }
-}
-
-function validateEvidenceAgainstOperation(
-  operation: ProjectWorkspaceOperation,
-  evidence: ProjectWorkspaceEvidence
-): void {
-  if (operation.kind === "read_text" && evidence.kind === "read_text" && evidence.status === "accepted") {
-    if (operation.relativePath !== evidence.relativePath || operation.expectedSha256 !== evidence.sha256) {
-      throw new Error("project_environment_read_evidence_mismatch");
-    }
-  }
-  if (operation.kind === "runtime_probe" && evidence.kind === "runtime_probe" && evidence.status === "accepted") {
-    if (operation.probe !== evidence.probe) throw new Error("project_environment_probe_evidence_mismatch");
-    if (evidence.exitCode === 0 && evidence.versionText === null) {
-      throw new Error("project_environment_probe_version_invalid");
-    }
-  }
-}
-
-function responseFromState(
-  state: ProjectEnvironmentStateRecord,
-  operations: ProjectWorkspaceOperation[]
-): ProjectEnvironmentSyncResponse {
-  if (!state.currentSyncId) throw new Error("project_environment_sync_not_initialized");
-  return {
-    syncId: state.currentSyncId,
-    scanId: state.currentScanId ?? null,
-    status: state.status,
-    operations
-  };
-}
-
-function stateFromSql(row: SqlStateRow): ProjectEnvironmentStateRecord {
+function projectEnvironmentStateFromSql(row: SqlProjectEnvironmentStateRow): ProjectEnvironmentStateRecord {
   return {
     userId: row.user_id,
     projectId: row.project_id,
     projectKind: row.project_kind,
     status: row.status,
-    currentSyncId: row.current_sync_id ?? undefined,
     currentScanId: row.current_scan_id ?? undefined,
     appliedScanId: row.applied_scan_id ?? undefined,
     fingerprint: row.fingerprint ?? undefined,
-    profileScanId: row.profile_scan_id ?? undefined,
-    activeAdapterId: row.active_adapter_id ?? undefined,
-    syncLeaseExpiresAt: row.sync_lease_expires_at ?? undefined,
-    updatedAt: row.updated_at
-  };
-}
-
-function operationFromSql(row: SqlOperationRow): ProjectEnvironmentOperationRecord {
-  return {
-    syncId: row.sync_id,
-    operationId: row.operation_id,
-    userId: row.user_id,
-    projectId: row.project_id,
-    adapterId: row.adapter_id,
-    operation: JSON.parse(row.request_json) as ProjectWorkspaceOperation,
-    status: row.status,
-    evidence: JSON.parse(row.evidence_json) as Record<string, unknown>,
-    resultHash: row.result_hash ?? undefined,
-    nextPageIndex: row.next_page_index,
-    isComplete: row.is_complete !== 0,
-    attempts: row.attempts,
     lastError: row.last_error ?? undefined,
-    expiresAt: row.expires_at,
-    createdAt: row.created_at,
     updatedAt: row.updated_at
   };
-}
-
-function leaseIsActive(expiresAt: string | undefined, at: string): boolean {
-  return Boolean(expiresAt && Date.parse(expiresAt) > Date.parse(at));
-}
-
-function plusMs(at: string, milliseconds: number): string {
-  return new Date(Date.parse(at) + milliseconds).toISOString();
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isProjectEnvironmentDerivedEvidence(value: unknown): value is ProjectEnvironmentDerivedEvidence {
-  if (!isRecord(value)) return false;
-  return (value.projectKind === "code" || value.projectKind === "folder") &&
-    typeof value.fingerprint === "string" &&
-    typeof value.compactFileTree === "string" &&
-    typeof value.omittedCount === "number" &&
-    isDeterministicProjectFacts(value.deterministicFacts);
-}
-
-function isDeterministicProjectFacts(value: unknown): value is DeterministicProjectFacts {
-  if (!isRecord(value) || !isRecord(value.languageCounts)) return false;
-  if (!Object.values(value.languageCounts).every((count) =>
-    typeof count === "number" && Number.isInteger(count) && count >= 0
-  )) return false;
-  return [
-    value.manifestLanguages,
-    value.runtimeDeclarations,
-    value.toolchains,
-    value.buildEntries,
-    value.testEntries,
-    value.checkEntries
-  ].every((facts) => Array.isArray(facts) && facts.every(isSourcedProjectFact)) &&
-    Array.isArray(value.runtimeProbes) && value.runtimeProbes.every((fact) =>
-      isRecord(fact) && typeof fact.probe === "string" && typeof fact.value === "string"
-    );
-}
-
-function isSourcedProjectFact(value: unknown): boolean {
-  return isRecord(value) &&
-    typeof value.value === "string" &&
-    typeof value.sourceRelativePath === "string" &&
-    typeof value.sourceSha256 === "string";
-}
-
-function stringValue(value: unknown): string | undefined {
-  return typeof value === "string" && value ? value : undefined;
 }
 
 export class Repositories {
@@ -7289,8 +6643,7 @@ function bundleIdentity(
     l3_world_model_input_traces: ["session_id", "trace_seq"],
     l3_world_model_evidence_batches: ["id"],
     l3_world_model_batch_targets: ["batch_id", "target_field"],
-    l3_world_model_project_environment_sync_state: ["user_id", "project_id"],
-    l3_world_model_project_environment_operations: ["sync_id", "operation_id"]
+    l3_world_model_project_environment_state: ["user_id", "project_id"]
   };
   const newColumns = newTableIdentityColumns[table];
   if (newColumns) {
@@ -7383,16 +6736,13 @@ function normalizeRedactedL3WorldModelBundle(
     if (jobType !== "l3_world_model_update" && jobType !== "project_environment_profile") return true;
     return row.status === "succeeded" || row.status === "dead_letter";
   });
-  tables.l3_world_model_project_environment_operations = [];
-  tables.l3_world_model_project_environment_sync_state = (
-    tables.l3_world_model_project_environment_sync_state ?? []
+  tables.l3_world_model_project_environment_state = (
+    tables.l3_world_model_project_environment_state ?? []
   ).map((row) => ({
     ...row,
-    status: "dirty",
-    current_sync_id: null,
+    status: "uninitialized",
     current_scan_id: null,
-    active_adapter_id: null,
-    sync_lease_expires_at: null
+    last_error: null
   }));
 
   const exportedAt = nowIso();

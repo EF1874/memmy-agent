@@ -3,9 +3,12 @@ import { parse as parseJsonc } from "jsonc-parser";
 import { parse as parseToml } from "smol-toml";
 import ts from "typescript";
 import YAML from "yaml";
-import type { InventoryEntry } from "@memmy/local-api-contracts";
-import type { ProjectEnvironmentOperationRecord } from "../../storage/repositories.js";
 import { extensionOf } from "./scan-policy.js";
+import type {
+  InventoryEntry,
+  ProjectEnvironmentTextFile,
+  RuntimeProbeResult
+} from "./types.js";
 
 export interface SourcedFact {
   value: string;
@@ -31,7 +34,8 @@ export interface DeterministicProjectFacts {
 
 export function parseDeterministicProjectFacts(input: {
   entries: InventoryEntry[];
-  operations: ProjectEnvironmentOperationRecord[];
+  textFiles: ProjectEnvironmentTextFile[];
+  runtimeProbes: RuntimeProbeResult[];
 }): DeterministicProjectFacts {
   const facts: DeterministicProjectFacts = {
     languageCounts: sourceLanguageCounts(input.entries),
@@ -43,19 +47,13 @@ export function parseDeterministicProjectFacts(input: {
     testEntries: [],
     checkEntries: []
   };
-  for (const operation of input.operations) {
-    if (!operation.isComplete || operation.status === "unsupported") continue;
-    if (operation.operation.kind === "runtime_probe") {
-      const evidence = operation.evidence;
-      if (evidence.status === "accepted" && evidence.exitCode === 0 && typeof evidence.versionText === "string") {
-        facts.runtimeProbes.push({ probe: operation.operation.probe, value: evidence.versionText });
-      }
-      continue;
+  for (const probe of input.runtimeProbes) {
+    if (probe.exitCode === 0 && typeof probe.versionText === "string") {
+      facts.runtimeProbes.push({ probe: probe.probe, value: probe.versionText });
     }
-    if (operation.operation.kind !== "read_text") continue;
-    const evidence = operation.evidence;
-    if (evidence.status !== "accepted" || typeof evidence.text !== "string" || typeof evidence.sha256 !== "string") continue;
-    parseConfigFile(facts, operation.operation.relativePath, evidence.sha256, evidence.text);
+  }
+  for (const file of input.textFiles) {
+    parseConfigFile(facts, file.relativePath, file.sha256, file.text);
   }
   inferToolchainsFromInventory(facts, input.entries);
   return normalizeFacts(facts);

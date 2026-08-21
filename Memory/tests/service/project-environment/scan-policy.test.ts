@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { InventoryEntry } from "@memmy/local-api-contracts";
+import type { InventoryEntry } from "../../../src/service/project-environment/types.js";
 import {
   buildCompactFileTree,
   deterministicReadCandidates,
@@ -31,17 +31,12 @@ describe("project environment scan policy", () => {
       file("src/index.ts"),
       hashedFile(".env", "b")
     ];
-    const capabilities = {
-      protocolVersion: "1" as const,
-      operations: ["inventory", "read_text", "runtime_probe"] as Array<"inventory" | "read_text" | "runtime_probe">,
-      maxTextBytes: 2 * 1024 * 1024
-    };
-    expect(deterministicReadCandidates(entries, capabilities)).toEqual([{
+    expect(deterministicReadCandidates(entries)).toEqual([{
       relativePath: "package.json",
       sha256: "a".repeat(64),
       maxBytes: 1024 * 1024
     }]);
-    expect(requiredRuntimeProbes(entries, capabilities)).toEqual(["node_version"]);
+    expect(requiredRuntimeProbes(entries)).toEqual(["node_version"]);
   });
 
   it("builds a deterministic tree and fingerprints semantic evidence only", () => {

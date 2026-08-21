@@ -46,7 +46,7 @@ export class L3WorldModelContextReadModel {
     if (typeof memoryScanId !== "string" || !memoryScanId) return false;
     const row = this.repos.db.prepare(
       `SELECT applied_scan_id
-       FROM l3_world_model_project_environment_sync_state
+       FROM l3_world_model_project_environment_state
        WHERE user_id = ? AND project_id = ?`
     ).get(userId, projectId) as { applied_scan_id: string | null } | undefined;
     return row?.applied_scan_id === memoryScanId;

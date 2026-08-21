@@ -19,8 +19,7 @@ import {
   loadRuntimeL3,
   notifyRuntimeBoundary,
   openRuntimeSession,
-  startRuntimeTurn,
-  syncRuntimeEnvironmentDetached
+  startRuntimeTurn
 } from "./memmy-workspace-bridge.mjs";
 
 const SOURCE = ${JSON.stringify(options.source)};
@@ -193,13 +192,8 @@ async function handleL3LifecycleEvent(payload) {
   }
   if (event === "postcompact") {
     await notifyRuntimeBoundary(session, "token_compaction");
-    syncRuntimeEnvironmentDetached(session, "token_compaction");
     writeLifecycleOutput(payload, "");
     return;
-  }
-  const startSource = normalizeText(payload.source || payload.reason).toLowerCase();
-  if (startSource !== "compact" && startSource !== "compaction") {
-    syncRuntimeEnvironmentDetached(session, "session_start");
   }
   const loaded = await loadRuntimeL3(session);
   writeLifecycleOutput(payload, loaded.additionalContext);

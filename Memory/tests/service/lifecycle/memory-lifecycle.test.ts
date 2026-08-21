@@ -1,3 +1,6 @@
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { canonicalJson, sha256Hex } from "@memmy/local-api-contracts";
 import { Repositories } from "../../../src/storage/repositories.js";
@@ -438,6 +441,132 @@ function memoryProperties(
   return JSON.parse(row.properties_json);
 }
 
+describe("L3 project environment scan triggers", () => {
+  it("queues on project Session creation and only on successful compaction with an L1 head", () => {
+    const { db, root, service } = createTestService();
+    const projectRoot = join(root, "project");
+    mkdirSync(projectRoot);
+    writeFileSync(join(projectRoot, "package.json"), '{"name":"trigger-test"}');
+    const namespace = {
+      source: "codex",
+      profileId: "default",
+      sessionKey: "project-trigger-session",
+      userId: "project-trigger-user"
+    };
+    const request = {
+      l3WorldModelProtocolVersion: 2 as const,
+      l3WorldModelTransition: "resume_only" as const,
+      workspaceUri: pathToFileURL(projectRoot).href,
+      workspaceHostId: "e".repeat(64),
+      namespace
+    };
+    const opened = service.openSession(request);
+    const jobCount = () => (db.db.prepare(
+      `SELECT COUNT(*) AS count FROM evolution_jobs WHERE job_type = 'project_environment_profile'`
+    ).get() as { count: number }).count;
+
+    expect(jobCount()).toBe(1);
+    expect(service.openSession(request)).toMatchObject({ sessionId: opened.sessionId, resumed: true });
+    expect(jobCount()).toBe(1);
+    expect(() => service.l3WorldModelBoundary(opened.sessionId, {
+      requestId: "2bd45fcb-af1c-4e62-ae16-f214bb465c20",
+      adapterId: "codex-memory",
+      source: "codex",
+      namespace: { ...namespace, projectId: opened.projectId! },
+      trigger: "token_compaction",
+      throughL1MemoryId: "missing-l1"
+    })).toThrow("through L1 memory was not registered");
+    expect(jobCount()).toBe(1);
+
+    const completed = service.completeTurn("project-trigger-turn", {
+      sessionId: opened.sessionId,
+      query: "Change one file",
+      answer: "Changed one file"
+    });
+    expect(jobCount()).toBe(1);
+    const envelope = {
+      requestId: "89e0763c-a864-40f4-b6fd-98fb4af1f722",
+      adapterId: "codex-memory",
+      source: "codex",
+      namespace: { ...namespace, projectId: opened.projectId! },
+      throughL1MemoryId: completed.l1MemoryId
+    };
+    service.l3WorldModelBoundary(opened.sessionId, {
+      ...envelope,
+      trigger: "token_compaction_attempt"
+    });
+    expect(jobCount()).toBe(1);
+    service.l3WorldModelBoundary(opened.sessionId, {
+      ...envelope,
+      requestId: "49bf4829-c9bd-4bb2-acfa-4b265fc66dba",
+      trigger: "token_compaction"
+    });
+    expect(jobCount()).toBe(2);
+    service.l3WorldModelBoundary(opened.sessionId, {
+      ...envelope,
+      requestId: "2c36608a-afac-47bf-a258-926b27258e57",
+      trigger: "token_compaction"
+    });
+    expect(jobCount()).toBe(2);
+  });
+
+  it("does not queue for non-project, legacy, non-local, or cloud Sessions", () => {
+    const local = createTestService();
+    local.service.openSession({
+      l3WorldModelProtocolVersion: 2,
+      l3WorldModelTransition: "resume_only",
+      namespace: {
+        source: "codex",
+        profileId: "default",
+        sessionKey: "no-project-session",
+        userId: "scan-boundary-user"
+      }
+    });
+    local.service.openSession({
+      workspacePath: local.root,
+      namespace: {
+        source: "codex",
+        profileId: "default",
+        sessionKey: "legacy-session",
+        userId: "scan-boundary-user"
+      }
+    });
+    local.service.openSession({
+      l3WorldModelProtocolVersion: 2,
+      l3WorldModelTransition: "resume_only",
+      workspaceUri: "ssh://example.test/project",
+      namespace: {
+        source: "codex",
+        profileId: "default",
+        sessionKey: "remote-project-session",
+        userId: "scan-boundary-user"
+      }
+    });
+    expect(local.db.db.prepare(
+      `SELECT COUNT(*) AS count FROM evolution_jobs WHERE job_type = 'project_environment_profile'`
+    ).get()).toEqual({ count: 0 });
+
+    const cloud = createTestService({ mode: "cloud" });
+    const cloudProjectRoot = join(cloud.root, "project");
+    mkdirSync(cloudProjectRoot);
+    cloud.service.openSession({
+      l3WorldModelProtocolVersion: 2,
+      l3WorldModelTransition: "resume_only",
+      workspaceUri: pathToFileURL(cloudProjectRoot).href,
+      workspaceHostId: "a".repeat(64),
+      namespace: {
+        source: "codex",
+        profileId: "default",
+        sessionKey: "cloud-project-session",
+        userId: "cloud-scan-boundary-user"
+      }
+    });
+    expect(cloud.db.db.prepare(
+      `SELECT COUNT(*) AS count FROM evolution_jobs WHERE job_type = 'project_environment_profile'`
+    ).get()).toEqual({ count: 0 });
+  });
+});
+
 
 describe("L3 World Model scope deletion", () => {
   it("detaches the unique scope and makes already queued field work no-change", () => {
@@ -531,40 +660,6 @@ describe("L3 World Model scope deletion", () => {
       targetField: "project_contract",
       value: "Run project tests before commit."
     })!;
-    const started = service.projectEnvironmentSyncStart(opened.projectId!, {
-      requestId: "db25209b-bcc8-4515-a11e-79b6ad980e50",
-      adapterId: "codex-memory",
-      source: "codex",
-      namespace,
-      sessionId: opened.sessionId,
-      trigger: "session_start",
-      capabilities: {
-        protocolVersion: "1",
-        operations: ["inventory"],
-        maxTextBytes: 1024
-      }
-    });
-    const operationId = started.operations[0]!.operationId;
-    const inventory = {
-      operationId,
-      pageIndex: 0,
-      isLast: true,
-      entries: [{ relativePath: "需求.docx", type: "file" as const, size: 1, mtimeMs: 1 }]
-    };
-    const pending = service.projectEnvironmentSyncEvidence(opened.projectId!, started.syncId, {
-      requestId: "ab87329e-b550-444b-8bdb-9fa5cdf0f3f5",
-      adapterId: "codex-memory",
-      source: "codex",
-      namespace,
-      sessionId: opened.sessionId,
-      evidence: {
-        ...inventory,
-        kind: "inventory",
-        status: "accepted",
-        pageHash: sha256Hex(canonicalJson({ ...inventory, omittedCount: null }))
-      }
-    });
-    expect(pending.status).toBe("summarizing");
 
     service.deleteMemory(existing.id, { namespace });
 
@@ -573,22 +668,15 @@ describe("L3 World Model scope deletion", () => {
       memoryId: undefined
     });
     expect(db.db.prepare(
-      `SELECT status, current_sync_id, current_scan_id, applied_scan_id,
-              profile_scan_id, fingerprint, active_adapter_id, sync_lease_expires_at
-       FROM l3_world_model_project_environment_sync_state`
+      `SELECT status, current_scan_id, applied_scan_id, fingerprint, last_error
+       FROM l3_world_model_project_environment_state`
     ).get()).toEqual({
       status: "uninitialized",
-      current_sync_id: null,
       current_scan_id: null,
       applied_scan_id: null,
-      profile_scan_id: null,
       fingerprint: null,
-      active_adapter_id: null,
-      sync_lease_expires_at: null
+      last_error: null
     });
-    expect(db.db.prepare(
-      `SELECT COUNT(*) AS count FROM l3_world_model_project_environment_operations`
-    ).get()).toEqual({ count: 0 });
     expect(service.panelItems({ layer: "L3" }).items.some((item) => item.id === existing.id)).toBe(false);
 
     await service.runWorkerOnce(10);

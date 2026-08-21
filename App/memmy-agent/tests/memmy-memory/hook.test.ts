@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -32,7 +32,6 @@ function fakeV2Client() {
     health: vi.fn(async () => ({
       features: {
         l3WorldModelProtocolVersions: [2],
-        workspaceBridgeProtocolVersions: ["1"],
       },
     })),
     openSession: vi.fn(async (body: any) => ({
@@ -62,14 +61,6 @@ function fakeV2Client() {
       throughL1MemoryId: "l1-1",
       batches: [],
     })),
-    projectEnvironmentSyncStart: vi.fn(async (_projectId: string, _body: any) => ({
-      syncId: "sync-1",
-      scanId: "scan-1",
-      status: "clean",
-      operations: [],
-    })),
-    projectEnvironmentSyncEvidence: vi.fn(),
-    projectEnvironmentSyncStatus: vi.fn(),
   };
   return client;
 }
@@ -100,7 +91,6 @@ describe("MemmyMemoryHook", () => {
       expect(client.health).toHaveBeenCalledTimes(1);
       expect(client.openSession).toHaveBeenCalledTimes(1);
       expect(client.l3WorldModelContext).toHaveBeenCalledTimes(1);
-      expect(client.projectEnvironmentSyncStart).not.toHaveBeenCalled();
       expect(client.openSession.mock.calls[0]![0]).toMatchObject({
         l3WorldModelProtocolVersion: 2,
         l3WorldModelTransition: "allow_legacy_rollover",
@@ -128,7 +118,6 @@ describe("MemmyMemoryHook", () => {
         stopReason: "completed",
       });
       expect(client.l3WorldModelContext).toHaveBeenCalledTimes(1);
-      expect(client.projectEnvironmentSyncStart).not.toHaveBeenCalled();
       expect(client.startTurn.mock.calls[0]![1].namespace.projectId).toBe(`ws_${"a".repeat(64)}`);
       expect(client.startTurn.mock.calls[0]![1].namespace).not.toHaveProperty("workspacePath");
     } finally {
@@ -139,17 +128,15 @@ describe("MemmyMemoryHook", () => {
     }
   });
 
-  it("runs the authorized Bridge and refreshes L3 only after successful token compaction", async () => {
+  it("refreshes L3 only after successful token compaction", async () => {
     const client = fakeV2Client();
     const workspace = mkdtempSync(join(tmpdir(), "memmy-v2-bridge-"));
     const memmyHome = mkdtempSync(join(tmpdir(), "memmy-v2-bridge-home-"));
     const previousMemmyHome = process.env.MEMMY_HOME;
     process.env.MEMMY_HOME = memmyHome;
-    writeFileSync(join(workspace, "package.json"), '{"scripts":{"test":"vitest run"}}', "utf8");
     try {
       const hook = new MemmyMemoryHook(client as any, {
         workspace,
-        workspaceBridgeEnabled: true,
         userId: "v2-user",
       });
       const spec = {
@@ -159,16 +146,6 @@ describe("MemmyMemoryHook", () => {
       };
       const lifecycle = new AgentHookContext({ sessionKey: spec.sessionKey, spec });
       await hook.beforeBuildSystemPrompt(lifecycle);
-
-      expect(client.projectEnvironmentSyncStart).toHaveBeenCalledTimes(1);
-      expect(client.projectEnvironmentSyncStart.mock.calls[0]![1]).toMatchObject({
-        sessionId: "memory-v2-session",
-        trigger: "session_start",
-        capabilities: {
-          protocolVersion: "1",
-          operations: ["inventory", "read_text", "runtime_probe"],
-        },
-      });
 
       await hook.afterCompaction(new AgentHookContext({
         sessionKey: spec.sessionKey,
@@ -185,10 +162,6 @@ describe("MemmyMemoryHook", () => {
       }));
       expect(client.l3WorldModelTraceHead).toHaveBeenCalledTimes(1);
       expect(client.l3WorldModelBoundary).toHaveBeenCalledTimes(1);
-      await vi.waitFor(() => {
-        expect(client.projectEnvironmentSyncStart).toHaveBeenCalledTimes(2);
-      });
-      expect(client.projectEnvironmentSyncStart.mock.calls[1]![1].trigger).toBe("token_compaction");
       expect(client.l3WorldModelContext).toHaveBeenCalledTimes(2);
     } finally {
       if (previousMemmyHome === undefined) delete process.env.MEMMY_HOME;
@@ -244,14 +217,13 @@ describe("MemmyMemoryHook", () => {
     expect(open).toMatchObject({ l3WorldModelProtocolVersion: 2 });
     expect(open).not.toHaveProperty("workspaceUri");
     expect(open).not.toHaveProperty("workspaceHostId");
-    expect(client.projectEnvironmentSyncStart).not.toHaveBeenCalled();
     expect(client.l3WorldModelContext.mock.calls[0]![1].namespace).not.toHaveProperty("projectId");
   });
 
-  it("does not scan when the service omits the Bridge capability", async () => {
+  it("uses v2 without requiring a separate workspace capability", async () => {
     const client = fakeV2Client();
     client.health.mockResolvedValue({
-      features: { l3WorldModelProtocolVersions: [2], workspaceBridgeProtocolVersions: [] },
+      features: { l3WorldModelProtocolVersions: [2] },
     });
     const workspace = mkdtempSync(join(tmpdir(), "memmy-v2-no-bridge-"));
     const memmyHome = mkdtempSync(join(tmpdir(), "memmy-v2-no-bridge-home-"));
@@ -260,7 +232,6 @@ describe("MemmyMemoryHook", () => {
     try {
       const hook = new MemmyMemoryHook(client as any, {
         workspace,
-        workspaceBridgeEnabled: true,
         userId: "v2-user",
       });
       const spec = {
@@ -273,7 +244,6 @@ describe("MemmyMemoryHook", () => {
 
       expect(client.openSession).toHaveBeenCalledTimes(1);
       expect(client.l3WorldModelContext).toHaveBeenCalledTimes(1);
-      expect(client.projectEnvironmentSyncStart).not.toHaveBeenCalled();
     } finally {
       if (previousMemmyHome === undefined) delete process.env.MEMMY_HOME;
       else process.env.MEMMY_HOME = previousMemmyHome;

@@ -12,8 +12,7 @@ import {
   loadRuntimeL3,
   notifyRuntimeBoundary,
   openRuntimeSession,
-  startRuntimeTurn,
-  syncRuntimeEnvironment
+  startRuntimeTurn
 } from "./memmy-workspace-bridge.mjs";
 
 const SOURCE = "opencode";
@@ -354,7 +353,6 @@ export const MemmyMemoryPlugin = async ({ client, directory, worktree }) => {
         const sessionID = normalizeText(info.id || info.sessionID);
         if (sessionID) {
           const runtimeSession = await ensureSession(null, sessionID, "main");
-          await syncRuntimeEnvironment(runtimeSession, "session_start");
           const loaded = await loadRuntimeL3(runtimeSession);
           if (loaded.additionalContext) l3InjectOnce.set(sessionID, loaded.additionalContext);
         }
@@ -364,7 +362,6 @@ export const MemmyMemoryPlugin = async ({ client, directory, worktree }) => {
         const sessionID = normalizeText(properties.sessionID || properties.id);
         const runtimeSession = sessionCache.get(sessionID) || await ensureSession(null, sessionID, "main");
         await notifyRuntimeBoundary(runtimeSession, "token_compaction");
-        await syncRuntimeEnvironment(runtimeSession, "token_compaction");
         const loaded = await loadRuntimeL3(runtimeSession);
         if (loaded.additionalContext) l3InjectOnce.set(sessionID, loaded.additionalContext);
         return;

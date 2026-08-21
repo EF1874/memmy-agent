@@ -7,7 +7,6 @@ import type {
 } from "@memmy/local-api-contracts";
 
 export type {
-  InventoryEntry,
   L3WorldModelBoundaryRequest,
   L3WorldModelBoundaryResponse,
   L3WorldModelBoundaryTrigger,
@@ -19,23 +18,9 @@ export type {
   L3WorldModelRuntimeNamespace,
   L3WorldModelTraceHeadResponse,
   L3WorldModelTransition,
-  ProjectEnvironmentScanPolicy,
-  ProjectEnvironmentSyncEvidenceRequest,
-  ProjectEnvironmentSyncResponse,
-  ProjectEnvironmentSyncStartRequest,
-  ProjectEnvironmentSyncStatus,
-  ProjectEnvironmentSyncStatusQuery,
-  ProjectEnvironmentSyncTrigger,
-  ProjectWorkspaceEvidence,
-  ProjectWorkspaceOperation,
-  ProjectWorkspaceUnsupportedReason,
-  RuntimeProbe,
   SessionL3WorldModelContextResponse,
-  WorkspaceBridgeCapabilities,
-  WorkspaceBridgeOperationKind,
   WorkspaceHostId,
   WorkspaceIdentityFields,
-  WorkspaceRelativePath,
   WorkspaceUri
 } from "@memmy/local-api-contracts";
 

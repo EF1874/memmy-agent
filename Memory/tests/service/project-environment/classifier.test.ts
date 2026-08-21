@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { InventoryEntry } from "@memmy/local-api-contracts";
+import type { InventoryEntry } from "../../../src/service/project-environment/types.js";
 import { classifyProjectInventory } from "../../../src/service/project-environment/project-classifier.js";
 
 describe("project environment classifier", () => {

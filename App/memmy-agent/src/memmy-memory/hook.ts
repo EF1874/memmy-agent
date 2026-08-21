@@ -32,11 +32,10 @@ import {
 import type { MemmyMemoryClient } from "./client.js";
 import { renderL3WorldModelContext } from "@memmy/local-api-contracts";
 import {
-  driveWorkspaceBridge,
   normalizeWorkspaceRoot,
   workspaceHostIdFromInstallationId,
   workspaceUriFromRoot,
-} from "./workspace-bridge.js";
+} from "./workspace-identity.js";
 import { registerMemmyMemoryTools } from "./tools.js";
 import type {
   JsonRecord,
@@ -87,7 +86,6 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
   private readonly entrypointBySessionKey = new Map<string, MemoryAnalyticsEntrypoint>();
   private readonly unavailableWarnedSessionKeys = new Set<string>();
   private readonly sessionStateBySessionKey = new Map<string, MemmyMemorySessionState>();
-  private readonly environmentSyncBySessionKey = new Map<string, Promise<unknown>>();
 
   constructor(client: MemmyMemoryClient, options: MemmyMemoryHookOptions = {}) {
     super(false);
@@ -99,7 +97,6 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
       profileId: options.profileId ?? PROFILE_ID,
       profileLabel: options.profileLabel ?? PROFILE_ID,
       userId: options.userId ?? null,
-      workspaceBridgeEnabled: options.workspaceBridgeEnabled ?? false,
       getAnalyticsClientId: options.getAnalyticsClientId ?? null,
       getAnalyticsUserId: options.getAnalyticsUserId ?? null,
       getAnalyticsUserMode: options.getAnalyticsUserMode ?? null,
@@ -345,7 +342,6 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
           throughL1MemoryId: head.throughL1MemoryId,
         });
       }
-      this.startEnvironmentSync(sessionKey, state, "token_compaction");
       await this.loadL3Context(sessionKey, state);
       this.clearMemoryUnavailable(sessionKey);
     } catch (error) {
@@ -381,7 +377,6 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
       }
       this.sessionIdBySessionKey.delete(sessionKey);
       this.sessionStateBySessionKey.delete(sessionKey);
-      this.environmentSyncBySessionKey.delete(sessionKey);
       this.turnBySessionKey.delete(sessionKey);
       this.entrypointBySessionKey.delete(sessionKey);
       this.clearMemoryUnavailable(sessionKey);
@@ -556,13 +551,6 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
       workspaceUri,
       workspaceHostId,
       l3Cache: emptyL3Cache(resolved, memoryProjectId, "empty", ""),
-      bridgeEnabled: Boolean(
-        supportsV2 &&
-        workspaceRoot &&
-        this.options.workspaceBridgeEnabled &&
-        health?.features?.workspaceBridgeProtocolVersions?.includes("1")
-      ),
-      healthChecked: true,
     });
     // Only emit opened for a newly created session; resumed opens are continuations.
     if (response?.resumed !== true) {
@@ -581,35 +569,7 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
     const state = this.sessionStateBySessionKey.get(sessionKey);
     if (!state || state.protocol !== "v2") return;
     if (!force && state.l3Cache.loadedAt) return;
-    const sync = this.startEnvironmentSync(sessionKey, state, "session_start");
-    if (sync) await waitAtMost(sync, 3_000);
     await this.loadL3Context(sessionKey, state);
-  }
-
-  private startEnvironmentSync(
-    sessionKey: string,
-    state: MemmyMemorySessionState,
-    trigger: "session_start" | "token_compaction",
-  ): Promise<unknown> | null {
-    if (!state.bridgeEnabled || !state.workspaceRoot || !state.memoryProjectId) return null;
-    const current = this.environmentSyncBySessionKey.get(sessionKey);
-    if (current) return current;
-    const operation = driveWorkspaceBridge({
-      client: this.client,
-      projectId: state.memoryProjectId,
-      sessionId: state.memorySessionId,
-      trigger,
-      envelope: this.l3Envelope(sessionKey, state),
-      root: state.workspaceRoot,
-    });
-    const tracked = operation.finally(() => {
-      if (this.environmentSyncBySessionKey.get(sessionKey) === tracked) {
-        this.environmentSyncBySessionKey.delete(sessionKey);
-      }
-    });
-    this.environmentSyncBySessionKey.set(sessionKey, tracked);
-    void tracked.catch((error) => this.warnMemoryUnavailable(sessionKey, "recall", error));
-    return tracked;
   }
 
   private async loadL3Context(sessionKey: string, state: MemmyMemorySessionState): Promise<void> {
@@ -779,21 +739,6 @@ function emptyL3Cache(
     sourceMemoryIds: [],
     loadedAt,
   };
-}
-
-async function waitAtMost(operation: Promise<unknown>, timeoutMs: number): Promise<void> {
-  let timeout: ReturnType<typeof setTimeout> | null = null;
-  try {
-    await Promise.race([
-      operation.then(() => undefined),
-      new Promise<void>((resolve) => {
-        timeout = setTimeout(resolve, timeoutMs);
-        timeout.unref?.();
-      }),
-    ]);
-  } finally {
-    if (timeout) clearTimeout(timeout);
-  }
 }
 
 function compact<T extends JsonRecord>(value: T): T {

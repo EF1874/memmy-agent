@@ -3,12 +3,17 @@ import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { MEMMY_WORKSPACE_BRIDGE_RUNTIME_ASSET } from "../../workspace-bridge/runtime-asset.js";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { loadMemmyWorkspaceBridgeRuntimeAsset } from "../../workspace-bridge/runtime-loader.js";
 import { renderMemmyResumeHookScript } from "../memmy-resume-hook.js";
 
 describe("memmy resume hook stop capture", () => {
   let tempDir = "";
+  let runtimeAsset = "";
+
+  beforeAll(async () => {
+    runtimeAsset = await loadMemmyWorkspaceBridgeRuntimeAsset();
+  });
 
   afterEach(() => {
     if (tempDir) {
@@ -39,7 +44,7 @@ describe("memmy resume hook stop capture", () => {
     try {
       const hookScriptPath = join(tempDir, "memmy-resume-hook.mjs");
       writeFileSync(hookScriptPath, renderMemmyResumeHookScript({ source: "claude_code", mode: "claude-code" }));
-      writeFileSync(join(tempDir, "memmy-workspace-bridge.mjs"), MEMMY_WORKSPACE_BRIDGE_RUNTIME_ASSET);
+      writeFileSync(join(tempDir, "memmy-workspace-bridge.mjs"), runtimeAsset);
       writeFileSync(join(tempDir, "memmy-memory-config.json"), JSON.stringify({
         memmy_config_path: join(tempDir, "missing-config.yaml"),
         endpoint: `http://127.0.0.1:${port}`,
@@ -124,7 +129,7 @@ describe("memmy resume hook stop capture", () => {
     await listen(server);
     try {
       const port = (server.address() as { port: number }).port;
-      const hookScriptPath = installHookFixture(tempDir, source, mode, `http://127.0.0.1:${port}`);
+      const hookScriptPath = installHookFixture(tempDir, source, mode, `http://127.0.0.1:${port}`, runtimeAsset);
       const result = await runHook(hookScriptPath, {
         hook_event_name: "SessionStart",
         session_id: "host-session",
@@ -187,7 +192,7 @@ describe("memmy resume hook stop capture", () => {
     await listen(server);
     try {
       const port = (server.address() as { port: number }).port;
-      const hookScriptPath = installHookFixture(tempDir, "codex", "codex", `http://127.0.0.1:${port}`);
+      const hookScriptPath = installHookFixture(tempDir, "codex", "codex", `http://127.0.0.1:${port}`, runtimeAsset);
       const result = await runHook(hookScriptPath, {
         hook_event_name: "PostCompact",
         session_id: "host-session",
@@ -218,7 +223,7 @@ describe("memmy resume hook stop capture", () => {
     await listen(server);
     try {
       const port = (server.address() as { port: number }).port;
-      const hookScriptPath = installHookFixture(tempDir, "cursor", "cursor", `http://127.0.0.1:${port}`);
+      const hookScriptPath = installHookFixture(tempDir, "cursor", "cursor", `http://127.0.0.1:${port}`, runtimeAsset);
       const result = await runHook(hookScriptPath, {
         hook_event_name: "sessionStart",
         session_id: "host-session",
@@ -238,10 +243,11 @@ function installHookFixture(
   source: string,
   mode: "claude-code" | "codex" | "cursor",
   endpoint: string,
+  runtimeAsset: string,
 ): string {
   const hookScriptPath = join(directory, "memmy-resume-hook.mjs");
   writeFileSync(hookScriptPath, renderMemmyResumeHookScript({ source, mode }));
-  writeFileSync(join(directory, "memmy-workspace-bridge.mjs"), MEMMY_WORKSPACE_BRIDGE_RUNTIME_ASSET);
+  writeFileSync(join(directory, "memmy-workspace-bridge.mjs"), runtimeAsset);
   writeFileSync(join(directory, "memmy-memory-config.json"), JSON.stringify({
     memmy_config_path: join(directory, "missing-config.yaml"),
     endpoint,

@@ -49,8 +49,7 @@ export const L3WorldModelRequestEnvelopeSchema = z.object(L3WorldModelRequestEnv
 export type L3WorldModelRequestEnvelope = z.infer<typeof L3WorldModelRequestEnvelopeSchema>;
 
 export const L3WorldModelFeaturesSchema = z.object({
-  l3WorldModelProtocolVersions: z.array(z.number().int().positive()).optional(),
-  workspaceBridgeProtocolVersions: z.array(NonEmptyStringSchema).optional()
+  l3WorldModelProtocolVersions: z.array(z.number().int().positive()).optional()
 }).strict();
 export type L3WorldModelFeatures = z.infer<typeof L3WorldModelFeaturesSchema>;
 

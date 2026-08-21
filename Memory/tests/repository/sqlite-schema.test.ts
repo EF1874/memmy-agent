@@ -84,8 +84,7 @@ describe("repository sqlite schema contract", () => {
         "recall_events",
         "memory_change_log",
         "idempotency_keys",
-        "l3_world_model_project_environment_sync_state",
-        "l3_world_model_project_environment_operations",
+        "l3_world_model_project_environment_state",
         "evolution_jobs",
         "embedding_retry_queue",
         "memory_processing_state",
@@ -250,21 +249,17 @@ describe("repository sqlite schema contract", () => {
         "uq_l3_world_model_scopes_project"
       ]));
       const projectEnvironmentColumns = db.db
-        .prepare(`PRAGMA table_info(l3_world_model_project_environment_sync_state)`)
+        .prepare(`PRAGMA table_info(l3_world_model_project_environment_state)`)
         .all() as Array<{ name: string }>;
-      expect(projectEnvironmentColumns.map((column) => column.name)).toContain("profile_scan_id");
+      expect(projectEnvironmentColumns.map((column) => column.name)).toEqual(expect.arrayContaining([
+        "current_scan_id",
+        "applied_scan_id",
+        "fingerprint"
+      ]));
       expect(projectEnvironmentColumns.map((column) => column.name)).not.toEqual(expect.arrayContaining([
         "summary_text",
-        "summary_scan_id"
-      ]));
-      const operationForeignKeys = db.db
-        .prepare(`PRAGMA foreign_key_list(l3_world_model_project_environment_operations)`)
-        .all() as Array<{ table: string; from: string; to: string; on_delete: string }>;
-      expect(operationForeignKeys.filter((foreignKey) =>
-        foreignKey.table === "l3_world_model_project_environment_sync_state"
-      )).toEqual(expect.arrayContaining([
-        expect.objectContaining({ from: "user_id", to: "user_id", on_delete: "CASCADE" }),
-        expect.objectContaining({ from: "project_id", to: "project_id", on_delete: "CASCADE" })
+        "summary_scan_id",
+        "profile_scan_id"
       ]));
       db.close();
     } finally {
@@ -408,16 +403,15 @@ describe("repository sqlite schema contract", () => {
       )).toThrow(/UNIQUE/u);
 
       db.db.prepare(
-        `INSERT INTO l3_world_model_project_environment_sync_state (
+        `INSERT INTO l3_world_model_project_environment_state (
            user_id, project_id, updated_at
          ) VALUES (?, ?, ?)`
       ).run("user-1", "project-1", at);
       expect(() => db.db.prepare(
-        `INSERT INTO l3_world_model_project_environment_operations (
-           sync_id, operation_id, user_id, project_id, adapter_id, operation_kind,
-           request_json, evidence_json, expires_at, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, 'inventory', '{}', '{}', ?, ?, ?)`
-      ).run("sync-1", "operation-1", "user-1", "other-project", "adapter", at, at, at)).toThrow(/FOREIGN KEY/u);
+        `INSERT INTO l3_world_model_project_environment_state (
+           user_id, project_id, updated_at
+         ) VALUES (?, ?, ?)`
+      ).run("user-1", "project-1", at)).toThrow(/UNIQUE/u);
     } finally {
       db.close();
     }
@@ -580,8 +574,7 @@ describe("repository sqlite schema contract", () => {
       });
 
       seeded.db.exec(`
-        DROP TABLE l3_world_model_project_environment_operations;
-        DROP TABLE l3_world_model_project_environment_sync_state;
+        DROP TABLE l3_world_model_project_environment_state;
         DROP TABLE l3_world_model_batch_targets;
         DROP TABLE l3_world_model_evidence_batches;
         DROP TABLE l3_world_model_input_traces;
@@ -651,12 +644,13 @@ describe("repository sqlite schema contract", () => {
       expect((migrated.db.prepare(`PRAGMA table_info(l3_world_model_scopes)`).all() as Array<{ name: string }>)
         .map((column) => column.name)).toContain("workspace_uri");
       const projectEnvironmentColumns = migrated.db.prepare(
-        `PRAGMA table_info(l3_world_model_project_environment_sync_state)`
+        `PRAGMA table_info(l3_world_model_project_environment_state)`
       ).all() as Array<{ name: string }>;
-      expect(projectEnvironmentColumns.map((column) => column.name)).toContain("profile_scan_id");
+      expect(projectEnvironmentColumns.map((column) => column.name)).toContain("applied_scan_id");
       expect(projectEnvironmentColumns.map((column) => column.name)).not.toEqual(expect.arrayContaining([
         "summary_text",
-        "summary_scan_id"
+        "summary_scan_id",
+        "profile_scan_id"
       ]));
       expect(existsSync(`${dbPath}.pre-v${SCHEMA_VERSION}.bak`)).toBe(true);
       migrated.close();

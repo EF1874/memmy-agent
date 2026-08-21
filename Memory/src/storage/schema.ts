@@ -468,51 +468,22 @@ const statements = [
     expires_at TEXT
   )`,
 
-  `CREATE TABLE IF NOT EXISTS l3_world_model_project_environment_sync_state (
+  `CREATE TABLE IF NOT EXISTS l3_world_model_project_environment_state (
     user_id TEXT NOT NULL,
     project_id TEXT NOT NULL,
     project_kind TEXT NOT NULL DEFAULT 'unknown' CHECK (project_kind IN ('unknown', 'code', 'folder')),
     status TEXT NOT NULL DEFAULT 'uninitialized' CHECK (status IN (
-      'uninitialized', 'dirty', 'collecting_inventory', 'deterministic_ready', 'summarizing', 'clean', 'failed'
+      'uninitialized', 'queued', 'scanning', 'summarizing', 'clean', 'failed'
     )),
-    current_sync_id TEXT,
     current_scan_id TEXT,
     applied_scan_id TEXT,
     fingerprint TEXT,
-    profile_scan_id TEXT,
-    active_adapter_id TEXT,
-    sync_lease_expires_at TEXT,
+    last_error TEXT,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (user_id, project_id)
   )`,
-  `CREATE INDEX IF NOT EXISTS idx_l3_world_model_project_environment_sync
-    ON l3_world_model_project_environment_sync_state (current_sync_id, status)`,
-
-  `CREATE TABLE IF NOT EXISTS l3_world_model_project_environment_operations (
-    sync_id TEXT NOT NULL,
-    operation_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
-    project_id TEXT NOT NULL,
-    adapter_id TEXT NOT NULL,
-    operation_kind TEXT NOT NULL CHECK (operation_kind IN ('inventory', 'read_text', 'runtime_probe')),
-    request_json TEXT NOT NULL CHECK (json_valid(request_json)),
-    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'unsupported', 'failed', 'expired')),
-    evidence_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(evidence_json)),
-    result_hash TEXT,
-    next_page_index INTEGER NOT NULL DEFAULT 0 CHECK (next_page_index >= 0),
-    is_complete INTEGER NOT NULL DEFAULT 0 CHECK (is_complete IN (0, 1)),
-    attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
-    last_error TEXT,
-    expires_at TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    PRIMARY KEY (sync_id, operation_id),
-    FOREIGN KEY (user_id, project_id)
-      REFERENCES l3_world_model_project_environment_sync_state(user_id, project_id)
-      ON DELETE CASCADE
-  )`,
-  `CREATE INDEX IF NOT EXISTS idx_l3_world_model_project_environment_operation_scope
-    ON l3_world_model_project_environment_operations (user_id, project_id, sync_id, status)`,
+  `CREATE INDEX IF NOT EXISTS idx_l3_world_model_project_environment_status
+    ON l3_world_model_project_environment_state (status, updated_at)`,
 
   `CREATE TABLE IF NOT EXISTS evolution_jobs (
     id TEXT PRIMARY KEY,

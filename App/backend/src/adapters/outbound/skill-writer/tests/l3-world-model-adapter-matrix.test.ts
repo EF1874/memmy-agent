@@ -11,7 +11,7 @@ import { createHermesSkillTarget } from "../hermes/index.js";
 import { createOpenclawSkillTarget } from "../openclaw/index.js";
 import { createOpencodeSkillTarget } from "../opencode/index.js";
 import type { SkillTarget } from "../types.js";
-import { MEMMY_WORKSPACE_BRIDGE_RUNTIME_ASSET } from "../workspace-bridge/runtime-asset.js";
+import { loadMemmyWorkspaceBridgeRuntimeAsset } from "../workspace-bridge/runtime-loader.js";
 
 let root: string | undefined;
 
@@ -21,7 +21,7 @@ afterEach(() => {
 });
 
 describe("L3 World Model automatic adapter matrix", () => {
-  it("atomically installs the one shared Node Bridge in all six Node adapters", async () => {
+  it("atomically installs the shared Node lifecycle runtime in all six Node adapters", async () => {
     root = mkdtempSync(join(tmpdir(), "memmy-l3-adapter-matrix-"));
     const configPath = join(root, "memmy-config.yaml");
     writeFileSync(configPath, [
@@ -29,11 +29,10 @@ describe("L3 World Model automatic adapter matrix", () => {
       "  enabled: true",
       "  endpoint: http://127.0.0.1:8765",
       "  userId: matrix-user",
-      "  workspaceBridge:",
-      "    enabled: true",
       ""
     ].join("\n"), "utf8");
-    const expectedHash = sha256(MEMMY_WORKSPACE_BRIDGE_RUNTIME_ASSET);
+    const runtimeAsset = await loadMemmyWorkspaceBridgeRuntimeAsset();
+    const expectedHash = sha256(runtimeAsset);
     const cases = nodeAdapterCases(root, configPath);
 
     for (const testCase of cases) {
@@ -41,7 +40,7 @@ describe("L3 World Model automatic adapter matrix", () => {
       const target = testCase.create();
       if (!target.installPlugin || !target.uninstallPlugin) throw new Error(`${testCase.name} has no automatic adapter`);
       await target.installPlugin(target.targetId);
-      expect(readFileSync(testCase.bridgePath, "utf8"), testCase.name).toBe(MEMMY_WORKSPACE_BRIDGE_RUNTIME_ASSET);
+      expect(readFileSync(testCase.bridgePath, "utf8"), testCase.name).toBe(runtimeAsset);
       expect(sha256(readFileSync(testCase.bridgePath, "utf8")), testCase.name).toBe(expectedHash);
       expect(readFileSync(testCase.bridgePath, "utf8"), testCase.name).toContain("l3WorldModelProtocolVersion: 2");
       expect(listFiles(testCase.rootDirectory).some((path) => /outbox|boundary.*\.json|cursor.*\.json/iu.test(path)), testCase.name)
@@ -60,8 +59,6 @@ describe("L3 World Model automatic adapter matrix", () => {
       "  enabled: true",
       "  endpoint: http://127.0.0.1:8765",
       "  userId: matrix-user",
-      "  workspaceBridge:",
-      "    enabled: true",
       ""
     ].join("\n"), "utf8");
     const hermesRoot = join(root, "hermes");
@@ -72,8 +69,8 @@ describe("L3 World Model automatic adapter matrix", () => {
     const providerPath = join(hermesRoot, "plugins", "memmy-memory", "__init__.py");
     const source = readFileSync(providerPath, "utf8");
     expect(source).toContain('"l3WorldModelProtocolVersion": 2');
-    expect(source).toContain('"kind": "inventory"');
-    expect(source).toContain("workspaceBridge");
+    expect(source).not.toContain('"kind": "inventory"');
+    expect(source).not.toContain("workspaceBridge");
     expect(listFiles(hermesRoot).some((path) => path.endsWith("memmy-workspace-bridge.mjs"))).toBe(false);
     expect(listFiles(hermesRoot).some((path) => /outbox|boundary.*\.json|cursor.*\.json/iu.test(path))).toBe(false);
     await target.uninstallPlugin(target.targetId);

@@ -9,7 +9,7 @@ import { renderMemmyOpencodePlugin, renderMemmyOpencodeResumeCommand } from "../
 import { renderMemmyPluginSkillManifest } from "../templates/memmy-plugin.js";
 import { renderMemmySkillBootstrapManifest } from "../templates/memmy-skill-directory.js";
 import type { SkillManifest, SkillTarget } from "../types.js";
-import { MEMMY_WORKSPACE_BRIDGE_RUNTIME_ASSET } from "../workspace-bridge/runtime-asset.js";
+import { loadMemmyWorkspaceBridgeRuntimeAsset } from "../workspace-bridge/runtime-loader.js";
 
 const OPENCODE_TARGET_ID = "opencode";
 const OPENCODE_DISPLAY_NAME = "Opencode";
@@ -84,7 +84,10 @@ export function createOpencodeSkillTarget(deps: CreateOpencodeSkillTargetDeps = 
         }, null, 2)}\n`
       );
       await writeFileAtomically(join(pluginDirectory, PLUGIN_FILE_NAME), renderMemmyOpencodePlugin());
-      await writeFileAtomically(join(pluginDirectory, WORKSPACE_BRIDGE_FILE_NAME), MEMMY_WORKSPACE_BRIDGE_RUNTIME_ASSET);
+      await writeFileAtomically(
+        join(pluginDirectory, WORKSPACE_BRIDGE_FILE_NAME),
+        await loadMemmyWorkspaceBridgeRuntimeAsset()
+      );
       await writeFileAtomically(join(commandDirectory, RESUME_COMMAND_FILE_NAME), renderMemmyOpencodeResumeCommand());
 
       const manifest = renderMemmyPluginSkillManifest(_targetId);

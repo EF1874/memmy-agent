@@ -5,10 +5,10 @@ import {
 import type { LlmClient } from "../../model/types.js";
 import type {
   EvolutionJobRecord,
-  ProjectEnvironmentDerivedEvidence,
   Repositories
 } from "../../storage/repositories.js";
 import { completeStrictJson } from "../l3-world-model/strict-json-completion.js";
+import type { ProjectEnvironmentDerivedEvidence } from "./types.js";
 
 export const CODE_PROFILE_PROMPT = `You maintain the complete Project Environment Profile for a code repository.
 The input contains structured scan evidence, a compact file tree, and, only when one already exists, the complete current profile.
@@ -63,16 +63,11 @@ interface ProjectEnvironmentProfilePipelineDeps {
 export class ProjectEnvironmentProfilePipeline {
   constructor(private readonly deps: ProjectEnvironmentProfilePipelineDeps) {}
 
-  async process(job: EvolutionJobRecord): Promise<void> {
+  async process(job: EvolutionJobRecord, derived: ProjectEnvironmentDerivedEvidence): Promise<void> {
     const payload = projectEnvironmentProfileJobPayload(job.payload);
     if (job.userId !== payload.userId) throw new Error("project_environment_job_owner_mismatch");
     const state = this.deps.repos.projectEnvironments.getState(payload.userId, payload.projectId);
-    if (!state || state.currentSyncId !== payload.syncId || state.currentScanId !== payload.scanId) return;
-    if (state.status === "clean" && state.profileScanId === payload.scanId) return;
-
-    this.deps.repos.projectEnvironments.renewProfileEvidence(payload.syncId);
-    const derived = this.deps.repos.projectEnvironments.derivedEvidence(payload.syncId);
-    if (derived.projectKind !== payload.projectKind) throw new Error("project_environment_job_kind_mismatch");
+    if (!state || state.currentScanId !== payload.scanId) return;
 
     const currentProfile = this.deps.repos.l3WorldModels.fields(
       payload.userId,
@@ -82,10 +77,10 @@ export class ProjectEnvironmentProfilePipeline {
     try {
       output = await completeStrictJson({
         llm: this.deps.llm,
-        operation: payload.projectKind === "code"
+        operation: derived.projectKind === "code"
           ? "project_environment_code_profile"
           : "project_environment_folder_profile",
-        systemPrompt: payload.projectKind === "code" ? CODE_PROFILE_PROMPT : FOLDER_PROFILE_PROMPT,
+        systemPrompt: derived.projectKind === "code" ? CODE_PROFILE_PROMPT : FOLDER_PROFILE_PROMPT,
         dynamicInput: profileDynamicInput(derived, currentProfile),
         expectedSchema: {
           op: "noop | create | update",
@@ -101,9 +96,7 @@ export class ProjectEnvironmentProfilePipeline {
       ).projectEnvironmentProfile;
       if (
         !latest ||
-        latest.currentSyncId !== payload.syncId ||
         latest.currentScanId !== payload.scanId ||
-        (latest.status === "clean" && latest.profileScanId === payload.scanId) ||
         latestProfile !== currentProfile
       ) return;
       throw error;
@@ -111,8 +104,9 @@ export class ProjectEnvironmentProfilePipeline {
     this.deps.repos.projectEnvironments.applyProfile({
       userId: payload.userId,
       projectId: payload.projectId,
-      syncId: payload.syncId,
       scanId: payload.scanId,
+      projectKind: derived.projectKind,
+      fingerprint: derived.fingerprint,
       expectedCurrentProfile: currentProfile,
       operation: output.op,
       profile: output.profile
@@ -123,19 +117,17 @@ export class ProjectEnvironmentProfilePipeline {
 export function projectEnvironmentProfileJobPayload(value: Record<string, unknown>): {
   userId: string;
   projectId: string;
-  syncId: string;
   scanId: string;
-  projectKind: "code" | "folder";
+  trigger: "session_start" | "token_compaction";
 } {
   const userId = stringValue(value.userId);
   const projectId = stringValue(value.projectId);
-  const syncId = stringValue(value.syncId);
   const scanId = stringValue(value.scanId);
-  const projectKind = value.projectKind;
-  if (!userId || !projectId || !syncId || !scanId || (projectKind !== "code" && projectKind !== "folder")) {
+  const trigger = value.trigger;
+  if (!userId || !projectId || !scanId || (trigger !== "session_start" && trigger !== "token_compaction")) {
     throw new TypeError(`invalid project environment job payload: ${canonicalJson(value as never)}`);
   }
-  return { userId, projectId, syncId, scanId, projectKind };
+  return { userId, projectId, scanId, trigger };
 }
 
 export function validateProjectEnvironmentProfileOutput(

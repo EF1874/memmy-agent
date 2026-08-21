@@ -347,44 +347,6 @@ export function polardbMigrationSql(): string[] {
       updated_at TIMESTAMPTZ NOT NULL,
       PRIMARY KEY (batch_id, target_field)
     )`,
-    `CREATE TABLE IF NOT EXISTS l3_world_model_project_environment_sync_state (
-      user_id TEXT NOT NULL,
-      project_id TEXT NOT NULL,
-      project_kind TEXT NOT NULL DEFAULT 'unknown' CHECK (project_kind IN ('unknown', 'code', 'folder')),
-      status TEXT NOT NULL DEFAULT 'uninitialized',
-      current_sync_id TEXT,
-      current_scan_id TEXT,
-      applied_scan_id TEXT,
-      fingerprint TEXT,
-      profile_scan_id TEXT,
-      active_adapter_id TEXT,
-      sync_lease_expires_at TIMESTAMPTZ,
-      updated_at TIMESTAMPTZ NOT NULL,
-      PRIMARY KEY (user_id, project_id)
-    )`,
-    `CREATE TABLE IF NOT EXISTS l3_world_model_project_environment_operations (
-      sync_id TEXT NOT NULL,
-      operation_id TEXT NOT NULL,
-      user_id TEXT NOT NULL,
-      project_id TEXT NOT NULL,
-      adapter_id TEXT NOT NULL,
-      operation_kind TEXT NOT NULL CHECK (operation_kind IN ('inventory', 'read_text', 'runtime_probe')),
-      request JSONB NOT NULL,
-      status TEXT NOT NULL DEFAULT 'pending',
-      evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
-      result_hash TEXT,
-      next_page_index INTEGER NOT NULL DEFAULT 0,
-      is_complete BOOLEAN NOT NULL DEFAULT false,
-      attempts INTEGER NOT NULL DEFAULT 0,
-      last_error TEXT,
-      expires_at TIMESTAMPTZ NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL,
-      updated_at TIMESTAMPTZ NOT NULL,
-      PRIMARY KEY (sync_id, operation_id),
-      FOREIGN KEY (user_id, project_id)
-        REFERENCES l3_world_model_project_environment_sync_state(user_id, project_id)
-        ON DELETE CASCADE
-    )`,
     `CREATE TABLE IF NOT EXISTS evolution_jobs (
       id TEXT PRIMARY KEY,
       job_type TEXT NOT NULL,

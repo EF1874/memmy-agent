@@ -11,7 +11,7 @@ import {
 } from "../templates/memmy-deepseek-harness-plugin.js";
 import { renderMemmyPluginSkillManifest } from "../templates/memmy-plugin.js";
 import type { SkillTarget } from "../types.js";
-import { MEMMY_WORKSPACE_BRIDGE_RUNTIME_ASSET } from "../workspace-bridge/runtime-asset.js";
+import { loadMemmyWorkspaceBridgeRuntimeAsset } from "../workspace-bridge/runtime-loader.js";
 
 const TARGET_ID = "deepseek_harness";
 const DISPLAY_NAME = "DeepSeek Harness";
@@ -62,7 +62,7 @@ export function createDeepseekHarnessSkillTarget(
         pluginSource === DEEPSEEK_HARNESS_PLUGIN_INDEX &&
         clientSource === DEEPSEEK_HARNESS_PLUGIN_CLIENT &&
         packageSource === JSON.stringify(createDeepseekHarnessPluginPackageManifest(), null, 2) + "\n" &&
-        bridgeSource === MEMMY_WORKSPACE_BRIDGE_RUNTIME_ASSET;
+        bridgeSource === await loadMemmyWorkspaceBridgeRuntimeAsset();
     },
 
     async installPlugin() {
@@ -76,7 +76,10 @@ export function createDeepseekHarnessSkillTarget(
       );
       await writeFileAtomically(join(pluginDirectory, "index.mjs"), DEEPSEEK_HARNESS_PLUGIN_INDEX);
       await writeFileAtomically(join(pluginDirectory, "client.js"), DEEPSEEK_HARNESS_PLUGIN_CLIENT);
-      await writeFileAtomically(join(pluginDirectory, "memmy-workspace-bridge.mjs"), MEMMY_WORKSPACE_BRIDGE_RUNTIME_ASSET);
+      await writeFileAtomically(
+        join(pluginDirectory, "memmy-workspace-bridge.mjs"),
+        await loadMemmyWorkspaceBridgeRuntimeAsset()
+      );
       await writeFileAtomically(
         join(pluginDirectory, "memmy-memory-config.json"),
         JSON.stringify({ memmy_config_path: memmyConfigPath, ...(await readMemmyMemoryServiceConfig(memmyConfigPath)) }, null, 2) + "\n"

@@ -14,7 +14,7 @@ import { renderMemmySkillBootstrapManifest } from "../templates/memmy-skill-dire
 import type { MemoryPluginConflict, SkillManifest, SkillTarget } from "../types.js";
 import { MEMMY_VERSION } from "../../../../project-version.js";
 import { readMemmyMemoryServiceConfig as readSharedMemmyMemoryServiceConfig } from "../memmy-runtime-config.js";
-import { MEMMY_WORKSPACE_BRIDGE_RUNTIME_ASSET } from "../workspace-bridge/runtime-asset.js";
+import { loadMemmyWorkspaceBridgeRuntimeAsset } from "../workspace-bridge/runtime-loader.js";
 
 const OPENCLAW_TARGET_ID = "openclaw";
 const OPENCLAW_DISPLAY_NAME = "OpenClaw";
@@ -108,7 +108,10 @@ export function createOpenclawSkillTarget(deps: CreateOpenclawSkillTargetDeps = 
         `${JSON.stringify(createOpenclawPluginManifest(), null, 2)}\n`
       );
       await writeFileAtomically(join(pluginDirectory, "index.mjs"), OPENCLAW_PLUGIN_INDEX);
-      await writeFileAtomically(join(pluginDirectory, "memmy-workspace-bridge.mjs"), MEMMY_WORKSPACE_BRIDGE_RUNTIME_ASSET);
+      await writeFileAtomically(
+        join(pluginDirectory, "memmy-workspace-bridge.mjs"),
+        await loadMemmyWorkspaceBridgeRuntimeAsset()
+      );
       await writeFileAtomically(
         join(pluginDirectory, "memmy-memory-config.json"),
         `${JSON.stringify({ memmy_config_path: memmyConfigPath, ...(await readSharedMemmyMemoryServiceConfig(memmyConfigPath)) }, null, 2)}\n`
@@ -451,8 +454,7 @@ import {
   closeRuntimeSession,
   loadRuntimeL3,
   notifyRuntimeBoundary,
-  openRuntimeSession,
-  syncRuntimeEnvironment
+  openRuntimeSession
 } from "./memmy-workspace-bridge.mjs";
 
 const PLUGIN_ID = "memmy-memory";
@@ -622,7 +624,6 @@ export default {
       if (normalizeText(event && event.reason).toLowerCase() === "compaction" && runtimeSessionCache.has(resolveExternalSessionId(ctx))) return;
       try {
         const runtimeSession = await ensureRuntimeSession(ctx);
-        await syncRuntimeEnvironment(runtimeSession, "session_start");
         const loaded = await loadRuntimeL3(runtimeSession);
         if (loaded.additionalContext) l3InjectOnce.set(resolveExternalSessionId(ctx), loaded.additionalContext);
       } catch (error) {
@@ -635,7 +636,6 @@ export default {
       try {
         const runtimeSession = await ensureRuntimeSession(ctx);
         await notifyRuntimeBoundary(runtimeSession, "token_compaction");
-        await syncRuntimeEnvironment(runtimeSession, "token_compaction");
         const loaded = await loadRuntimeL3(runtimeSession);
         if (loaded.additionalContext) l3InjectOnce.set(resolveExternalSessionId(ctx), loaded.additionalContext);
       } catch (error) {

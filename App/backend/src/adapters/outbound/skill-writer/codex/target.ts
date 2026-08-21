@@ -11,7 +11,7 @@ import { renderMemmyResumeHookScript } from "../templates/memmy-resume-hook.js";
 import { renderMemmySkillBootstrapManifest } from "../templates/memmy-skill-directory.js";
 import type { SkillManifest, SkillTarget } from "../types.js";
 import { trustMemmyCodexHooks, type TrustMemmyCodexHooks } from "./hook-trust.js";
-import { MEMMY_WORKSPACE_BRIDGE_RUNTIME_ASSET } from "../workspace-bridge/runtime-asset.js";
+import { loadMemmyWorkspaceBridgeRuntimeAsset } from "../workspace-bridge/runtime-loader.js";
 
 const CODEX_TARGET_ID = "codex";
 const CODEX_DISPLAY_NAME = "Codex";
@@ -98,7 +98,10 @@ export function createCodexSkillTarget(deps: CreateCodexSkillTargetDeps = {}): S
         `${JSON.stringify({ memmy_config_path: memmyConfigPath, ...(await readMemmyMemoryServiceConfig(memmyConfigPath)) }, null, 2)}\n`
       );
       await writeFileAtomically(hookScriptPath, renderMemmyResumeHookScript({ source: CODEX_TARGET_ID, mode: "codex" }));
-      await writeFileAtomically(join(hookDirectory, WORKSPACE_BRIDGE_FILE_NAME), MEMMY_WORKSPACE_BRIDGE_RUNTIME_ASSET);
+      await writeFileAtomically(
+        join(hookDirectory, WORKSPACE_BRIDGE_FILE_NAME),
+        await loadMemmyWorkspaceBridgeRuntimeAsset()
+      );
       const hooksFilePath = join(root, HOOKS_FILE_NAME);
       const hookCommand = createNodeHookCommand(hookScriptPath);
       await upsertCodexHookConfig(hooksFilePath, hookCommand);

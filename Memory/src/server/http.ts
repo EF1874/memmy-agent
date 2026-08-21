@@ -4,9 +4,7 @@ import type { AddressInfo } from "node:net";
 import {
   L3WorldModelBoundaryRequestSchema,
   L3WorldModelRequestEnvelopeSchema,
-  OpenSessionInputSchema,
-  ProjectEnvironmentSyncEvidenceRequestSchema,
-  ProjectEnvironmentSyncStartRequestSchema
+  OpenSessionInputSchema
 } from "@memmy/local-api-contracts";
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import { memoryPanelHtml } from "../viewer/static.js";
@@ -49,9 +47,6 @@ export const API_ROUTES = [
   "GET /api/v1/sessions/:sessionId/l3-world-model-trace-head",
   "POST /api/v1/sessions/:sessionId/l3-world-model-boundary",
   "GET /api/v1/l3-world-model/sessions/:sessionId/context",
-  "POST /api/v1/l3-world-model/projects/:projectId/environment-sync/start",
-  "POST /api/v1/l3-world-model/projects/:projectId/environment-sync/:syncId/evidence",
-  "GET /api/v1/l3-world-model/projects/:projectId/environment-sync/:syncId",
   "POST /api/v1/turns/start",
   "POST /api/v1/turns/:turnId/complete",
   "POST /api/v1/memory/search",
@@ -435,9 +430,14 @@ async function routeRequest(
           workspacePath: request.workspacePath,
           meta: request.meta
         };
-    return publicOpenSessionResponse(
-      await service.idempotent("sessions.create", publicRequest, publicRequest, () => service.openSession(publicRequest))
+    const result = await service.idempotent(
+      "sessions.create",
+      publicRequest,
+      publicRequest,
+      () => service.openSession(publicRequest)
     );
+    if (request.l3WorldModelProtocolVersion === 2 && result.projectId) autoWorker.schedule();
+    return publicOpenSessionResponse(result);
   }
 
   const sessionClose = match(path, /^\/api\/v1\/sessions\/([^/]+)\/close$/);
@@ -479,6 +479,7 @@ async function routeRequest(
       () => service.l3WorldModelBoundary(sessionId, request)
     );
     scheduleAutoWorkerForEvolution(result, autoWorker);
+    if (request.trigger === "token_compaction") autoWorker.schedule();
     return result;
   }
 
@@ -493,61 +494,6 @@ async function routeRequest(
       namespace: principal.namespace
     }, principal));
     return service.l3WorldModelContext(sessionId, request);
-  }
-
-  const projectEnvironmentStart = match(
-    path,
-    /^\/api\/v1\/l3-world-model\/projects\/([^/]+)\/environment-sync\/start$/
-  );
-  if (method === "POST" && projectEnvironmentStart) {
-    requireMemoryWrite(principal);
-    const projectId = decodeMatchSegment(projectEnvironmentStart, 1);
-    const request = ProjectEnvironmentSyncStartRequestSchema.parse(
-      strictEnvelopeWithPrincipal(asObject(body, "project-environment.start"), principal)
-    );
-    const result = service.projectEnvironmentSyncStart(projectId, request);
-    scheduleAutoWorkerForEvolution(result, autoWorker);
-    return result;
-  }
-
-  const projectEnvironmentEvidence = match(
-    path,
-    /^\/api\/v1\/l3-world-model\/projects\/([^/]+)\/environment-sync\/([^/]+)\/evidence$/
-  );
-  if (method === "POST" && projectEnvironmentEvidence) {
-    requireMemoryWrite(principal);
-    const projectId = decodeMatchSegment(projectEnvironmentEvidence, 1);
-    const syncId = decodeMatchSegment(projectEnvironmentEvidence, 2);
-    const request = ProjectEnvironmentSyncEvidenceRequestSchema.parse(
-      strictEnvelopeWithPrincipal(asObject(body, "project-environment.evidence"), principal)
-    );
-    const result = await service.idempotentExact(
-      "project-environment.evidence",
-      request,
-      { projectId, syncId, request },
-      () => service.projectEnvironmentSyncEvidence(projectId, syncId, request)
-    );
-    scheduleAutoWorkerForEvolution(result, autoWorker);
-    return result;
-  }
-
-  const projectEnvironmentStatus = match(
-    path,
-    /^\/api\/v1\/l3-world-model\/projects\/([^/]+)\/environment-sync\/([^/]+)$/
-  );
-  if (method === "GET" && projectEnvironmentStatus) {
-    requireMemoryRead(principal);
-    const projectId = decodeMatchSegment(projectEnvironmentStatus, 1);
-    const syncId = decodeMatchSegment(projectEnvironmentStatus, 2);
-    const sessionId = url.searchParams.get("sessionId");
-    if (!sessionId) throw new MemoryServiceError("invalid_argument", "sessionId is required");
-    const request = L3WorldModelRequestEnvelopeSchema.parse(strictEnvelopeWithPrincipal({
-      requestId,
-      adapterId: url.searchParams.get("adapterId"),
-      source: url.searchParams.get("source") ?? undefined,
-      namespace: principal.namespace
-    }, principal));
-    return service.projectEnvironmentSyncStatus(projectId, syncId, sessionId, request);
   }
 
   if (method === "POST" && path === "/api/v1/turns/start") {

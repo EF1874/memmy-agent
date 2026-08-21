@@ -38,6 +38,7 @@
     "better-sqlite3": "^12.6.3",
     "dotenv": "^16.6.1",
     "fast-xml-parser": "^5.8.0",
+    "ignore": "^7.0.5",
     "jsonc-parser": "^3.3.1",
     "sqlite-vec": "0.1.9",
     "smol-toml": "1.7.0",

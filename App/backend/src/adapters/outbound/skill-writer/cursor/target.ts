@@ -8,7 +8,7 @@ import { removeMemmySkillDirectory, replaceMemmySkillDirectory } from "../skill-
 import { renderMemmyPluginSkillManifest } from "../templates/memmy-plugin.js";
 import { renderMemmyResumeHookScript } from "../templates/memmy-resume-hook.js";
 import type { SkillManifest, SkillTarget } from "../types.js";
-import { MEMMY_WORKSPACE_BRIDGE_RUNTIME_ASSET } from "../workspace-bridge/runtime-asset.js";
+import { loadMemmyWorkspaceBridgeRuntimeAsset } from "../workspace-bridge/runtime-loader.js";
 
 const CURSOR_TARGET_ID = "cursor";
 const CURSOR_DISPLAY_NAME = "Cursor";
@@ -66,7 +66,10 @@ export function createCursorSkillTarget(deps: CreateCursorSkillTargetDeps = {}):
         hookScriptPath,
         renderMemmyResumeHookScript({ source: CURSOR_TARGET_ID, mode: "cursor" })
       );
-      await writeFileAtomically(join(hookDirectory, WORKSPACE_BRIDGE_FILE_NAME), MEMMY_WORKSPACE_BRIDGE_RUNTIME_ASSET);
+      await writeFileAtomically(
+        join(hookDirectory, WORKSPACE_BRIDGE_FILE_NAME),
+        await loadMemmyWorkspaceBridgeRuntimeAsset()
+      );
       await upsertCursorHookConfig(join(cursorRootDirectory, HOOKS_FILE_NAME), hookScriptPath);
       await rm(join(cursorRootDirectory, HOOK_DIRECTORY_NAME, LEGACY_HOOK_SCRIPT_FILE_NAME), { force: true });
 

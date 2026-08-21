@@ -153,7 +153,7 @@ describe("hermes skill target", () => {
     expect(pluginInit).toContain('"source": _optional_text(body.get("source")) or "hermes"');
     expect(pluginInit).toContain('session_key = "hermes-memory-" + external_session_id');
     expect(pluginInit).toContain('"l3WorldModelProtocolVersion": 2');
-    expect(pluginInit).toContain("def _drive_workspace_bridge");
+    expect(pluginInit).not.toContain("def _drive_workspace_bridge");
     expect(pluginInit).toContain("def _render_l3_world_model_context");
     expect(pluginInit).toContain("HTTP_TIMEOUT_SECONDS = 45.0");
     expect(pluginInit).toContain("SHUTDOWN_THREAD_TIMEOUT_SECONDS = 60.0");

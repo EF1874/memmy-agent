@@ -4,7 +4,6 @@ import {
   L3WorldModelBoundaryResponseSchema,
   L3WorldModelTraceHeadResponseSchema,
   MemoryHealthSnapshotSchema,
-  ProjectEnvironmentSyncResponseSchema,
   SessionL3WorldModelContextResponseSchema,
   l3WorldModelGetTransport,
   type L3WorldModelBoundaryRequest,
@@ -12,9 +11,6 @@ import {
   type L3WorldModelRequestEnvelope,
   type L3WorldModelTraceHeadResponse,
   type MemoryHealthSnapshot,
-  type ProjectEnvironmentSyncEvidenceRequest,
-  type ProjectEnvironmentSyncResponse,
-  type ProjectEnvironmentSyncStartRequest,
   type SessionL3WorldModelContextResponse
 } from "@memmy/local-api-contracts";
 
@@ -160,42 +156,6 @@ export class MemmyMemoryClient {
       { query: transport.query, headers: transport.headers }
     );
     return SessionL3WorldModelContextResponseSchema.parse(value);
-  }
-
-  async projectEnvironmentSyncStart(
-    projectId: string,
-    request: ProjectEnvironmentSyncStartRequest
-  ): Promise<ProjectEnvironmentSyncResponse> {
-    return ProjectEnvironmentSyncResponseSchema.parse(await this.post(
-      `/api/v1/l3-world-model/projects/${encodeURIComponent(projectId)}/environment-sync/start`,
-      request
-    ));
-  }
-
-  async projectEnvironmentSyncEvidence(
-    projectId: string,
-    syncId: string,
-    request: ProjectEnvironmentSyncEvidenceRequest
-  ): Promise<ProjectEnvironmentSyncResponse> {
-    return ProjectEnvironmentSyncResponseSchema.parse(await this.post(
-      `/api/v1/l3-world-model/projects/${encodeURIComponent(projectId)}/environment-sync/${encodeURIComponent(syncId)}/evidence`,
-      request
-    ));
-  }
-
-  async projectEnvironmentSyncStatus(
-    projectId: string,
-    syncId: string,
-    sessionId: string,
-    envelope: L3WorldModelRequestEnvelope
-  ): Promise<ProjectEnvironmentSyncResponse> {
-    const transport = l3WorldModelGetTransport(envelope, { sessionId });
-    const value = await this.request<unknown>(
-      "GET",
-      `/api/v1/l3-world-model/projects/${encodeURIComponent(projectId)}/environment-sync/${encodeURIComponent(syncId)}`,
-      { query: transport.query, headers: transport.headers }
-    );
-    return ProjectEnvironmentSyncResponseSchema.parse(value);
   }
 
 }

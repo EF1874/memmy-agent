@@ -42,26 +42,14 @@ describe("MemoryService / bundle", () => {
       query: "A later turn has not reached a boundary yet.",
       answer: "It remains an unfrozen trace.",
     });
-    first.service.projectEnvironmentSyncStart(opened.projectId!, {
-      requestId: "619226b9-e87d-4012-ab6f-5f5728573755",
-      adapterId: "codex-memory",
-      source: "codex",
-      namespace: { ...namespace, projectId: opened.projectId! },
-      sessionId: opened.sessionId,
-      trigger: "session_start",
-      capabilities: {
-        protocolVersion: "1",
-        operations: ["inventory", "read_text", "runtime_probe"],
-        maxTextBytes: 1024 * 1024,
-      },
-    });
 
     const full = first.service.exportBundle({ includeRawText: true });
     expect(full.tables.l3_world_model_evidence_batches).toHaveLength(1);
     expect(full.tables.l3_world_model_batch_targets).toHaveLength(2);
     expect((full.tables.evolution_jobs as Array<Record<string, unknown>>)
       .filter((row) => row.job_type === "l3_world_model_update")).toHaveLength(2);
-    expect(full.tables.l3_world_model_project_environment_operations).toHaveLength(1);
+    expect(full.tables.l3_world_model_project_environment_state).toHaveLength(1);
+    expect(full.tables.l3_world_model_project_environment_operations).toBeUndefined();
 
     const redacted = first.service.exportBundle();
     expect(redacted.tables.l3_world_model_evidence_batches).toEqual([]);
@@ -69,14 +57,12 @@ describe("MemoryService / bundle", () => {
     expect((redacted.tables.evolution_jobs as Array<Record<string, unknown>>)
       .filter((row) => row.job_type === "l3_world_model_update" || row.job_type === "project_environment_profile"))
       .toEqual([]);
-    expect(redacted.tables.l3_world_model_project_environment_operations).toEqual([]);
-    expect(redacted.tables.l3_world_model_project_environment_sync_state).toEqual([
+    expect(redacted.tables.l3_world_model_project_environment_operations).toBeUndefined();
+    expect(redacted.tables.l3_world_model_project_environment_state).toEqual([
       expect.objectContaining({
-        status: "dirty",
-        current_sync_id: null,
+        status: "uninitialized",
         current_scan_id: null,
-        active_adapter_id: null,
-        sync_lease_expires_at: null,
+        last_error: null,
       }),
     ]);
     expect(redacted.tables.l3_world_model_session_cursors).toEqual([

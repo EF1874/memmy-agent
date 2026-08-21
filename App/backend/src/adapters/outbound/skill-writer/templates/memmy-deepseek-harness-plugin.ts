@@ -9,8 +9,7 @@ import {
   loadRuntimeL3,
   notifyRuntimeBoundary,
   openRuntimeSession,
-  startRuntimeTurn,
-  syncRuntimeEnvironment
+  startRuntimeTurn
 } from "./memmy-workspace-bridge.mjs";
 
 export const name = "memmy-memory";
@@ -55,7 +54,6 @@ export function apply(ctx, config = {}) {
       const runtimeSession = await ensureSession(null, memorySessionIds, payload.agent.session);
       const sessionId = runtimeSession.sessionId;
       if (!runtimeSession.l3Initialized) {
-        await syncRuntimeEnvironment(runtimeSession, "session_start");
         const loaded = await loadRuntimeL3(runtimeSession);
         runtimeSession.l3Initialized = true;
         if (loaded.additionalContext) pendingL3.set(String(payload.agent.session.id), loaded.additionalContext);
@@ -92,7 +90,6 @@ export function apply(ctx, config = {}) {
     if (event.type === "compaction/end" && !(event.data && event.data.error)) {
       const runtimeSession = await ensureSession(null, memorySessionIds, session);
       await notifyRuntimeBoundary(runtimeSession, "token_compaction");
-      await syncRuntimeEnvironment(runtimeSession, "token_compaction");
       const loaded = await loadRuntimeL3(runtimeSession);
       if (loaded.additionalContext) pendingL3.set(sessionKey, loaded.additionalContext);
       return;

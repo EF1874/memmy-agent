@@ -84,12 +84,9 @@ describe("MemmyMemoryClient", () => {
     } satisfies Partial<MemmyMemoryHttpError>);
   });
 
-  it("strictly reads L3 and Bridge capability versions without inferring them from storage", async () => {
+  it("strictly reads L3 capability versions without inferring them from storage", async () => {
     const values = [
-      validHealth({
-        l3WorldModelProtocolVersions: [2],
-        workspaceBridgeProtocolVersions: ["1"],
-      }),
+      validHealth({ l3WorldModelProtocolVersions: [2] }),
       validHealth(undefined, "v999"),
       validHealth({ l3WorldModelProtocolVersions: ["2"] }),
     ];
@@ -101,7 +98,6 @@ describe("MemmyMemoryClient", () => {
     await expect(client.health()).resolves.toMatchObject({
       features: {
         l3WorldModelProtocolVersions: [2],
-        workspaceBridgeProtocolVersions: ["1"],
       },
     });
     await expect(client.health()).resolves.toMatchObject({
@@ -110,7 +106,7 @@ describe("MemmyMemoryClient", () => {
     await expect(client.health()).rejects.toThrow();
   });
 
-  it("uses the shared v2 transport for context, Trace Head, boundary, and environment sync", async () => {
+  it("uses the shared v2 transport for context, Trace Head, and boundary", async () => {
     const calls: Array<{ method: string; url: URL; headers: Record<string, string>; body: unknown }> = [];
     const client = new MemmyMemoryClient(
       { baseUrl: "http://memory.test", timeoutMs: 1000 },
@@ -151,7 +147,7 @@ describe("MemmyMemoryClient", () => {
             serverTime: "2026-08-19T00:00:00.000Z",
           });
         }
-        return response({ syncId: "sync-1", scanId: "scan-1", status: "clean", operations: [] });
+        return response({}, 404);
       }) as any,
     );
     const envelope = {
@@ -174,29 +170,7 @@ describe("MemmyMemoryClient", () => {
       trigger: "token_compaction",
       throughL1MemoryId: "l1-1",
     });
-    await client.projectEnvironmentSyncStart("project-1", {
-      ...envelope,
-      sessionId: "session-1",
-      trigger: "session_start",
-      capabilities: {
-        protocolVersion: "1",
-        operations: ["inventory", "read_text", "runtime_probe"],
-        maxTextBytes: 1024,
-      },
-    });
-    await client.projectEnvironmentSyncEvidence("project-1", "sync-1", {
-      ...envelope,
-      sessionId: "session-1",
-      evidence: {
-        operationId: "operation-1",
-        kind: "inventory",
-        status: "unsupported",
-        reason: "permission_denied",
-      },
-    });
-    await client.projectEnvironmentSyncStatus("project-1", "sync-1", "session-1", envelope);
-
-    for (const call of [calls[0]!, calls[1]!, calls[5]!]) {
+    for (const call of [calls[0]!, calls[1]!]) {
       expect(call.method).toBe("GET");
       expect(call.body).toBeUndefined();
       expect(Object.fromEntries(call.url.searchParams)).toEqual(expect.objectContaining({
@@ -211,15 +185,9 @@ describe("MemmyMemoryClient", () => {
         "x-memmy-session-key": "websocket:one",
       });
     }
-    expect(Object.fromEntries(calls[5]!.url.searchParams)).toMatchObject({ sessionId: "session-1" });
     expect(calls[2]).toMatchObject({
       method: "POST",
       body: { trigger: "token_compaction", throughL1MemoryId: "l1-1" },
-    });
-    expect(calls[3]!.body).toMatchObject({ sessionId: "session-1", trigger: "session_start" });
-    expect(calls[4]!.body).toMatchObject({
-      sessionId: "session-1",
-      evidence: { operationId: "operation-1", status: "unsupported" },
     });
   });
 });

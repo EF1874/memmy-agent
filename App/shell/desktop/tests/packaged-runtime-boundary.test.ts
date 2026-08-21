@@ -965,7 +965,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain("async function stageMacDmgUpdatePackage");
     expect(mainSource).toContain("function resolveStagedMacUpdateAppPath");
     expect(mainSource).toContain("function createMacDmgUpdateStageScript");
-    expect(mainSource).toContain("await stageMacDmgUpdatePackage(filePath)");
+    expect(mainSource).toContain("await stageMacDmgUpdatePackageWithLock(filePath)");
     expect(mainSource).toContain("using staged Memmy app");
     expect(mainSource).toContain("STAGED_APP_PATH");
     expect(mainSource).toContain("function shouldInstallWindowsUpdateInBackground");
@@ -1246,6 +1246,9 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).not.toContain('npm install --prefix "$AGENT_DIR"');
     expect(source).not.toContain('if [ ! -x "$AGENT_DIR/node_modules/.bin/tsc" ]');
     expect(source).toContain('cp -R "$MEMORY_DIR/dist/src" "$RUNTIME_DIR/memory/src"');
+    expect(source).toContain(
+      'npm install --prefix "$RUNTIME_DIR/memory" --package-lock-only --ignore-scripts --os=darwin --cpu="$TARGET_CPU"'
+    );
     expect(source).toContain('npm ci --prefix "$RUNTIME_DIR/memory" --omit=dev --os=darwin --cpu="$TARGET_CPU"');
     expect(source).toContain('delete dependencies["@memmy/local-api-contracts"]');
     expect(source).toContain('delete dependencies["@memmy/migrations"]');
@@ -1593,6 +1596,9 @@ describe("desktop packaged runtime boundaries", () => {
     expect(asarGuardSource).toContain("dist/main/desktop-edition.json");
     expect(asarGuardSource).toContain("dist/runtime/memmy-agent/package.json");
     expect(asarGuardSource).toContain("dist/runtime/memory/package-lock.json");
+    expect(asarGuardSource).toContain(
+      "node_modules/@memmy/backend/dist/src/adapters/outbound/skill-writer/workspace-bridge/memmy-workspace-bridge.mjs",
+    );
   });
 
   it("points packaged Memory at the bundled local embedding model resources", () => {

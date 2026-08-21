@@ -146,7 +146,7 @@ describe("AgentLoop memmy memory integration", () => {
       config: new Config({
         fileMemory: { enabled: false },
         app: { userId: "loop-user" },
-        memmyMemory: { enabled: true, workspaceBridge: { enabled: false } },
+        memmyMemory: { enabled: true },
       }),
       provider: {
         generation: { maxTokens: 256 },
@@ -207,7 +207,7 @@ function validHealth(): Record<string, unknown> {
     mode: "local",
     storage: { backend: "sqlite", schemaVersion: "v6", ready: true },
     capabilities: { routes: [], tools: [], memoryLayers: ["L1", "L2", "L3", "Skill"], supportsCli: true },
-    features: { l3WorldModelProtocolVersions: [2], workspaceBridgeProtocolVersions: ["1"] },
+    features: { l3WorldModelProtocolVersions: [2] },
     models: {
       summary: { configured: true, provider: "host", model: "test", remote: false, routing: "fixed" },
       evolution: { configured: true, provider: "host", model: "test", remote: false, routing: "fixed" },

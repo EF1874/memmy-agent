@@ -43,7 +43,6 @@ export function createMemmyMemoryIntegration(
   const client = new MemmyMemoryClient(connection);
   const hook = new MemmyMemoryHook(client, {
     workspace: options.workspace ?? null,
-    workspaceBridgeEnabled: options.workspaceBridgeEnabled ?? resolved.workspaceBridgeEnabled,
     userId: resolved.userId,
     // Prefer disk config: AgentLoop keeps a cloned in-memory Config that stays
     // stale after desktop switches account ↔ byok and rewrites config.yaml.

@@ -10,7 +10,7 @@ import { renderMemmyResumeHookScript } from "../templates/memmy-resume-hook.js";
 import { renderMemmySkillBootstrapManifest } from "../templates/memmy-skill-directory.js";
 import type { SkillManifest, SkillTarget } from "../types.js";
 import { resolveClaudeCodeHomeDirectory } from "../../agent-paths.js";
-import { MEMMY_WORKSPACE_BRIDGE_RUNTIME_ASSET } from "../workspace-bridge/runtime-asset.js";
+import { loadMemmyWorkspaceBridgeRuntimeAsset } from "../workspace-bridge/runtime-loader.js";
 
 const CLAUDE_CODE_TARGET_ID = "claude_code";
 const CLAUDE_CODE_DISPLAY_NAME = "Claude Code";
@@ -102,7 +102,10 @@ export function createClaudeCodeSkillTarget(deps: CreateClaudeCodeSkillTargetDep
         hookScriptPath,
         renderMemmyResumeHookScript({ source: CLAUDE_CODE_TARGET_ID, mode: "claude-code" })
       );
-      await writeFileAtomically(join(hookDirectory, WORKSPACE_BRIDGE_FILE_NAME), MEMMY_WORKSPACE_BRIDGE_RUNTIME_ASSET);
+      await writeFileAtomically(
+        join(hookDirectory, WORKSPACE_BRIDGE_FILE_NAME),
+        await loadMemmyWorkspaceBridgeRuntimeAsset()
+      );
       await writeFileAtomically(join(root, COMMAND_DIRECTORY_NAME, RESUME_COMMAND_FILE_NAME), CLAUDE_CODE_RESUME_COMMAND);
       await upsertClaudeCodeHookSettings(join(root, SETTINGS_FILE_NAME), hookScriptPath);
       await rm(join(root, HOOK_DIRECTORY_NAME, LEGACY_HOOK_SCRIPT_FILE_NAME), { force: true });

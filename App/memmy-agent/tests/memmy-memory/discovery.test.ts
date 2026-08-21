@@ -91,8 +91,6 @@ describe("memmy memory discovery", () => {
     expect(defaultConfig.memmyMemory.enabled).toBe(true);
     expect(resolveMemmyMemoryConfig(enabled).enabled).toBe(true);
     expect(resolveMemmyMemoryConfig(defaultConfig).enabled).toBe(true);
-    expect(resolveMemmyMemoryConfig(enabled).workspaceBridgeEnabled).toBe(true);
-    expect(resolveMemmyMemoryConfig(defaultConfig).workspaceBridgeEnabled).toBe(true);
     expect(resolveMemmyMemoryConfig(enabled).userId).toBe("user_config_1");
     expect(resolveMemmyMemoryConfig(disabled).enabled).toBe(false);
     expect(resolveMemmyMemoryConfig(disabled).userId).toBe("local-user");
@@ -100,7 +98,6 @@ describe("memmy memory discovery", () => {
       enabled: true,
       userId: "user_config_1",
       version: 1,
-      workspaceBridge: { enabled: true },
       storage: { endpoint: "http://127.0.0.1:18960", token: "service-token" },
     });
     expect(enabled.toObject().app).toEqual({

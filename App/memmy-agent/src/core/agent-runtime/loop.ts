@@ -775,7 +775,6 @@ export class AgentLoop {
     this.workspace = path.resolve(getWorkspacePath(init.workspace ?? defaults.workspace ?? process.cwd()));
     this.memmyMemoryIntegration = installMemmyMemory(this.config, {
       workspace: this.workspace,
-      workspaceBridgeEnabled: this.config.memmyMemory.workspaceBridge.enabled,
       hooks: this.extraHooks,
     });
     installByokTokenUsage(this.config, { hooks: this.extraHooks });

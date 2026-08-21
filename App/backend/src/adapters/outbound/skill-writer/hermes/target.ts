@@ -898,9 +898,6 @@ import json
 import logging
 import os
 import re
-import shutil
-import subprocess
-import tempfile
 import threading
 import uuid
 from pathlib import Path
@@ -917,11 +914,6 @@ except Exception:
     yaml = None
 
 try:
-    import pathspec
-except Exception:
-    pathspec = None
-
-try:
     from tools.registry import tool_error
 except Exception:
     def tool_error(message: str) -> str:
@@ -933,21 +925,6 @@ PLUGIN_DIR = Path(__file__).resolve().parent
 DEFAULT_MEMMY_CONFIG_PATH = Path.home() / ".memmy" / "config.yaml"
 HTTP_TIMEOUT_SECONDS = 45.0
 SHUTDOWN_THREAD_TIMEOUT_SECONDS = 60.0
-MAX_TEXT_BYTES = 1024 * 1024
-JSON_BODY_LIMIT = 2 * 1024 * 1024
-FIXED_EXCLUDES = {
-    ".git", "node_modules", "vendor", ".venv", "venv", "env", "dist", "build",
-    "out", "coverage", ".cache", ".next", ".nuxt", "target", "__pycache__",
-    ".pytest_cache", ".mypy_cache",
-}
-BINARY_EXTENSIONS = {
-    ".7z", ".a", ".avi", ".bin", ".bmp", ".class", ".dll", ".dylib", ".exe",
-    ".gif", ".gz", ".ico", ".jar", ".jpeg", ".jpg", ".mov", ".mp3", ".mp4",
-    ".o", ".obj", ".pdf", ".png", ".so", ".tar", ".tgz", ".wav", ".webm",
-    ".webp", ".woff", ".woff2", ".xz", ".zip",
-}
-
-
 MEMMY_SEARCH_SCHEMA = {
     "name": "memmy_memory_search",
     "description": "Search Memmy local memory for relevant facts, preferences, policies, world models, and skills.",
@@ -1015,15 +992,6 @@ class MemmyMemoryProvider(MemoryProvider):
         self._session_id = session_id or "default"
         try:
             state = self._ensure_runtime_session(self._session_id)
-            scan_thread = self._start_background(
-                self._sync_environment,
-                self._session_id,
-                state,
-                "session_start",
-                name="memmy-memory-workspace-scan",
-            )
-            if scan_thread is not None:
-                scan_thread.join(timeout=3.0)
             context = self._load_l3(state)
             if context:
                 with self._lock:
@@ -1211,16 +1179,13 @@ class MemmyMemoryProvider(MemoryProvider):
                 body["workspaceUri"] = Path(workspace_root).as_uri()
                 body["workspaceHostId"] = runtime.get("workspaceHostId")
             opened = _memmy_post("/api/v1/sessions/open", body)
-            bridge_versions = features.get("workspaceBridgeProtocolVersions") if isinstance(features, dict) else []
             protocol = "v2"
-            bridge_supported = isinstance(bridge_versions, list) and "1" in bridge_versions
         else:
             opened = _memmy_post("/api/v1/sessions/open", {
                 "sessionId": session_key,
                 "workspacePath": workspace_root or None,
             })
             protocol = "legacy"
-            bridge_supported = False
         memory_session_id = str(opened.get("sessionId") or "")
         if not memory_session_id:
             raise RuntimeError("Memmy did not return a sessionId")
@@ -1230,7 +1195,6 @@ class MemmyMemoryProvider(MemoryProvider):
             "projectId": _clean_text(opened.get("projectId")) or None,
             "sessionKey": session_key,
             "workspaceRoot": workspace_root,
-            "workspaceBridgeSupported": bridge_supported,
             "runtime": runtime,
         }
         with self._lock:
@@ -1291,7 +1255,6 @@ class MemmyMemoryProvider(MemoryProvider):
         try:
             previous = self._ensure_runtime_session(previous_session)
             _notify_boundary(previous, "token_compaction")
-            self._sync_environment(previous_session, previous, "token_compaction")
             current = self._ensure_runtime_session(active_session)
             context = self._load_l3(current)
             if context:
@@ -1300,12 +1263,6 @@ class MemmyMemoryProvider(MemoryProvider):
                     self._l3_contexts[active_session] = context
         except Exception as exc:
             logger.warning("memmy-memory compression refresh failed: %s", exc)
-
-    def _sync_environment(self, active_session: str, state: Dict[str, Any], trigger: str) -> None:
-        try:
-            _drive_workspace_bridge(state, trigger)
-        except Exception as exc:
-            logger.warning("memmy-memory workspace scan failed: %s", exc)
 
     def _start_background(self, target, *args, name: str) -> Optional[threading.Thread]:
         thread = threading.Thread(target=target, args=args, daemon=True, name=name)
@@ -1358,7 +1315,6 @@ def _load_runtime() -> Dict[str, str]:
         root = {}
     memory = root.get("memmyMemory") if isinstance(root.get("memmyMemory"), dict) else {}
     app = root.get("app") if isinstance(root.get("app"), dict) else {}
-    bridge = memory.get("workspaceBridge") if isinstance(memory.get("workspaceBridge"), dict) else {}
     base_url = _clean_text(storage.get("endpoint")).rstrip("/") or _clean_text(plugin_config.get("endpoint")).rstrip("/") or "http://127.0.0.1:18960"
     token = _clean_text(storage.get("token")) or _clean_text(plugin_config.get("token"))
     if not base_url:
@@ -1368,7 +1324,6 @@ def _load_runtime() -> Dict[str, str]:
         "token": token,
         "userId": _clean_text(app.get("userId")) or _clean_text(memory.get("userId")) or _clean_text(plugin_config.get("userId")) or "local-user",
         "workspaceHostId": _clean_text(plugin_config.get("workspaceHostId")),
-        "workspaceBridgeEnabled": bridge.get("enabled") is True,
     }
 
 
@@ -1551,329 +1506,6 @@ def _hermes_workspace_root(session_id: str) -> Optional[str]:
         return str(path)
     except Exception:
         return None
-
-
-def _drive_workspace_bridge(state: Dict[str, Any], trigger: str) -> None:
-    runtime = state.get("runtime") if isinstance(state.get("runtime"), dict) else {}
-    root = _clean_text(state.get("workspaceRoot"))
-    project_id = _clean_text(state.get("projectId"))
-    if (
-        state.get("protocol") != "v2"
-        or state.get("workspaceBridgeSupported") is not True
-        or runtime.get("workspaceBridgeEnabled") is not True
-        or not root
-        or not project_id
-        or pathspec is None
-    ):
-        return
-    response = _session_post(
-        state,
-        "/api/v1/l3-world-model/projects/" + quote(project_id, safe="") + "/environment-sync/start",
-        {
-            "sessionId": state["sessionId"],
-            "trigger": trigger,
-            "capabilities": {
-                "protocolVersion": "1",
-                "operations": ["inventory", "read_text", "runtime_probe"],
-                "maxTextBytes": MAX_TEXT_BYTES,
-            },
-        },
-    )
-    for _ in range(64):
-        status = _clean_text(response.get("status"))
-        operations = response.get("operations") if isinstance(response.get("operations"), list) else []
-        if status in ("clean", "failed") or not operations:
-            return
-        for operation in operations:
-            if not isinstance(operation, dict):
-                continue
-            for evidence in _execute_workspace_operation(root, operation):
-                response = _session_post(
-                    state,
-                    "/api/v1/l3-world-model/projects/" + quote(project_id, safe="") +
-                    "/environment-sync/" + quote(_clean_text(response.get("syncId")), safe="") + "/evidence",
-                    {"sessionId": state["sessionId"], "evidence": evidence},
-                )
-        envelope = _runtime_envelope(runtime, state["sessionKey"], project_id)
-        transport = _get_transport(envelope, state["sessionId"])
-        response = _memmy_get(
-            "/api/v1/l3-world-model/projects/" + quote(project_id, safe="") +
-            "/environment-sync/" + quote(_clean_text(response.get("syncId")), safe=""),
-            query=transport["query"],
-            headers=transport["headers"],
-        )
-
-
-def _execute_workspace_operation(root: str, operation: Dict[str, Any]) -> List[Dict[str, Any]]:
-    kind = _clean_text(operation.get("kind"))
-    if kind == "inventory":
-        return _inventory_evidence(root, operation)
-    if kind == "read_text":
-        return [_read_text_evidence(root, operation)]
-    if kind == "runtime_probe":
-        return [_runtime_probe_evidence(root, operation)]
-    return [_unsupported(operation, "unsupported_operation")]
-
-
-def _inventory_evidence(root: str, operation: Dict[str, Any]) -> List[Dict[str, Any]]:
-    policy = operation.get("policy") if isinstance(operation.get("policy"), dict) else {}
-    expected = {
-        "policyVersion": "project_environment.v1",
-        "maxDepth": 20,
-        "maxEntries": 20000,
-        "maxPageEntries": 500,
-        "maxRelativePathUtf8Bytes": 4096,
-        "followSymbolicLinks": False,
-        "respectGitignore": True,
-    }
-    if policy != expected or _clean_text(operation.get("mode")) != "full":
-        return [_unsupported(operation, "unsupported_operation")]
-    first = _scan_workspace(root, policy)
-    second = _scan_workspace(root, policy)
-    if _canonical_json(first) != _canonical_json(second):
-        first = _scan_workspace(root, policy)
-        if _canonical_json(first) != _canonical_json(_scan_workspace(root, policy)):
-            return [_unsupported(operation, "unstable_workspace")]
-    entries = first["entries"]
-    page_size = int(policy["maxPageEntries"])
-    pages = _chunk_inventory_entries(entries, page_size)
-    evidence = []
-    for page_index, page in enumerate(pages):
-        is_last = page_index == len(pages) - 1
-        omitted = first["omittedCount"] if is_last and first["omittedCount"] else None
-        hash_input = {
-            "operationId": _clean_text(operation.get("operationId")),
-            "pageIndex": page_index,
-            "isLast": is_last,
-            "omittedCount": omitted,
-            "entries": page,
-        }
-        item = {
-            "operationId": hash_input["operationId"],
-            "kind": "inventory",
-            "status": "accepted",
-            "pageIndex": page_index,
-            "isLast": is_last,
-            "pageHash": hashlib.sha256(_canonical_json(hash_input).encode("utf-8")).hexdigest(),
-            "entries": page,
-        }
-        if omitted is not None:
-            item["omittedCount"] = omitted
-        evidence.append(item)
-    return evidence
-
-
-def _chunk_inventory_entries(entries: List[Dict[str, Any]], max_entries: int) -> List[List[Dict[str, Any]]]:
-    if not entries:
-        return [[]]
-    pages: List[List[Dict[str, Any]]] = []
-    current: List[Dict[str, Any]] = []
-    for entry in entries:
-        candidate = [*current, entry]
-        encoded_size = len(json.dumps({"evidence": {"entries": candidate}}, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
-        if current and (len(candidate) > max_entries or encoded_size >= JSON_BODY_LIMIT):
-            pages.append(current)
-            current = [entry]
-        else:
-            current = candidate
-    pages.append(current)
-    return pages
-
-
-def _scan_workspace(root: str, policy: Dict[str, Any]) -> Dict[str, Any]:
-    patterns = []
-    gitignore = Path(root) / ".gitignore"
-    if gitignore.is_file():
-        try:
-            patterns = gitignore.read_text(encoding="utf-8").splitlines()
-        except Exception:
-            patterns = []
-    ignore_spec = pathspec.PathSpec.from_lines("gitwildmatch", patterns)
-    entries: List[Dict[str, Any]] = []
-
-    def walk(directory: Path, prefix: str, depth: int) -> None:
-        if depth > int(policy["maxDepth"]):
-            return
-        try:
-            children = sorted(directory.iterdir(), key=lambda item: item.name)
-        except Exception:
-            return
-        for child in children:
-            relative = (prefix + "/" + child.name) if prefix else child.name
-            if (
-                child.name in FIXED_EXCLUDES
-                or len(relative.encode("utf-8")) > int(policy["maxRelativePathUtf8Bytes"])
-                or ignore_spec.match_file(relative)
-                or (child.is_dir() and ignore_spec.match_file(relative + "/"))
-                or _is_sensitive_path(relative)
-                or child.is_symlink()
-            ):
-                continue
-            try:
-                details = child.stat()
-            except Exception:
-                continue
-            if child.is_dir():
-                entry = {"relativePath": relative, "type": "directory", "mtimeMs": max(0, int(details.st_mtime * 1000))}
-                entries.append(entry)
-                walk(child, relative, depth + 1)
-            elif child.is_file() and child.suffix.lower() not in BINARY_EXTENSIONS:
-                entry = {
-                    "relativePath": relative,
-                    "type": "file",
-                    "size": max(0, int(details.st_size)),
-                    "mtimeMs": max(0, int(details.st_mtime * 1000)),
-                }
-                if _is_deterministic_candidate(relative) and details.st_size <= MAX_TEXT_BYTES:
-                    sha256 = _hash_stable_candidate(child, entry)
-                    if sha256:
-                        entry["sha256"] = sha256
-                entries.append(entry)
-
-    walk(Path(root), "", 0)
-    git_entry = Path(root) / ".git"
-    if git_entry.is_dir() or git_entry.is_file():
-        entries.append({"relativePath": ".git", "type": "directory", "mtimeMs": 0})
-    entries.sort(key=lambda item: item["relativePath"])
-    max_entries = int(policy["maxEntries"])
-    omitted = max(0, len(entries) - max_entries)
-    return {"entries": entries[:max_entries], "omittedCount": omitted}
-
-
-def _hash_stable_candidate(path: Path, observed: Dict[str, Any]) -> Optional[str]:
-    for attempt in range(2):
-        try:
-            before = path.lstat()
-            if path.is_symlink() or not path.is_file() or before.st_size > MAX_TEXT_BYTES:
-                return None
-            raw = path.read_bytes()
-            after = path.lstat()
-            stable = before.st_size == after.st_size and int(before.st_mtime * 1000) == int(after.st_mtime * 1000)
-            matches_inventory = int(observed["size"]) == before.st_size and int(observed["mtimeMs"]) == int(before.st_mtime * 1000)
-            if stable and (attempt > 0 or matches_inventory):
-                return hashlib.sha256(raw).hexdigest()
-        except Exception:
-            return None
-    return None
-
-
-def _read_text_evidence(root: str, operation: Dict[str, Any]) -> Dict[str, Any]:
-    relative = _clean_text(operation.get("relativePath"))
-    if not _valid_relative_path(relative) or not _is_deterministic_candidate(relative):
-        return _unsupported(operation, "unsafe_path")
-    unresolved = Path(root) / relative
-    if unresolved.is_symlink():
-        return _unsupported(operation, "unsafe_path")
-    candidate = unresolved.resolve()
-    if not _path_inside(Path(root).resolve(), candidate) or not candidate.is_file():
-        return _unsupported(operation, "unsafe_path")
-    try:
-        before = candidate.stat()
-        if before.st_size > min(int(operation.get("maxBytes") or 0), MAX_TEXT_BYTES):
-            return _unsupported(operation, "too_large")
-        raw = candidate.read_bytes()
-        after = candidate.stat()
-        actual = hashlib.sha256(raw).hexdigest()
-        stable = before.st_size == after.st_size and int(before.st_mtime * 1000) == int(after.st_mtime * 1000)
-        if not stable or actual != _clean_text(operation.get("expectedSha256")):
-            return {"operationId": operation["operationId"], "kind": "read_text", "status": "stale", "relativePath": relative, "actualSha256": actual}
-        text_value = raw.decode("utf-8", errors="strict")
-        accepted = {"operationId": operation["operationId"], "kind": "read_text", "status": "accepted", "relativePath": relative, "sha256": actual, "text": text_value}
-        if len(json.dumps({"evidence": accepted}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) >= JSON_BODY_LIMIT:
-            return _unsupported(operation, "body_limit")
-        return accepted
-    except UnicodeDecodeError:
-        return _unsupported(operation, "unsupported_operation")
-    except PermissionError:
-        return _unsupported(operation, "permission_denied")
-
-
-def _runtime_probe_evidence(root: str, operation: Dict[str, Any]) -> Dict[str, Any]:
-    probes = {
-        "node_version": ("node", ["--version"], re.compile(r"^v\d+\.\d+\.\d+(?:[-+][\w.-]+)?$")),
-        "python_version": ("python3", ["--version"], re.compile(r"^Python \d+\.\d+\.\d+(?:[\w.+-]*)$")),
-        "go_version": ("go", ["version"], re.compile(r"^go version go\d+\.\d+(?:\.\d+)?\b.*$")),
-        "rust_version": ("rustc", ["--version"], re.compile(r"^rustc \d+\.\d+\.\d+\b.*$")),
-        "java_version": ("java", ["-version"], re.compile(r'^(?:openjdk|java) version "[^"\r\n]+".*$')),
-    }
-    probe = _clean_text(operation.get("probe"))
-    spec = probes.get(probe)
-    if spec is None:
-        return _unsupported(operation, "unsupported_operation")
-    executable = shutil.which(spec[0])
-    if not executable:
-        return _unsupported(operation, "unavailable_runtime")
-    executable_path = Path(executable).resolve()
-    if _path_inside(Path(root).resolve(), executable_path):
-        return _unsupported(operation, "unsafe_probe")
-    env = {key: os.environ[key] for key in ("PATH", "PATHEXT", "SYSTEMROOT", "SystemRoot", "WINDIR") if key in os.environ}
-    try:
-        result = subprocess.run([str(executable_path), *spec[1]], cwd=tempfile.gettempdir(), env=env, capture_output=True, text=True, timeout=2.0, check=False)
-        output = (result.stdout + "\n" + result.stderr).strip()[:256]
-        return {"operationId": operation["operationId"], "kind": "runtime_probe", "status": "accepted", "probe": probe, "exitCode": int(result.returncode), "versionText": output if result.returncode == 0 and spec[2].match(output) else None}
-    except Exception:
-        return {"operationId": operation["operationId"], "kind": "runtime_probe", "status": "accepted", "probe": probe, "exitCode": 1, "versionText": None}
-
-
-def _unsupported(operation: Dict[str, Any], reason: str) -> Dict[str, Any]:
-    return {"operationId": _clean_text(operation.get("operationId")), "kind": _clean_text(operation.get("kind")), "status": "unsupported", "reason": reason}
-
-
-def _canonical_json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"), sort_keys=True)
-
-
-def _path_inside(root: Path, candidate: Path) -> bool:
-    try:
-        candidate.relative_to(root)
-        return True
-    except ValueError:
-        return False
-
-
-def _valid_relative_path(value: str) -> bool:
-    if not value or len(value.encode("utf-8")) > 4096 or "\\" in value or "\x00" in value or value.startswith("/") or re.match(r"^[A-Za-z]:", value):
-        return False
-    return all(segment not in ("", ".", "..") for segment in value.split("/"))
-
-
-def _is_sensitive_path(value: str) -> bool:
-    lower = value.lower()
-    name = lower.rsplit("/", 1)[-1]
-    return (
-        name.startswith(".env") or "credentials" in name or "secret" in name
-        or bool(re.search(r"\.(pem|key|p12|pfx|crt|cer)$", name))
-        or name in (".npmrc", ".pypirc", "settings.xml") or lower.startswith(".ssh/")
-    )
-
-
-def _is_deterministic_candidate(value: str) -> bool:
-    if not _valid_relative_path(value) or _is_sensitive_path(value):
-        return False
-    segments = value.split("/")
-    name = segments[-1]
-    lower = name.lower()
-    depth = len(segments) - 1
-    if len(segments) == 3 and segments[0] == ".github" and segments[1] == "workflows" and re.search(r"\.ya?ml$", name, re.I):
-        return True
-    if depth <= 2 and re.search(r"\.(sln|csproj)$", name, re.I):
-        return True
-    if depth != 0:
-        return False
-    patterns = (
-        r"^(package\.json|pyproject\.toml|cargo\.toml|go\.mod|pom\.xml|makefile)$",
-        r"^(package-lock\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|yarn\.lock|bun\.lock)$",
-        r"^(tsconfig|jsconfig).*\.json$",
-        r"^(eslint\.config\.(js|cjs|mjs|ts)|\.eslintrc(\.(json|ya?ml|js|cjs))?)$",
-        r"^(jest\.config\.(js|cjs|mjs|ts|json)|vitest\.config\.(js|mjs|ts))$",
-        r"^(poetry\.lock|uv\.lock|requirements.*\.txt|\.python-version|tox\.ini|pytest\.ini|setup\.cfg)$",
-        r"^(cargo\.lock|rust-toolchain(\.toml)?|go\.sum|go\.work(\.sum)?)$",
-        r"^(build\.gradle(\.kts)?|settings\.gradle(\.kts)?|gradle\.properties)$",
-        r"^(dockerfile(\..*)?|compose\.ya?ml|docker-compose\.ya?ml)$",
-        r"^(\.gitlab-ci\.yml|azure-pipelines\.yml|jenkinsfile)$",
-        r"^(\.nvmrc|\.node-version|\.tool-versions|\.java-version|\.ruby-version)$",
-    )
-    return any(re.match(pattern, lower, re.I) for pattern in patterns)
 
 
 def _render_l3_world_model_context(content: str) -> str:

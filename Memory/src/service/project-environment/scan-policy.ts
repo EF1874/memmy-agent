@@ -1,17 +1,65 @@
 import {
   canonicalJson,
-  isProjectEnvironmentDeterministicCandidate,
-  PROJECT_ENVIRONMENT_SOURCE_EXTENSIONS,
-  sha256Hex,
-  type InventoryEntry,
-  type RuntimeProbe,
-  type WorkspaceBridgeCapabilities
+  sha256Hex
 } from "@memmy/local-api-contracts";
+import type { InventoryEntry, RuntimeProbe } from "./types.js";
 
-export const PROJECT_SOURCE_EXTENSIONS = PROJECT_ENVIRONMENT_SOURCE_EXTENSIONS;
+export const PROJECT_ENVIRONMENT_SCAN_POLICY = {
+  maxDepth: 20,
+  maxEntries: 20_000,
+  maxRelativePathUtf8Bytes: 4096,
+  maxTextBytes: 1024 * 1024
+} as const;
+
+export const PROJECT_SOURCE_EXTENSIONS = [
+  ".c", ".cc", ".cpp", ".cs", ".go", ".h", ".hpp", ".java", ".js", ".jsx",
+  ".kt", ".kts", ".mjs", ".cjs", ".php", ".py", ".rb", ".rs", ".scala",
+  ".swift", ".ts", ".tsx"
+] as const;
 
 export function isDeterministicCandidate(relativePath: string): boolean {
-  return isProjectEnvironmentDeterministicCandidate(relativePath);
+  if (validateWorkspaceRelativePath(relativePath) || isSensitivePath(relativePath)) return false;
+  const segments = relativePath.split("/");
+  const basename = segments.at(-1)!;
+  const lower = basename.toLowerCase();
+  const depth = segments.length - 1;
+  if (segments.length === 3 && segments[0] === ".github" && segments[1] === "workflows" && /\.(ya?ml)$/i.test(basename)) return true;
+  if (depth <= 2 && /\.(sln|csproj)$/i.test(basename)) return true;
+  if (depth !== 0) return false;
+  if (/^(package\.json|pyproject\.toml|cargo\.toml|go\.mod|pom\.xml|makefile)$/i.test(basename)) return true;
+  if (/^(package-lock\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|yarn\.lock|bun\.lock)$/i.test(basename)) return true;
+  if (/^(tsconfig|jsconfig).*\.json$/i.test(basename)) return true;
+  if (/^(eslint\.config\.(js|cjs|mjs|ts)|\.eslintrc(\.(json|ya?ml|js|cjs))?)$/i.test(basename)) return true;
+  if (/^(jest\.config\.(js|cjs|mjs|ts|json)|vitest\.config\.(js|mjs|ts))$/i.test(basename)) return true;
+  if (/^(poetry\.lock|uv\.lock|requirements.*\.txt|\.python-version|tox\.ini|pytest\.ini|setup\.cfg)$/i.test(basename)) return true;
+  if (/^(cargo\.lock|rust-toolchain(\.toml)?|go\.sum|go\.work(\.sum)?)$/i.test(basename)) return true;
+  if (/^(build\.gradle(\.kts)?|settings\.gradle(\.kts)?|gradle\.properties)$/i.test(basename)) return true;
+  if (/^(dockerfile(\..*)?|compose\.ya?ml|docker-compose\.ya?ml)$/i.test(basename)) return true;
+  if (/^(\.gitlab-ci\.yml|azure-pipelines\.yml|jenkinsfile)$/i.test(basename)) return true;
+  return /^(\.nvmrc|\.node-version|\.tool-versions|\.java-version|\.ruby-version)$/i.test(basename);
+}
+
+export function isSensitivePath(relativePath: string): boolean {
+  const lower = relativePath.toLowerCase();
+  const basename = lower.split("/").at(-1) ?? lower;
+  return basename.startsWith(".env") || basename.includes("credentials") || basename.includes("secret") ||
+    /\.(pem|key|p12|pfx|crt|cer)$/i.test(basename) || basename === ".npmrc" ||
+    basename === ".pypirc" || basename === "settings.xml" || lower.startsWith(".ssh/");
+}
+
+export function validateWorkspaceRelativePath(value: string): string | null {
+  if (new TextEncoder().encode(value).byteLength > PROJECT_ENVIRONMENT_SCAN_POLICY.maxRelativePathUtf8Bytes) {
+    return "relative path exceeds 4096 UTF-8 bytes";
+  }
+  if (value.includes("\0")) return "relative path must not contain NUL";
+  if (value.includes("\\")) return "relative path must use forward slashes";
+  if (value.startsWith("/") || value.startsWith("//")) return "relative path must not be absolute";
+  if (/^[A-Za-z]:/.test(value)) return "relative path must not include a Windows drive prefix";
+  const segments = value.split("/");
+  if (segments.some((segment) => !segment || segment === "." || segment === "..")) {
+    return "relative path contains an empty, dot, or parent segment";
+  }
+  return null;
 }
 
 export function buildCompactFileTree(entries: InventoryEntry[]): string {
@@ -65,10 +113,8 @@ export function projectFingerprint(input: {
 }
 
 export function requiredRuntimeProbes(
-  entries: InventoryEntry[],
-  capabilities: WorkspaceBridgeCapabilities
+  entries: InventoryEntry[]
 ): RuntimeProbe[] {
-  if (!capabilities.operations.includes("runtime_probe")) return [];
   const paths = new Set(entries.map((entry) => entry.relativePath.toLowerCase()));
   const extensions = new Set(entries.map((entry) => extensionOf(entry.relativePath.toLowerCase())));
   const probes: RuntimeProbe[] = [];
@@ -81,11 +127,9 @@ export function requiredRuntimeProbes(
 }
 
 export function deterministicReadCandidates(
-  entries: InventoryEntry[],
-  capabilities: WorkspaceBridgeCapabilities
+  entries: InventoryEntry[]
 ): Array<{ relativePath: string; sha256: string; maxBytes: number }> {
-  if (!capabilities.operations.includes("read_text")) return [];
-  const maxBytes = Math.min(capabilities.maxTextBytes, 1024 * 1024);
+  const maxBytes = PROJECT_ENVIRONMENT_SCAN_POLICY.maxTextBytes;
   return entries
     .filter((entry): entry is Extract<InventoryEntry, { type: "file" }> & { sha256: string } =>
       entry.type === "file" && typeof entry.sha256 === "string" && isDeterministicCandidate(entry.relativePath))
