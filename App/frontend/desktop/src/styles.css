@@ -4779,6 +4779,21 @@ code {
   color: color-mix(in srgb, var(--color-text-ink) 68%, transparent);
 }
 
+.memory-pill--user-memory-active {
+  background: color-mix(in srgb, var(--color-status-success) 12%, var(--color-background-paper));
+  color: color-mix(in srgb, var(--color-status-success) 80%, var(--color-text-ink));
+}
+
+.memory-pill--user-memory-archived {
+  background: color-mix(in srgb, var(--color-canvas-oat) 70%, var(--color-background-paper));
+  color: color-mix(in srgb, var(--color-text-ink) 62%, transparent);
+}
+
+.memory-pill--user-memory-deleted {
+  background: color-mix(in srgb, var(--color-status-error) 12%, var(--color-background-paper));
+  color: var(--color-status-error);
+}
+
 .memory-pill--reflection-done {
   border: 1px solid color-mix(in srgb, var(--color-accent-lavender) 72%, transparent);
   background: color-mix(in srgb, var(--color-accent-lavender) 44%, var(--color-background-paper));

@@ -137,9 +137,9 @@ export const AgentThreadMessages = memo(function AgentThreadMessages(props: Agen
     [props.chatScopeKey, props.messages, props.retryWaitStatus]
   );
   const finalAssistantAnswerIndex = useMemo(() => findFinalAssistantAnswerUnitIndex(units, { isSending: props.isSending }), [props.isSending, units]);
-  const recallEvidenceAnchor = useMemo(
-    () => findRecallEvidenceUserAnchor(units, finalAssistantAnswerIndex),
-    [finalAssistantAnswerIndex, units]
+  const recallEvidenceAnchors = useMemo(
+    () => findRecallEvidenceUserAnchors(units, { isSending: props.isSending }),
+    [props.isSending, units]
   );
   const [manualOpenByActivityKey, setManualOpenByActivityKey] = useState<Record<string, boolean | undefined>>({});
   const previousRunningByActivityKey = useRef<Record<string, boolean>>({});
@@ -223,7 +223,7 @@ export const AgentThreadMessages = memo(function AgentThreadMessages(props: Agen
               deferredRevealDelayMs={deferredAgentMessageRevealDelay(index, units.length)}
               sanitizePlatformApiErrors={props.sanitizePlatformApiErrors === true}
               memoryRuntimeClient={props.memoryRuntimeClient}
-              recallEvidenceTurnId={index === recallEvidenceAnchor?.unitIndex ? recallEvidenceAnchor.turnId : undefined}
+              recallEvidenceTurnId={recallEvidenceAnchors.get(index)}
             />
             {unit.message.id === props.afterMessageId ? props.afterMessageContent : null}
           </Fragment>
@@ -394,20 +394,34 @@ function findLastUserUnitIndex(units: AgentDisplayUnit[]): number {
   return -1;
 }
 
-function findRecallEvidenceUserAnchor(
+function findRecallEvidenceUserAnchors(
   units: AgentDisplayUnit[],
-  finalAssistantAnswerIndex: number
-): { unitIndex: number; turnId: string } | null {
-  if (finalAssistantAnswerIndex < 0) return null;
-  const answer = units[finalAssistantAnswerIndex];
-  if (answer?.type !== "single" || answer.message.role !== "assistant") return null;
-  for (let index = finalAssistantAnswerIndex - 1; index >= 0; index -= 1) {
+  options: { isSending?: boolean }
+): Map<number, string> {
+  const anchors = new Map<number, string>();
+  const lastUserUnitIndex = findLastUserUnitIndex(units);
+  let userUnitIndex = -1;
+  for (let index = 0; index < units.length; index += 1) {
     const unit = units[index];
-    if (unit?.type !== "single" || unit.message.role !== "user") continue;
-    const turnId = answer.message.turnId ?? unit.message.turnId;
-    return turnId ? { unitIndex: index, turnId } : null;
+    if (unit?.type !== "single") continue;
+    if (unit.message.role === "user") {
+      userUnitIndex = index;
+      continue;
+    }
+    if (
+      userUnitIndex < 0 ||
+      unit.message.role !== "assistant" ||
+      unit.message.kind === "trace" ||
+      unit.message.kind === "narration" ||
+      unit.message.kind === "context_compaction" ||
+      unit.message.content.trim().length === 0 ||
+      (options.isSending && userUnitIndex === lastUserUnitIndex)
+    ) continue;
+    const userUnit = units[userUnitIndex];
+    const turnId = unit.message.turnId ?? (userUnit?.type === "single" ? userUnit.message.turnId : undefined);
+    if (turnId) anchors.set(userUnitIndex, turnId);
   }
-  return null;
+  return anchors;
 }
 
 interface SingleMessageProps {

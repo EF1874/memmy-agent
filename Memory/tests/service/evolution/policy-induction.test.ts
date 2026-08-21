@@ -1241,39 +1241,38 @@ function createBc08SummaryLlm(): LlmClient {
       const payload = messages.find((message) => message.role === "user")?.content ?? "";
       if (payload.includes("以后不要写不必要的兜底代码")) {
         return {
-          create_l1: true,
-          l1_summary: "用户要求代码保持简洁、避免不必要的兜底；本轮已精简并通过测试。",
-          policy_eligible: true,
-          create_user_memory: true,
-          user_memory_types: ["User Preference"],
-          user_memory_evidence: [{
-            quote: "我更喜欢简洁的代码",
-            type: "User Preference"
-          }, {
-            quote: "以后不要写不必要的兜底代码",
-            type: "User Preference"
-          }],
-          l1_evidence: [{
-            quote: "已精简代码并通过测试",
-            source_role: "assistant",
-            kind: "task_outcome"
-          }],
-          reason: "task-linked feedback with a verified outcome"
+          l1: {
+            summary: "用户要求代码保持简洁、避免不必要的兜底；本轮已精简并通过测试。",
+            evidence: [{
+              quote: "已精简代码并通过测试",
+              role: "assistant",
+              kind: "task_outcome"
+            }]
+          },
+          user: {
+            action: "create",
+            evidence: [{
+              quote: "我更喜欢简洁的代码",
+              type: "User Preference"
+            }, {
+              quote: "以后不要写不必要的兜底代码",
+              type: "User Preference"
+            }],
+            target: "",
+            replacement: ""
+          }
         } as unknown as T;
       }
       return {
-        create_l1: true,
-        l1_summary: "按既有反馈删除不必要兜底，并通过测试验证。",
-        policy_eligible: true,
-        create_user_memory: false,
-        user_memory_types: [],
-        user_memory_evidence: [],
-        l1_evidence: [{
-          quote: "测试验证通过",
-          source_role: "assistant",
-          kind: "task_outcome"
-        }],
-        reason: "independent successful task evidence"
+        l1: {
+          summary: "按既有反馈删除不必要兜底，并通过测试验证。",
+          evidence: [{
+            quote: "测试验证通过",
+            role: "assistant",
+            kind: "task_outcome"
+          }]
+        },
+        user: null
       } as unknown as T;
     },
     status: () => ({

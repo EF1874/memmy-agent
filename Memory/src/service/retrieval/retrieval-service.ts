@@ -529,6 +529,7 @@ interface RenderedInjectedSection {
 const MEMORY_PACKET_MAX_SNIPPET_BODY_CHARS = 640;
 
 const MEMORY_PACKET_SKILL_SUMMARY_CHARS = 200;
+const TURN_START_RECENT_RAW_TURN_EXCLUSION_LIMIT = 8;
 
 interface InjectedRenderOptions {
   contextHints?: Record<string, unknown>;
@@ -1718,7 +1719,7 @@ export class RetrievalService {
     const recentRawTurnIds = retrievalMode === "turn_start" && request.sessionId
       ? new Set(
           this.deps.repos.runtime
-            .listRecentRawTurnsBySession(request.sessionId, 8)
+            .listRecentRawTurnsBySession(request.sessionId, TURN_START_RECENT_RAW_TURN_EXCLUSION_LIMIT)
             .map((turn) => turn.id)
         )
       : undefined;
@@ -1812,7 +1813,8 @@ export class RetrievalService {
           query: retrievalQuery,
           queryVectorText,
           queryExtract,
-          limit: parallelLaneLimit
+          limit: parallelLaneLimit,
+          excludeSourceTurnIds: recentRawTurnIds
         })
       : { hits: [] as RecallHit[], memories: [] as UserMemoryRecord[] };
     const agentHits = onboardingFirstReportHit || timeFilter
@@ -1966,18 +1968,18 @@ export class RetrievalService {
         ...(timeFilter ? { timeFilter } : {}),
         timeZone
       }, {
-        candidates: retrieval.hits.map(toSearchCandidateLog),
+        candidates: merged.hits.map(toSearchCandidateLog),
         filtered: hits.map(toSearchCandidateLog),
-        droppedByLlm: retrieval.hits.filter((hit) => !keptIds.has(hit.id)).map(toSearchCandidateLog),
+        droppedByLlm: merged.hits.filter((hit) => !keptIds.has(hit.id)).map(toSearchCandidateLog),
         stats: {
-          raw: memories.length,
-          ranked: retrieval.hits.length,
+          raw: candidateMemoryIds.length,
+          ranked: merged.hits.length,
           droppedByThreshold: retrieval.debug.droppedByThreshold,
           topRelevance: retrieval.debug.topRelevance,
           llmFilter: {
             outcome: filteredHits.status.length > 0 ? filteredHits.status.join(",") : "kept",
             kept: hits.length,
-            dropped: Math.max(0, retrieval.hits.length - hits.length)
+            dropped: Math.max(0, merged.hits.length - hits.length)
           },
           finalReturned: hits.length
         },
@@ -2034,6 +2036,7 @@ export class RetrievalService {
     queryVectorText: string;
     queryExtract: RetrievalQueryExtract | null;
     limit: number;
+    excludeSourceTurnIds?: ReadonlySet<string>;
   }): Promise<{ hits: RecallHit[]; memories: UserMemoryRecord[] }> {
     if (input.limit <= 0) return { hits: [], memories: [] };
     const compiled = compileRetrievalQuery(input.query, input.queryExtract, {
@@ -2041,6 +2044,10 @@ export class RetrievalService {
     });
     const active = this.deps.repos.userMemories.listActive(input.userId);
     if (active.length === 0) return { hits: [], memories: [] };
+    const excludedCount = active.filter((memory) =>
+      input.excludeSourceTurnIds?.has(memory.sourceTurnId)
+    ).length;
+    const routeLimit = input.limit + excludedCount;
     const queryVector = active.some((memory) => memory.embedding?.length)
       ? await this.queryVector(input.queryVectorText)
       : undefined;
@@ -2048,15 +2055,15 @@ export class RetrievalService {
       ...this.deps.repos.userMemories.searchFtsIds(
         input.userId,
         compiled.ftsMatch,
-        input.limit
+        routeLimit
       ),
       ...this.deps.repos.userMemories.searchPatternIds(
         input.userId,
         compiled.patternTerms,
-        input.limit
+        routeLimit
       ),
       ...(queryVector
-        ? this.deps.repos.userMemories.searchVectorIds(input.userId, queryVector, input.limit)
+        ? this.deps.repos.userMemories.searchVectorIds(input.userId, queryVector, routeLimit)
         : [])
     ];
     const bestScoreById = new Map<string, number>();
@@ -2068,10 +2075,15 @@ export class RetrievalService {
         (bestScoreById.get(right.id) ?? 0) - (bestScoreById.get(left.id) ?? 0) ||
         right.updatedAt.localeCompare(left.updatedAt)
       )
+      .slice(0, routeLimit);
+    const injectableMemories = memories
+      .filter((memory) => !input.excludeSourceTurnIds?.has(memory.sourceTurnId))
       .slice(0, input.limit);
     return {
       memories,
-      hits: memories.map((memory) => userMemoryRecallHit(memory, bestScoreById.get(memory.id) ?? 0))
+      hits: injectableMemories.map((memory) =>
+        userMemoryRecallHit(memory, bestScoreById.get(memory.id) ?? 0)
+      )
     };
   }
 
