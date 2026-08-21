@@ -518,7 +518,7 @@ function stringArray(value: unknown): string[] { return Array.isArray(value) ? v
 function stringValue(value: unknown): string | undefined { return typeof value === "string" && value.trim() ? value.trim() : undefined; }
 function uniq<T>(values: readonly T[]): T[] { return [...new Set(values)]; }
 
-type InjectedSnippetRefKind = "skill" | "episode" | "trace" | "experience" | "world-model";
+type InjectedSnippetRefKind = "user-memory" | "skill" | "episode" | "trace" | "experience" | "world-model";
 
 interface RenderedInjectedSection {
   refKind: InjectedSnippetRefKind;
@@ -573,10 +573,10 @@ export function buildInjectedContext(
     timeZone: tuning?.timeZone
   };
   const memoryById = new Map(contextMemories.map((memory) => [memory.id, memory]));
-  const rendered = hits.flatMap((hit) => {
-    const section = renderInjectedSection(hit, memoryById.get(hit.id), options);
+  const rendered = hits.flatMap((hit) => splitUserMemoryMembersForInjection(hit).flatMap((memberHit) => {
+    const section = renderInjectedSection(memberHit, memoryById.get(memberHit.id), options);
     return section ? [section] : [];
-  });
+  }));
   const memories = isStandaloneMathInjected(options)
     ? suppressLowSpecificityStandaloneMathSections(
         suppressIsolatedMathSkillSections(rendered),
@@ -715,6 +715,38 @@ function renderInjectedSection(
   };
 }
 
+function splitUserMemoryMembersForInjection(hit: RecallHit): RecallHit[] {
+  if (hit.memoryLayer === "UserMemory") return [hit];
+  const userMembers = (hit.members ?? []).filter((member) => member.memoryLayer === "UserMemory");
+  if (userMembers.length === 0) return [hit];
+  const agentMembers = (hit.members ?? []).filter((member) => member.memoryLayer !== "UserMemory");
+  const agentIds = agentMembers.map((member) => member.id);
+  return [
+    {
+      ...hit,
+      memberMemoryIds: agentIds.length > 0 ? agentIds : [hit.id],
+      members: agentMembers
+    },
+    ...userMembers.map((member): RecallHit => ({
+      id: member.id,
+      kind: "user_memory",
+      memoryLayer: "UserMemory",
+      status: "activated",
+      title: "User Memory",
+      snippet: member.content,
+      score: hit.score,
+      tags: [],
+      createdAt: member.createdAt,
+      updatedAt: member.updatedAt,
+      source: "search",
+      sourceTurnId: hit.sourceTurnId,
+      memberMemoryIds: [member.id],
+      retrievalRoutes: ["user_memory"],
+      members: [member]
+    }))
+  ];
+}
+
 function renderInjectedSnippet(
   hit: RecallHit,
   memory: MemoryRow | undefined,
@@ -722,18 +754,16 @@ function renderInjectedSnippet(
 ): { refKind: InjectedSnippetRefKind; title: string; body: string } | null {
   if (hit.kind === "user_memory" || hit.memoryLayer === "UserMemory") {
     return {
-      refKind: "trace",
-      title: "User Memory",
+      refKind: "user-memory",
+      title: hit.id,
       body: truncateInjectedSnippet([
-        `id: ${hit.id}`,
         ...(hit.memberMemoryIds && hit.memberMemoryIds.length > 1
           ? [`member ids: ${hit.memberMemoryIds.join(", ")}`]
           : []),
-        ...(hit.sourceTurnId ? [`source turn: ${hit.sourceTurnId}`] : []),
-        ...(hit.createdAt ? [`created at: ${hit.createdAt}`] : []),
-        ...(hit.updatedAt ? [`updated at: ${hit.updatedAt}`] : []),
+        ...(hit.createdAt ? [`created at: ${formatInjectedTimestamp(undefined, hit.createdAt, options.timeZone)}`] : []),
+        ...(hit.updatedAt ? [`updated at: ${formatInjectedTimestamp(undefined, hit.updatedAt, options.timeZone)}`] : []),
         "",
-        ...labeledInjectedBlock("User statement", hit.snippet)
+        ...labeledInjectedBlock("Historical user statement", hit.snippet)
       ].join("\n"))
     };
   }
@@ -814,7 +844,7 @@ function renderInjectedSnippet(
     }
     return {
       refKind: "trace",
-      title: "Trace",
+      title: hit.id,
       body: truncateInjectedSnippet(renderInjectedTraceBody(hit, trace, options.timeZone))
     };
   }
@@ -883,7 +913,6 @@ function renderInjectedExperienceUseHint(policy: NonNullable<ReturnType<typeof p
 
 function renderInjectedTraceBody(hit: RecallHit, trace: TraceMeta, timeZone?: string): string {
   return [
-    `id: ${hit.id}`,
     `timestamp: ${formatInjectedTimestamp(trace.ts, hit.updatedAt, timeZone ?? trace.timeZone)}`,
     "",
     ...labeledInjectedBlock("Historical user statement", trace.userText || "(empty)"),
@@ -985,12 +1014,13 @@ function renderInjectedMarkdown(
     parts.push(renderMathFinalAnswerProtocol(options.query));
   }
   const skills = sections.filter((section) => section.refKind === "skill");
+  const userMemories = sections.filter((section) => section.refKind === "user-memory");
   const episodes = sections.filter((section) => section.refKind === "episode");
   const traces = sections.filter((section) => section.refKind === "trace");
   const experiences = sections.filter((section) => section.refKind === "experience");
   const worlds = sections.filter((section) => section.refKind === "world-model");
 
-  parts.push(...renderInjectedMemoriesSection(traces, episodes));
+  parts.push(...renderInjectedMemoriesSection(userMemories, traces, episodes));
 
   if (experiences.length > 0) {
     parts.push("## L2 Experience Memories\n");
@@ -1053,11 +1083,18 @@ function prependResearchPlaybook(markdown: string, domain?: string): string {
 }
 
 function renderInjectedMemoriesSection(
+  userMemories: RenderedInjectedSection[],
   traces: RenderedInjectedSection[],
   episodes: RenderedInjectedSection[]
 ): string[] {
-  if (episodes.length === 0 && traces.length === 0) return [];
+  if (userMemories.length === 0 && episodes.length === 0 && traces.length === 0) return [];
   const parts: string[] = [];
+  if (userMemories.length > 0) {
+    parts.push("## User Memories");
+    userMemories.forEach((section, index) => {
+      parts.push(renderNumberedInjectedSection(section, index + 1));
+    });
+  }
   if (traces.length > 0) {
     parts.push("## L1 Trace Memories");
     traces.forEach((section, index) => {
@@ -1135,7 +1172,8 @@ function suppressIsolatedMathSkillSections(sections: RenderedInjectedSection[]):
   const onlySkill = skills[0];
   if (onlySkill && shouldKeepIsolatedMathSkillSection(onlySkill)) return sections;
   const hasGrounding = sections.some((section) =>
-    section.refKind === "trace" || section.refKind === "episode" || section.refKind === "experience"
+    section.refKind === "user-memory" || section.refKind === "trace" ||
+    section.refKind === "episode" || section.refKind === "experience"
   );
   if (hasGrounding) return sections;
   return sections.filter((section) => section.refKind !== "skill");
@@ -1156,7 +1194,10 @@ function suppressLowSpecificityStandaloneMathSections(
 ): RenderedInjectedSection[] {
   const taskTerms = extractSpecificMathTerms(taskText ?? "");
   return sections.filter((section) => {
-    if (section.refKind === "trace" || section.refKind === "episode" || section.refKind === "experience") {
+    if (
+      section.refKind === "user-memory" || section.refKind === "trace" ||
+      section.refKind === "episode" || section.refKind === "experience"
+    ) {
       return hasEnoughStandaloneMathOverlap(sectionTextForSpecificity(section), taskTerms, 2);
     }
     if (section.refKind === "world-model") {
@@ -1260,14 +1301,17 @@ function injectedFooterFor(
       "Do not call them merely to browse when the original problem can be solved directly."
     ].join("\n");
   }
-  if (sections.length > 0 && sections.every((section) => section.refKind === "trace")) {
+  if (
+    sections.length > 0 &&
+    sections.every((section) => section.refKind === "trace" || section.refKind === "user-memory")
+  ) {
     return "";
   }
   void skillMode;
   return [
     "## Follow-up memory tools",
     "",
-    "If details are needed, use `memmy_memory_get(id)` with one of the ids above.",
+    "If details are needed, use `memmy_memory_get(id)` with a non-User-Memory id above; User Memory entries are complete as shown.",
     "Use `memmy_memory_search(query)` only when the recalled memory is insufficient or ambiguous."
   ].join("\n");
 }
@@ -1763,7 +1807,7 @@ export class RetrievalService {
     const retrievalLimit = timeFilter
       ? TIME_FILTERED_TRACE_LIMIT
       : request.limit ?? this.deps.turnStartRetrievalLimit();
-    const parallelLaneLimit = includeUserMemory
+    const agentLaneLimit = includeUserMemory
       ? parallelMemoryLaneLimit(retrievalLimit)
       : retrievalLimit;
     const retrievalOutput = onboardingFirstReportHit && onboardingFirstReportMemory
@@ -1784,7 +1828,7 @@ export class RetrievalService {
           queryExtract,
           layers,
           tags: request.tags,
-          limit: parallelLaneLimit,
+          limit: agentLaneLimit,
           mode: retrievalMode,
           excludeTraceRawTurnIds: recentRawTurnIds,
           targetSkillId: request.targetSkillId,
@@ -1813,7 +1857,7 @@ export class RetrievalService {
           query: retrievalQuery,
           queryVectorText,
           queryExtract,
-          limit: parallelLaneLimit,
+          limit: retrievalLimit,
           excludeSourceTurnIds: recentRawTurnIds
         })
       : { hits: [] as RecallHit[], memories: [] as UserMemoryRecord[] };

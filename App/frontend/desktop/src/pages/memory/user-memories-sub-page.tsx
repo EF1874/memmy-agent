@@ -152,8 +152,9 @@ export function UserMemoriesSubPage(props: UserMemoriesSubPageProps) {
           >
             <header className="memory-drawer__header">
               <div>
-                <div className="memory-drawer__eyebrow">{t("memory.userMemories.detailTitle")}</div>
-                <h4 id="memory-user-memory-title" className="memory-drawer__title">{selected.title}</h4>
+                <div className="memory-drawer__identity">
+                  <span id="memory-user-memory-title" className="memory-drawer__eyebrow">{selected.id}</span>
+                </div>
               </div>
               <button
                 type="button"
