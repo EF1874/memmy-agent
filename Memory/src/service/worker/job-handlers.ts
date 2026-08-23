@@ -16,6 +16,7 @@ import type {
 import { ModelHttpError } from "../../model/http.js";
 import type { JobType,MemoryRow,RuntimeNamespace } from "../../types.js";
 import { newId,stableHash } from "../../utils/id.js";
+import { isRecord } from "../../utils/json.js";
 import {
   embeddingRetryTargetKindForMemory,
   embeddingRetryVectorFieldForMemory
@@ -31,7 +32,7 @@ export type ProcessingStage = "summary" | "embedding";
 export const EPISODE_IDLE_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 export type JobChangeOperation = "queued" | "leased" | "succeeded" | "failed" | "dead_letter";
 export type EmbeddingRetryChangeOperation = "queued" | "retry" | "succeeded" | "failed";
-export type ClosedEpisodeTrigger = "topic_boundary" | "session_closed" | "episode_rewarded" | "idle_timeout" | "end_topic";
+export type ClosedEpisodeTrigger = "topic_boundary" | "session_closed" | "episode_rewarded" | "idle_timeout" | "end_topic" | "capture_decided";
 
 export interface EnqueueJobInput {
   jobType: JobType;
@@ -338,10 +339,11 @@ export function finalizeClosedEpisode(
 ): EvolutionJobRecord[] {
   const current = deps.repos.runtime.getEpisode(episode.id) ?? episode;
   if (current.status !== "closed" || current.l1MemoryIds.length === 0) return [];
+  if (episodeHasPendingCaptureDecision(deps, current)) return [];
   if (episodeRewardWasSkipped(current)) return [];
   const reflectionJobs = enqueueEpisodeReflection(deps, current, at, trigger);
   if (reflectionJobs.length > 0) return reflectionJobs;
-  if (episodeHasRewardForReflection(current)) return [];
+  if (episodeHasRewardForReflection(deps, current)) return [];
   return enqueueEpisodeRewardAfterReflection(deps, current, at, trigger);
 }
 
@@ -353,7 +355,8 @@ export function enqueueEpisodeRewardAfterReflection(
 ): EvolutionJobRecord[] {
   if (
     episode.status !== "closed" ||
-    episodeHasRewardForReflection(episode) ||
+    episodeHasPendingCaptureDecision(deps, episode) ||
+    episodeHasRewardForReflection(deps, episode) ||
     episodeRewardWasSkipped(episode) ||
     (
       deps.repos.runtime.hasEpisodeJob(episode.id, "reward", ["queued", "leased", "failed"])
@@ -408,10 +411,11 @@ export function enqueueEpisodeReflection(
 ): EvolutionJobRecord[] {
   if (
     episode.status !== "closed" ||
+    episodeHasPendingCaptureDecision(deps, episode) ||
     deps.repos.runtime.hasEpisodeJob(episode.id, "reflection", ["queued", "leased", "failed"])
   ) return [];
   const target = deps.repos.memories.getMany(episode.l1MemoryIds)
-    .filter((memory) => memory.memoryLayer === "L1" && !deps.traceReflectionWasScored(memory))
+    .filter((memory) => memory.memoryLayer === "L1" && memory.status === "activated" && !deps.traceReflectionWasScored(memory))
     .sort((a, b) => deps.traceSortKey(a) - deps.traceSortKey(b))[0];
   if (!target) return [];
   return [enqueueJob(deps, {
@@ -423,6 +427,13 @@ export function enqueueEpisodeReflection(
     payload: { trigger, targetKind: "episode" },
     createdAt: at
   })];
+}
+
+function episodeHasPendingCaptureDecision(deps: WorkerJobHandlerDeps, episode: EpisodeRecord): boolean {
+  return deps.repos.memories.getMany(episode.l1MemoryIds).some((memory) => {
+    const decision = memory.properties.internal_info.capture_decision;
+    return isRecord(decision) && decision.status === "pending";
+  });
 }
 
 export function enqueueImportSummaryIfMissing(
@@ -453,7 +464,7 @@ export function enqueueImportSummaryIfMissing(
   });
 }
 
-export function episodeHasRewardForReflection(episode: EpisodeRecord): boolean {
+export function episodeHasRewardForReflection(deps: WorkerJobHandlerDeps, episode: EpisodeRecord): boolean {
   if (
     episode.status !== "closed" ||
     typeof episode.rTask !== "number" ||
@@ -463,8 +474,11 @@ export function episodeHasRewardForReflection(episode: EpisodeRecord): boolean {
   const traceIds = Array.isArray(episode.rewardDetail.traceIds)
     ? episode.rewardDetail.traceIds.filter((id): id is string => typeof id === "string")
     : [];
-  return traceIds.length === episode.l1MemoryIds.length &&
-    traceIds.every((id, index) => id === episode.l1MemoryIds[index]);
+  const activeL1MemoryIds = episode.l1MemoryIds.filter((id) =>
+    deps.repos.memories.get(id)?.status === "activated"
+  );
+  return traceIds.length === activeL1MemoryIds.length &&
+    traceIds.every((id, index) => id === activeL1MemoryIds[index]);
 }
 
 export function episodeRewardWasSkipped(episode: EpisodeRecord): boolean {

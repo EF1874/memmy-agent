@@ -1253,6 +1253,26 @@ export class UserMemoryRepository {
     return { memory: updated, created: false, previous };
   }
 
+  confirmExisting(input: {
+    id: string;
+    userId: string;
+    sourceTurnId: string;
+    memoryTypes: UserMemoryType[];
+    updatedAt: string;
+  }): { memory: UserMemoryRecord; previous: UserMemoryRecord } | undefined {
+    const previous = this.get(input.id);
+    if (!previous || previous.userId !== input.userId || previous.status !== "active") return undefined;
+    const memory = this.update({
+      ...previous,
+      memoryTypes: uniq([...previous.memoryTypes, ...input.memoryTypes]),
+      sourceTurnRefs: uniq([...previous.sourceTurnRefs, input.sourceTurnId]),
+      updatedAt: Date.parse(input.updatedAt) > Date.parse(previous.updatedAt)
+        ? input.updatedAt
+        : previous.updatedAt
+    });
+    return { memory, previous };
+  }
+
   insert(memory: UserMemoryRecord): UserMemoryRecord {
     this.db.prepare(
       `INSERT INTO user_memories (

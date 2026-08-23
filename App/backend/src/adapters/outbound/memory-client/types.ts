@@ -37,6 +37,7 @@ import type {
 /** Contract for memory client. */
 export interface MemoryRequestContext {
   timeZone?: string;
+  userId?: string;
 }
 
 export interface MemoryClient {

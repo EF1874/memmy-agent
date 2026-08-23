@@ -20,12 +20,13 @@ describe("User Memory", () => {
       llm: captureDecisionRouterLlm((payload) => {
         if (payload.includes("以后不要再推荐飞盘")) {
           return {
-            create_l1: false,
-            l1_summary: "",
+            create_l1: true,
+            l1_summary: "用户以后不希望 Agent 推荐飞盘。",
+            l1_evidence: [{ quote: "以后不要再推荐飞盘", source_role: "user", kind: "user_preference" }],
             create_user_memory: true,
-            user_memory_types: ["User Directive"],
-            user_memory_evidence: [{ quote: "以后不要再推荐飞盘", type: "User Directive" }],
-            reason: "durable future directive"
+            user_memory_types: ["User Preference"],
+            user_memory_evidence: [{ quote: "以后不要再推荐飞盘", type: "User Preference" }],
+            reason: "stable work preference that also constrains future Agent work"
           };
         }
         if (payload.includes("我喜欢玩飞盘")) {
@@ -84,19 +85,87 @@ describe("User Memory", () => {
       types: JSON.parse(memory.memory_types_json)
     }))).toEqual([
       { content: "我喜欢玩飞盘", types: ["User Preference"] },
-      { content: "以后不要再推荐飞盘", types: ["User Directive"] }
+      { content: "以后不要再推荐飞盘", types: ["User Preference"] }
     ]);
     expect(userMemories.every((memory) => JSON.parse(memory.source_turn_refs_json).length === 1)).toBe(true);
     expect(db.db.prepare(
       `SELECT COUNT(*) AS count FROM user_memories WHERE content = '换一个'`
     ).get()).toEqual({ count: 0 });
+    expect(db.db.prepare(`SELECT status FROM memories WHERE id = ?`).get(turns[0]!.l1MemoryId))
+      .toEqual({ status: "deleted" });
+    expect(db.db.prepare(`SELECT status FROM memories WHERE id = ?`).get(turns[1]!.l1MemoryId))
+      .toEqual({ status: "deleted" });
+    expect(db.db.prepare(`SELECT status FROM memories WHERE id = ?`).get(turns[2]!.l1MemoryId))
+      .toEqual({ status: "activated" });
+    db.close();
+  });
+
+  it("routes one-off task commands to L1 without creating User Memory", async () => {
+    const requests = ["帮我开发一个网页", "帮我把代码提交到 GitHub"];
+    const { db, service } = createTestService({
+      llm: captureDecisionRouterLlm((payload) => {
+        const request = requests.find((item) => payload.includes(item));
+        if (!request) throw new Error(`unexpected payload: ${payload}`);
+        return {
+          create_l1: true,
+          l1_summary: request,
+          policy_eligible: true,
+          l1_evidence: [{ quote: request, source_role: "user", kind: "task_request" }],
+          create_user_memory: false,
+          user_memory_types: [],
+          user_memory_evidence: [],
+          reason: "one-off Agent task instruction"
+        };
+      })
+    });
+    const session = open(service, "one-off-task-user");
+    const turns = requests.map((query, index) => service.completeTurn(`one-off-task-${index}`, {
+      sessionId: session.sessionId,
+      query,
+      answer: "好的。"
+    }));
+
+    await service.runWorkerOnce(50, { priorityCohortOnly: true });
+
+    expect(rowCount(db, "user_memories")).toBe(0);
+    for (const turn of turns) {
+      expect(db.db.prepare(
+        `SELECT status, json_extract(properties_json, '$.internal_info.policy_eligible') AS policy_eligible
+         FROM memories WHERE id = ?`
+      ).get(turn.l1MemoryId)).toEqual({ status: "activated", policy_eligible: 0 });
+    }
+    db.close();
+  });
+
+  it("stores a stable merge convention in both User Memory and L1", async () => {
+    const query = "merge 代码不要用 squash";
+    const { db, service } = createTestService({
+      llm: captureDecisionLlm([], {
+        create_l1: true,
+        l1_summary: query,
+        policy_eligible: true,
+        l1_evidence: [{ quote: query, source_role: "user", kind: "user_preference" }],
+        create_user_memory: true,
+        user_memory_types: ["User Preference"],
+        user_memory_evidence: [{ quote: query, type: "User Preference" }],
+        reason: "stable work preference that constrains Agent execution"
+      })
+    });
+    const session = open(service, "merge-convention-user");
+    const completed = service.completeTurn("merge-convention", {
+      sessionId: session.sessionId,
+      query,
+      answer: "好的。"
+    });
+
+    await service.runWorkerOnce(20, { priorityCohortOnly: true });
+
+    expect(db.db.prepare(`SELECT content, memory_types_json FROM user_memories`).get())
+      .toEqual({ content: query, memory_types_json: '["User Preference"]' });
     expect(db.db.prepare(
-      `SELECT status FROM memories WHERE id IN (?, ?, ?) ORDER BY id`
-    ).all(...turns.map((turn) => turn.l1MemoryId))).toEqual([
-      { status: "deleted" },
-      { status: "deleted" },
-      { status: "deleted" }
-    ]);
+      `SELECT status, json_extract(properties_json, '$.internal_info.policy_eligible') AS policy_eligible
+       FROM memories WHERE id = ?`
+    ).get(completed.l1MemoryId)).toEqual({ status: "activated", policy_eligible: 1 });
     db.close();
   });
 
@@ -132,6 +201,32 @@ describe("User Memory", () => {
       .toEqual({ status: "deleted" });
     expect(db.db.prepare(`SELECT * FROM memory_processing_state WHERE memory_id = ?`).get(completed.l1MemoryIds[0]))
       .toBeUndefined();
+    db.close();
+  });
+
+  it("does not turn a preference question or the assistant's guess into User Memory", async () => {
+    const { db, service } = createTestService({
+      llm: captureDecisionLlm([], {
+        create_l1: false,
+        l1_summary: "",
+        create_user_memory: false,
+        user_memory_types: [],
+        reason: "question is not an explicit user claim"
+      })
+    });
+    const session = open(service, "preference-question-user");
+    const completed = service.completeTurn("turn-preference-question", {
+      sessionId: session.sessionId,
+      query: "财经类新闻呢？我喜欢看吗",
+      answer: "你喜欢看政治相关新闻，也对财经类新闻感兴趣。",
+      sourceMemoryIds: ["user_memory_politics"]
+    });
+
+    await service.runWorkerOnce(20, { priorityCohortOnly: true });
+
+    expect(rowCount(db, "user_memories")).toBe(0);
+    expect(db.db.prepare(`SELECT status FROM memories WHERE id = ?`).get(completed.l1MemoryIds[0]))
+      .toEqual({ status: "deleted" });
     db.close();
   });
 
@@ -173,15 +268,16 @@ describe("User Memory", () => {
       llm: captureDecisionLlm([], {
         create_l1: true,
         l1_summary: summary,
+        policy_eligible: true,
         l1_evidence: [{ quote: "已精简实现并通过测试", source_role: "assistant", kind: "task_outcome" }],
         create_user_memory: true,
-        user_memory_types: ["User Preference", "User Directive"],
+        user_memory_types: ["User Preference"],
         user_memory_evidence: [{
           quote: "我更喜欢简洁的代码",
           type: "User Preference"
         }, {
           quote: "以后不要写不必要的兜底代码",
-          type: "User Directive"
+          type: "User Preference"
         }],
         reason: "task outcome plus reusable user feedback"
       })
@@ -198,8 +294,10 @@ describe("User Memory", () => {
     expect(db.db.prepare(`SELECT content FROM user_memories WHERE status = 'active'`).get())
       .toEqual({ content: "我更喜欢简洁的代码，以后不要写不必要的兜底代码" });
     expect(db.db.prepare(
-      `SELECT status, json_extract(info_json, '$.summary') AS summary FROM memories WHERE id = ?`
-    ).get(completed.l1MemoryIds[0])).toEqual({ status: "activated", summary });
+      `SELECT status, json_extract(info_json, '$.summary') AS summary,
+              json_extract(properties_json, '$.internal_info.policy_eligible') AS policy_eligible
+       FROM memories WHERE id = ?`
+    ).get(completed.l1MemoryIds[0])).toEqual({ status: "activated", summary, policy_eligible: 0 });
     db.close();
   });
 
@@ -236,7 +334,7 @@ describe("User Memory", () => {
     db.close();
   });
 
-  it("repairs model memory types and keeps task-linked feedback in both branches", async () => {
+  it("does not let assistant completion wording override the summary model's L1 rejection", async () => {
     const { db, service } = createTestService({
       llm: captureDecisionLlm([], {
         create_l1: false,
@@ -258,9 +356,9 @@ describe("User Memory", () => {
 
     expect(JSON.parse((db.db.prepare(`SELECT memory_types_json FROM user_memories`).get() as {
       memory_types_json: string;
-    }).memory_types_json)).toEqual(["User Preference", "User Directive"]);
+    }).memory_types_json)).toEqual(["User Preference"]);
     expect(db.db.prepare(`SELECT status FROM memories WHERE id = ?`).get(completed.l1MemoryIds[0]))
-      .toEqual({ status: "activated" });
+      .toEqual({ status: "deleted" });
     const recall = await service.search({
       sessionId: session.sessionId,
       query: "简洁代码 不必要兜底代码",
@@ -268,10 +366,8 @@ describe("User Memory", () => {
       limit: 5,
       includeInjectedContext: true
     });
-    expect(recall.hits.find((hit) => hit.sourceTurnId)?.memberMemoryIds).toEqual(expect.arrayContaining([
-      expect.stringMatching(/^user_memory_/),
-      completed.l1MemoryIds[0]
-    ]));
+    expect(recall.hits.flatMap((hit) => hit.memberMemoryIds ?? [hit.id]))
+      .not.toContain(completed.l1MemoryIds[0]);
     db.close();
   });
 
@@ -287,7 +383,7 @@ describe("User Memory", () => {
         }],
         create_user_memory: true,
         user_memory_types: ["User Preference"],
-        user_memory_evidence: [{ quote: "以后不要再推荐飞盘", type: "User Directive" }],
+        user_memory_evidence: [{ quote: "以后不要再推荐飞盘", type: "User Preference" }],
         reason: "durable directive is independently useful in both branches"
       })
     });
@@ -301,7 +397,7 @@ describe("User Memory", () => {
     await service.runWorkerOnce(20, { priorityCohortOnly: true });
 
     expect(db.db.prepare(`SELECT memory_types_json FROM user_memories`).get())
-      .toEqual({ memory_types_json: '["User Directive"]' });
+      .toEqual({ memory_types_json: '["User Preference"]' });
     expect(db.db.prepare(`SELECT status FROM memories WHERE id = ?`).get(completed.l1MemoryIds[0]))
       .toEqual({ status: "activated" });
     const accepted = db.db.prepare(`SELECT properties_json FROM memories WHERE id = ?`)
@@ -379,6 +475,35 @@ describe("User Memory", () => {
 
     expect(rowCount(db, "user_memories")).toBe(0);
     expect(db.db.prepare(`SELECT status FROM memories WHERE id = ?`).get(completed.l1MemoryIds[0]))
+      .toEqual({ status: "activated" });
+    db.close();
+  });
+
+  it("does not let question-like wording override grounded model decisions", async () => {
+    const content = "I prefer songs which fit my film projects.";
+    const { db, service } = createTestService({
+      llm: captureDecisionLlm([], {
+        create_l1: true,
+        l1_summary: content,
+        policy_eligible: true,
+        l1_evidence: [{ quote: content, source_role: "user", kind: "user_preference" }],
+        create_user_memory: true,
+        user_memory_types: ["User Preference"],
+        user_memory_evidence: [{ quote: content, type: "User Preference" }],
+        reason: "stable work preference stated declaratively"
+      })
+    });
+    const session = open(service, "question-like-wording-user");
+    const completed = service.completeTurn("question-like-wording", {
+      sessionId: session.sessionId,
+      query: content,
+      answer: "Understood."
+    });
+
+    await service.runWorkerOnce(20, { priorityCohortOnly: true });
+
+    expect(db.db.prepare(`SELECT content FROM user_memories`).get()).toEqual({ content });
+    expect(db.db.prepare(`SELECT status FROM memories WHERE id = ?`).get(completed.l1MemoryId))
       .toEqual({ status: "activated" });
     db.close();
   });
@@ -514,6 +639,153 @@ describe("User Memory", () => {
     db.close();
   });
 
+  it("uses this turn's recalled User Memory candidates to confirm a semantic repeat", async () => {
+    let existingMemoryId = "";
+    let sawCandidate = false;
+    const { db, service } = createTestService({
+      llm: captureDecisionRouterLlm((payload) => {
+        const second = payload.includes("苹果是我最喜欢的水果");
+        if (second) {
+          sawCandidate = payload.includes(existingMemoryId) && payload.includes("我最喜欢的水果是苹果");
+        }
+        const quote = second ? "苹果是我最喜欢的水果" : "我最喜欢的水果是苹果";
+        return {
+          create_l1: false,
+          l1_summary: "",
+          policy_eligible: false,
+          create_user_memory: true,
+          user_memory_types: ["User Preference"],
+          user_memory_evidence: [{ quote, type: "User Preference" }],
+          user_memory_action: second ? "confirm_existing" : "create",
+          matched_user_memory_id: second ? existingMemoryId : "",
+          reason: second ? "same preference without information gain" : "new preference"
+        };
+      })
+    });
+    const session = open(service, "semantic-repeat-user");
+    service.completeTurn("semantic-repeat-first", {
+      sessionId: session.sessionId,
+      query: "我最喜欢的水果是苹果",
+      answer: "好的。"
+    });
+    await service.runWorkerOnce(20, { priorityCohortOnly: true });
+    existingMemoryId = (db.db.prepare(`SELECT id FROM user_memories`).get() as { id: string }).id;
+
+    const started = await service.startTurn({
+      sessionId: session.sessionId,
+      turnId: "semantic-repeat-second",
+      query: "苹果是我最喜欢的水果"
+    });
+    expect(started.sourceMemoryIds).not.toContain(existingMemoryId);
+    service.completeTurn(started.turnId, {
+      sessionId: session.sessionId,
+      query: "苹果是我最喜欢的水果",
+      answer: "好的。"
+    });
+    await service.runWorkerOnce(20, { priorityCohortOnly: true });
+
+    expect(sawCandidate).toBe(true);
+    expect(db.db.prepare(
+      `SELECT id, content, json_array_length(source_turn_refs_json) AS source_count
+       FROM user_memories`
+    ).all()).toEqual([{
+      id: existingMemoryId,
+      content: "我最喜欢的水果是苹果",
+      source_count: 2
+    }]);
+    db.close();
+  });
+
+  it("[BC-02 correction] uses the summary model to archive an explicitly corrected recalled User Memory", async () => {
+    let appleMemoryId = "";
+    let sawCorrectionCandidate = false;
+    const original = "我在大学的时候最喜欢吃苹果，我现在爱看的书是《百年孤独》";
+    const correction = "前面说错了，我在大学的时候最喜欢吃的是西瓜";
+    const revised = "我在大学的时候最喜欢吃西瓜，我现在爱看的书是《百年孤独》";
+    const { db, service } = createTestService({
+      llm: captureDecisionRouterLlm((payload) => {
+        const isCorrection = payload.includes(correction);
+        if (isCorrection) {
+          sawCorrectionCandidate = payload.includes(appleMemoryId) && payload.includes(original);
+        }
+        const quote = isCorrection ? correction : original;
+        return {
+          create_l1: isCorrection,
+          l1_summary: isCorrection ? "用户纠正大学时最喜欢吃的水果为西瓜" : "",
+          l1_evidence: isCorrection
+            ? [{ quote: "前面说错了", source_role: "user", kind: "correction" }]
+            : [],
+          create_user_memory: true,
+          user_memory_types: ["User Preference"],
+          user_memory_evidence: [{ quote, type: "User Preference" }],
+          user_memory_action: isCorrection ? "correct_existing" : "create",
+          matched_user_memory_id: isCorrection ? appleMemoryId : "",
+          corrected_user_memory_content: isCorrection ? revised : "",
+          reason: isCorrection ? "explicit correction of one fact in the recalled preference" : "new preference"
+        };
+      })
+    });
+    const session = open(service, "automatic-correction-user");
+    service.completeTurn("automatic-correction-apple", {
+      sessionId: session.sessionId,
+      query: original,
+      answer: "好的。"
+    });
+    await service.runWorkerOnce(20, { priorityCohortOnly: true });
+    appleMemoryId = (db.db.prepare(`SELECT id FROM user_memories`).get() as { id: string }).id;
+
+    const started = await service.startTurn({
+      sessionId: session.sessionId,
+      turnId: "automatic-correction-watermelon",
+      query: correction
+    });
+    expect(started.sourceMemoryIds).not.toContain(appleMemoryId);
+    service.completeTurn(started.turnId, {
+      sessionId: session.sessionId,
+      query: correction,
+      answer: "已修正。"
+    });
+    await service.runWorkerOnce(20, { priorityCohortOnly: true });
+
+    expect(sawCorrectionCandidate).toBe(true);
+    const rows = db.db.prepare(
+      `SELECT id, content, status, archive_reason, replaced_by_memory_id, replaces_memory_id
+       FROM user_memories ORDER BY created_at, id`
+    ).all() as Array<Record<string, string | null>>;
+    const replacement = rows.find((row) => row.id !== appleMemoryId)!;
+    expect(rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: appleMemoryId,
+        status: "archived",
+        archive_reason: "user_correction",
+        replaced_by_memory_id: replacement.id
+      }),
+      expect.objectContaining({
+        id: replacement.id,
+        content: revised,
+        status: "active",
+        replaces_memory_id: appleMemoryId
+      })
+    ]));
+    const evidence = service.recallEvidence(started.turnId);
+    expect(evidence.diagnostics).toMatchObject({
+      candidateMemoryIds: expect.arrayContaining([appleMemoryId]),
+      injectedMemoryIds: expect.not.arrayContaining([appleMemoryId]),
+      capture: {
+        status: "completed",
+        user_memory: {
+          written: true,
+          action: "corrected",
+          memory_id: replacement.id,
+          target_memory_id: appleMemoryId
+        }
+      }
+    });
+    expect((evidence.diagnostics.capture?.l1 as Array<Record<string, unknown>>)[0])
+      .toMatchObject({ written: true, policy_eligible: true });
+    db.close();
+  });
+
   it("lists User Memory in its own panel layer with user isolation and search", () => {
     const { db, service } = createTestService();
     const session = open(service, "panel-user");
@@ -546,6 +818,136 @@ describe("User Memory", () => {
     expect(service.panelOverviewSummary({
       namespace: { source: "codex", profileId: "default", userId: "another-user" }
     }).counts.userMemories).toBe(0);
+    db.close();
+  });
+
+  it("includes User Memory in search log candidates and statistics", async () => {
+    const { db, service } = createTestService();
+    const session = open(service, "user-memory-log-user");
+    const completed = service.completeTurn("turn-user-memory-log", {
+      sessionId: session.sessionId,
+      query: "我比较喜欢定期清理服务器，让服务器保持简洁干净",
+      answer: "好的。"
+    });
+    const userMemoryId = completed.userMemoryIds[0]!;
+
+    const recall = await service.search({
+      sessionId: session.sessionId,
+      query: "定期清理服务器",
+      layers: ["L1"],
+      limit: 5
+    });
+
+    expect(recall.hits).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: userMemoryId, memoryLayer: "UserMemory" })
+    ]));
+    const latestSearchLog = service.apiLogs({ tools: ["memory_search"], limit: 1 }).logs[0]!;
+    const output = JSON.parse(latestSearchLog.outputJson) as {
+      candidates: Array<{ refId: string; tier: string }>;
+      filtered: Array<{ refId: string; tier: string }>;
+      stats: {
+        raw: number;
+        ranked: number;
+        finalReturned: number;
+        llmFilter: { kept: number; dropped: number };
+      };
+    };
+    expect(output.candidates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ refId: userMemoryId, tier: "UserMemory" })
+    ]));
+    expect(output.filtered).toEqual(expect.arrayContaining([
+      expect.objectContaining({ refId: userMemoryId, tier: "UserMemory" })
+    ]));
+    expect(output.stats).toMatchObject({
+      raw: 1,
+      ranked: 1,
+      finalReturned: 1,
+      llmFilter: { kept: 1, dropped: 0 }
+    });
+    db.close();
+  });
+
+  it("limits the User Memory recall lane to the requested TopK", async () => {
+    const { db, service } = createTestService();
+    const session = open(service, "user-memory-top-k-user");
+    for (let index = 0; index < 12; index += 1) {
+      service.completeTurn(`turn-user-memory-top-k-${index}`, {
+        sessionId: session.sessionId,
+        query: `我喜欢共同关键词主题${index}`,
+        answer: "好的。"
+      });
+    }
+
+    await service.search({
+      sessionId: session.sessionId,
+      query: "共同关键词",
+      layers: ["L1"],
+      limit: 10
+    });
+
+    const latestSearchLog = service.apiLogs({ tools: ["memory_search"], limit: 1 }).logs[0]!;
+    const output = JSON.parse(latestSearchLog.outputJson) as {
+      candidates: Array<{ tier: string }>;
+    };
+    expect(output.candidates.filter((candidate) => candidate.tier === "UserMemory")).toHaveLength(10);
+    db.close();
+  });
+
+  it("excludes User Memory from automatic injection for the current session's latest 8 turns", async () => {
+    const { db, service } = createTestService();
+    const session = open(service, "recent-user-memory-user");
+    const completed = service.completeTurn("turn-recent-user-memory", {
+      sessionId: session.sessionId,
+      query: "我最喜欢的水果是苹果",
+      answer: "好的。"
+    });
+    const userMemoryId = completed.userMemoryIds[0]!;
+
+    const immediate = await service.search({
+      sessionId: session.sessionId,
+      query: "我最喜欢的水果",
+      layers: ["L1"],
+      retrievalMode: "turn_start",
+      limit: 5
+    });
+    expect(immediate.hits.map((hit) => hit.id)).not.toContain(userMemoryId);
+
+    const explicit = await service.search({
+      sessionId: session.sessionId,
+      query: "我最喜欢的水果",
+      layers: ["L1"],
+      limit: 5
+    });
+    expect(explicit.hits.map((hit) => hit.id)).toContain(userMemoryId);
+
+    const otherSession = service.openSession({
+      sessionId: "session-recent-user-memory-other",
+      namespace: { source: "codex", profileId: "default", userId: "recent-user-memory-user" }
+    });
+    const crossSession = await service.search({
+      sessionId: otherSession.sessionId,
+      query: "我最喜欢的水果",
+      layers: ["L1"],
+      retrievalMode: "turn_start",
+      limit: 5
+    });
+    expect(crossSession.hits.map((hit) => hit.id)).toContain(userMemoryId);
+
+    for (let index = 0; index < 8; index += 1) {
+      service.completeTurn(`turn-after-user-memory-${index}`, {
+        sessionId: session.sessionId,
+        query: "好的",
+        answer: "好的。"
+      });
+    }
+    const afterEightNewerTurns = await service.search({
+      sessionId: session.sessionId,
+      query: "我最喜欢的水果",
+      layers: ["L1"],
+      retrievalMode: "turn_start",
+      limit: 5
+    });
+    expect(afterEightNewerTurns.hits.map((hit) => hit.id)).toContain(userMemoryId);
     db.close();
   });
 
@@ -593,20 +995,50 @@ describe("User Memory", () => {
   });
 
   it("[BC-02 current change] keeps both active memories when the user describes a new current state", async () => {
-    const { db, service } = createTestService();
+    let appleMemoryId = "";
+    let sawHistoricalCandidate = false;
+    const { db, service } = createTestService({
+      llm: captureDecisionRouterLlm((payload) => {
+        const current = payload.includes("我现在最喜欢的水果是西瓜");
+        if (current) {
+          sawHistoricalCandidate = payload.includes(appleMemoryId) && payload.includes("我最喜欢的水果是苹果");
+        }
+        const quote = current ? "我现在最喜欢的水果是西瓜" : "我最喜欢的水果是苹果";
+        return {
+          create_l1: false,
+          l1_summary: "",
+          policy_eligible: false,
+          create_user_memory: true,
+          user_memory_types: ["User Preference"],
+          user_memory_evidence: [{ quote, type: "User Preference" }],
+          user_memory_action: "create",
+          matched_user_memory_id: "",
+          reason: current ? "new current state that preserves history" : "new preference"
+        };
+      })
+    });
     const session = open(service, "time-change-user");
     service.completeTurn("turn-old-favorite", {
       sessionId: session.sessionId,
       query: "我最喜欢的水果是苹果",
       answer: "好的。"
     });
-    service.completeTurn("turn-current-favorite", {
+    await service.runWorkerOnce(20, { priorityCohortOnly: true });
+    appleMemoryId = (db.db.prepare(`SELECT id FROM user_memories`).get() as { id: string }).id;
+    const started = await service.startTurn({
+      sessionId: session.sessionId,
+      turnId: "turn-current-favorite",
+      query: "我现在最喜欢的水果是西瓜"
+    });
+    expect(started.sourceMemoryIds).not.toContain(appleMemoryId);
+    service.completeTurn(started.turnId, {
       sessionId: session.sessionId,
       query: "我现在最喜欢的水果是西瓜",
       answer: "好的。"
     });
-    await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20, { priorityCohortOnly: true });
 
+    expect(sawHistoricalCandidate).toBe(true);
     expect(db.db.prepare(
       `SELECT content FROM user_memories WHERE status = 'active' ORDER BY created_at, id`
     ).all()).toEqual(expect.arrayContaining([
@@ -625,6 +1057,16 @@ describe("User Memory", () => {
       "我最喜欢的水果是苹果",
       "我现在最喜欢的水果是西瓜"
     ]));
+    expect(recall.injectedContext.markdown).toContain("## User Memories");
+    expect(recall.injectedContext.markdown).not.toContain("## L1 Trace Memories");
+    expect(recall.injectedContext.markdown).toContain(
+      "Historical user statement:\n   我现在最喜欢的水果是西瓜"
+    );
+    expect(recall.injectedContext.markdown).toContain("created at:");
+    expect(recall.injectedContext.markdown).toContain("updated at:");
+    expect(recall.injectedContext.markdown).not.toContain("timestamp:");
+    expect(recall.injectedContext.markdown).not.toContain("source turn:");
+    expect(recall.injectedContext.markdown).not.toContain("raw_");
     db.close();
   });
 
@@ -693,10 +1135,23 @@ describe("User Memory", () => {
       l1MemoryId
     ]));
     expect(sameTurnHit?.retrievalRoutes).toEqual(["user_memory", "l1"]);
-    expect(recall.injectedContext.sections.filter((section) =>
+    const sameTurnSections = recall.injectedContext.sections.filter((section) =>
       section.memoryIds.includes(userMemoryId) ||
       section.memoryIds.includes(l1MemoryId)
-    )).toHaveLength(1);
+    );
+    expect(sameTurnSections).toHaveLength(2);
+    expect(sameTurnSections.find((section) => section.memoryLayer === "UserMemory")?.memoryIds)
+      .toEqual([userMemoryId]);
+    expect(sameTurnSections.find((section) => section.memoryLayer === "L1")?.memoryIds)
+      .toEqual([l1MemoryId]);
+    expect(recall.injectedContext.markdown).toContain("## User Memories");
+    expect(recall.injectedContext.markdown).toContain("## L1 Trace Memories");
+    expect(recall.injectedContext.markdown).toContain(`1. ${userMemoryId}`);
+    expect(recall.injectedContext.markdown).toContain(`1. ${l1MemoryId}`);
+    expect(recall.injectedContext.markdown).not.toContain(`id: ${userMemoryId}`);
+    expect(recall.injectedContext.markdown).not.toContain(`id: ${l1MemoryId}`);
+    expect(recall.injectedContext.markdown).toContain("Historical user statement:");
+    expect(recall.injectedContext.markdown).not.toContain("source turn:");
 
     const event = db.db.prepare(
       `SELECT query_id, user_memory_candidate_ids_json, l1_candidate_ids_json,
@@ -854,18 +1309,21 @@ function rowCount(db: ReturnType<typeof createTestService>["db"], table: string)
   return (db.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count;
 }
 
-function captureDecisionLlm(
-  calls: string[],
-  decision: {
-    create_l1: boolean;
-    l1_summary: string;
-    create_user_memory: boolean;
-    user_memory_types: string[];
-    user_memory_evidence?: unknown[];
-    l1_evidence?: unknown[];
-    reason: string;
-  }
-): LlmClient {
+type LegacyCaptureDecision = {
+  create_l1: boolean;
+  l1_summary: string;
+  policy_eligible?: boolean;
+  create_user_memory: boolean;
+  user_memory_types: string[];
+  user_memory_evidence?: unknown[];
+  user_memory_action?: "none" | "create" | "confirm_existing" | "correct_existing";
+  matched_user_memory_id?: string;
+  corrected_user_memory_content?: string;
+  l1_evidence?: unknown[];
+  reason: string;
+};
+
+function captureDecisionLlm(calls: string[], decision: LegacyCaptureDecision): LlmClient {
   return {
     config: {
       ...DEFAULT_MEMMY_CONFIG.summary,
@@ -880,7 +1338,7 @@ function captureDecisionLlm(
       options: LlmCompletionOptions
     ): Promise<T> {
       calls.push(options.operation);
-      if (options.operation === "capture.summarize") return decision as unknown as T;
+      if (options.operation === "capture.summarize") return compactCaptureDecision(decision) as T;
       return { summary: decision.l1_summary } as unknown as T;
     },
     status: () => ({
@@ -893,15 +1351,7 @@ function captureDecisionLlm(
 }
 
 function captureDecisionRouterLlm(
-  decide: (payload: string) => {
-    create_l1: boolean;
-    l1_summary: string;
-    create_user_memory: boolean;
-    user_memory_types: string[];
-    user_memory_evidence?: unknown[];
-    l1_evidence?: unknown[];
-    reason: string;
-  }
+  decide: (payload: string) => LegacyCaptureDecision
 ): LlmClient {
   return {
     config: {
@@ -917,7 +1367,9 @@ function captureDecisionRouterLlm(
       options: LlmCompletionOptions
     ): Promise<T> {
       if (options.operation !== "capture.summarize") return { summary: "" } as unknown as T;
-      return decide(messages.find((message) => message.role === "user")?.content ?? "") as unknown as T;
+      return compactCaptureDecision(
+        decide(messages.find((message) => message.role === "user")?.content ?? "")
+      ) as T;
     },
     status: () => ({
       provider: "host",
@@ -925,5 +1377,33 @@ function captureDecisionRouterLlm(
       configured: true,
       remote: true
     })
+  };
+}
+
+function compactCaptureDecision(decision: LegacyCaptureDecision): Record<string, unknown> {
+  const l1Evidence = (decision.l1_evidence ?? []).map((item) => {
+    const evidence = item as Record<string, unknown>;
+    return {
+      quote: evidence.quote,
+      role: evidence.source_role,
+      kind: evidence.kind
+    };
+  });
+  const action = decision.user_memory_action === "confirm_existing"
+    ? "confirm"
+    : decision.user_memory_action === "correct_existing"
+      ? "correct"
+      : "create";
+  return {
+    l1: decision.create_l1 ? {
+      summary: decision.l1_summary,
+      evidence: l1Evidence
+    } : null,
+    user: decision.create_user_memory ? {
+      action,
+      evidence: decision.user_memory_evidence ?? [],
+      target: decision.matched_user_memory_id ?? "",
+      replacement: decision.corrected_user_memory_content ?? ""
+    } : null
   };
 }

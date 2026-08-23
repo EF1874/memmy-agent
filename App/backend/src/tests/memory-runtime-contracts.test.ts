@@ -158,7 +158,7 @@ describe("memory runtime contracts", () => {
   const outputCases: Array<{ name: string; schema: ZodType<unknown>; valid: unknown; invalid: unknown }> = [
     { name: "InjectedContext", schema: InjectedContextSchema, valid: injectedContext(), invalid: { markdown: "", sections: [{ id: "sec-1", kind: "bad" }] } },
     { name: "RecallHit", schema: RecallHitSchema, valid: recallHit(), invalid: { ...recallHit(), memoryLayer: "L4" } },
-    { name: "RecallEvidenceOutput", schema: RecallEvidenceOutputSchema, valid: { recallEventId: "recall-1", queryId: "turn-1", query: "remember", hits: [recallHit()], createdAt: ISO, serverTime: ISO }, invalid: { queryId: "", hits: [] } },
+    { name: "RecallEvidenceOutput", schema: RecallEvidenceOutputSchema, valid: { recallEventId: "recall-1", queryId: "turn-1", query: "remember", hits: [recallHit()], diagnostics: { candidateMemoryIds: ["memory-1"], injectedMemoryIds: ["memory-1"], capture: { status: "completed" } }, createdAt: ISO, serverTime: ISO }, invalid: { queryId: "", hits: [] } },
     { name: "MemoryListItem", schema: MemoryListItemSchema, valid: memoryListItem(), invalid: { ...memoryListItem(), status: "draft" } },
     { name: "MemoryDetailItem", schema: MemoryDetailItemSchema, valid: memoryDetailItem(), invalid: { ...memoryDetailItem(), createdAt: "not-a-date" } },
     { name: "RawTurnSummary", schema: RawTurnSummarySchema, valid: rawTurnSummary(), invalid: { ...rawTurnSummary(), rawTurnId: "" } },
