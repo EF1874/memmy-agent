@@ -22,6 +22,7 @@ import {
   embeddingRetryVectorFieldForMemory
 } from "../embedding/embedding-pipeline.js";
 import { memoryHasImportPipeline } from "../import/import-job-processor.js";
+import { isTerminalL3WorldModelError } from "../evolution/l3-world-model-pipeline.js";
 import {
   namespaceForMemory,
   namespaceForSession
@@ -61,6 +62,8 @@ export interface WorkerJobProcessors {
     induceL2(job: EvolutionJobRecord): MaybePromise<void>;
     materializeNegativeExperience(job: EvolutionJobRecord): MaybePromise<void>;
     abstractL3(job: EvolutionJobRecord): MaybePromise<void>;
+    updateL3WorldModel(job: EvolutionJobRecord): MaybePromise<void>;
+    updateProjectEnvironment(job: EvolutionJobRecord): MaybePromise<void>;
     crystallizeSkill(job: EvolutionJobRecord): MaybePromise<void>;
     associateL2(job: EvolutionJobRecord): MaybePromise<void>;
     splitBigTurn(job: EvolutionJobRecord): MaybePromise<void>;
@@ -230,6 +233,24 @@ export async function processJob(
       return;
     case "l3_abstraction":
       await deps.processors.evolution.abstractL3(job);
+      return;
+    case "l3_world_model_update":
+      try {
+        await deps.processors.evolution.updateL3WorldModel(job);
+      } catch (error) {
+        if (isTerminalL3WorldModelError(error)) {
+          deps.repos.runtime.failJob(
+            job.id,
+            error instanceof Error ? error.message : String(error),
+            deps.nowIso(),
+            true
+          );
+        }
+        throw error;
+      }
+      return;
+    case "project_environment_profile":
+      await deps.processors.evolution.updateProjectEnvironment(job);
       return;
     case "skill_crystallization":
       await deps.processors.evolution.crystallizeSkill(job);
@@ -465,7 +486,11 @@ export function episodeRewardWasSkipped(episode: EpisodeRecord): boolean {
 }
 
 export function workerJobCanRunInParallel(job: EvolutionJobRecord): boolean {
-  return job.jobType === "trace_summary" || job.jobType === "import_summary" || job.jobType === "embedding";
+  return job.jobType === "trace_summary" ||
+    job.jobType === "import_summary" ||
+    job.jobType === "embedding" ||
+    job.jobType === "l3_world_model_update" ||
+    job.jobType === "project_environment_profile";
 }
 
 export function processingStageForJob(jobType: JobType): ProcessingStage | undefined {

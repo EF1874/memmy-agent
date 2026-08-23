@@ -87,6 +87,29 @@ type PrepareMessagesOptions = {
   reservedPromptTokens?: number;
 };
 
+export type FollowupModelRequestKind = "iteration" | "max_iterations_finalization";
+
+export type FollowupModelRequestContext = {
+  requestKind: FollowupModelRequestKind;
+  iteration: number;
+  transcriptMessages: readonly Record<string, any>[];
+  currentTurnMessages: readonly Record<string, any>[];
+  modelMessages: readonly Record<string, any>[];
+  toolsForRequest: Record<string, any>[] | null;
+  reservedPromptTokens: number;
+  inputTokenBudget: number | null;
+  estimatePromptTokens: (messages: Record<string, any>[]) => number;
+};
+
+export type FollowupModelContextUpdate = {
+  messages: Record<string, any>[];
+} | null;
+
+type ModelContextProjection = {
+  messages: Record<string, any>[];
+  transcriptLength: number;
+};
+
 type TurnImageRecord = {
   identity: string;
   label: string;
@@ -132,6 +155,7 @@ export class AgentRunSpec {
   maxIterationsFinalPrompt: string | null;
   workspace?: string | null;
   sessionKey?: string | null;
+  hostProjectId?: string | null;
   contextWindowTokens?: number | null;
   contextBlockLimit?: number | null;
   providerRetryMode: string;
@@ -147,6 +171,8 @@ export class AgentRunSpec {
   internalTurnContext?: AgentInternalTurnContext | null;
   actualModelContext?: ActualModelContext | null;
   onMaxFinalizationStarting?: (() => void) | null;
+  currentTurnMessageStartIndex?: number | null;
+  beforeFollowupModelRequest?: ((ctx: FollowupModelRequestContext) => Promise<FollowupModelContextUpdate>) | null;
 
   constructor(init: {
     messages?: Record<string, any>[];
@@ -168,6 +194,7 @@ export class AgentRunSpec {
     maxIterationsFinalPrompt?: string | null;
     workspace?: string | null;
     sessionKey?: string | null;
+    hostProjectId?: string | null;
     contextWindowTokens?: number | null;
     contextBlockLimit?: number | null;
     providerRetryMode?: string;
@@ -183,6 +210,8 @@ export class AgentRunSpec {
     internalTurnContext?: AgentInternalTurnContext | null;
     actualModelContext?: ActualModelContext | null;
     onMaxFinalizationStarting?: (() => void) | null;
+    currentTurnMessageStartIndex?: number | null;
+    beforeFollowupModelRequest?: ((ctx: FollowupModelRequestContext) => Promise<FollowupModelContextUpdate>) | null;
   } = {}) {
     this.messages = this.initialMessages = init.messages ?? init.initialMessages ?? [];
     this.provider = init.provider;
@@ -202,6 +231,7 @@ export class AgentRunSpec {
     this.maxIterationsFinalPrompt = init.maxIterationsFinalPrompt ?? null;
     this.workspace = init.workspace ?? null;
     this.sessionKey = init.sessionKey ?? null;
+    this.hostProjectId = init.hostProjectId ?? null;
     this.contextWindowTokens = init.contextWindowTokens ?? null;
     this.contextBlockLimit = init.contextBlockLimit ?? null;
     this.providerRetryMode = init.providerRetryMode ?? "standard";
@@ -217,6 +247,8 @@ export class AgentRunSpec {
     this.internalTurnContext = init.internalTurnContext ?? null;
     this.actualModelContext = init.actualModelContext ?? null;
     this.onMaxFinalizationStarting = init.onMaxFinalizationStarting ?? null;
+    this.currentTurnMessageStartIndex = init.currentTurnMessageStartIndex ?? null;
+    this.beforeFollowupModelRequest = init.beforeFollowupModelRequest ?? null;
   }
 }
 
@@ -1255,6 +1287,98 @@ export class AgentRunner {
     return out;
   }
 
+  private inputTokenBudget(spec: AgentRunSpec): number | null {
+    if (!spec.contextWindowTokens) return null;
+    const generation = ((spec.provider ?? this.provider) as any)?.generation;
+    const providerMaxTokens = generation?.maxTokens ?? 4096;
+    const maxOutput = Number.isInteger(spec.maxTokens)
+      ? spec.maxTokens
+      : Number.isInteger(providerMaxTokens)
+        ? Number(providerMaxTokens)
+        : 4096;
+    const budget = spec.contextBlockLimit
+      ?? spec.contextWindowTokens - maxOutput - CONTEXT_SAFETY_BUFFER_TOKENS;
+    return Number.isFinite(budget) ? budget : null;
+  }
+
+  private prepareMessagesBeforeSnip(
+    spec: AgentRunSpec,
+    messages: Record<string, any>[],
+  ): Record<string, any>[] {
+    let prepared = AgentRunner.dropOrphanToolResults(messages);
+    prepared = AgentRunner.backfillMissingToolResults(prepared);
+    prepared = AgentRunner.microcompact(prepared);
+    return this.applyToolResultBudget(spec, prepared);
+  }
+
+  private estimateMessagesBeforeSnip(
+    spec: AgentRunSpec,
+    messages: Record<string, any>[],
+    options: PrepareMessagesOptions,
+  ): number {
+    const prepared = this.prepareMessagesBeforeSnip(spec, messages);
+    const estimateResult = estimatePromptTokensChain(
+      spec.provider ?? this.provider,
+      spec.model ?? null,
+      prepared,
+      options.toolsForRequest ?? [],
+    );
+    const estimate = Array.isArray(estimateResult) ? estimateResult[0] : estimateResult;
+    return Math.max(0, Number(estimate) + Math.max(0, options.reservedPromptTokens ?? 0));
+  }
+
+  private modelContextMessages(
+    transcriptMessages: Record<string, any>[],
+    projection: ModelContextProjection | null,
+  ): Record<string, any>[] {
+    if (!projection) return transcriptMessages;
+    return [
+      ...projection.messages,
+      ...transcriptMessages.slice(projection.transcriptLength),
+    ];
+  }
+
+  private async updateProjectionBeforeFollowup(
+    spec: AgentRunSpec,
+    transcriptMessages: Record<string, any>[],
+    projection: ModelContextProjection | null,
+    {
+      requestKind,
+      iteration,
+      toolsForRequest,
+      reservedPromptTokens,
+    }: {
+      requestKind: FollowupModelRequestKind;
+      iteration: number;
+      toolsForRequest: Record<string, any>[] | null;
+      reservedPromptTokens: number;
+    },
+  ): Promise<ModelContextProjection | null> {
+    if (!spec.beforeFollowupModelRequest || spec.currentTurnMessageStartIndex == null) return projection;
+    const modelMessages = this.modelContextMessages(transcriptMessages, projection);
+    const currentTurnStart = Math.max(
+      0,
+      Math.min(spec.currentTurnMessageStartIndex, transcriptMessages.length),
+    );
+    const options = { toolsForRequest, reservedPromptTokens };
+    const update = await spec.beforeFollowupModelRequest({
+      requestKind,
+      iteration,
+      transcriptMessages,
+      currentTurnMessages: transcriptMessages.slice(currentTurnStart),
+      modelMessages,
+      toolsForRequest,
+      reservedPromptTokens,
+      inputTokenBudget: this.inputTokenBudget(spec),
+      estimatePromptTokens: (messages) => this.estimateMessagesBeforeSnip(spec, messages, options),
+    });
+    if (!update) return projection;
+    return {
+      messages: update.messages.map((message) => ({ ...message })),
+      transcriptLength: transcriptMessages.length,
+    };
+  }
+
   snipHistory(
     spec: AgentRunSpec,
     messages: Record<string, any>[],
@@ -1264,15 +1388,8 @@ export class AgentRunner {
     },
   ): Record<string, any>[] {
     if (!messages.length || !spec.contextWindowTokens) return messages;
-    const generation = ((spec.provider ?? this.provider) as any)?.generation;
-    const providerMaxTokens = generation?.maxTokens ?? 4096;
-    const maxOutput = Number.isInteger(spec.maxTokens)
-      ? spec.maxTokens
-      : Number.isInteger(providerMaxTokens)
-        ? Number(providerMaxTokens)
-        : 4096;
-    const baseBudget = spec.contextBlockLimit
-      ?? spec.contextWindowTokens - maxOutput - CONTEXT_SAFETY_BUFFER_TOKENS;
+    const baseBudget = this.inputTokenBudget(spec);
+    if (baseBudget == null) return messages;
     const budget = baseBudget - Math.max(0, options.reservedPromptTokens ?? 0);
     if (budget <= 0) return messages;
     const estimateResult = estimatePromptTokensChain(
@@ -1325,10 +1442,7 @@ export class AgentRunner {
     options: PrepareMessagesOptions,
   ): Record<string, any>[] {
     try {
-      let prepared = AgentRunner.dropOrphanToolResults(messages);
-      prepared = AgentRunner.backfillMissingToolResults(prepared);
-      prepared = AgentRunner.microcompact(prepared);
-      prepared = this.applyToolResultBudget(spec, prepared);
+      let prepared = this.prepareMessagesBeforeSnip(spec, messages);
       prepared = this.snipHistory(spec, prepared, options);
       prepared = AgentRunner.dropOrphanToolResults(prepared);
       return AgentRunner.backfillMissingToolResults(prepared);
@@ -1389,20 +1503,41 @@ export class AgentRunner {
       images: new Map(),
       batches: new Map(),
     };
+    let modelContextProjection: ModelContextProjection | null = null;
 
     const runCtx = new AgentHookContext({ spec, messages });
     await hook.beforeRun(runCtx);
 
     for (let iteration = 0; iteration < spec.maxIterations; iteration += 1) {
-      let messagesForModel = messages;
       if (spec.abortSignal?.aborted) {
         finalContent = "Error: task cancelled";
         stopReason = "cancelled";
         error = finalContent;
         break;
       }
+      const toolsForRequest = spec.tools?.getDefinitions?.() ?? [];
+      if (iteration > 0) {
+        modelContextProjection = await this.updateProjectionBeforeFollowup(
+          spec,
+          messages,
+          modelContextProjection,
+          {
+            requestKind: "iteration",
+            iteration,
+            toolsForRequest,
+            reservedPromptTokens: 0,
+          },
+        );
+        if (spec.abortSignal?.aborted) {
+          finalContent = "Error: task cancelled";
+          stopReason = "cancelled";
+          error = finalContent;
+          break;
+        }
+      }
+      let messagesForModel = this.modelContextMessages(messages, modelContextProjection);
       messagesForModel = this.prepareMessagesForModel(spec, messagesForModel, {
-        toolsForRequest: spec.tools?.getDefinitions?.() ?? [],
+        toolsForRequest,
         reservedPromptTokens: 0,
       });
       messagesForModel = this.prepareImageMessages(messagesForModel, imageTextState);
@@ -1667,73 +1802,97 @@ export class AgentRunner {
         });
       if (spec.maxIterationsFinalPrompt) {
         spec.onMaxFinalizationStarting?.();
-        const preparedMessages = this.prepareMessagesForModel(spec, messages, {
-          toolsForRequest: null,
-          reservedPromptTokens: estimateMessageTokens({ role: "user", content: spec.maxIterationsFinalPrompt }),
-        }).map((message) => ({ ...message }));
-        AgentRunner.appendInjectedMessages(preparedMessages, [{
+        const reservedPromptTokens = estimateMessageTokens({
           role: "user",
           content: spec.maxIterationsFinalPrompt,
-        }]);
-        const requestMessages = this.prepareImageMessages(preparedMessages, imageTextState);
-        const context = new AgentHookContext({
-          spec,
-          messages,
-          iteration: spec.maxIterations,
-          usage,
         });
-        try {
-          response = await this.requestModelWithImagePolicy(
+        if (!spec.abortSignal?.aborted) {
+          modelContextProjection = await this.updateProjectionBeforeFollowup(
             spec,
-            requestMessages,
-            hook,
-            context,
-            imageTextState,
+            messages,
+            modelContextProjection,
             {
-              toolsOverride: null,
-              forceNonStreaming: true,
+              requestKind: "max_iterations_finalization",
+              iteration: spec.maxIterations,
+              toolsForRequest: null,
+              reservedPromptTokens,
             },
           );
-          const finalUsage = this.usageDict(response.usage);
-          this.accumulateUsage(usage, finalUsage);
-          if (spec.abortSignal?.aborted || response.errorKind === "aborted") {
-            finalContent = "Error: task cancelled";
-            stopReason = "cancelled";
-            error = finalContent;
-          } else if (response.finishReason === "error" && AgentRunner.terminalImageError(response)) {
-            const [, cleanedContent] = extractReasoning(
-              response.reasoningContent,
-              response.thinkingBlocks,
-              response.content,
+        }
+        if (spec.abortSignal?.aborted) {
+          finalContent = "Error: task cancelled";
+          stopReason = "cancelled";
+          error = finalContent;
+        } else {
+          const finalizationMessages = this.modelContextMessages(messages, modelContextProjection);
+          const preparedMessages = this.prepareMessagesForModel(spec, finalizationMessages, {
+            toolsForRequest: null,
+            reservedPromptTokens,
+          }).map((message) => ({ ...message }));
+          AgentRunner.appendInjectedMessages(preparedMessages, [{
+            role: "user",
+            content: spec.maxIterationsFinalPrompt,
+          }]);
+          const requestMessages = this.prepareImageMessages(preparedMessages, imageTextState);
+          const context = new AgentHookContext({
+            spec,
+            messages,
+            iteration: spec.maxIterations,
+            usage,
+          });
+          try {
+            response = await this.requestModelWithImagePolicy(
+              spec,
+              requestMessages,
+              hook,
+              context,
+              imageTextState,
+              {
+                toolsOverride: null,
+                forceNonStreaming: true,
+              },
             );
-            response.content = cleanedContent;
-            finalContent = hook.finalizeContent(context, response.content)
-              || spec.errorMessage
-              || DEFAULT_ERROR_MESSAGE;
-            stopReason = "error";
-            error = finalContent;
-            AgentRunner.appendModelErrorPlaceholder(messages);
-          } else {
-            const [, cleanedContent] = extractReasoning(
-              response.reasoningContent,
-              response.thinkingBlocks,
-              response.content,
-            );
-            response.content = cleanedContent;
-            const clean = hook.finalizeContent(context, response.content);
-            finalContent = response.finishReason !== "error" && !isBlankText(clean)
-              ? clean
-              : fallback;
-            AgentRunner.appendFinalMessage(messages, finalContent);
-          }
-        } catch (requestError) {
-          if (isAbortError(requestError) || spec.abortSignal?.aborted) {
-            finalContent = "Error: task cancelled";
-            stopReason = "cancelled";
-            error = finalContent;
-          } else {
-            finalContent = fallback;
-            AgentRunner.appendFinalMessage(messages, finalContent);
+            const finalUsage = this.usageDict(response.usage);
+            this.accumulateUsage(usage, finalUsage);
+            if (spec.abortSignal?.aborted || response.errorKind === "aborted") {
+              finalContent = "Error: task cancelled";
+              stopReason = "cancelled";
+              error = finalContent;
+            } else if (response.finishReason === "error" && AgentRunner.terminalImageError(response)) {
+              const [, cleanedContent] = extractReasoning(
+                response.reasoningContent,
+                response.thinkingBlocks,
+                response.content,
+              );
+              response.content = cleanedContent;
+              finalContent = hook.finalizeContent(context, response.content)
+                || spec.errorMessage
+                || DEFAULT_ERROR_MESSAGE;
+              stopReason = "error";
+              error = finalContent;
+              AgentRunner.appendModelErrorPlaceholder(messages);
+            } else {
+              const [, cleanedContent] = extractReasoning(
+                response.reasoningContent,
+                response.thinkingBlocks,
+                response.content,
+              );
+              response.content = cleanedContent;
+              const clean = hook.finalizeContent(context, response.content);
+              finalContent = response.finishReason !== "error" && !isBlankText(clean)
+                ? clean
+                : fallback;
+              AgentRunner.appendFinalMessage(messages, finalContent);
+            }
+          } catch (requestError) {
+            if (isAbortError(requestError) || spec.abortSignal?.aborted) {
+              finalContent = "Error: task cancelled";
+              stopReason = "cancelled";
+              error = finalContent;
+            } else {
+              finalContent = fallback;
+              AgentRunner.appendFinalMessage(messages, finalContent);
+            }
           }
         }
       } else {

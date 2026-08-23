@@ -23,6 +23,7 @@ import {
   PanelAnalysisOutputSchema,
   PanelItemsInputSchema,
   PanelItemsOutputSchema,
+  PanelMemoryListItemSchema,
   PanelOverviewOutputSchema,
   RawTurnSummarySchema,
   RecallHitSchema,
@@ -30,13 +31,89 @@ import {
   SearchInputSchema,
   SearchOutputSchema,
   StartTurnInputSchema,
-  StartTurnOutputSchema
+  StartTurnOutputSchema,
+  WorldModelScopeSchema
 } from "@memmy/local-api-contracts";
 import type { ZodType } from "zod";
 
 const ISO = "2026-05-29T10:00:00.000Z";
 
 describe("memory runtime contracts", () => {
+  it("accepts optional L3 feature versions while preserving old health responses", () => {
+    expect(() => MemoryHealthSnapshotSchema.parse(healthOutput())).not.toThrow();
+    expect(() => MemoryHealthSnapshotSchema.parse({
+      ...healthOutput(),
+      features: {
+        l3WorldModelProtocolVersions: [2]
+      }
+    })).not.toThrow();
+    expect(() => MemoryHealthSnapshotSchema.parse({
+      ...healthOutput(),
+      features: {
+        l3WorldModelProtocolVersions: ["2"]
+      }
+    })).toThrow();
+  });
+
+  it("keeps legacy open-session input and strictly validates protocol v2", () => {
+    expect(() => OpenSessionInputSchema.parse({
+      sessionId: "host-session-1",
+      workspacePath: "/tmp/project",
+      source: "codex"
+    })).not.toThrow();
+    const v2 = {
+      requestId: "86af17ba-8eed-4a3a-9d09-2cc1a9db7b3f",
+      adapterId: "codex-memory",
+      source: "codex",
+      namespace: {
+        source: "codex",
+        profileId: "default",
+        sessionKey: "codex:session-1"
+      },
+      l3WorldModelProtocolVersion: 2,
+      l3WorldModelTransition: "resume_only",
+      workspaceUri: "file:///tmp/project",
+      workspaceHostId: "a".repeat(64)
+    } as const;
+    expect(() => OpenSessionInputSchema.parse(v2)).not.toThrow();
+    expect(() => OpenSessionInputSchema.parse({ ...v2, l3WorldModelTransition: undefined })).toThrow();
+    expect(() => OpenSessionInputSchema.parse({
+      source: "codex",
+      workspaceUri: "file:///tmp/project",
+      workspaceHostId: "a".repeat(64)
+    })).toThrow();
+    expect(() => OpenSessionInputSchema.parse({
+      ...v2,
+      namespace: { ...v2.namespace, projectId: "host-project" }
+    })).toThrow();
+    expect(() => OpenSessionOutputSchema.parse({
+      ...openSessionOutput(),
+      projectId: "ws_project"
+    })).not.toThrow();
+  });
+
+  it("accepts strict four-field World Model details and preserves legacy details", () => {
+    expect(() => GetMemoryOutputSchema.parse(getMemoryOutput())).not.toThrow();
+    const v2 = getMemoryOutput();
+    v2.item.worldModel = {
+      schemaVersion: 2,
+      sourceMemoryIds: ["memory-1"],
+      summary: "project context",
+      generalRulesAndSafetyConstraints: null,
+      projectEnvironmentProfile: "语言：TypeScript",
+      projectContract: "Run tests before commit.",
+      domainKnowledge: null
+    } as typeof v2.item.worldModel;
+    expect(() => GetMemoryOutputSchema.parse(v2)).not.toThrow();
+    expect(() => GetMemoryOutputSchema.parse({
+      ...v2,
+      item: {
+        ...v2.item,
+        worldModel: { ...v2.item.worldModel, domainKnowledge: 1 }
+      }
+    })).toThrow();
+  });
+
   it("parses Span memories and Span processing jobs", () => {
     expect(() => MemoryListItemSchema.parse(memoryListItem({ kind: "span" }))).not.toThrow();
     expect(() => PanelItemsOutputSchema.parse({
@@ -55,6 +132,27 @@ describe("memory runtime contracts", () => {
       kind: "user_memory",
       memoryLayer: "UserMemory"
     }))).not.toThrow();
+  });
+
+  it("keeps world model scope typed and exclusive to panel list items", () => {
+    const general = { kind: "general" };
+    const project = {
+      kind: "project",
+      projectLabel: "deepseek-harness",
+      workspaceDisplayPath: "/Users/test/deepseek-harness"
+    };
+    expect(WorldModelScopeSchema.parse(general)).toEqual(general);
+    expect(WorldModelScopeSchema.parse(project)).toEqual(project);
+    expect(() => WorldModelScopeSchema.parse({ ...general, projectLabel: null })).toThrow();
+    expect(() => WorldModelScopeSchema.parse({ ...project, projectId: "internal" })).toThrow();
+
+    const panelItem = { ...memoryListItem({ memoryLayer: "L3" }), worldModelScope: project };
+    expect(PanelMemoryListItemSchema.parse(panelItem)).toEqual(panelItem);
+    expect(PanelItemsOutputSchema.parse({ ...panelItemsOutput(), items: [panelItem] }).items[0])
+      .toHaveProperty("worldModelScope", project);
+    expect(MemoryListItemSchema.parse(panelItem)).not.toHaveProperty("worldModelScope");
+    expect(MemoryDetailItemSchema.parse({ ...memoryDetailItem(), worldModelScope: project }))
+      .not.toHaveProperty("worldModelScope");
   });
 
   const outputCases: Array<{ name: string; schema: ZodType<unknown>; valid: unknown; invalid: unknown }> = [

@@ -1150,6 +1150,81 @@ describe("AgentThreadMessages", () => {
     expect(html).not.toContain("Completed read_file");
   });
 
+  it("keeps apply_patch content out of summaries and truncates it only in expanded details", () => {
+    const longBody = "private-patch-content-".repeat(260);
+    const patchInput = [
+      "*** Begin Patch",
+      "*** Update File: src/app.ts",
+      "@@",
+      "-old",
+      `+${longBody}`,
+      "*** End Patch",
+    ].join("\n");
+    const render = (stoppedByUser: boolean) => renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages
+          chatScopeKey={`chat-apply-patch-${stoppedByUser}`}
+          messages={[{
+            id: "patch-tool",
+            role: "tool",
+            kind: "trace",
+            content: "",
+            traces: [],
+            toolEvents: [{
+              phase: "end",
+              call_id: "call-patch",
+              name: "apply_patch",
+              arguments: { input: patchInput },
+            }],
+            activitySegmentId: "activity-patch",
+            isStreaming: stoppedByUser,
+            stoppedByUser,
+          }]}
+        />
+      </I18nProvider>,
+    );
+
+    const collapsed = render(false);
+    expect(collapsed).toContain("工作了一会儿");
+    expect(collapsed).not.toContain("private-patch-content");
+    expect(collapsed).not.toContain("*** Begin Patch");
+
+    const expanded = render(true);
+    expect(expanded).toContain("Patched");
+    expect(expanded).toContain("app.ts");
+    expect(expanded).toContain('data-detail="arguments"');
+    expect(expanded).toContain("*** Begin Patch");
+    expect(expanded).toContain("private-patch-content");
+    expect(expanded).toContain("…");
+    expect(expanded).not.toContain(longBody);
+  });
+
+  it("uses the same apply_patch summary for a legacy persisted trace", () => {
+    const patchInput = "*** Begin Patch\n*** Add File: src/legacy.ts\n+new\n*** End Patch";
+    const trace = `apply_patch(${JSON.stringify({ input: patchInput })})`;
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages
+          chatScopeKey="chat-legacy-apply-patch"
+          messages={[{
+            id: "legacy-patch",
+            role: "tool",
+            kind: "trace",
+            content: trace,
+            traces: [trace],
+            activitySegmentId: "activity-legacy-patch",
+            isStreaming: true,
+            stoppedByUser: true,
+          }]}
+        />
+      </I18nProvider>,
+    );
+
+    expect(html).toContain("Patched");
+    expect(html).toContain("legacy.ts");
+    expect(html).toContain('data-detail="trace"');
+  });
+
   it("renders same-call file edit and tool trace in one activity cluster without duplicate summary", () => {
     const html = renderToString(
       <I18nProvider language="zh-CN">
