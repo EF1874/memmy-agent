@@ -782,6 +782,47 @@ describe("webui transcript replay", () => {
     expect(messages[1].activitySegmentId).toBe(messages[2].activitySegmentId);
   });
 
+  it("replays apply_patch arguments and multi-file rows under one UI call", () => {
+    const patchInput = [
+      "*** Begin Patch",
+      "*** Update File: src/old.ts",
+      "*** Move to: src/new.ts",
+      "*** End Patch",
+    ].join("\n");
+    const edits = [
+      { call_id: "provider-final", ui_tool_call_id: "ui-patch", tool: "apply_patch", path: "src/old.ts", phase: "end", status: "done" },
+      { call_id: "provider-final", ui_tool_call_id: "ui-patch", tool: "apply_patch", path: "src/new.ts", phase: "end", status: "done" },
+    ];
+    const messages = replayTranscriptToUiMessages([
+      {
+        event: "message",
+        turn_id: "turn-patch",
+        kind: "progress",
+        tool_events: [{
+          phase: "end",
+          call_id: "provider-final",
+          ui_tool_call_id: "ui-patch",
+          name: "apply_patch",
+          arguments: { input: patchInput },
+          result: "Patch applied:\n- move src/old.ts -> src/new.ts",
+        }],
+      },
+      { event: "file_edit", turn_id: "turn-patch", edits },
+    ]);
+
+    const toolMessage = messages.find((message) => message.toolEvents);
+    const fileMessage = messages.find((message) => message.fileEdits);
+    expect(toolMessage?.toolEvents).toEqual([
+      expect.objectContaining({
+        name: "apply_patch",
+        arguments: { input: patchInput },
+        result: "Patch applied:\n- move src/old.ts -> src/new.ts",
+      }),
+    ]);
+    expect(fileMessage?.fileEdits).toEqual(edits);
+    expect(fileMessage?.activitySegmentId).toBe(toolMessage?.activitySegmentId);
+  });
+
   it("replays file edit rows with an earlier tool progress segment", () => {
     const startEdit = {
       version: 1,

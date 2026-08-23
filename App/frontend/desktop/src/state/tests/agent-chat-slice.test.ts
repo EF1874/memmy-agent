@@ -2606,7 +2606,14 @@ describe("agent chat slice", () => {
         event: "message",
         chat_id: "chat-1",
         kind: "progress",
-        tool_events: [{ phase: "end", call_id: callId, name: toolName, arguments: { path: "/tmp/a.txt" } }]
+        tool_events: [{
+          phase: "end",
+          call_id: callId,
+          name: toolName,
+          arguments: toolName === "apply_patch"
+            ? { input: "*** Begin Patch\n*** Delete File: tmp/a.txt\n*** End Patch" }
+            : { path: "/tmp/a.txt" },
+        }]
       }
     });
 
@@ -2615,11 +2622,11 @@ describe("agent chat slice", () => {
     const traceTexts = state.messages.flatMap((message) => [message.content, ...(message.traces ?? [])]);
 
     expect(fileEditMessage).toMatchObject({ content: "", traces: [] });
-    // write_file / edit_file / apply_patch all resolve to the "edit" canonical
-    // action → the trace line reads "Wrote a.txt" for write_file and
-    // "Edited a.txt" for edit_file / apply_patch. The important invariant is
-    // that we never leak the raw JSON payload for the file edit tool call.
-    const expectedTrace = toolName === "write_file" ? "Wrote a.txt" : "Edited a.txt";
+    const expectedTrace = toolName === "write_file"
+      ? "Wrote a.txt"
+      : toolName === "apply_patch"
+        ? "Patched a.txt"
+        : "Edited a.txt";
     expect(toolTraceMessage?.traces).toEqual([expectedTrace]);
     expect(fileEditMessage).toMatchObject({ isStreaming: false });
     expect(toolTraceMessage).toMatchObject({ isStreaming: false });
