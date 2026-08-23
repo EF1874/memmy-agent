@@ -11,8 +11,9 @@ import {
 import { AgentLoop } from "../../../src/core/agent-runtime/loop.js";
 import { Consolidator } from "../../../src/core/agent-runtime/memory.js";
 import { AgentRunResult } from "../../../src/core/agent-runtime/runner.js";
+import { Session } from "../../../src/core/session/manager.js";
 import { Config } from "../../../src/config/schema.js";
-import { LLMResponse } from "../../../src/providers/base.js";
+import { LLMResponse, ToolCallRequest } from "../../../src/providers/base.js";
 
 const roots: string[] = [];
 
@@ -292,6 +293,88 @@ describe("lifecycle hooks", () => {
     const serialized = JSON.stringify(modelCalls.at(-1));
     expect(serialized).toContain("after-compaction");
     expect(serialized).not.toContain("before-compaction");
+  });
+
+  it("refreshes hook-backed prompt state during mid-turn compaction before the follow-up request", async () => {
+    const events: string[] = [];
+    class VersionedPromptHook extends AgentHook {
+      version = "before-mid-turn";
+
+      override onBuildSystemPrompt(ctx: SystemPromptBuildContext): void {
+        ctx.upsertSection({ id: "mid-turn-version", content: this.version });
+      }
+
+      override async beforeCompaction(): Promise<void> {
+        events.push("beforeCompaction");
+      }
+
+      override async afterCompaction(ctx: AgentHookContext): Promise<void> {
+        events.push("afterCompaction");
+        if (ctx.compaction?.changed) this.version = "after-mid-turn";
+      }
+    }
+    const hook = new VersionedPromptHook();
+    const calls: any[] = [];
+    const p = {
+      generation: { maxTokens: 128 },
+      getDefaultModel: () => "test-model",
+      chatWithRetry: vi.fn(async (args: any) => {
+        calls.push(args);
+        events.push(`model-${calls.length}`);
+        if (calls.length === 1) {
+          return new LLMResponse({
+            content: "checking",
+            toolCalls: [new ToolCallRequest({ id: "goal-1", name: "get_goal", arguments: {} })],
+          });
+        }
+        return new LLMResponse({ content: "done" });
+      }),
+    };
+    const loop = makeLoop([hook], { contextWindowTokens: 10_000, provider: p });
+    const session = loop.sessions.getOrCreate("cli:mid-turn-hook");
+    session.messages = [
+      { role: "user", content: "old user" },
+      { role: "assistant", content: "old answer" },
+    ];
+    loop.sessions.save(session);
+    const originalCompaction = loop.consolidator.maybeConsolidateByTokens;
+    vi.spyOn(loop.consolidator, "maybeConsolidateByTokens").mockImplementation(async function (
+      this: Consolidator,
+      currentSession: Session,
+      options: any,
+    ) {
+      if (!options.estimateProjectionTokens) {
+        return {
+          kind: "token",
+          replayMaxMessages: options.replayMaxMessages ?? null,
+          changed: false,
+          summary: null,
+          error: null,
+          started: false,
+        };
+      }
+      const liveEstimator = options.estimateProjectionTokens;
+      return originalCompaction.call(this, currentSession, {
+        ...options,
+        estimateProjectionTokens: (candidateSession: Session, projection: any) => {
+          liveEstimator(candidateSession, projection);
+          return [projection.visibleMessageStart === 0 ? 7_000 : 100, "test"];
+        },
+      });
+    });
+    vi.spyOn(loop.consolidator, "archive").mockResolvedValue("mid-turn summary");
+
+    await loop.processDirect("current user", { sessionKey: session.key });
+
+    expect(events).toEqual([
+      "model-1",
+      "beforeCompaction",
+      "afterCompaction",
+      "model-2",
+    ]);
+    const secondRequest = JSON.stringify(calls[1].messages);
+    expect(secondRequest).toContain("after-mid-turn");
+    expect(secondRequest).not.toContain("before-mid-turn");
   });
 
   it("keeps CompositeHook order and obeys each hook's reraise policy", async () => {

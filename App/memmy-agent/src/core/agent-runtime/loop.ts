@@ -86,7 +86,13 @@ import { imageGenerationPrompt } from "../../utils/image-generation-intent.js";
 import { LLMRuntime } from "../../utils/llm-runtime.js";
 import { withProgressCapabilities } from "../../utils/progress-events.js";
 import { EMPTY_FINAL_RESPONSE_MESSAGE } from "../../utils/runtime.js";
-import { AgentRunner, AgentRunSpec, type AgentInternalTurnContext } from "./runner.js";
+import {
+  AgentRunner,
+  AgentRunSpec,
+  type AgentInternalTurnContext,
+  type FollowupModelContextUpdate,
+  type FollowupModelRequestContext,
+} from "./runner.js";
 import {
   GoalRuntime,
   GoalRuntimeError,
@@ -106,7 +112,12 @@ import { connectMissingServers, runtimeLines as mcpRuntimeLines, sessionExtra as
 import { BrowserSessionManager, type BrowserScope } from "./tools/browser.js";
 import { ContextBuilder } from "./context.js";
 import { BUILTIN_SKILLS_DIR } from "./skills.js";
-import { Consolidator, Dream, type TokenCompactionStatus } from "./memory.js";
+import {
+  Consolidator,
+  Dream,
+  type TokenCompactionEvent,
+  type TokenCompactionStatus,
+} from "./memory.js";
 import { AgentHook, AgentHookContext, CompositeAgentHook } from "./hook.js";
 import { SubagentManager } from "./subagent.js";
 import { AutoCompact } from "./autocompact.js";
@@ -218,6 +229,22 @@ type AgentLoopResult = [
   failedModel: string | null,
 ];
 
+type MidTurnContextDescriptor = {
+  transcriptStartIndex: number;
+  protectedSessionMessageStart: number;
+  sessionTailMessagesRepresentedInTranscript: number;
+  rebuildProjection: (
+    session: Session,
+    currentTurnMessages: readonly Record<string, any>[],
+    options?: {
+      visibleMessageStart?: number;
+      summaryOverride?: string | null;
+    },
+  ) => Record<string, any>[];
+};
+
+type TokenCompactionEventCallback = (event: TokenCompactionEvent) => Promise<void> | void;
+
 export enum TurnState {
   RESTORE = "restore",
   COMPACT = "compact",
@@ -292,6 +319,8 @@ export class TurnContext {
   actualModel: string | null = null;
   consolidator: Consolidator | null = null;
   slot: TurnSlot | null = null;
+  midTurnContext: MidTurnContextDescriptor | null = null;
+  onTokenCompactionEvent: TokenCompactionEventCallback | null = null;
 
   constructor(init: {
     msg: InboundMessage;
@@ -2961,6 +2990,126 @@ export class AgentLoop {
     });
   }
 
+  private sessionSummaryText(session: Session): string | null {
+    const summary = session.metadata?.lastSummary;
+    if (typeof summary === "string") return summary;
+    return summary && typeof summary === "object" && typeof summary.text === "string"
+      ? summary.text
+      : null;
+  }
+
+  private createMidTurnContextDescriptor(
+    session: Session,
+    initialMessages: Record<string, any>[],
+    sessionTailMessagesRepresentedInTranscript: number,
+    modelSelection: ResolvedModelSelection | null,
+    buildMessages: (
+      history: Record<string, any>[],
+      summary: string | null,
+      currentSession: Session,
+    ) => Record<string, any>[],
+  ): MidTurnContextDescriptor {
+    const protectedTailCount = Math.max(
+      0,
+      Math.min(sessionTailMessagesRepresentedInTranscript, session.messages.length),
+    );
+    const protectedSessionMessageStart = session.messages.length - protectedTailCount;
+    return {
+      transcriptStartIndex: Math.max(0, initialMessages.length - 1),
+      protectedSessionMessageStart,
+      sessionTailMessagesRepresentedInTranscript: protectedTailCount,
+      rebuildProjection: (currentSession, currentTurnMessages, options = {}) => {
+        const visibleMessageStart = Math.max(
+          0,
+          Math.min(options.visibleMessageStart ?? currentSession.lastConsolidated, currentSession.messages.length),
+        );
+        const view = new Session({
+          key: currentSession.key,
+          messages: currentSession.messages,
+          metadata: currentSession.metadata,
+          lastConsolidated: visibleMessageStart,
+          createdAt: currentSession.createdAt,
+          updatedAt: currentSession.updatedAt,
+        });
+        const visibleHistory = view.getHistory({
+          maxMessages: this.maxMessages,
+          maxTokens: this.replayTokenBudget(modelSelection),
+          includeTimestamps: true,
+          targetProvider: modelSelection?.provider,
+        });
+        const retainedHistory = protectedTailCount > 0
+          ? visibleHistory.slice(0, Math.max(0, visibleHistory.length - protectedTailCount))
+          : visibleHistory;
+        const hasSummaryOverride = Object.prototype.hasOwnProperty.call(options, "summaryOverride");
+        const summary = hasSummaryOverride
+          ? options.summaryOverride ?? null
+          : this.sessionSummaryText(currentSession);
+        const rebuilt = buildMessages(retainedHistory, summary, currentSession);
+        const systemMessages = rebuilt.filter((message) => message.role === "system");
+        return [
+          ...systemMessages,
+          ...retainedHistory,
+          ...currentTurnMessages.map((message) => ({ ...message })),
+        ];
+      },
+    };
+  }
+
+  private async compactBeforeFollowupModelRequest(
+    session: Session,
+    consolidator: Consolidator,
+    descriptor: MidTurnContextDescriptor,
+    request: FollowupModelRequestContext,
+    onCompactionEvent: TokenCompactionEventCallback | null,
+  ): Promise<FollowupModelContextUpdate> {
+    if (request.inputTokenBudget == null || request.inputTokenBudget <= 0) return null;
+    try {
+      const result = await consolidator.maybeConsolidateByTokens(session, {
+        replayMaxMessages: this.maxMessages,
+        inputTokenBudget: request.inputTokenBudget,
+        maxMessageEndExclusive: descriptor.protectedSessionMessageStart,
+        estimateProjectionTokens: (candidateSession, projection) => {
+          const messages = descriptor.rebuildProjection(
+            candidateSession,
+            request.currentTurnMessages,
+            projection,
+          );
+          return [request.estimatePromptTokens(messages), "runner-live"];
+        },
+        ...(onCompactionEvent
+          ? {
+              notifyOnLockWait: true,
+              onCompactionEvent,
+            }
+          : {}),
+      });
+      if (!result.changed) return null;
+      const currentSession = this.sessions.get(session.key) ?? session;
+      try {
+        return {
+          messages: descriptor.rebuildProjection(
+            currentSession,
+            request.currentTurnMessages,
+          ),
+        };
+      } catch {
+        try {
+          await onCompactionEvent?.({
+            kind: "token",
+            status: "error",
+            replayMaxMessages: this.maxMessages,
+            changed: true,
+          });
+        } catch {
+          // UI notification is best-effort and must not affect the active turn.
+        }
+        return null;
+      }
+    } catch {
+      return null;
+    }
+  }
+
   async dispatchCommandInline(msg: InboundMessage, key: string, raw: string, dispatchFn: (ctx: CommandContext) => Promise<OutboundMessage | null> | OutboundMessage | null): Promise<void> {
     const result = await dispatchFn(new CommandContext({ msg, session: null, key, raw, loop: this }));
     if (!result) return;
@@ -3309,6 +3458,9 @@ export class AgentLoop {
       modelSelection = null,
       internalTurnContext = null,
       onMaxFinalizationStarting = null,
+      midTurnContext = null,
+      consolidator = null,
+      onTokenCompactionEvent = null,
     }: {
       onProgress?: any;
       onStream?: any;
@@ -3330,6 +3482,9 @@ export class AgentLoop {
       modelSelection?: ResolvedModelSelection | null;
       internalTurnContext?: AgentInternalTurnContext | null;
       onMaxFinalizationStarting?: (() => void) | null;
+      midTurnContext?: MidTurnContextDescriptor | null;
+      consolidator?: Consolidator | null;
+      onTokenCompactionEvent?: TokenCompactionEventCallback | null;
     } = {},
   ): Promise<AgentLoopResult> {
     if (!modelSelection) this.refreshProviderSnapshot();
@@ -3398,6 +3553,16 @@ export class AgentLoop {
         internalTurnContext,
         actualModelContext: modelSelection ? persistedModelSelection(modelSelection) : null,
         onMaxFinalizationStarting,
+        currentTurnMessageStartIndex: midTurnContext?.transcriptStartIndex ?? null,
+        beforeFollowupModelRequest: midTurnContext && session && consolidator
+          ? (request) => this.compactBeforeFollowupModelRequest(
+              session,
+              consolidator,
+              midTurnContext,
+              request,
+              onTokenCompactionEvent,
+            )
+          : null,
       }),
     );
     const rawUsage = result.usage ?? result.response?.usage;
@@ -3725,13 +3890,13 @@ export class AgentLoop {
     const compactionOptions: {
       replayMaxMessages: number | null;
       notifyOnLockWait?: boolean;
-      onCompactionEvent?: (event: { status: TokenCompactionStatus }) => Promise<void>;
+      onCompactionEvent?: TokenCompactionEventCallback;
     } = {
       replayMaxMessages: this.maxMessages,
     };
     if (ctx.msg.channel === "websocket" || ctx.mirrorTurn) {
       compactionOptions.notifyOnLockWait = true;
-      compactionOptions.onCompactionEvent = async (event) => {
+      ctx.onTokenCompactionEvent = async (event) => {
         const text = this.contextCompactionLabel(ctx, event.status);
         if (ctx.mirrorTurn) {
           if (ctx.boundary?.shouldEmitLive() !== false) {
@@ -3745,6 +3910,7 @@ export class AgentLoop {
           await this.publishWebuiContextCompaction(ctx, event.status);
         }
       };
+      compactionOptions.onCompactionEvent = ctx.onTokenCompactionEvent;
     }
     await (ctx.consolidator ?? this.consolidator).maybeConsolidateByTokens(
       ctx.session!,
@@ -3791,6 +3957,34 @@ export class AgentLoop {
       ctx.history,
       ctx.pendingSummary,
       sessionWorkspace,
+    );
+    ctx.midTurnContext = this.createMidTurnContextDescriptor(
+      ctx.session!,
+      ctx.initialMessages,
+      ctx.userPersistedEarly ? 1 : 0,
+      ctx.modelSelection,
+      (history, summary, currentSession) => this.context.buildMessages({
+        history,
+        currentMessage: imageGenerationPrompt(ctx.msg.content, ctx.msg.metadata),
+        media: ctx.msg.media.length ? ctx.msg.media : null,
+        channel: ctx.msg.channel,
+        chatId: this.runtimeChatId(ctx.msg),
+        senderId: ctx.msg.senderId,
+        sessionSummary: summary,
+        sessionMetadata: currentSession.metadata,
+        responseLanguage: ctx.msg.metadata?.[WEBUI_LANGUAGE_METADATA_KEY]
+          ?? currentSession.metadata?.[WEBUI_LANGUAGE_METADATA_KEY]
+          ?? null,
+        sessionKey: currentSession.key,
+        unifiedSession: this.unifiedSession,
+        currentRuntimeLines: [
+          ...mcpRuntimeLines(ctx.msg, {
+            availableServerNames: new Set(Object.keys(this.mcpServers ?? {})),
+          }),
+        ],
+        hook: this.lifecycleHook(),
+        sessionWorkspace,
+      }),
     );
     ctx.onProgress ??= await this.buildBusProgressCallback(ctx);
     if (ctx.mirrorTurn && this.guiTranscriptMirror) {
@@ -3878,6 +4072,9 @@ export class AgentLoop {
           }
         : null,
       onMaxFinalizationStarting: settleSlot,
+      midTurnContext: ctx.midTurnContext,
+      consolidator: ctx.consolidator ?? this.consolidator,
+      onTokenCompactionEvent: ctx.onTokenCompactionEvent,
     });
     ctx.stopReason = stopReason;
     if (ctx.slot) ctx.slot.stopReason = stopReason;
@@ -4018,11 +4215,6 @@ export class AgentLoop {
       ctx.modelSelection,
       ctx.dagGoalContext,
     );
-    const followupCompaction = (ctx.consolidator ?? this.consolidator).maybeConsolidateByTokens(ctx.session!, {
-      replayMaxMessages: this.maxMessages,
-    });
-    if (ctx.sessionKey.startsWith("cli:")) await followupCompaction;
-    else this.scheduleBackground(followupCompaction);
     return "ok";
   }
 
@@ -4154,7 +4346,8 @@ export class AgentLoop {
     );
 
     const isSubagent = msg.senderId === "subagent";
-    if (isSubagent && this.persistSubagentFollowup(session, msg)) this.sessions.save(session);
+    const subagentFollowupPersisted = isSubagent && this.persistSubagentFollowup(session, msg);
+    if (subagentFollowupPersisted) this.sessions.save(session);
     this.setToolContext(
       channel,
       chatId,
@@ -4194,6 +4387,36 @@ export class AgentLoop {
       hook: this.lifecycleHook(),
       sessionWorkspace,
     });
+    const midTurnContext = this.createMidTurnContextDescriptor(
+      session,
+      messages,
+      subagentFollowupPersisted ? 1 : 0,
+      modelSelection,
+      (visibleHistory, summary, currentSession) => this.context.buildMessages({
+        history: visibleHistory,
+        currentMessage: isSubagent ? "" : msg.content,
+        channel,
+        chatId,
+        currentRole,
+        senderId: msg.senderId,
+        sessionSummary: summary,
+        sessionMetadata: currentSession.metadata,
+        responseLanguage: msg.metadata?.[WEBUI_LANGUAGE_METADATA_KEY]
+          ?? currentSession.metadata?.[WEBUI_LANGUAGE_METADATA_KEY]
+          ?? null,
+        sessionKey: currentSession.key,
+        unifiedSession: this.unifiedSession,
+        currentRuntimeLines: isSubagent
+          ? []
+          : [
+              ...mcpRuntimeLines(msg, {
+                availableServerNames: new Set(Object.keys(this.mcpServers ?? {})),
+              }),
+            ],
+        hook: this.lifecycleHook(),
+        sessionWorkspace,
+      }),
+    );
 
     const started = Date.now();
     const [
@@ -4225,6 +4448,8 @@ export class AgentLoop {
       sessionWorkspace,
       hostProjectId: sessionBinding.projectId,
       modelSelection,
+      midTurnContext,
+      consolidator: scopedConsolidator,
     });
     if (abortSignal?.aborted || stopReason === "cancelled") {
       throw createTaskCancelledError();
@@ -4264,9 +4489,6 @@ export class AgentLoop {
       session.messages.length,
       modelSelection,
     );
-    this.scheduleBackground(scopedConsolidator.maybeConsolidateByTokens(session, {
-      replayMaxMessages: this.maxMessages,
-    }));
 
     const metadata: Record<string, any> = {};
     if (channel === "slack" && key.startsWith("slack:") && key.split(":").length >= 3) {
