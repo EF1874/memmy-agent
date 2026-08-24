@@ -95,9 +95,7 @@ export class ProjectEnvironmentService {
       const appliedByMemory = typeof memory?.info.project_environment_applied_scan_id === "string"
         ? memory.info.project_environment_applied_scan_id
         : undefined;
-      const provenanceMatches = currentProfile === null
-        ? Boolean(state.appliedScanId)
-        : state.appliedScanId === appliedByMemory;
+      const provenanceMatches = currentProfile !== null && state.appliedScanId === appliedByMemory;
       if (
         state.fingerprint === derived.fingerprint &&
         state.appliedScanId &&

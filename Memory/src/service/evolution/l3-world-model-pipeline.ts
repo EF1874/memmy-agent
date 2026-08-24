@@ -359,6 +359,7 @@ Remove or ignore:
 Merge equivalent items and remove superseded items. Sort explicit user rules and high-risk guardrails before weaker or lower-frequency items.
 
 ${SHARED_OPERATION_RULES}
+Return exactly one valid JSON object with the required keys. Do not include Markdown or explanatory text.
 
 Return exactly one of:
 {"op":"noop","general_rules_and_safety_constraints":""}
@@ -381,6 +382,7 @@ Do not include ordinary tool errors, environment facts, implementation steps, or
 Use the Project Environment Profile only to understand the project type and environment. Do not modify or output it. Merge equivalent items and replace old contract content only when new evidence explicitly supersedes it. Sort by constraint strength and evidence strength.
 
 ${SHARED_OPERATION_RULES}
+Return exactly one valid JSON object with the required keys. Do not include Markdown or explanatory text.
 
 Return exactly one of:
 {"op":"noop","project_contract":""}
@@ -399,6 +401,7 @@ Do not create Domain Knowledge from a successful result alone. Do not include re
 Replace an old fact when new evidence from the same environment disproves it. Do not merge facts from incompatible environment versions or configurations. Use the Project Environment Profile only to understand the environment; do not modify or output it. Sort by evidence strength.
 
 ${SHARED_OPERATION_RULES}
+Return exactly one valid JSON object with the required keys. Do not include Markdown or explanatory text.
 
 Return exactly one of:
 {"op":"noop","domain_knowledge":""}

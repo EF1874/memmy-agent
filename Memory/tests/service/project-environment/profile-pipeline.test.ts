@@ -20,6 +20,7 @@ describe("project environment profile pipeline", () => {
 
     await pipeline.process(job(), evidence);
 
+    expect(prompt).toContain("valid JSON object");
     expect(complete.mock.calls[0]?.[0]?.[0]).toEqual({ role: "system", content: prompt });
     expect(complete.mock.calls[0]?.[1]).toEqual(expect.objectContaining({ operation, maxTokens: 65_536 }));
     expect(applyProfile).toHaveBeenCalledWith(expect.objectContaining({
@@ -41,6 +42,37 @@ describe("project environment profile pipeline", () => {
     expect(applyProfile).toHaveBeenCalledWith(expect.objectContaining({ operation: "noop", profile: "" }));
   });
 
+  it("repairs a first-scan noop when useful evidence supports a profile", async () => {
+    const complete = vi.fn()
+      .mockResolvedValueOnce('{"op":"noop","profile":""}')
+      .mockResolvedValueOnce('{"op":"create","profile":"Complete repaired profile"}');
+    const { applyProfile, pipeline } = fixture(complete);
+
+    await pipeline.process(job(), derived("code"));
+
+    expect(complete).toHaveBeenCalledTimes(2);
+    expect(complete.mock.calls[1]?.[1]).toEqual(expect.objectContaining({
+      operation: "project_environment_code_profile.repair"
+    }));
+    expect(applyProfile).toHaveBeenCalledWith(expect.objectContaining({
+      operation: "create",
+      profile: "Complete repaired profile"
+    }));
+  });
+
+  it("allows first-scan noop when an empty folder has no useful evidence", async () => {
+    const complete = vi.fn().mockResolvedValue('{"op":"noop","profile":""}');
+    const { applyProfile, pipeline } = fixture(complete);
+
+    await pipeline.process(job(), emptyFolderEvidence());
+
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(applyProfile).toHaveBeenCalledWith(expect.objectContaining({
+      operation: "noop",
+      profile: ""
+    }));
+  });
+
   it("drops a stale scan before calling the model", async () => {
     const complete = vi.fn();
     const { pipeline } = fixture(complete, null, "scan-new");
@@ -57,6 +89,11 @@ describe("project environment profile pipeline", () => {
 
   it("strictly validates noop, create, update and clear operations", () => {
     expect(validateProjectEnvironmentProfileOutput({ op: "noop", profile: "" }, null)).toEqual({ op: "noop", profile: "" });
+    expect(() => validateProjectEnvironmentProfileOutput(
+      { op: "noop", profile: "" },
+      null,
+      true
+    )).toThrow("first-scan evidence");
     expect(validateProjectEnvironmentProfileOutput({ op: "create", profile: "new" }, null)).toEqual({ op: "create", profile: "new" });
     expect(validateProjectEnvironmentProfileOutput({ op: "update", profile: "" }, "old")).toEqual({ op: "update", profile: "" });
     expect(() => validateProjectEnvironmentProfileOutput({ op: "noop", profile: "old" }, "old")).toThrow();
@@ -125,6 +162,25 @@ function derived(projectKind: "code" | "folder"): ProjectEnvironmentDerivedEvide
       buildEntries: [sourcedFact("npm run build")],
       testEntries: [sourcedFact("npm run test")],
       checkEntries: [sourcedFact("npm run typecheck")]
+    }
+  };
+}
+
+function emptyFolderEvidence(): ProjectEnvironmentDerivedEvidence {
+  return {
+    projectKind: "folder",
+    fingerprint: "empty-fingerprint",
+    compactFileTree: ".git/",
+    omittedCount: 0,
+    deterministicFacts: {
+      languageCounts: {},
+      manifestLanguages: [],
+      runtimeDeclarations: [],
+      runtimeProbes: [],
+      toolchains: [],
+      buildEntries: [],
+      testEntries: [],
+      checkEntries: []
     }
   };
 }

@@ -28,6 +28,7 @@ Choose exactly one operation:
 For "noop", return an empty profile and do not repeat the current profile.
 For "create" and "update", return the complete final replacement profile, not a delta or change description.
 Write in the language of the current profile. If it is absent, use the dominant human language observable in the paths; if none is observable, use English. Do not translate merely because these instructions are in English.
+Return exactly one valid JSON object with the required keys. Do not include Markdown or explanatory text.
 
 Return exactly one of:
 {"op":"noop","profile":""}
@@ -51,6 +52,7 @@ Choose exactly one operation:
 For "noop", return an empty profile and do not repeat the current profile.
 For "create" and "update", return the complete final replacement profile, not a delta or change description.
 Write in the language of the current profile. If it is absent, use the dominant human language observable in the paths; if none is observable, use English. Do not translate merely because these instructions are in English.
+Return exactly one valid JSON object with the required keys. Do not include Markdown or explanatory text.
 
 Return exactly one of:
 {"op":"noop","profile":""}
@@ -75,6 +77,7 @@ export class ProjectEnvironmentProfilePipeline {
       payload.userId,
       payload.projectId
     ).projectEnvironmentProfile;
+    const evidenceSupportsProfile = projectEnvironmentEvidenceSupportsProfile(derived);
     let output: ReturnType<typeof validateProjectEnvironmentProfileOutput>;
     try {
       output = await completeStrictJson({
@@ -88,7 +91,11 @@ export class ProjectEnvironmentProfilePipeline {
           op: "noop | create | update",
           profile: "complete final profile; empty only for noop or update-clear"
         },
-        validate: (value) => validateProjectEnvironmentProfileOutput(value, currentProfile)
+        validate: (value) => validateProjectEnvironmentProfileOutput(
+          value,
+          currentProfile,
+          evidenceSupportsProfile
+        )
       });
     } catch (error) {
       const latest = this.deps.repos.projectEnvironments.getState(payload.userId, payload.projectId);
@@ -134,7 +141,8 @@ export function projectEnvironmentProfileJobPayload(value: Record<string, unknow
 
 export function validateProjectEnvironmentProfileOutput(
   value: unknown,
-  currentProfile: string | null
+  currentProfile: string | null,
+  evidenceSupportsProfile = false
 ): { op: "noop" | "create" | "update"; profile: string } {
   if (!isRecord(value) || Object.keys(value).sort().join(",") !== "op,profile" || typeof value.profile !== "string") {
     throw new TypeError("profile output must contain exactly op and profile");
@@ -143,6 +151,9 @@ export function validateProjectEnvironmentProfileOutput(
     throw new TypeError("profile op must be noop, create, or update");
   }
   if (value.op === "noop" && value.profile !== "") throw new TypeError("noop profile must be empty");
+  if (value.op === "noop" && currentProfile === null && evidenceSupportsProfile) {
+    throw new TypeError("noop profile is invalid when first-scan evidence supports a useful profile");
+  }
   if (value.op === "create" && (currentProfile !== null || !value.profile.trim())) {
     throw new TypeError("invalid create profile");
   }
@@ -154,6 +165,26 @@ export function validateProjectEnvironmentProfileOutput(
     throw new TypeError("invalid update profile");
   }
   return { op: value.op, profile: value.profile };
+}
+
+function projectEnvironmentEvidenceSupportsProfile(
+  derived: ProjectEnvironmentDerivedEvidence
+): boolean {
+  if (derived.omittedCount > 0) return true;
+  if (derived.compactFileTree.split(/\r?\n/u).some((line) => {
+    const entry = line.trim();
+    return entry.length > 0 && entry !== ".git/";
+  })) return true;
+
+  const facts = derived.deterministicFacts;
+  return Object.values(facts.languageCounts).some((count) => count > 0) ||
+    facts.manifestLanguages.length > 0 ||
+    facts.runtimeDeclarations.length > 0 ||
+    facts.runtimeProbes.length > 0 ||
+    facts.toolchains.length > 0 ||
+    facts.buildEntries.length > 0 ||
+    facts.testEntries.length > 0 ||
+    facts.checkEntries.length > 0;
 }
 
 function profileDynamicInput(

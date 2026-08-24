@@ -103,6 +103,7 @@ describe("L3 World Model trace field pipeline", () => {
     expect(calls).toHaveLength(2);
     for (const [messages, options] of calls) {
       expect(messages).toHaveLength(2);
+      expect(messages[0]?.content).toContain("valid JSON object");
       expect(messages[1]?.role).toBe("user");
       expect(JSON.parse(messages[1]!.content)).toEqual(expect.objectContaining({
         current_field: "",
@@ -193,6 +194,7 @@ describe("L3 World Model trace field pipeline", () => {
     await new L3WorldModelTraceFieldPipeline({ repos, skillLlm: llm }).updateField(job);
 
     expect(complete).toHaveBeenCalledTimes(2);
+    expect(complete.mock.calls[0]?.[0]?.[0]?.content).toContain("valid JSON object");
     const firstInput = JSON.parse(complete.mock.calls[0]![0][1]!.content) as {
       raw_turns: Array<Record<string, unknown>>;
     };
