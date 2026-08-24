@@ -2681,7 +2681,7 @@ body:has(.memory-drawer) .window-drag-region {
   bottom: 0;
   left: 0;
   z-index: 2;
-  padding: 40px 24px 12px;
+  padding: 40px var(--codex-content-padding-x) 12px;
   pointer-events: none;
 }
 
@@ -2789,11 +2789,10 @@ body:has(.memory-drawer) .window-drag-region {
   white-space: nowrap;
 }
 
-.agent-queue-item__remove {
+.agent-queue-item__remove,
+.agent-queue-item__steer {
   display: inline-flex;
-  width: 28px;
   height: 28px;
-  flex: 0 0 28px;
   align-items: center;
   justify-content: center;
   border-radius: 8px;
@@ -2802,17 +2801,38 @@ body:has(.memory-drawer) .window-drag-region {
   transition: background 140ms ease, color 140ms ease, opacity 140ms ease;
 }
 
+.agent-queue-item__remove {
+  width: 28px;
+  flex: 0 0 28px;
+}
+
+.agent-queue-item__steer {
+  flex: 0 0 auto;
+  gap: 4px;
+  padding: 0 8px;
+  color: var(--color-action-sky);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.agent-queue-item__steer:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-action-sky) 10%, transparent);
+}
+
 .agent-queue-item__remove:hover:not(:disabled) {
   background: var(--color-canvas-oat);
   color: var(--color-status-error);
 }
 
-.agent-queue-item__remove:focus-visible {
+.agent-queue-item__remove:focus-visible,
+.agent-queue-item__steer:focus-visible {
   outline: none;
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-action-sky) 32%, transparent);
 }
 
-.agent-queue-item__remove:disabled {
+.agent-queue-item__remove:disabled,
+.agent-queue-item__steer:disabled {
   cursor: not-allowed;
   opacity: 0.38;
 }
