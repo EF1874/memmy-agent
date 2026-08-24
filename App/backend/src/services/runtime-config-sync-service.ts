@@ -7,14 +7,25 @@ import {
 import {
   clearAccountModelProjectionFromMemmyConfig,
   readRuntimeMemmyConfigState,
+  writeAccountModelProjectionToMemmyConfig,
   type RuntimeMemmyConfigState
 } from "../infrastructure/memmy-config/index.js";
+
+export interface RuntimeConfigMigrationConsistency {
+  /** The account database was replaced from an explicitly trusted install generation. */
+  accountSourceIsAuthoritative: boolean;
+  /** Runtime config was copied from a migration source instead of retaining the target. */
+  runtimeSourceWasMigrated: boolean;
+  /** Account and runtime directories came from the same trusted install generation. */
+  categorySourcesShareGeneration: boolean;
+}
 
 export interface SyncRuntimeConfigWithAppStateOptions {
   appStateStore: AppStateStore;
   memmyConfigPath: string;
   /** Login channel supported by the current desktop package. */
   accountChannel?: AccountChannel;
+  migrationConsistency?: RuntimeConfigMigrationConsistency;
 }
 
 export interface SyncRuntimeConfigForStartupOptions {
@@ -22,6 +33,7 @@ export interface SyncRuntimeConfigForStartupOptions {
   memmyConfigPath: string;
   /** Login channel supported by the current desktop package. */
   accountChannel?: AccountChannel;
+  migrationConsistency?: RuntimeConfigMigrationConsistency;
 }
 
 export interface RuntimeConfigSyncResult {
@@ -47,7 +59,10 @@ type RuntimeConfigSyncErrorState = {
 export async function syncRuntimeConfigWithAppState(
   options: SyncRuntimeConfigWithAppStateOptions
 ): Promise<RuntimeConfigSyncResult> {
-  const state = await readRuntimeMemmyConfigState(options.memmyConfigPath);
+  let state = await readRuntimeMemmyConfigState(options.memmyConfigPath);
+  if (options.migrationConsistency) {
+    state = await reconcileMigratedAccountProjection(options, state);
+  }
   const activeChannelMismatch = await clearMismatchedActiveSession(options, state);
   if (activeChannelMismatch) {
     const clearedUntrustedProjection = await clearUntrustedAccountProjection(
@@ -129,11 +144,77 @@ export async function syncRuntimeConfigForStartup(
     return await syncRuntimeConfigWithAppState({
       appStateStore,
       memmyConfigPath: options.memmyConfigPath,
-      accountChannel: options.accountChannel
+      accountChannel: options.accountChannel,
+      migrationConsistency: options.migrationConsistency
     });
   } finally {
     appStateStore.close();
   }
+}
+
+async function reconcileMigratedAccountProjection(
+  options: SyncRuntimeConfigWithAppStateOptions,
+  state: RuntimeMemmyConfigState
+): Promise<RuntimeMemmyConfigState> {
+  const session = options.appStateStore.repositories.accountSession.get();
+  const projection = accountProjectionFromState(state);
+  if (!session.authenticated) {
+    if (projection || (
+      options.migrationConsistency?.accountSourceIsAuthoritative
+      && options.appStateStore.repositories.bootstrap.getAppSettings().userMode === "account"
+    )) {
+      throw createMigrationConsistencyError(
+        "Migrated account runtime config has no authenticated local account session"
+      );
+    }
+    return state;
+  }
+
+  const sessionChannel = options.appStateStore.repositories.accountSession.getAuthChannel();
+  if (options.accountChannel && sessionChannel !== options.accountChannel) {
+    throw createMigrationConsistencyError(
+      `Migrated account authentication channel ${String(sessionChannel)} does not match package channel ${options.accountChannel}`
+    );
+  }
+  const cloudUuid = options.appStateStore.repositories.accountSession.getCloudUuid();
+  if (!cloudUuid) {
+    throw createMigrationConsistencyError("Migrated account session is missing its cloud credential");
+  }
+
+  const projectionMatchesSession = projection
+    && projection.cloudUuid === cloudUuid
+    && projection.userId === session.profile.userId;
+  if (projection && !projectionMatchesSession) {
+    if (
+      !options.migrationConsistency?.accountSourceIsAuthoritative
+      || options.migrationConsistency.categorySourcesShareGeneration
+    ) {
+      throw createMigrationConsistencyError(
+        "Migrated account database and runtime model projection have different owners"
+      );
+    }
+  }
+
+  if (!projectionMatchesSession || state.status === "no_model_config") {
+    await writeAccountModelProjectionToMemmyConfig({
+      cloudUuid,
+      userId: session.profile.userId
+    }, options.memmyConfigPath);
+    const repaired = await readRuntimeMemmyConfigState(options.memmyConfigPath);
+    const repairedProjection = accountProjectionFromState(repaired);
+    if (
+      !repairedProjection
+      || repairedProjection.cloudUuid !== cloudUuid
+      || repairedProjection.userId !== session.profile.userId
+      || (repaired.status !== "valid_account" && repaired.status !== "valid_byok")
+    ) {
+      throw createMigrationConsistencyError(
+        "Migrated account model projection could not be restored from the authoritative account database"
+      );
+    }
+    return repaired;
+  }
+  return state;
 }
 
 function hydrateByokRuntimeConfig(
@@ -264,5 +345,12 @@ function createRuntimeConfigSyncError(state: RuntimeConfigSyncErrorState): Error
     configPath: state.configPath,
     reason: state.reason,
     status: state.status
+  });
+}
+
+function createMigrationConsistencyError(reason: string): Error {
+  return Object.assign(new Error(`Windows data migration consistency check failed: ${reason}`), {
+    code: "windows_data_migration_inconsistent" as const,
+    reason
   });
 }

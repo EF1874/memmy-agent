@@ -1,7 +1,14 @@
 param(
   [Parameter(Mandatory = $true)][string]$InstallDir,
   [Parameter(Mandatory = $true)][string]$LockPath,
-  [Parameter(Mandatory = $true)][string]$LogPath
+  [Parameter(Mandatory = $true)][string]$LogPath,
+  [string]$DirectMigrationStatePath = '',
+  [string]$DirectMigrationScriptPath = '',
+  [string]$DirectMigrationLogPath = '',
+  [string]$TargetUserDataPathOverride = '',
+  [string]$TargetRuntimeHomePathOverride = '',
+  [string]$LegacyRuntimeHomePathOverride = '',
+  [string]$MigrationStatePathOverride = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -11,6 +18,46 @@ $expectedBackupParent = "$normalizedInstallDir.memmy-upgrade-backup"
 $normalizedLockPath = [System.IO.Path]::GetFullPath($LockPath).TrimEnd('\')
 $expectedStagingRoot = Split-Path -Parent $normalizedLockPath
 $statePath = Join-Path $LockPath 'state.json'
+$expectedTargetUserDataPath = if ($TargetUserDataPathOverride) {
+  [System.IO.Path]::GetFullPath($TargetUserDataPathOverride).TrimEnd('\')
+} else {
+  Join-Path $env:APPDATA 'Memmy'
+}
+$expectedTargetUserDataPath = [System.IO.Path]::GetFullPath([string]$expectedTargetUserDataPath).TrimEnd('\')
+$expectedLegacyRuntimeHomePath = if ($LegacyRuntimeHomePathOverride) {
+  [System.IO.Path]::GetFullPath($LegacyRuntimeHomePathOverride).TrimEnd('\')
+} else {
+  [System.IO.Path]::GetFullPath((Join-Path $env:USERPROFILE '.memmy')).TrimEnd('\')
+}
+$installDriveRoot = [System.IO.Path]::GetPathRoot($normalizedInstallDir)
+$expectedTargetRuntimeHomePath = if ($TargetRuntimeHomePathOverride) {
+  [System.IO.Path]::GetFullPath($TargetRuntimeHomePathOverride).TrimEnd('\')
+} elseif ([string]::Equals($installDriveRoot, 'C:\', [System.StringComparison]::OrdinalIgnoreCase)) {
+  $expectedLegacyRuntimeHomePath
+} else {
+  [System.IO.Path]::GetFullPath((Join-Path $installDriveRoot 'MemmyData\.memmy')).TrimEnd('\')
+}
+$expectedPointerPath = Join-Path $expectedTargetUserDataPath 'data-root.txt'
+$expectedMigrationStatePath = if ($MigrationStatePathOverride) {
+  [System.IO.Path]::GetFullPath($MigrationStatePathOverride).TrimEnd('\')
+} else {
+  [System.IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'Memmy\data-migration\state.json')).TrimEnd('\')
+}
+$resolvedDirectMigrationStatePath = if ($DirectMigrationStatePath) {
+  [System.IO.Path]::GetFullPath($DirectMigrationStatePath).TrimEnd('\')
+} else {
+  $expectedMigrationStatePath
+}
+$resolvedDirectMigrationScriptPath = if ($DirectMigrationScriptPath) {
+  $DirectMigrationScriptPath
+} else {
+  Join-Path $PSScriptRoot 'MemmyWindowsDataMigration.ps1'
+}
+$resolvedDirectMigrationLogPath = if ($DirectMigrationLogPath) {
+  $DirectMigrationLogPath
+} else {
+  Join-Path $env:LOCALAPPDATA 'Memmy\upgrade-logs\data-migration.log'
+}
 
 function Write-MemmyUpgradeRecoveryLog([string]$Message) {
   $logDirectory = Split-Path -Parent $LogPath
@@ -22,6 +69,17 @@ function Write-MemmyUpgradeRecoveryLog([string]$Message) {
 
 function Resolve-MemmyNormalizedPath([string]$Path) {
   return [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+}
+
+function Assert-MemmySamePath([string]$Actual, [string]$Expected, [string]$Description) {
+  if (-not $Actual -or
+      -not [string]::Equals(
+        (Resolve-MemmyNormalizedPath $Actual),
+        (Resolve-MemmyNormalizedPath $Expected),
+        [System.StringComparison]::OrdinalIgnoreCase
+      )) {
+    throw "$Description does not match the trusted recovery path"
+  }
 }
 
 function Test-MemmyUpgradeProcessRunning($ProcessId, $StartedAtUtc, [string]$ExpectedPath = '') {
@@ -104,11 +162,121 @@ function Move-MemmyRecoveryDirectory([string]$Source, [string]$Destination) {
 }
 
 function Clear-MemmyRecoveryTransientMarkers {
-  $markerPath = Join-Path $dataPath 'Memmy\prepared-required-update.json'
-  foreach ($path in @("$markerPath.lock", "$markerPath.prompt")) {
-    Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
+  $markerPaths = @(
+    (Join-Path $dataPath 'Memmy\prepared-required-update.json'),
+    (Join-Path $expectedTargetUserDataPath 'prepared-required-update.json')
+  )
+  foreach ($markerPath in $markerPaths) {
+    foreach ($path in @("$markerPath.lock", "$markerPath.prompt")) {
+      Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
+    }
   }
   Write-MemmyUpgradeRecoveryLog "cleared transient prepared-update lock and prompt markers"
+}
+
+function Read-MemmyMigrationState([string]$MigrationStatePath) {
+  if (-not $MigrationStatePath -or -not (Test-Path -LiteralPath $MigrationStatePath -PathType Leaf)) {
+    return $null
+  }
+  return Get-Content -LiteralPath $MigrationStatePath -Raw -Encoding UTF8 | ConvertFrom-Json
+}
+
+function Invoke-MemmyMigrationRecovery(
+  [ValidateSet('Rollback', 'Recover')][string]$Mode,
+  [string]$MigrationStatePath,
+  [string]$MigrationScriptPath,
+  [string]$MigrationLogPath,
+  [ValidateSet('relay', 'installer')][string]$ExpectedOwner,
+  [string]$ExpectedSourceDataPath = ''
+) {
+  $migrationState = Read-MemmyMigrationState -MigrationStatePath $MigrationStatePath
+  if ($null -eq $migrationState) {
+    throw "migration state is unavailable: $MigrationStatePath"
+  }
+  if ([string]$migrationState.owner -ne $ExpectedOwner) {
+    throw "migration state owner does not match recovery owner $ExpectedOwner"
+  }
+  if (-not (Test-Path -LiteralPath $MigrationScriptPath -PathType Leaf)) {
+    throw "migration recovery helper is unavailable: $MigrationScriptPath"
+  }
+
+  $migrationSourcePath = [string]$migrationState.sourceDataPath
+  if (-not $migrationSourcePath -or -not $migrationState.targetUserDataPath -or
+      -not $migrationState.targetRuntimeHomePath -or -not $migrationState.pointerPath) {
+    throw "migration state is missing required recovery paths"
+  }
+  Assert-MemmySamePath -Actual ([string]$migrationState.targetUserDataPath) -Expected $expectedTargetUserDataPath -Description 'migration user-data target'
+  Assert-MemmySamePath -Actual ([string]$migrationState.targetRuntimeHomePath) -Expected $expectedTargetRuntimeHomePath -Description 'migration runtime target'
+  Assert-MemmySamePath -Actual ([string]$migrationState.pointerPath) -Expected $expectedPointerPath -Description 'migration data-root pointer'
+  if ($ExpectedSourceDataPath) {
+    Assert-MemmySamePath -Actual $migrationSourcePath -Expected $ExpectedSourceDataPath -Description 'migration source'
+  }
+
+  $migrationSourceAuthority = if ($migrationState.sourceAuthority) {
+    [string]$migrationState.sourceAuthority
+  } elseif ($ExpectedOwner -eq 'relay') {
+    'relay-backup-authority'
+  } else {
+    'current-install-authority'
+  }
+  $migrationSourceInstallDir = if ($migrationState.sourceInstallDir) {
+    [string]$migrationState.sourceInstallDir
+  } elseif ($ExpectedOwner -eq 'relay') {
+    $normalizedInstallDir
+  } else {
+    Split-Path -Parent $migrationSourcePath
+  }
+
+  $powershellPath = Join-Path $PSHOME 'powershell.exe'
+  & $powershellPath @(
+    '-NoProfile',
+    '-NonInteractive',
+    '-ExecutionPolicy', 'Bypass',
+    '-File', $MigrationScriptPath,
+    '-Mode', $Mode,
+    '-SourceDataPath', $migrationSourcePath,
+    '-SourceAuthority', $migrationSourceAuthority,
+    '-SourceInstallDir', $migrationSourceInstallDir,
+    '-LegacyRuntimeHomePath', $expectedLegacyRuntimeHomePath,
+    '-TargetUserDataPath', $expectedTargetUserDataPath,
+    '-TargetRuntimeHomePath', $expectedTargetRuntimeHomePath,
+    '-PointerPath', $expectedPointerPath,
+    '-StatePath', $MigrationStatePath,
+    '-LockPath', $LockPath,
+    '-LogPath', $MigrationLogPath,
+    '-Owner', $ExpectedOwner
+  )
+  if ($LASTEXITCODE -ne 0) {
+    throw "migration $Mode recovery failed with exit code $LASTEXITCODE"
+  }
+  Write-MemmyUpgradeRecoveryLog "migration $Mode recovery completed for $ExpectedOwner"
+}
+
+function Recover-MemmyDirectMigration {
+  Assert-MemmySamePath -Actual $resolvedDirectMigrationStatePath -Expected $expectedMigrationStatePath -Description 'direct migration state'
+  $migrationState = Read-MemmyMigrationState -MigrationStatePath $resolvedDirectMigrationStatePath
+  if ($null -eq $migrationState) {
+    return $false
+  }
+  if ([string]$migrationState.owner -ne 'installer') {
+    return $false
+  }
+
+  $migrationPhase = [string]$migrationState.phase
+  if (@('prepared', 'recovery-required') -contains $migrationPhase) {
+    Invoke-MemmyMigrationRecovery `
+      -Mode Recover `
+      -MigrationStatePath $resolvedDirectMigrationStatePath `
+      -MigrationScriptPath $resolvedDirectMigrationScriptPath `
+      -MigrationLogPath $resolvedDirectMigrationLogPath `
+      -ExpectedOwner installer
+  }
+  elseif (@('prepared-for-retry', 'awaiting-app-verification', 'app-verified') -notcontains $migrationPhase) {
+    throw "direct migration state has an unsupported phase: $migrationPhase"
+  }
+
+  Write-MemmyUpgradeRecoveryLog "stale direct-install migration recovered in phase $migrationPhase"
+  return $true
 }
 
 if (-not (Test-Path -LiteralPath $LockPath -PathType Container)) {
@@ -118,9 +286,20 @@ if (-not (Test-Path -LiteralPath $LockPath -PathType Container)) {
 try {
   if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
     $lockAge = (Get-Date) - (Get-Item -LiteralPath $LockPath).LastWriteTime
-    if ($lockAge.TotalMinutes -lt 2 -or -not (Test-Path -LiteralPath $dataPath -PathType Container)) {
+    if ($lockAge.TotalMinutes -lt 2) {
       Write-MemmyUpgradeRecoveryLog "active lock has no recovery state; leaving it in place"
       exit 2
+    }
+    if (Recover-MemmyDirectMigration) {
+      Clear-MemmyRecoveryTransientMarkers
+      Remove-Item -LiteralPath $LockPath -Recurse -Force
+      Write-MemmyUpgradeRecoveryLog "cleared stale direct-install lock after migration recovery"
+      exit 0
+    }
+    if (-not (Test-Path -LiteralPath $dataPath -PathType Container)) {
+      Remove-Item -LiteralPath $LockPath -Recurse -Force
+      Write-MemmyUpgradeRecoveryLog "cleared stale state-less lock without installed data so installation can be retried"
+      exit 0
     }
     Clear-MemmyRecoveryTransientMarkers
     Remove-Item -LiteralPath $LockPath -Recurse -Force
@@ -130,7 +309,49 @@ try {
 
   $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
   $phase = [string]$state.phase
-  if (@('relay-ready', 'data-moved', 'installer-starting', 'installer-running', 'installer-exited') -notcontains $phase) {
+  if ([string]$state.owner -eq 'installer') {
+    if ($phase -ne 'direct-migration-running') {
+      throw "direct installer recovery state has an unsupported phase: $phase"
+    }
+    if (-not $state.installDir -or -not $state.installerPath -or -not $state.installerPid) {
+      throw "direct installer recovery state is missing process identity"
+    }
+    if (Test-MemmyUpgradeProcessRunning $state.installerPid $null ([string]$state.installerPath)) {
+      Write-MemmyUpgradeRecoveryLog "direct installer is still running; leaving active lock in place"
+      exit 2
+    }
+
+    $directInstallDir = Resolve-MemmyNormalizedPath ([string]$state.installDir)
+    $directInstallRoot = [System.IO.Path]::GetPathRoot($directInstallDir)
+    $directExpectedRuntimeHomePath = if ($TargetRuntimeHomePathOverride) {
+      $expectedTargetRuntimeHomePath
+    } elseif ([string]::Equals($directInstallRoot, 'C:\', [System.StringComparison]::OrdinalIgnoreCase)) {
+      $expectedLegacyRuntimeHomePath
+    } else {
+      Resolve-MemmyNormalizedPath (Join-Path $directInstallRoot 'MemmyData\.memmy')
+    }
+    Assert-MemmySamePath -Actual ([string]$state.targetUserDataPath) -Expected $expectedTargetUserDataPath -Description 'direct-lock user-data target'
+    Assert-MemmySamePath -Actual ([string]$state.targetRuntimeHomePath) -Expected $directExpectedRuntimeHomePath -Description 'direct-lock runtime target'
+    $expectedTargetRuntimeHomePath = $directExpectedRuntimeHomePath
+    $dataPath = Join-Path $directInstallDir 'data'
+
+    if (Recover-MemmyDirectMigration) {
+      Clear-MemmyRecoveryTransientMarkers
+      Remove-Item -LiteralPath $LockPath -Recurse -Force
+      Write-MemmyUpgradeRecoveryLog "cleared direct-install lock after the installer exited and migration recovery completed"
+      exit 0
+    }
+    if (-not (Test-Path -LiteralPath $dataPath -PathType Container)) {
+      Remove-Item -LiteralPath $LockPath -Recurse -Force
+      Write-MemmyUpgradeRecoveryLog "cleared direct-install lock after the installer exited without migrated data"
+      exit 0
+    }
+    Clear-MemmyRecoveryTransientMarkers
+    Remove-Item -LiteralPath $LockPath -Recurse -Force
+    Write-MemmyUpgradeRecoveryLog "cleared direct-install lock after the installer exited with installed data present"
+    exit 0
+  }
+  if (@('relay-ready', 'data-moved', 'migration-prepared', 'migration-skipped', 'installer-starting', 'installer-running', 'installer-exited', 'migration-completed', 'migration-recovery-required') -notcontains $phase) {
     throw "recovery state has an unsupported phase: $phase"
   }
   $stateInstallDir = Resolve-MemmyNormalizedPath ([string]$state.installDir)
@@ -139,6 +360,12 @@ try {
   $backupRoot = Resolve-MemmyNormalizedPath ([string]$state.backupRoot)
   if (-not [string]::Equals($stateInstallDir, $normalizedInstallDir, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "recovery state install directory does not match launcher install directory"
+  }
+  if ([int]$state.schemaVersion -ge 3) {
+    Assert-MemmySamePath -Actual ([string]$state.migrationStatePath) -Expected $expectedMigrationStatePath -Description 'relay migration state'
+    Assert-MemmySamePath -Actual ([string]$state.targetUserDataPath) -Expected $expectedTargetUserDataPath -Description 'relay user-data target'
+    Assert-MemmySamePath -Actual ([string]$state.targetRuntimeHomePath) -Expected $expectedTargetRuntimeHomePath -Description 'relay runtime target'
+    Assert-MemmySamePath -Actual ([string]$state.legacyRuntimeHomePath) -Expected $expectedLegacyRuntimeHomePath -Description 'relay legacy runtime root'
   }
   if (-not [string]::Equals((Split-Path -Parent $stateWorkDir), $expectedStagingRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "recovery state work directory is outside the expected staging directory"
@@ -159,6 +386,19 @@ try {
       ($phase -eq 'installer-starting' -and (Test-MemmyInstallerPathRunning $stateInstallerPath))) {
     Write-MemmyUpgradeRecoveryLog "upgrade process is still running; leaving active lock in place"
     exit 2
+  }
+
+  $relayMigrationStatePath = if ([int]$state.schemaVersion -ge 3) { $expectedMigrationStatePath } else { '' }
+  $relayMigrationState = Read-MemmyMigrationState -MigrationStatePath $relayMigrationStatePath
+  $relayMigrationPhase = if ($null -ne $relayMigrationState) { [string]$relayMigrationState.phase } else { '' }
+  if ($phase -eq 'migration-completed' -or
+      @('awaiting-app-verification', 'app-verified') -contains $relayMigrationPhase) {
+    Remove-Item -LiteralPath $LockPath -Recurse -Force
+    Write-MemmyUpgradeRecoveryLog "completed migration lock cleared without restoring install-local data"
+    if (Test-Path -LiteralPath $stateWorkDir -PathType Container) {
+      Remove-Item -LiteralPath $stateWorkDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    exit 0
   }
 
   $backupPath = Join-Path $backupRoot 'data-backup'
@@ -182,6 +422,31 @@ try {
     throw "both installed data and upgrade backup are missing"
   }
 
+  if (@('prepared', 'recovery-required') -contains $relayMigrationPhase) {
+    $relayMigrationLogPath = if ($state.migrationLogPath) {
+      [string]$state.migrationLogPath
+    } else {
+      $resolvedDirectMigrationLogPath
+    }
+    Invoke-MemmyMigrationRecovery `
+      -Mode Rollback `
+      -MigrationStatePath $relayMigrationStatePath `
+      -MigrationScriptPath (Join-Path $stateWorkDir 'MemmyWindowsDataMigration.ps1') `
+      -MigrationLogPath $relayMigrationLogPath `
+      -ExpectedOwner relay `
+      -ExpectedSourceDataPath $backupPath
+  }
+  elseif ([int]$state.schemaVersion -ge 3 -and
+      @('migration-prepared', 'installer-starting', 'installer-running', 'installer-exited', 'migration-recovery-required') -contains $phase -and
+      -not $relayMigrationPhase) {
+    if ((Test-Path -LiteralPath $dataPath -PathType Container) -and
+        -not (Test-Path -LiteralPath $backupPath)) {
+      Write-MemmyUpgradeRecoveryLog "prepared relay migration rollback was already completed before lock cleanup"
+    } else {
+      throw "prepared relay migration state is unavailable"
+    }
+  }
+
   Clear-MemmyRecoveryTransientMarkers
   Remove-Item -LiteralPath $LockPath -Recurse -Force
   Write-MemmyUpgradeRecoveryLog "stale active lock cleared"
@@ -196,5 +461,20 @@ try {
   exit 0
 } catch {
   Write-MemmyUpgradeRecoveryLog ('automatic recovery failed: ' + ($_ | Out-String))
+  $lockAge = if (Test-Path -LiteralPath $LockPath -PathType Container) {
+    (Get-Date) - (Get-Item -LiteralPath $LockPath).LastWriteTime
+  } else {
+    [TimeSpan]::Zero
+  }
+  if ($lockAge.TotalMinutes -ge 2) {
+    $quarantinePath = "$LockPath.recovery-failed-$([DateTime]::UtcNow.ToString('yyyyMMddHHmmss'))"
+    try {
+      Move-Item -LiteralPath $LockPath -Destination $quarantinePath -Force -ErrorAction Stop
+      Write-MemmyUpgradeRecoveryLog "quarantined unrecoverable stale lock at $quarantinePath; application launch is no longer blocked"
+      exit 0
+    } catch {
+      Write-MemmyUpgradeRecoveryLog "unable to quarantine stale lock: $($_.Exception.Message)"
+    }
+  }
   exit 3
 }
