@@ -1132,6 +1132,7 @@ async function installPreparedRequiredUpdateBeforeBoot(): Promise<boolean> {
 
     const safeFilePath = resolveDownloadedUpdatePath(preparedUpdate.filePath);
     await access(safeFilePath, fsConstants.R_OK);
+    await stageMacDmgUpdatePackageOrDiscard(safeFilePath);
     showUpdateInstallSplashWindow(targetVersion);
     hideMacDockForPreparedUpdateInstall();
     await writePackagedStartupLog(`boot:prepared-required-update ${targetVersion}`);
@@ -1450,7 +1451,11 @@ async function prepareRequiredUpdateAfterBoot(): Promise<void> {
     }
 
     await writePackagedStartupLog(`boot:managed-update prepare ${update.currentVersion}->${targetVersion}`);
-    const preparedFilePath = update.preparedUpdatePath ?? (await downloadUpdate(update, { openInstaller: false })).filePath;
+    const reusablePreparedFilePath = await resolvePreparedUpdatePackagePath(update.downloadUrl, update.latestVersion);
+    const preparedFilePath = reusablePreparedFilePath ?? (await downloadUpdate(update, { openInstaller: false })).filePath;
+    if (reusablePreparedFilePath) {
+      await stageMacDmgUpdatePackageOrDiscard(preparedFilePath);
+    }
     await writePreparedRequiredUpdate(update, preparedFilePath);
     preparedManagedBackgroundUpdateVersion = targetVersion;
     await writePackagedStartupLog(`boot:managed-update prepared ${targetVersion}`);
@@ -1489,6 +1494,7 @@ async function installPreparedRequiredUpdateOnQuit(): Promise<void> {
 
     const safeFilePath = resolveDownloadedUpdatePath(preparedUpdate.filePath);
     await access(safeFilePath, fsConstants.R_OK);
+    await stageMacDmgUpdatePackageOrDiscard(safeFilePath);
     await writePackagedStartupLog(`quit:prepared-required-update ${preparedUpdate.latestVersion ?? "unknown"}`);
     const installOptions: BackgroundUpdateInstallOptions = {
       quitCurrentApp: false,
@@ -1561,6 +1567,7 @@ async function hasPreparedRequiredUpdate(update: DesktopUpdateCheckResult): Prom
   try {
     const safeFilePath = resolveDownloadedUpdatePath(preparedUpdate.filePath);
     await access(safeFilePath, fsConstants.R_OK);
+    await stageMacDmgUpdatePackageOrDiscard(safeFilePath);
     return true;
   } catch {
     await clearPreparedRequiredUpdate();
@@ -1932,12 +1939,9 @@ async function downloadUpdate(
   await mkdir(updatesDirectory, { recursive: true });
   const filePath = join(updatesDirectory, resolveUpdatePackageFileName(downloadUrl, update.latestVersion));
   await downloadUpdatePackageWithLock(downloadUrl, filePath, progressTarget);
+  await stageMacDmgUpdatePackageOrDiscard(filePath);
 
   if (options.openInstaller === false) {
-    await stageMacDmgUpdatePackageWithLock(filePath).catch(async (error) => {
-      console.warn("mac update package staging skipped:", error);
-      await writePackagedStartupLog(`mac-update-stage skipped\n${formatStartupError(error)}`);
-    });
     await writePreparedRequiredUpdate(update, filePath);
     return { filePath, opened: false };
   }
@@ -1990,11 +1994,15 @@ async function downloadUpdatePackageToFile(
   const temporaryFilePath = `${filePath}.${process.pid}.${Date.now()}.download`;
   const totalBytes = readDownloadContentLength(response.headers);
   let transferredBytes = 0;
+  let downloadCompleted = false;
   let lastPublishedAt = 0;
   let lastPublishedPercent: number | null = null;
 
   const publishProgress = (force = false) => {
-    const progress = createUpdateDownloadProgress(downloadUrl, filePath, transferredBytes, totalBytes);
+    const currentProgress = createUpdateDownloadProgress(downloadUrl, filePath, transferredBytes, totalBytes);
+    const progress = !downloadCompleted && currentProgress.percent === 100
+      ? { ...currentProgress, percent: 99 }
+      : currentProgress;
     const now = Date.now();
     if (!force && now - lastPublishedAt < 100 && progress.percent === lastPublishedPercent) {
       return;
@@ -2013,7 +2021,6 @@ async function downloadUpdatePackageToFile(
       const buffer = Buffer.from(await response.arrayBuffer());
       transferredBytes = buffer.byteLength;
       await writeFile(temporaryFilePath, buffer);
-      publishProgress(true);
     } else {
       const reader = response.body.getReader();
       const fileHandle = await open(temporaryFilePath, "w");
@@ -2035,11 +2042,23 @@ async function downloadUpdatePackageToFile(
         reader.releaseLock();
         await fileHandle.close().catch(() => undefined);
       }
-      publishProgress(true);
+    }
+
+    const downloadedPackage = await stat(temporaryFilePath);
+    if (downloadedPackage.size <= 0) {
+      throw new Error("update package download is empty");
+    }
+    if (downloadedPackage.size !== transferredBytes) {
+      throw new Error(`update package write incomplete: ${downloadedPackage.size}/${transferredBytes}`);
+    }
+    if (totalBytes !== null && downloadedPackage.size !== totalBytes) {
+      throw new Error(`update package download incomplete: ${downloadedPackage.size}/${totalBytes}`);
     }
 
     await removeFileIfExists(filePath);
     await rename(temporaryFilePath, filePath);
+    downloadCompleted = true;
+    publishProgress(true);
   } catch (error) {
     await removeFileIfExists(temporaryFilePath).catch(() => undefined);
     throw error;
@@ -2047,6 +2066,11 @@ async function downloadUpdatePackageToFile(
 }
 
 function readDownloadContentLength(headers: Headers): number | null {
+  const contentEncoding = headers.get("content-encoding")?.trim().toLowerCase();
+  if (contentEncoding && contentEncoding !== "identity") {
+    return null;
+  }
+
   const value = headers.get("content-length");
   if (!value) {
     return null;
@@ -2425,11 +2449,18 @@ async function stageMacDmgUpdatePackage(filePath: string): Promise<void> {
 
   const stagedAppPath = resolveStagedMacUpdateAppPath(filePath);
   const stagedReadyPath = resolveStagedMacUpdateReadyPath(filePath);
+  if (existsSync(stagedAppPath) && existsSync(stagedReadyPath)) {
+    return;
+  }
   const helperPath = join(resolveUpdatesDirectory(), `stage-mac-update-${Date.now()}.zsh`);
   const logPath = join(resolveUpdatesDirectory(), "mac-update-install.log");
   await writeFile(helperPath, createMacDmgUpdateStageScript(), { mode: 0o700 });
   await chmod(helperPath, 0o700).catch(() => undefined);
-  await runHelperScript(helperPath, [filePath, stagedAppPath, stagedReadyPath, logPath]);
+  try {
+    await runHelperScript(helperPath, [filePath, stagedAppPath, stagedReadyPath, logPath]);
+  } finally {
+    await removeFileIfExists(helperPath).catch(() => undefined);
+  }
 }
 
 async function stageMacDmgUpdatePackageWithLock(filePath: string): Promise<void> {
@@ -2448,6 +2479,25 @@ async function stageMacDmgUpdatePackageWithLock(filePath: string): Promise<void>
     if (updatePackagePreparationLocks.get(safeFilePath) === preparation) {
       updatePackagePreparationLocks.delete(safeFilePath);
     }
+  }
+}
+
+async function stageMacDmgUpdatePackageOrDiscard(filePath: string): Promise<void> {
+  if (!shouldInstallMacDmgUpdateInBackground(filePath)) {
+    return;
+  }
+
+  try {
+    await stageMacDmgUpdatePackageWithLock(filePath);
+  } catch (error) {
+    console.warn("mac update package staging failed:", error);
+    await writePackagedStartupLog(`mac-update-stage failed\n${formatStartupError(error)}`).catch(() => undefined);
+    await Promise.all([
+      removeFileIfExists(filePath).catch(() => undefined),
+      rm(resolveStagedMacUpdateAppPath(filePath), { recursive: true, force: true }).catch(() => undefined),
+      removeFileIfExists(resolveStagedMacUpdateReadyPath(filePath)).catch(() => undefined)
+    ]);
+    throw error;
   }
 }
 

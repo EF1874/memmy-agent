@@ -876,8 +876,15 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain('update.updateMode === "silent" || isRequiredUpdate(update)');
     expect(mainSource).toContain("preparedManagedBackgroundUpdateVersion");
     expect(mainSource).toContain("await hasPreparedRequiredUpdate(update)");
-    expect(mainSource).toContain("const preparedFilePath = update.preparedUpdatePath ?? (await downloadUpdate(update, { openInstaller: false })).filePath");
+    expect(mainSource).toContain("const reusablePreparedFilePath = await resolvePreparedUpdatePackagePath(update.downloadUrl, update.latestVersion)");
+    expect(mainSource).toContain("const preparedFilePath = reusablePreparedFilePath ?? (await downloadUpdate(update, { openInstaller: false })).filePath");
+    expect(mainSource).toContain("await stageMacDmgUpdatePackageOrDiscard(preparedFilePath)");
     expect(mainSource).toContain("await writePreparedRequiredUpdate(update, preparedFilePath)");
+    expect(mainSource).toContain("downloadedPackage.size !== totalBytes");
+    expect(mainSource).toContain("update package download incomplete:");
+    expect(mainSource).toContain("async function stageMacDmgUpdatePackageOrDiscard");
+    expect(mainSource).toContain("removeFileIfExists(filePath).catch(() => undefined)");
+    expect(mainSource).not.toContain("mac update package staging skipped:");
     expect(mainSource).toContain("async function installPreparedRequiredUpdateOnQuit");
     expect(mainSource).toContain("await installPreparedRequiredUpdateOnQuit()");
     expect(mainSource).toContain("showUpdateInstallSplashWindow(targetVersion)");
