@@ -57,6 +57,8 @@ export interface CreateLocalBackendOptions {
   memmyConfigPath?: string;
   /** Memory service address exposed to desktop and browser-debug clients. */
   memoryBaseUrl?: string;
+  /** Resolves when the managed Memory service is ready for startup config reload. */
+  memoryReady?: Promise<void>;
   /** Desktop install fingerprint. */
   desktopInstallFingerprint?: string;
   /** Login channel supported by the current desktop package. */
@@ -108,7 +110,14 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       runtimeToken: options.localToken
     });
     const memoryClient = options.memoryClient ?? createDefaultMemoryClient(process.env);
-    await memoryClient.reloadConfig({ reason: "desktop_startup" });
+    const memoryConfigReload = options.memoryReady
+      ? options.memoryReady.then(() => memoryClient.reloadConfig({ reason: "desktop_startup" }))
+      : memoryClient.reloadConfig({ reason: "desktop_startup" });
+    void memoryConfigReload.catch((error) => {
+      console.warn(
+        `Memory config reload failed during desktop startup: ${error instanceof Error ? error.message : String(error)}`
+      );
+    });
     const scanProcess = options.memoryClient ? undefined : { databasePath: appStateStore.databasePath };
     const cloudConfig = resolveCloudClientConfig(process.env);
     const cloudClient = options.cloudClient ?? createDefaultCloudClient(

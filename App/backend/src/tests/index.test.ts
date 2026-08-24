@@ -5,7 +5,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import YAML from "yaml";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CloudClient } from "../adapters/outbound/cloud-client/index.js";
 import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
 import { createLocalBackend, readMemoryLayerConfig, type LocalBackend } from "../index.js";
@@ -91,6 +91,21 @@ describe("local api", () => {
     tempDir = mkdtempSync(join(tmpdir(), "memmy-backend-mcp-startup-reload-"));
     const memmyConfigPath = join(tempDir, "config.yaml");
     const snapshots: unknown[] = [];
+  it("does not block local API startup while managed Memory is still initializing", async () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-backend-memory-ready-"));
+    const baseClient = createMockMemoryClient();
+    const reloadReasons: unknown[] = [];
+    let markMemoryReady: (() => void) | undefined;
+    const memoryReady = new Promise<void>((resolveReady) => {
+      markMemoryReady = resolveReady;
+    });
+    const memoryClient: MemoryClient = {
+      ...baseClient,
+      async reloadConfig(input) {
+        reloadReasons.push(input);
+        return baseClient.reloadConfig(input);
+      }
+    };
 
     backend = await createLocalBackend({
       databasePath: join(tempDir, "app.sqlite"),

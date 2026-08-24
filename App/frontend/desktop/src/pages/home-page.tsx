@@ -2830,7 +2830,7 @@ export function HomePage() {
             </button>
           ) : null}
           <div ref={composerOverlayRef} className="agent-conversation-composer">
-            <div className="agent-conversation-content agent-conversation-content--composer max-w-2xl mx-auto">
+            <div className="agent-conversation-content agent-conversation-content--composer max-w-3xl mx-auto">
               <div className="agent-composer-flow">
                 {slashMenuOpen && (
                   <div className="agent-composer-popover absolute left-0 bottom-full mb-3 z-40" style={{ width: "min(448px, 100%)" }}>

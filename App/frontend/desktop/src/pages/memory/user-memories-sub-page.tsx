@@ -115,8 +115,8 @@ export function UserMemoriesSubPage(props: UserMemoriesSubPageProps) {
                 <span className="memory-card__body">
                   <span className="memory-card__title">{item.title}</span>
                   <span className="memory-card__meta">
-                    <span>{userMemoryTypeLabel(item, t)}</span>
-                    <span>{userMemoryStatusLabel(item.status, t)}</span>
+                    <span className="memory-pill memory-pill--kind">{userMemoryTypeLabel(item, t)}</span>
+                    <UserMemoryStatusPill status={item.status} />
                     <span>{formatUserDateTime(item.updatedAt)}</span>
                   </span>
                 </span>
@@ -138,13 +138,23 @@ export function UserMemoriesSubPage(props: UserMemoriesSubPageProps) {
             className="memory-drawer-backdrop__close"
             tabIndex={-1}
             aria-hidden="true"
-            onClick={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.stopPropagation();
+              setSelected(null);
+            }}
           />
-          <aside className="memory-drawer" onClick={(event) => event.stopPropagation()}>
+          <aside
+            className="memory-drawer memory-drawer--entry"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="memory-user-memory-title"
+            onClick={(event) => event.stopPropagation()}
+          >
             <header className="memory-drawer__header">
               <div>
-                <div className="memory-drawer__eyebrow">{t("memory.userMemories.detailTitle")}</div>
-                <h4 className="memory-drawer__title">{selected.title}</h4>
+                <div className="memory-drawer__identity">
+                  <span id="memory-user-memory-title" className="memory-drawer__eyebrow">{selected.id}</span>
+                </div>
               </div>
               <button
                 type="button"
@@ -164,9 +174,9 @@ export function UserMemoriesSubPage(props: UserMemoriesSubPageProps) {
                 <h5 className="memory-detail-card__label">{t("memory.memories.meta")}</h5>
                 <dl className="memory-detail-grid">
                   <dt>{t("memory.userMemories.type")}</dt>
-                  <dd>{userMemoryTypeLabel(selected, t)}</dd>
+                  <dd><span className="memory-pill memory-pill--kind">{userMemoryTypeLabel(selected, t)}</span></dd>
                   <dt>{t("memory.memories.status")}</dt>
-                  <dd>{userMemoryStatusLabel(selected.status, t)}</dd>
+                  <dd><UserMemoryStatusPill status={selected.status} /></dd>
                   <dt>{t("memory.memories.createdAt")}</dt>
                   <dd>{formatUserDateTime(selected.createdAt)}</dd>
                   <dt>{t("memory.memories.updatedAt")}</dt>
@@ -184,6 +194,21 @@ export function UserMemoriesSubPage(props: UserMemoriesSubPageProps) {
       ) : null}
     </section>
   );
+}
+
+function UserMemoryStatusPill(props: { status: MemoryListItem["status"] }) {
+  const { t } = useTranslation();
+  return (
+    <span className={`memory-pill memory-pill--user-memory-${userMemoryStatusTone(props.status)}`}>
+      {userMemoryStatusLabel(props.status, t)}
+    </span>
+  );
+}
+
+function userMemoryStatusTone(status: MemoryListItem["status"]): "active" | "archived" | "deleted" {
+  if (status === "activated") return "active";
+  if (status === "archived") return "archived";
+  return "deleted";
 }
 
 function userMemoryTypeLabel(item: MemoryListItem, t: (key: MessageKey) => string): string {

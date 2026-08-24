@@ -17,6 +17,7 @@ export class SystemPromptBuildContext {
   channel: string | null;
   sessionSummary: string | null;
   workspace: string | null;
+  readonly sessionKey: string | null;
   metadata: Record<string, any>;
 
   constructor(init: {
@@ -25,6 +26,7 @@ export class SystemPromptBuildContext {
     channel?: string | null;
     sessionSummary?: string | null;
     workspace?: string | null;
+    sessionKey?: string | null;
     metadata?: Record<string, any>;
   } = {}) {
     this.sections = [...(init.sections ?? [])];
@@ -32,6 +34,7 @@ export class SystemPromptBuildContext {
     this.channel = init.channel ?? null;
     this.sessionSummary = init.sessionSummary ?? null;
     this.workspace = init.workspace ?? null;
+    this.sessionKey = init.sessionKey ?? null;
     this.metadata = init.metadata ?? {};
   }
 
@@ -141,6 +144,7 @@ export class AgentHook {
   }
   onRegisterTools(ctx: AgentToolRegistrationContext): void {}
   onBuildSystemPrompt(ctx: SystemPromptBuildContext): void {}
+  async beforeBuildSystemPrompt(ctx: AgentHookContext): Promise<void> {}
   async beforeRun(ctx: AgentHookContext): Promise<void> {}
   async afterRun(ctx: AgentHookContext, result: any): Promise<void> {}
   async beforeToolCall(ctx: AgentHookContext, toolCall: any): Promise<void> {}
@@ -223,6 +227,9 @@ export class CompositeHook extends AgentHook {
   }
   override onBuildSystemPrompt(ctx: SystemPromptBuildContext): void {
     this.forEachHookSyncSafe("onBuildSystemPrompt", ctx);
+  }
+  override async beforeBuildSystemPrompt(ctx: AgentHookContext): Promise<void> {
+    await this.forEachHookSafe("beforeBuildSystemPrompt", ctx);
   }
   override async afterRun(ctx: AgentHookContext, result: any): Promise<void> {
     await this.forEachHookSafe("afterRun", ctx, result);

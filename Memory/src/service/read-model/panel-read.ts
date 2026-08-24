@@ -7,6 +7,7 @@ import type {
   EmbeddingRetryStatus,
   EpisodeRecord,
   EvolutionJobRecord,
+  L3WorldModelScopeRecord,
   RawTurnRecord,
   Repositories
 } from "../../storage/repositories.js";
@@ -22,7 +23,8 @@ import type {
   RawTurnSummary,
   RequestEnvelope,
   RuntimeNamespace,
-  UserMemoryRecord
+  UserMemoryRecord,
+  WorldModelScope
 } from "../../types.js";
 import { nowIso, resolveTimeZone } from "../../utils/time.js";
 import {
@@ -499,12 +501,26 @@ export class PanelReadModel {
           offset
         ).map((hit) => hit.id))
       : this.deps.repos.memories.list(filter, pageSize, offset);
+    const scopes = this.deps.repos.l3WorldModels.getScopesByMemoryIds(
+      memories.filter((memory) => memory.memoryLayer === "L3").map((memory) => memory.id)
+    );
+    const scopesByMemoryId = new Map(
+      scopes.flatMap((scope) => scope.memoryId ? [[scope.memoryId, scope] as const] : [])
+    );
     return {
-      items: memories.map((memory) => panelListItemFromMemory(
-        this.deps.repos.memories.toListItem(memory),
-        memory,
-        this.deps.repos.processing.get(memory.id)
-      )),
+      items: memories.map((memory) => {
+        const item = panelListItemFromMemory(
+          this.deps.repos.memories.toListItem(memory),
+          memory,
+          this.deps.repos.processing.get(memory.id)
+        );
+        const scope = scopesByMemoryId.get(memory.id);
+        const worldModelScope = memory.memoryLayer === "L3" && scope &&
+          scope.memoryId === memory.id && scope.userId === memory.userId
+          ? panelWorldModelScope(scope)
+          : undefined;
+        return worldModelScope ? { ...item, worldModelScope } : item;
+      }),
       page,
       pageSize,
       total,
@@ -628,6 +644,40 @@ export class PanelReadModel {
     return counts;
   }
 
+}
+
+function panelWorldModelScope(scope: L3WorldModelScopeRecord): WorldModelScope {
+  if (!scope.projectId) return { kind: "general" };
+  const display = workspaceUriDisplay(scope.workspaceUri);
+  return {
+    kind: "project",
+    projectLabel: display.projectLabel,
+    workspaceDisplayPath: display.workspaceDisplayPath
+  };
+}
+
+export function workspaceUriDisplay(workspaceUri?: string): {
+  projectLabel: string | null;
+  workspaceDisplayPath: string | null;
+} {
+  if (!workspaceUri) return { projectLabel: null, workspaceDisplayPath: null };
+  try {
+    const url = new URL(workspaceUri);
+    const decodedSegments = url.pathname.split("/").map((segment) => decodeURIComponent(segment));
+    const decodedPath = decodedSegments.join("/");
+    const projectLabel = decodedSegments.filter(Boolean).at(-1) ?? null;
+    if (url.protocol !== "file:") {
+      return { projectLabel, workspaceDisplayPath: url.toString() };
+    }
+    const workspaceDisplayPath = url.host
+      ? `//${url.host}${decodedPath.startsWith("/") ? decodedPath : `/${decodedPath}`}`
+      : /^\/[A-Za-z]:\//u.test(decodedPath)
+        ? decodedPath.slice(1)
+        : decodedPath;
+    return { projectLabel, workspaceDisplayPath };
+  } catch {
+    return { projectLabel: null, workspaceDisplayPath: null };
+  }
 }
 
 export function redactConfig(value: unknown): unknown {
