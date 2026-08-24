@@ -76,14 +76,6 @@ function assertPlainObject(field: string, value: any): Dict {
   return value;
 }
 
-function assertStringRecord(field: string, value: any): Dict<string> {
-  const record = assertPlainObject(field, value);
-  for (const [key, item] of Object.entries(record)) {
-    if (typeof item !== "string") throw new ValueError(`${field}.${key} must be a string`);
-  }
-  return record as Dict<string>;
-}
-
 function assertBoolean(field: string, value: any): boolean {
   if (typeof value !== "boolean") throw new ValueError(`${field} must be a boolean`);
   return value;
@@ -1287,14 +1279,13 @@ export class Config extends Base {
         throw new ValueError(`modelPresets.${presetId} ownerAccountId does not match its Provider`);
       }
     }
-    this.validateAssignment("byok", this.modelAssignments.byok, protocolsByCapability);
-    this.validateAssignment("account", this.modelAssignments.account, protocolsByCapability);
+    this.validateAssignment("byok", this.modelAssignments.byok);
+    this.validateAssignment("account", this.modelAssignments.account);
   }
 
   private validateAssignment(
     namespace: "byok" | "account",
     assignment: ModelAssignmentConfig,
-    _protocols: Readonly<Record<ModelCapability, ReadonlySet<ModelEndpointProtocol>>>,
   ): void {
     const validate = (presetId: string | null, capability: ModelCapability): void => {
       if (!presetId) return;

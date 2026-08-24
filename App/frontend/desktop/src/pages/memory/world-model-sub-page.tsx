@@ -214,14 +214,12 @@ export function WorldModelSubPage(props: WorldModelSubPageProps) {
 
   useEffect(() => {
     void search().catch(() => undefined);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.client, t]);
 
   useEffect(() => {
     if (props.openRequest) {
       openWorldModelById(props.openRequest.id);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.openRequest?.requestId]);
 
   return (
@@ -713,7 +711,7 @@ function parseJsonString(value: unknown): unknown {
   }
 
   const trimmed = value.trim();
-  if (!trimmed || !/^[\[{"]/.test(trimmed)) {
+  if (!trimmed || !/^[[{"]/.test(trimmed)) {
     return value;
   }
 

@@ -48,13 +48,13 @@ function fakeV2Client() {
       renderedContext: "项目场域认知：保持现有模块边界。",
       sourceMemoryIds: ["l1-1"],
     })),
-    l3WorldModelTraceHead: vi.fn(async (_sessionId: string, _envelope: any) => ({
+    l3WorldModelTraceHead: vi.fn(async () => ({
       sessionId: "memory-v2-session",
       projectId: `ws_${"a".repeat(64)}`,
       throughL1MemoryId: "l1-1",
       traceSeq: 1,
     })),
-    l3WorldModelBoundary: vi.fn(async (_sessionId: string, _body: any) => ({
+    l3WorldModelBoundary: vi.fn(async () => ({
       sessionId: "memory-v2-session",
       projectId: `ws_${"a".repeat(64)}`,
       trigger: "token_compaction",
