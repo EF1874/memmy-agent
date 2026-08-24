@@ -1,4 +1,4 @@
-import { createLocalBackend, loadCloudServiceEnv, syncRuntimeConfigForStartup, trackAnalyticsEvent, type BootstrapScenario, type LocalBackend } from "@memmy/backend";
+import { createHttpMemmyAgentAdminClient, createLocalBackend, loadCloudServiceEnv, syncRuntimeConfigForStartup, trackAnalyticsEvent, type BootstrapScenario, type LocalBackend } from "@memmy/backend";
 import { resolveCloudServiceBaseUrl, type AccountChannel } from "@memmy/local-api-contracts";
 import type {
   DesktopAppInfo,
@@ -787,6 +787,12 @@ async function startLocalApi(services: ManagedRuntimeServices | null): Promise<D
     bootstrapScenario: getBootstrapScenario(),
     desktopInstallFingerprint,
     accountChannel: resolveCurrentDesktopAccountChannel(),
+    memmyAgentAdminClient: services
+      ? createHttpMemmyAgentAdminClient({
+          baseUrl: services.agentGateway.baseUrl,
+          bootstrapSecret: services.agentGateway.bootstrapSecret
+        })
+      : undefined,
     memmyConfigPath: process.env.MEMMY_CONFIG,
     memoryBaseUrl: memoryControl.baseUrl,
     memoryReady: services?.memory.ready,

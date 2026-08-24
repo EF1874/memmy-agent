@@ -87,6 +87,10 @@ describe("local api", () => {
     expect(backend.runtimeConfig.memory).toEqual({ baseUrl: "http://127.0.0.1:18960" });
   });
 
+  it("reloads Agent MCP only after writing the current Composio bridge config", async () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-backend-mcp-startup-reload-"));
+    const memmyConfigPath = join(tempDir, "config.yaml");
+    const snapshots: unknown[] = [];
   it("does not block local API startup while managed Memory is still initializing", async () => {
     tempDir = mkdtempSync(join(tmpdir(), "memmy-backend-memory-ready-"));
     const baseClient = createMockMemoryClient();
@@ -107,16 +111,37 @@ describe("local api", () => {
       databasePath: join(tempDir, "app.sqlite"),
       runtimeConfigPath: join(tempDir, "runtime.json"),
       localToken: "test-token",
-      memoryBaseUrl: "http://127.0.0.1:18960",
-      memoryReady,
-      memoryClient,
+      memoryClient: createMockMemoryClient(),
       cloudClient: createMockCloudClient(),
-      memmyConfigPath: join(tempDir, "config.yaml")
+      memmyConfigPath,
+      memmyAgentAdminClient: {
+        getChannelDefinitions: async () => ({ channels: [] }),
+        getChannelConnections: async () => ({ connections: [] }),
+        configureChannel: async () => ({ status: "connected", running: true }),
+        stopChannel: async () => ({ status: "disabled", running: false }),
+        startWeixinLogin: async () => ({ status: "pendingQr" }),
+        pollWeixinLogin: async () => ({ status: "connected" }),
+        startFeishuLogin: async () => ({ status: "pendingQr" }),
+        pollFeishuLogin: async () => ({ status: "connected" }),
+        async reloadMcpConfig() {
+          snapshots.push(YAML.parse(readFileSync(memmyConfigPath, "utf8")));
+          return { ok: true, message: "reloaded", requires_restart: false };
+        }
+      }
     });
 
-    expect(reloadReasons).toEqual([]);
-    markMemoryReady?.();
-    await vi.waitFor(() => expect(reloadReasons).toEqual([{ reason: "desktop_startup" }]));
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0]).toMatchObject({
+      tools: {
+        mcpServers: {
+          composio: {
+            type: "streamableHttp",
+            url: `${backend.runtimeConfig.baseUrl}/mcp/composio`,
+            headers: { "x-memmy-mcp-token": expect.stringMatching(/^mmt_/) }
+          }
+        }
+      }
+    });
   });
 
   it("uses the built-in default Cloud client when MEMMY_CLOUD_URL is missing", async () => {
