@@ -594,7 +594,7 @@ describe("HomePage", () => {
     expect(styles).not.toContain("padding-left: 86px;");
     expect(source).toContain('className="relative agent-composer-shell agent-composer-shell--expanded rounded-card-lg"');
     expect(source).toContain('className="agent-composer-toolbar"');
-    expect(source).toContain('<div className="agent-conversation-content agent-conversation-content--composer max-w-2xl mx-auto">');
+    expect(source).toContain('<div className="agent-conversation-content agent-conversation-content--composer max-w-3xl mx-auto">');
     expect(styles).toMatch(/\.agent-composer-toolbar\s*{[^}]*display:\s*flex;/s);
     expect(styles).toMatch(/\.agent-composer-toolbar \.composer-actions\s*{[^}]*margin-left:\s*auto;/s);
     expect(source).toContain("COMPOSER_SINGLE_LINE_HEIGHT_PX = 52");
@@ -606,7 +606,9 @@ describe("HomePage", () => {
 
     expect(source).toContain('agent-workspace-layout${environmentPanelOpen ? " agent-workspace-layout--environment-open" : ""}');
     expect(source).toContain('className="agent-conversation-content max-w-3xl mx-auto space-y-3"');
-    expect(source).toContain('className="agent-conversation-content agent-conversation-content--composer max-w-2xl mx-auto"');
+    expect(source).toContain('className="agent-conversation-content agent-conversation-content--composer max-w-3xl mx-auto"');
+    const composerRule = styles.match(/\.agent-conversation-composer\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(composerRule).toContain("padding: 40px var(--codex-content-padding-x) 12px;");
     expect(styles).toContain("container-name: agent-workspace;");
     expect(styles).toContain("@container agent-workspace (min-width: 1240px)");
     expect(styles).toContain(".agent-workspace-layout--environment-open .agent-conversation-content");
