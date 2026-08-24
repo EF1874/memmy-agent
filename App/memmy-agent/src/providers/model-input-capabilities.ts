@@ -4,7 +4,7 @@ const TEXT = Object.freeze(["text"] as const);
 const TEXT_IMAGE = Object.freeze(["text", "image"] as const);
 const TEXT_IMAGE_VIDEO = Object.freeze(["text", "image", "video"] as const);
 
-export const MODEL_INPUT_CAPABILITIES_REVIEWED_AT = "2026-08-19";
+export const MODEL_INPUT_CAPABILITIES_REVIEWED_AT = "2026-08-24";
 
 export function defineModelInputCapabilities(
   entries: ReadonlyArray<readonly [string, readonly ModelInputModality[]]>,
@@ -167,11 +167,13 @@ export const MODEL_INPUT_CAPABILITIES = defineModelInputCapabilities([
   ["groq/compound-mini", TEXT],
   ["qwen/qwen3.6-27b", TEXT_IMAGE],
 
-  // DeepSeek. Reviewed 2026-08-13.
+  // DeepSeek. Reviewed 2026-08-24.
   // Source: https://api-docs.deepseek.com/updates/
   ["deepseek-v4-pro", TEXT],
   ["deepseek-v4-flash", TEXT],
   ["deepseek-v4-flash-0731", TEXT],
+  // Internal experimental route; it is not part of the public DeepSeek model list.
+  ["deepseek-v4-flash-vision-exp", TEXT_IMAGE],
   ["deepseek-v3.2", TEXT],
 
   // Qwen / 百炼. Reviewed 2026-08-19.
