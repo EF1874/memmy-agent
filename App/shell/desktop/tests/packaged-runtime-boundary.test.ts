@@ -1117,7 +1117,6 @@ describe("desktop packaged runtime boundaries", () => {
       source.indexOf("memoryStartup = ensureMemoryService"),
     );
     expect(source).toContain("memoryStartup = ensureMemoryService");
-    expect(source).toContain("Memory service unavailable during desktop startup");
     expect(source).toContain("readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath)");
     expect(source).toContain("browserPreparation?.stop()");
     expect(source).toContain("terminateProcessTreeSync(child)");
@@ -1135,6 +1134,23 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).not.toContain(legacyApplicationSupportDir);
     expect(source).toContain('join(repoRoot, "Memory", "dist", "src", "server", "index.js")');
     expect(source).toContain('join(repoRoot, "App", "memmy-agent", "dist", "main.js")');
+  });
+
+  it("waits for Memory readiness before publishing managed runtime services", () => {
+    const source = readFileSync(runtimeServicesPath, "utf8");
+    const startupIndex = source.indexOf("memoryStartup = ensureMemoryService");
+    const barrierIndex = source.indexOf(
+      "const [agentGatewayStartupIssue] = await Promise.all([",
+      startupIndex,
+    );
+    const returnIndex = source.indexOf("return {", barrierIndex);
+
+    expect(startupIndex).toBeGreaterThan(-1);
+    expect(barrierIndex).toBeGreaterThan(startupIndex);
+    expect(returnIndex).toBeGreaterThan(barrierIndex);
+    expect(source.slice(barrierIndex, returnIndex)).toContain("memoryStartup");
+    expect(source).toContain("const MEMORY_STARTUP_TIMEOUT_MS = 120_000;");
+    expect(source).not.toContain("Memory service unavailable during desktop startup");
   });
 
   it("exports shared config and workspace paths from dev-start", () => {
