@@ -4942,8 +4942,9 @@ export class ProjectEnvironmentRepository {
         nextProfile = input.profile || null;
       }
 
+      const emptyNoop = input.operation === "noop" && nextProfile === null;
       const existingMemory = this.l3WorldModels.getMemory(input.userId, input.projectId);
-      if (nextProfile !== null || existingMemory) {
+      if (!emptyNoop && (nextProfile !== null || existingMemory)) {
         this.l3WorldModels.upsertField({
           userId: input.userId,
           projectId: input.projectId,
@@ -4961,8 +4962,8 @@ export class ProjectEnvironmentRepository {
          WHERE user_id = ? AND project_id = ? AND current_scan_id = ?`
       ).run(
         input.projectKind,
-        input.scanId,
-        input.fingerprint,
+        emptyNoop ? null : input.scanId,
+        emptyNoop ? null : input.fingerprint,
         at,
         input.userId,
         input.projectId,

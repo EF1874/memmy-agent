@@ -359,6 +359,7 @@ Remove or ignore:
 Merge equivalent items and remove superseded items. Sort explicit user rules and high-risk guardrails before weaker or lower-frequency items.
 
 ${SHARED_OPERATION_RULES}
+Return exactly one valid JSON object with the required keys. Do not include Markdown or explanatory text.
 
 Return exactly one of:
 {"op":"noop","general_rules_and_safety_constraints":""}
@@ -369,18 +370,21 @@ const PROJECT_CONTRACT_PROMPT = `You maintain only the "Project Contract".
 The input contains the current Project Contract, a read-only current Project Environment Profile, and a chronological batch of new RawTurns.
 
 Keep only:
-- long-lived project rules explicitly stated by the user;
-- explicit user corrections to implementations that violated project rules;
-- reusable development or work guardrails demonstrated by acceptance rejection;
+- project-scoped development or work rules explicitly stated by the user that can reasonably guide future tasks in the same project;
+- project-scoped collaboration and delivery conventions, including reusable requirements for how the Agent explains, summarizes, formats, reviews, documents, or presents work;
+- explicit user requirements or corrections that establish or refine such a rule, whether stated before or after an implementation;
+- reusable project guardrails revealed by user acceptance or rejection;
 - constraints explicitly enforced by CI, Hooks, or quality gates.
 
-Do not include requirements that only constrain the current task deliverable and cannot reasonably apply to future project tasks.
-If a user requirement or correction uses persistent language such as "in the future", "always", "do not act without permission", "must", or "unless explicitly permitted", or constrains a category of future operations, treat it as a long-lived project rule even if it appears only once.
+An explicit rule may be retained after a single statement. Do not require repetition, a previous violation, acceptance or rejection evidence, or persistent words such as "in the future", "always", or "must". Determine durability from meaning: if the requirement governs a category of project operations or can reasonably apply to later tasks in this project, treat it as a project rule.
+Treat a reusable instruction about response structure or presentation as a project rule rather than a current-task detail. For example, "when a table can explain the result clearly, use a table" belongs in the Project Contract when it applies to work in this project.
+Exclude only requirements whose substance is tied exclusively to the current task deliverable and cannot reasonably apply to future project tasks. Do not exclude a reusable rule merely because it was first expressed while discussing the current task.
 Do not include ordinary tool errors, environment facts, implementation steps, or temporary Agent choices.
 
 Use the Project Environment Profile only to understand the project type and environment. Do not modify or output it. Merge equivalent items and replace old contract content only when new evidence explicitly supersedes it. Sort by constraint strength and evidence strength.
 
 ${SHARED_OPERATION_RULES}
+Return exactly one valid JSON object with the required keys. Do not include Markdown or explanatory text.
 
 Return exactly one of:
 {"op":"noop","project_contract":""}
@@ -399,6 +403,7 @@ Do not create Domain Knowledge from a successful result alone. Do not include re
 Replace an old fact when new evidence from the same environment disproves it. Do not merge facts from incompatible environment versions or configurations. Use the Project Environment Profile only to understand the environment; do not modify or output it. Sort by evidence strength.
 
 ${SHARED_OPERATION_RULES}
+Return exactly one valid JSON object with the required keys. Do not include Markdown or explanatory text.
 
 Return exactly one of:
 {"op":"noop","domain_knowledge":""}
