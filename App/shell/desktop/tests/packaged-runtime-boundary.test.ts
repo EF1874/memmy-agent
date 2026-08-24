@@ -1134,9 +1134,9 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).not.toContain("await preparePackagedBrowser(entries, runtimeConfig, options)");
     expect(source).toContain('[entries.agentEntry, "internal", "browser-prepare"]');
     expect(source.indexOf("browserPreparation = startPackagedBrowserPreparation")).toBeLessThan(
-      source.indexOf("memoryStartup = ensureMemoryService"),
+      source.indexOf("const memoryReady = ensureMemoryService"),
     );
-    expect(source).toContain("memoryStartup = ensureMemoryService");
+    expect(source).toContain("const memoryReady = ensureMemoryService");
     expect(source).toContain("Memory service unavailable during desktop startup");
     expect(source).toContain("readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath)");
     expect(source).toContain("browserPreparation?.stop()");
@@ -1155,6 +1155,25 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).not.toContain(legacyApplicationSupportDir);
     expect(source).toContain('join(repoRoot, "Memory", "dist", "src", "server", "index.js")');
     expect(source).toContain('join(repoRoot, "App", "memmy-agent", "dist", "main.js")');
+  });
+
+  it("publishes managed runtime services while Memory continues initializing", () => {
+    const source = readFileSync(runtimeServicesPath, "utf8");
+    const startupIndex = source.indexOf("const memoryReady = ensureMemoryService");
+    const gatewayIndex = source.indexOf(
+      "const agentGatewayStartupIssue = await startAgentGatewayWithRecovery",
+      startupIndex,
+    );
+    const returnIndex = source.indexOf("return {", gatewayIndex);
+
+    expect(startupIndex).toBeGreaterThan(-1);
+    expect(gatewayIndex).toBeGreaterThan(startupIndex);
+    expect(returnIndex).toBeGreaterThan(gatewayIndex);
+    expect(source.slice(startupIndex, returnIndex)).not.toContain("await memoryReady");
+    expect(source.slice(startupIndex, returnIndex)).not.toContain("await memoryStartup");
+    expect(source.slice(returnIndex, source.indexOf("agentGateway:", returnIndex))).toContain("ready: memoryReady");
+    expect(source).toContain("const MEMORY_STARTUP_TIMEOUT_MS = 120_000;");
+    expect(readFileSync(mainSourcePath, "utf8")).toContain("memoryReady: services?.memory.ready");
   });
 
   it("exports shared config and workspace paths from dev-start", () => {
