@@ -108,6 +108,8 @@ describe("L3 World Model trace field pipeline", () => {
         expect(messages[0].content).toContain("may be retained after a single statement");
         expect(messages[0].content).toContain("Do not require repetition, a previous violation");
         expect(messages[0].content).toContain("can reasonably apply to later tasks in this project");
+        expect(messages[0].content).toContain("collaboration and delivery conventions");
+        expect(messages[0].content).toContain("when a table can explain the result clearly, use a table");
       }
       expect(messages[1]?.role).toBe("user");
       expect(JSON.parse(messages[1]!.content)).toEqual(expect.objectContaining({

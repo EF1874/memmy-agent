@@ -371,11 +371,13 @@ The input contains the current Project Contract, a read-only current Project Env
 
 Keep only:
 - project-scoped development or work rules explicitly stated by the user that can reasonably guide future tasks in the same project;
+- project-scoped collaboration and delivery conventions, including reusable requirements for how the Agent explains, summarizes, formats, reviews, documents, or presents work;
 - explicit user requirements or corrections that establish or refine such a rule, whether stated before or after an implementation;
 - reusable project guardrails revealed by user acceptance or rejection;
 - constraints explicitly enforced by CI, Hooks, or quality gates.
 
 An explicit rule may be retained after a single statement. Do not require repetition, a previous violation, acceptance or rejection evidence, or persistent words such as "in the future", "always", or "must". Determine durability from meaning: if the requirement governs a category of project operations or can reasonably apply to later tasks in this project, treat it as a project rule.
+Treat a reusable instruction about response structure or presentation as a project rule rather than a current-task detail. For example, "when a table can explain the result clearly, use a table" belongs in the Project Contract when it applies to work in this project.
 Exclude only requirements whose substance is tied exclusively to the current task deliverable and cannot reasonably apply to future project tasks. Do not exclude a reusable rule merely because it was first expressed while discussing the current task.
 Do not include ordinary tool errors, environment facts, implementation steps, or temporary Agent choices.
 
