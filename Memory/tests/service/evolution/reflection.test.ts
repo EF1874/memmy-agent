@@ -66,12 +66,11 @@ function createUnusableReflectionLlm(): LlmClient {
         const payload = messages.find((message) => message.role === "user")?.content ?? "";
         const userQuote = payload.match(/\bUSER:\s*(.*?)\s+ASSISTANT:/)?.[1]?.trim() ?? "";
         return {
-          create_l1: true,
-          l1_summary: "unusable reflection summary",
-          l1_evidence: [{ quote: userQuote, source_role: "user", kind: "task_outcome" }],
-          create_user_memory: false,
-          user_memory_types: [],
-          reason: "durable task result"
+          l1: {
+            summary: "unusable reflection summary",
+            evidence: [{ quote: userQuote, role: "user", kind: "task_outcome" }]
+          },
+          user: null
         } as unknown as T;
       }
       return {
@@ -119,12 +118,11 @@ function createCapturingReflectionLlm(calls: Array<{
         const payload = messages.find((message) => message.role === "user")?.content ?? "";
         const userQuote = payload.match(/\bUSER:\s*(.*?)\s+ASSISTANT:/)?.[1]?.trim() ?? "";
         return {
-          create_l1: true,
-          l1_summary: "sqlite migration reflection summary",
-          l1_evidence: [{ quote: userQuote, source_role: "user", kind: "task_outcome" }],
-          create_user_memory: false,
-          user_memory_types: [],
-          reason: "durable task result"
+          l1: {
+            summary: "sqlite migration reflection summary",
+            evidence: [{ quote: userQuote, role: "user", kind: "task_outcome" }]
+          },
+          user: null
         } as unknown as T;
       }
       return {
@@ -565,7 +563,7 @@ describe("MemoryService / evolution / reflection", () => {
     expect(summaryCalls.some((call) => call.options.operation === "capture.reflection.batch.v13")).toBe(false);
     const summaryCall = summaryCalls.find((call) => call.options.operation === "capture.summarize");
     expect(summaryCall).toBeTruthy();
-    expect(summaryCall!.messages[0]?.content).toContain("single user/agent exchange");
+    expect(summaryCall!.messages[0]?.content).toContain("Judge L1 and User Memory");
     expect(summaryCall!.messages[1]?.content).not.toContain("REFLECTION:");
     expect(summaryCalls.some((call) => call.options.operation === "capture.reflected_trace_summary.v1")).toBe(false);
     const payload = JSON.parse(
@@ -858,7 +856,7 @@ describe("MemoryService / evolution / reflection", () => {
     expect(payload.task_context).toContain("sqlite migration");
     const summaryCall = calls.find((call) => call.options.operation === "capture.summarize");
     expect(summaryCall).toBeTruthy();
-    expect(summaryCall!.messages[0]?.content).toContain("single user/agent exchange");
+    expect(summaryCall!.messages[0]?.content).toContain("Judge L1 and User Memory");
     const summaryPayload = summaryCall!.messages.find((message) => message.role === "user")?.content ?? "";
     expect(summaryPayload).not.toContain("REFLECTION:");
     expect(summaryPayload).toContain("TOOLS:");

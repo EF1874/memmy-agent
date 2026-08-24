@@ -40,13 +40,14 @@ export function createCapturingL2Llm(calls: Array<{
         } as unknown as T;
       }
       if (options.operation === "capture.summarize") {
+        const payload = messages.find((message) => message.role === "user")?.content ?? "";
+        const userQuote = payload.match(/\bUSER:\s*(.*?)\s+ASSISTANT:/)?.[1]?.trim() ?? "";
         return {
-          summary: "reflected trace summary",
-          create_l1: true,
-          l1_summary: "reflected trace summary",
-          create_user_memory: false,
-          user_memory_types: [],
-          reason: "durable task result"
+          l1: {
+            summary: "reflected trace summary",
+            evidence: [{ quote: userQuote, role: "user", kind: "task_outcome" }]
+          },
+          user: null
         } as unknown as T;
       }
       if (options.operation === "l2.induction.v4") {

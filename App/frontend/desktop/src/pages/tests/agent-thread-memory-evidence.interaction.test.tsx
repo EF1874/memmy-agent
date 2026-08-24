@@ -20,6 +20,43 @@ describe("AgentThreadMessages memory evidence interaction", () => {
     container.remove();
   });
 
+  it("keeps a separate memory evidence control for every completed turn", async () => {
+    const recallEvidence = vi.fn(async (turnId: string) => ({
+      recallEventId: `recall-${turnId}`,
+      queryId: turnId,
+      query: turnId,
+      createdAt: "2026-08-21T00:00:00.000Z",
+      serverTime: "2026-08-21T00:00:00.000Z",
+      hits: []
+    }));
+
+    await act(async () => {
+      root.render(
+        <I18nProvider language="zh-CN">
+          <AgentThreadMessages
+            chatScopeKey="chat-memory-history"
+            isSending
+            memoryRuntimeClient={{ recallEvidence, deleteMemory: vi.fn() }}
+            messages={[
+              { id: "query-1", role: "user", content: "第一轮" },
+              { id: "answer-1", role: "assistant", turnId: "turn-1", content: "第一轮完成" },
+              { id: "query-2", role: "user", content: "第二轮" },
+              { id: "answer-2", role: "assistant", turnId: "turn-2", content: "第二轮完成" },
+              { id: "query-3", role: "user", content: "第三轮正在处理" }
+            ]}
+          />
+        </I18nProvider>
+      );
+    });
+
+    const buttons = [...container.querySelectorAll<HTMLButtonElement>("button.agent-memory-evidence-toggle")];
+    expect(buttons).toHaveLength(2);
+    await act(async () => buttons[0]?.click());
+    await act(async () => buttons[1]?.click());
+    expect(recallEvidence).toHaveBeenNthCalledWith(1, "turn-1");
+    expect(recallEvidence).toHaveBeenNthCalledWith(2, "turn-2");
+  });
+
   it("[BC-27 chat] deletes same-turn L1 and User Memory members together", async () => {
     const deleteMemory = vi.fn(async (id: string) => {
       if (id === "trace-1") throw Object.assign(new Error("already deleted"), { status: 404 });

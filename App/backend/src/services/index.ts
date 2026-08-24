@@ -138,6 +138,10 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     const mode = options.appStateStore.repositories.bootstrap.getAppSettings().userMode;
     return mode === "account" || mode === "byok" ? mode : null;
   };
+  const resolveMemoryUserId = () => {
+    const session = accountSessionRepository.get();
+    return session.authenticated ? session.profile.userId : "local-user";
+  };
   const ingestionService =
     options.ingestionService ??
     createIngestionService({
@@ -224,7 +228,8 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       memoryClient: options.memoryClient
     }),
     panel: createPanelService({
-      memoryClient: options.memoryClient
+      memoryClient: options.memoryClient,
+      getUserId: resolveMemoryUserId
     }),
     byokTokenUsage: createByokTokenUsageService({
       repository: options.appStateStore.repositories.byokTokenUsage

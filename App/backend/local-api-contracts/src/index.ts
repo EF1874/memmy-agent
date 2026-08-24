@@ -4,6 +4,9 @@ import { z } from "zod";
 export * from "./model-catalog-resolver.js";
 
 export * from "./memory-runtime.js";
+export * from "./memory-canonical-json.js";
+export * from "./memory-workspace-identity.js";
+export * from "./memory-l3-world-model.js";
 export * from "./endpoints.js";
 export * from "./cloud-service.js";
 export * from "./desktop-runtime-manifest.js";
@@ -334,6 +337,9 @@ const ManagedAgentSyncFieldMapSchema = z.object({
 const ManagedAgentSyncRecipeBaseSchema = z.object({
     version: z.literal(1),
     path: z.string().trim().min(1),
+    wslDistro: z.string().trim().min(1).refine((value) => !/[\\/\0]/u.test(value), {
+        message: "WSL distribution name must not contain path separators"
+    }).optional(),
     fields: ManagedAgentSyncFieldMapSchema,
     roleMap: z.record(z.string(), z.enum(["user", "assistant", "tool", "system"])).optional(),
     timestampFormat: z.enum(["auto", "iso", "unix_seconds", "unix_milliseconds"]).default("auto")
