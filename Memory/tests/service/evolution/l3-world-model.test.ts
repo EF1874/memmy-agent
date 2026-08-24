@@ -99,6 +99,8 @@ describe("L3 World Model trace field pipeline", () => {
     expect(db.db.prepare(
       `SELECT terminal_outcome FROM l3_world_model_evidence_batches`
     ).get()).toEqual({ terminal_outcome: "applied" });
+    expect(repos.l3WorldModels.getMemory("l3-world-model-user", opened.projectId)?.memoryValue)
+      .not.toContain("DECISION_REASON_NOT_STORED");
     const calls = vi.mocked(llm.complete).mock.calls;
     expect(calls).toHaveLength(2);
     for (const [messages, options] of calls) {
@@ -110,6 +112,11 @@ describe("L3 World Model trace field pipeline", () => {
         expect(messages[0].content).toContain("can reasonably apply to later tasks in this project");
         expect(messages[0].content).toContain("collaboration and delivery conventions");
         expect(messages[0].content).toContain("when a table can explain the result clearly, use a table");
+        expect(messages[0].content).toContain("already belongs to the current project Session");
+        expect(messages[0].content).toContain("scoped to the current project by default");
+        expect(messages[0].content).toContain('Phrases such as "以后", "后续", "以后也是"');
+        expect(messages[0].content).toContain('provide a brief, concrete "reason"');
+        expect(messages[0].content).toContain("it is not part of the Project Contract and will not be stored");
       }
       expect(messages[1]?.role).toBe("user");
       expect(JSON.parse(messages[1]!.content)).toEqual(expect.objectContaining({
@@ -323,6 +330,9 @@ describe("L3 World Model trace field pipeline", () => {
       };
       const field = system.includes("Project Contract") ? "project_contract" : "domain_knowledge";
       return JSON.stringify({
+        ...(field === "project_contract"
+          ? { reason: "The latest reusable project rule determines the contract." }
+          : {}),
         op: input.current_field ? "update" : "create",
         [field]: `${field}:${input.raw_turns.at(-1)!.raw_turn_id}`
       });
@@ -411,6 +421,7 @@ describe("L3 World Model trace field pipeline", () => {
         value: changedBase === "owner field" ? "concurrent-contract" : "profile-v2"
       });
       release!(JSON.stringify({
+        reason: "The project rule changes the current contract.",
         op: changedBase === "owner field" ? "update" : "create",
         project_contract: "stale-result"
       }));
@@ -421,6 +432,7 @@ describe("L3 World Model trace field pipeline", () => {
       )?.status).toBe("queued");
 
       const retryComplete = vi.fn<LlmClient["complete"]>().mockResolvedValue(JSON.stringify({
+        reason: "The latest project rule must be retained.",
         op: changedBase === "owner field" ? "update" : "create",
         project_contract: "retry-final"
       }));
@@ -444,6 +456,7 @@ describe("L3 World Model trace field pipeline", () => {
 
   it("rejects unknown output fields after one repair and leaves the target queued", async () => {
     const complete = vi.fn<LlmClient["complete"]>().mockResolvedValue(JSON.stringify({
+      reason: "A reusable project constraint was found.",
       op: "create",
       project_contract: "valid-looking content",
       domain_knowledge: "not owned by this target"
@@ -464,7 +477,37 @@ describe("L3 World Model trace field pipeline", () => {
         candidate.payload.targetField === "project_contract"
     )!;
     await expect(new L3WorldModelTraceFieldPipeline({ repos, skillLlm: llm }).updateField(job))
-      .rejects.toThrow("exactly op and project_contract");
+      .rejects.toThrow("exactly op, project_contract, reason");
+    expect(complete).toHaveBeenCalledTimes(2);
+    expect(repos.l3WorldModels.getTarget(String(job.payload.batchId), "project_contract")?.status)
+      .toBe("queued");
+    db.close();
+  });
+
+  it("requires a non-empty project contract reason", async () => {
+    const complete = vi.fn<LlmClient["complete"]>().mockResolvedValue(JSON.stringify({
+      reason: "",
+      op: "create",
+      project_contract: "Keep the reusable project rule."
+    }));
+    const llm = strictCompletionLlm(complete);
+    const { db, service } = createTestService({ skillLlm: llm });
+    const opened = openProject(service, "missing-reason-user", "missing-reason-session");
+    service.completeTurn("missing-reason-turn", {
+      sessionId: opened.sessionId,
+      query: "Follow this project constraint.",
+      answer: "Acknowledged.",
+      status: "succeeded"
+    });
+    service.closeSession(opened.sessionId);
+    const repos = new Repositories(db.db);
+    const job = repos.runtime.listJobs("queued", 100).find(
+      (candidate) => candidate.jobType === "l3_world_model_update" &&
+        candidate.payload.targetField === "project_contract"
+    )!;
+
+    await expect(new L3WorldModelTraceFieldPipeline({ repos, skillLlm: llm }).updateField(job))
+      .rejects.toThrow("project contract reason must be a non-empty string");
     expect(complete).toHaveBeenCalledTimes(2);
     expect(repos.l3WorldModels.getTarget(String(job.payload.batchId), "project_contract")?.status)
       .toBe("queued");
@@ -565,6 +608,7 @@ function fieldLlm(): LlmClient {
     const system = messages[0]?.content ?? "";
     if (system.includes("Project Contract")) {
       return JSON.stringify({
+        reason: "DECISION_REASON_NOT_STORED: 用户提出了可复用的项目测试规则。",
         op: "create",
         project_contract: "- 提交前必须运行项目测试。"
       });
