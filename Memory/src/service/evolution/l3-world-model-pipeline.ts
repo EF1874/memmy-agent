@@ -278,6 +278,13 @@ function dynamicInputForField(
 }
 
 function expectedSchemaForField(field: L3WorldModelTargetField): JsonValue {
+  if (field === "project_contract") {
+    return {
+      reason: "brief decision reason string",
+      op: "noop | create | update",
+      project_contract: "complete final content string"
+    };
+  }
   return {
     op: "noop | create | update",
     [field]: "complete final content string"
@@ -294,8 +301,17 @@ function validateFieldOutput(
   }
   const record = value as Record<string, unknown>;
   const keys = Object.keys(record).sort();
-  if (keys.length !== 2 || !keys.includes("op") || !keys.includes(field)) {
-    throw new TypeError(`output must contain exactly op and ${field}`);
+  const expectedKeys = field === "project_contract"
+    ? ["op", "project_contract", "reason"]
+    : ["op", field];
+  if (keys.length !== expectedKeys.length || expectedKeys.some((key) => !keys.includes(key))) {
+    throw new TypeError(`output must contain exactly ${expectedKeys.join(", ")}`);
+  }
+  if (
+    field === "project_contract" &&
+    (typeof record.reason !== "string" || !record.reason.trim())
+  ) {
+    throw new TypeError("project contract reason must be a non-empty string");
   }
   if (record.op !== "noop" && record.op !== "create" && record.op !== "update") {
     throw new TypeError("op must be noop, create, or update");
@@ -377,6 +393,7 @@ Keep only:
 - constraints explicitly enforced by CI, Hooks, or quality gates.
 
 An explicit rule may be retained after a single statement. Do not require repetition, a previous violation, acceptance or rejection evidence, or persistent words such as "in the future", "always", or "must". Determine durability from meaning: if the requirement governs a category of project operations or can reasonably apply to later tasks in this project, treat it as a project rule.
+Every RawTurn in this input already belongs to the current project Session. Treat any reusable or durable user requirement in these RawTurns as scoped to the current project by default; do not require the user to repeat the project name. Only exclude it from the Project Contract when the user explicitly limits it to the current task. A rule may still be retained in this Project Contract when it also applies beyond this project. Phrases such as "以后", "后续", "以后也是", "from now on", or "always" are direct durability evidence and must not be classified as current-task-only merely because they appear inside a request for the current deliverable.
 Treat a reusable instruction about response structure or presentation as a project rule rather than a current-task detail. For example, "when a table can explain the result clearly, use a table" belongs in the Project Contract when it applies to work in this project.
 Exclude only requirements whose substance is tied exclusively to the current task deliverable and cannot reasonably apply to future project tasks. Do not exclude a reusable rule merely because it was first expressed while discussing the current task.
 Do not include ordinary tool errors, environment facts, implementation steps, or temporary Agent choices.
@@ -384,12 +401,13 @@ Do not include ordinary tool errors, environment facts, implementation steps, or
 Use the Project Environment Profile only to understand the project type and environment. Do not modify or output it. Merge equivalent items and replace old contract content only when new evidence explicitly supersedes it. Sort by constraint strength and evidence strength.
 
 ${SHARED_OPERATION_RULES}
+Before choosing the operation, provide a brief, concrete "reason" explaining whether the new RawTurns create, change, remove, or leave unchanged a reusable Project Contract rule. The reason is required to improve the decision, but it is not part of the Project Contract and will not be stored. Keep it concise and use the same language as the resulting Project Contract content, or the dominant user language when the content is empty.
 Return exactly one valid JSON object with the required keys. Do not include Markdown or explanatory text.
 
 Return exactly one of:
-{"op":"noop","project_contract":""}
-{"op":"create","project_contract":"complete final content"}
-{"op":"update","project_contract":"complete final content"}`;
+{"reason":"brief reason why the contract is unchanged","op":"noop","project_contract":""}
+{"reason":"brief reason why a reusable rule is created","op":"create","project_contract":"complete final content"}
+{"reason":"brief reason why the contract is updated","op":"update","project_contract":"complete final content"}`;
 
 const DOMAIN_KNOWLEDGE_PROMPT = `You maintain only "Domain Knowledge".
 The input contains the current Domain Knowledge, a read-only current Project Environment Profile, and a chronological batch of new RawTurns.
