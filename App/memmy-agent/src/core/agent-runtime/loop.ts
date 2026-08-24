@@ -102,7 +102,7 @@ import { RequestContext, ToolContext } from "./tools/context.js";
 import { ExecSessionManager } from "./tools/exec-session.js";
 import { MessageTool, type MessageSendCallback } from "./tools/message.js";
 import { FileStateStore } from "./tools/file-state.js";
-import { connectMissingServers, runtimeLines as mcpRuntimeLines, sessionExtra as mcpSessionExtra } from "./tools/mcp.js";
+import { connectMissingServers, handleRuntimeControl, reloadLock, runtimeLines as mcpRuntimeLines, sessionExtra as mcpSessionExtra } from "./tools/mcp.js";
 import { BrowserSessionManager, type BrowserScope } from "./tools/browser.js";
 import { ContextBuilder } from "./context.js";
 import { BUILTIN_SKILLS_DIR } from "./skills.js";
@@ -4979,6 +4979,8 @@ export class AgentLoop {
         continue;
       }
       const msg = this.normalizeSharedInboundMessage(inbound);
+      const canReloadMcp = this.activeTasks.size === 0 && this.pendingQueues.size === 0 && this.turnSlots.size === 0;
+      if (await handleRuntimeControl(this, msg, this.tools, canReloadMcp)) continue;
       const raw = msg.content.trim();
       const effectiveKey = this.effectiveSessionKey(msg);
       const deletionQueue = this.sessionDeletionQueues.get(effectiveKey);
@@ -5207,25 +5209,26 @@ export class AgentLoop {
       abortSignal?: AbortSignal | null;
     } = {},
   ): Promise<OutboundMessage | null> {
-    await this.initializeRuntimeTools();
+    await reloadLock(this);
     const key = sessionKey.startsWith("cli:")
       ? sessionKey
       : this.unifiedSession
         ? UNIFIED_SESSION_KEY
         : sessionKey;
-    const msg = new InboundMessage({
-      channel,
-      chatId,
-      senderId: "user",
-      content,
-      media,
-      metadata,
-      sessionKey: key,
-    });
     const turnId = cryptoRandomId();
     const pendingMarker = new AsyncQueue<InboundMessage>();
     this.pendingQueues.set(key, pendingMarker);
     try {
+      await this.initializeRuntimeTools();
+      const msg = new InboundMessage({
+        channel,
+        chatId,
+        senderId: "user",
+        content,
+        media,
+        metadata,
+        sessionKey: key,
+      });
       return await this.lockFor(key).runExclusive(() => this.withTerminalTurn(
         key,
         channel,

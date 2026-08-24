@@ -9,6 +9,7 @@ import { Session, SessionManager } from "../../../src/core/session/manager.js";
 import { appendTranscriptObject, webuiTranscriptPath } from "../../../src/entrypoints/frontend-bridge/transcript.js";
 import { ProjectStore } from "../../../src/entrypoints/frontend-bridge/projects.js";
 import { loadConfig } from "../../../src/config/loader.js";
+import { INBOUND_META_RUNTIME_CONTROL, RUNTIME_CONTROL_ACK, RUNTIME_CONTROL_MCP_RELOAD } from "../../../src/core/runtime-messages/events.js";
 
 const routeMocks = vi.hoisted(() => ({
   mcpPresetsSettingsAction: vi.fn(),
@@ -667,6 +668,42 @@ describe("WebSocket HTTP route helpers", () => {
     });
     expect(tools.status).toBe(200);
     expect(((await tools.json()) as any).last_action.message).toBe("tools:docs MCP config reloaded.");
+  });
+
+  it("reloads MCP runtime settings through an authenticated admin route", async () => {
+    const channel = makeChannel({ sessionManager: seedSession(tmpRoot()) });
+    const port = await startChannel(channel);
+
+    const denied = await fetch(`http://127.0.0.1:${port}/api/settings/mcp-presets/reload`, { method: "POST" });
+    expect(denied.status).toBe(401);
+
+    const headers = await authHeaders(port);
+    const token = headers.Authorization.slice("Bearer ".length);
+    const rejectedQueryToken = await fetch(`http://127.0.0.1:${port}/api/settings/mcp-presets/reload?token=${encodeURIComponent(token)}`, {
+      method: "POST",
+    });
+    expect(rejectedQueryToken.status).toBe(401);
+    const rejectedGet = await fetch(`http://127.0.0.1:${port}/api/settings/mcp-presets/reload`, { headers });
+    expect(rejectedGet.status).toBe(405);
+    expect(channel.bus.inbound.getNowait()).toBeUndefined();
+
+    const responsePromise = channel.handleSettingsMcpPresets({
+      method: "POST",
+      headers,
+      path: "/api/settings/mcp-presets/reload",
+    }, "reload");
+    const control = await channel.bus.consumeInbound();
+    expect(control.metadata[INBOUND_META_RUNTIME_CONTROL]).toBe(RUNTIME_CONTROL_MCP_RELOAD);
+    control.metadata[RUNTIME_CONTROL_ACK].resolve({
+      ok: true,
+      message: "MCP config reloaded without restarting memmy.",
+      requires_restart: false,
+    });
+
+    const response = await responsePromise;
+    expect(response.status).toBe(200);
+    expect(await responseJson(response)).toEqual(expect.objectContaining({ ok: true, requires_restart: false }));
+    expect(channel.bus.inbound.getNowait()).toBeUndefined();
   });
 
   it("serves image generation tool settings without accepting retired catalog fields", async () => {
