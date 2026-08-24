@@ -1,4 +1,5 @@
 import { CronSchedule } from "../cron/types.js";
+import { getModelTokenDefaults } from "../providers/model-token-defaults.js";
 import { PROVIDERS, findByName } from "../providers/registry.js";
 import { DEFAULT_MAX_TOKENS } from "../token-budget.js";
 import { normalizeTimeZoneOffset, systemUtcOffset } from "../utils/time-zone.js";
@@ -107,6 +108,9 @@ export type ModelEndpointProtocol =
   | "memmy-account";
 
 const MODEL_CAPABILITIES = ["agent", "memory_summary", "memory_evolution", "embedding", "asr", "image_generation"] as const;
+const TEXT_GENERATION_CAPABILITIES: ReadonlySet<ModelCapability> = new Set([
+  "agent", "memory_summary", "memory_evolution",
+]);
 const ENDPOINT_PROTOCOLS = [
   "openai-chat-completions", "openai-responses", "anthropic-messages", "gemini-generate-content",
   "openai-embeddings", "dashscope-input-audio-chat", "openai-images",
@@ -248,16 +252,24 @@ export class ModelPresetConfig extends Base {
     this.source = assertOneOf("modelPreset source", init.source, ["account", "byok"] as const);
     this.ownerAccountId = pick(init, ["ownerAccountId"], null);
     this.capabilities = assertStringArray("modelPreset capabilities", init.capabilities) as ModelCapability[];
-    this.maxTokens = pick(init, ["maxTokens"], DEFAULT_MAX_TOKENS);
-    this.contextWindowTokens = pick(init, ["contextWindowTokens"], DEFAULT_CONTEXT_WINDOW_TOKENS);
-    this.temperature = pick(init, ["temperature"], 0.7);
-    this.reasoningEffort = pick(init, ["reasoningEffort"], null);
     assertRequiredString("modelPreset endpoint", this.endpoint);
     assertRequiredString("modelPreset model", this.model);
     assertRequiredString("modelPreset provider", this.provider);
     if (!this.capabilities.length || this.capabilities.some((capability) => !MODEL_CAPABILITIES.includes(capability))) {
       throw new ValueError(`modelPreset capabilities must contain only ${MODEL_CAPABILITIES.join(", ")}`);
     }
+    const mappedDefaults = this.source === "byok"
+      && this.capabilities.some((capability) => TEXT_GENERATION_CAPABILITIES.has(capability))
+      ? getModelTokenDefaults(this.model)
+      : null;
+    this.maxTokens = pick(init, ["maxTokens"], mappedDefaults?.maxTokens ?? DEFAULT_MAX_TOKENS);
+    this.contextWindowTokens = pick(
+      init,
+      ["contextWindowTokens"],
+      mappedDefaults?.contextWindowTokens ?? DEFAULT_CONTEXT_WINDOW_TOKENS,
+    );
+    this.temperature = pick(init, ["temperature"], 0.7);
+    this.reasoningEffort = pick(init, ["reasoningEffort"], null);
     if (this.source === "account" && !optionalString(this.ownerAccountId)) {
       throw new ValueError("account modelPreset ownerAccountId is required");
     }
