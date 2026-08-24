@@ -370,13 +370,13 @@ const PROJECT_CONTRACT_PROMPT = `You maintain only the "Project Contract".
 The input contains the current Project Contract, a read-only current Project Environment Profile, and a chronological batch of new RawTurns.
 
 Keep only:
-- long-lived project rules explicitly stated by the user;
-- explicit user corrections to implementations that violated project rules;
-- reusable development or work guardrails demonstrated by acceptance rejection;
+- project-scoped development or work rules explicitly stated by the user that can reasonably guide future tasks in the same project;
+- explicit user requirements or corrections that establish or refine such a rule, whether stated before or after an implementation;
+- reusable project guardrails revealed by user acceptance or rejection;
 - constraints explicitly enforced by CI, Hooks, or quality gates.
 
-Do not include requirements that only constrain the current task deliverable and cannot reasonably apply to future project tasks.
-If a user requirement or correction uses persistent language such as "in the future", "always", "do not act without permission", "must", or "unless explicitly permitted", or constrains a category of future operations, treat it as a long-lived project rule even if it appears only once.
+An explicit rule may be retained after a single statement. Do not require repetition, a previous violation, acceptance or rejection evidence, or persistent words such as "in the future", "always", or "must". Determine durability from meaning: if the requirement governs a category of project operations or can reasonably apply to later tasks in this project, treat it as a project rule.
+Exclude only requirements whose substance is tied exclusively to the current task deliverable and cannot reasonably apply to future project tasks. Do not exclude a reusable rule merely because it was first expressed while discussing the current task.
 Do not include ordinary tool errors, environment facts, implementation steps, or temporary Agent choices.
 
 Use the Project Environment Profile only to understand the project type and environment. Do not modify or output it. Merge equivalent items and replace old contract content only when new evidence explicitly supersedes it. Sort by constraint strength and evidence strength.
