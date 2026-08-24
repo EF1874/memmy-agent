@@ -11,16 +11,25 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$dataPath = Join-Path $InstallDir 'data'
-$backupPath = Join-Path $WorkDir 'data-backup'
+$normalizedInstallDir = [System.IO.Path]::GetFullPath($InstallDir).TrimEnd('\')
+$dataPath = Join-Path $normalizedInstallDir 'data'
+$backupParent = "$normalizedInstallDir.memmy-upgrade-backup"
+$backupRoot = Join-Path $backupParent (Split-Path -Leaf $WorkDir)
+$backupPath = Join-Path $backupRoot 'data-backup'
+$installerDataPath = Join-Path $backupRoot 'installer-created-data'
 $stagingRoot = Split-Path -Parent $WorkDir
 $lockPath = Join-Path $stagingRoot 'active.lock'
-$appExe = Join-Path $InstallDir 'Memmy.exe'
+$lockStatePath = Join-Path $stagingRoot 'active.lock\state.json'
+$appExe = Join-Path $normalizedInstallDir 'Memmy.exe'
+$normalizedInstallerPath = [System.IO.Path]::GetFullPath($InstallerPath)
 $installerExit = 1
+$installerProcess = $null
 $dataMoved = $false
 $dataRestored = $false
 $lockAcquired = $false
+$relayPhase = 'relay-ready'
 $resolvedReopenAfterInstall = $ReopenAfterInstall
+$relayStartedAtUtc = (Get-Process -Id $PID -ErrorAction Stop).StartTime.ToUniversalTime().ToString('O')
 
 function Write-MemmyUpgradeLog([string]$Message) {
   $logDirectory = Split-Path -Parent $LogPath
@@ -62,7 +71,16 @@ function Wait-MemmyProcessExit([int]$ProcessId, [int]$TimeoutSeconds) {
   }
 }
 
+function Assert-MemmySameVolume([string]$Source, [string]$Destination) {
+  $sourceRoot = [System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($Source))
+  $destinationRoot = [System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($Destination))
+  if (-not [string]::Equals($sourceRoot, $destinationRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "refusing cross-volume directory move: $Source -> $Destination"
+  }
+}
+
 function Move-MemmyDirectory([string]$Source, [string]$Destination) {
+  Assert-MemmySameVolume -Source $Source -Destination $Destination
   New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Destination) | Out-Null
   for ($attempt = 1; $attempt -le 120; $attempt++) {
     try {
@@ -75,6 +93,35 @@ function Move-MemmyDirectory([string]$Source, [string]$Destination) {
       Start-Sleep -Milliseconds 500
     }
   }
+}
+
+function Write-MemmyRelayState {
+  $installerPid = $null
+  $installerStartedAtUtc = $null
+  if ($null -ne $installerProcess) {
+    $installerPid = $installerProcess.Id
+    try {
+      $installerStartedAtUtc = $installerProcess.StartTime.ToUniversalTime().ToString('O')
+    } catch {
+      $installerStartedAtUtc = $null
+    }
+  }
+  $state = [ordered]@{
+    schemaVersion = 2
+    phase = $relayPhase
+    stateUpdatedAtUtc = [DateTime]::UtcNow.ToString('O')
+    relayPid = $PID
+    relayStartedAtUtc = $relayStartedAtUtc
+    installerPid = $installerPid
+    installerStartedAtUtc = $installerStartedAtUtc
+    installerPath = $normalizedInstallerPath
+    installDir = $normalizedInstallDir
+    workDir = [System.IO.Path]::GetFullPath($WorkDir).TrimEnd('\')
+    backupRoot = $backupRoot
+  }
+  $temporaryStatePath = "$lockStatePath.tmp"
+  [System.IO.File]::WriteAllText($temporaryStatePath, ($state | ConvertTo-Json -Compress))
+  Move-Item -LiteralPath $temporaryStatePath -Destination $lockStatePath -Force
 }
 
 function Restore-MemmyData {
@@ -91,7 +138,6 @@ function Restore-MemmyData {
     throw "data backup is missing: $backupPath"
   }
   if (Test-Path -LiteralPath $dataPath) {
-    $installerDataPath = Join-Path $WorkDir 'installer-created-data'
     if (Test-Path -LiteralPath $installerDataPath) {
       throw "installer-created data backup already exists: $installerDataPath"
     }
@@ -169,7 +215,7 @@ function Schedule-MemmyStagingCleanup {
     return
   }
   $powershellPath = Join-Path $PSHOME 'powershell.exe'
-  $cleanupArguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$cleanupScriptPath`" -WorkDir `"$WorkDir`""
+  $cleanupArguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$cleanupScriptPath`" -WorkDir `"$WorkDir`" -BackupRoot `"$backupRoot`""
   Start-Process -FilePath $powershellPath -ArgumentList $cleanupArguments -WorkingDirectory $stagingRoot -WindowStyle Hidden
 }
 
@@ -180,23 +226,29 @@ try {
   $resolvedReopenAfterInstall = Resolve-MemmyLegacyHelperReopenIntent -HelperPid $LegacyHelperPid -MarkerPath $markerPath -Fallback $ReopenAfterInstall
   New-Item -ItemType Directory -Path $lockPath -ErrorAction Stop | Out-Null
   $lockAcquired = $true
+  Write-MemmyRelayState
   [System.IO.File]::WriteAllText($ReadyPath, $resolvedReopenAfterInstall)
   Write-MemmyUpgradeLog "relay ready reopen=$resolvedReopenAfterInstall"
   Wait-MemmyProcessExit -ProcessId $OriginalInstallerPid -TimeoutSeconds 120
 
   if (Test-Path -LiteralPath $dataPath -PathType Container) {
-    if (Test-Path -LiteralPath $backupPath) {
-      throw "refusing to overwrite existing data backup: $backupPath"
+    if (Test-Path -LiteralPath $backupRoot) {
+      throw "refusing to overwrite existing upgrade backup root: $backupRoot"
     }
     Move-MemmyDirectory -Source $dataPath -Destination $backupPath
     $dataMoved = $true
+    $relayPhase = 'data-moved'
+    Write-MemmyRelayState
     Write-MemmyUpgradeLog "data moved to $backupPath"
   }
 
   $arguments = @('/S', '--updated', '--memmy-upgrade-relayed', '/currentuser', ('/D=' + $InstallDir))
   $env:MEMMY_UPGRADE_WORK_DIR = $WorkDir
+  $env:MEMMY_UPGRADE_BACKUP_ROOT = $backupRoot
   $env:MEMMY_UPGRADE_REOPEN_AFTER_INSTALL = $resolvedReopenAfterInstall
-  Write-MemmyUpgradeLog "child installer context workDir=$env:MEMMY_UPGRADE_WORK_DIR reopen=$env:MEMMY_UPGRADE_REOPEN_AFTER_INSTALL"
+  Write-MemmyUpgradeLog "child installer context workDir=$env:MEMMY_UPGRADE_WORK_DIR backupRoot=$env:MEMMY_UPGRADE_BACKUP_ROOT reopen=$env:MEMMY_UPGRADE_REOPEN_AFTER_INSTALL"
+  $relayPhase = 'installer-starting'
+  Write-MemmyRelayState
   $installerProcess = Start-Process -FilePath $InstallerPath -ArgumentList $arguments -PassThru -WindowStyle Hidden
   $installerProcess.WaitForExit()
   $installerExit = if ($null -eq $installerProcess.ExitCode) { 1 } else { $installerProcess.ExitCode }
@@ -213,8 +265,10 @@ try {
     Write-MemmyUpgradeLog ('data restore failed: ' + ($_ | Out-String))
     $dataRestored = $false
   }
-  if ($lockAcquired) {
+  if ($lockAcquired -and $dataRestored) {
     Remove-Item -LiteralPath $lockPath -Recurse -Force -ErrorAction SilentlyContinue
+  } elseif ($lockAcquired) {
+    Write-MemmyUpgradeLog "active lock retained for automatic recovery $lockPath"
   }
 }
 
