@@ -396,6 +396,24 @@ body.memmy-window-fullscreen {
 .home-workspace-context__branch {
   max-width: min(14rem, 30vw);
   flex: 0 1 auto;
+  padding: 0 6px;
+  border-radius: var(--radius-input);
+  font-weight: 400;
+}
+
+.home-workspace-context__branch.home-workspace-context__trigger--open {
+  background: color-mix(in srgb, var(--color-action-sky) 10%, transparent);
+  color: var(--color-action-sky-hover);
+}
+
+.home-workspace-context__branch.home-workspace-context__trigger--open:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-action-sky) 14%, transparent);
+  color: var(--color-action-sky-hover);
+}
+
+.home-workspace-context__branch:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-action-sky) 45%, transparent);
+  outline-offset: -2px;
 }
 
 .home-workspace-context__branch > span {
@@ -408,17 +426,27 @@ body.memmy-window-fullscreen {
   flex: 0 0 auto;
 }
 
+.home-workspace-context__branch svg {
+  width: 13px;
+  height: 13px;
+  color: inherit;
+  opacity: 0.72;
+}
+
 .home-workspace-menu {
+  --home-workspace-menu-separator: color-mix(in srgb, var(--color-border-stone) 44%, transparent);
   position: absolute;
-  top: calc(100% + 10px);
+  top: calc(100% + 2px);
   left: 0;
   z-index: 100;
-  padding: 10px;
-  border: 1px solid color-mix(in srgb, var(--color-border-stone) 72%, transparent);
-  border-radius: 16px;
-  background: color-mix(in srgb, var(--color-background-paper) 98%, var(--color-canvas-oat));
-  box-shadow: 0 16px 42px rgb(17 29 28 / 0.16);
+  padding: 6px;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 48%, transparent);
+  border-radius: var(--radius-card);
+  background: var(--color-background-paper);
+  box-shadow: var(--shadow-popover);
   color: var(--color-text-ink);
+  font-family: var(--font-sans);
+  font-size: var(--codex-text-sm);
 }
 
 .home-workspace-menu--mode {
@@ -426,45 +454,50 @@ body.memmy-window-fullscreen {
 }
 
 .home-workspace-menu--branch {
-  width: min(350px, calc(100vw - 32px));
-}
-
-.home-workspace-menu__heading {
-  margin: 2px 8px 7px;
-  color: color-mix(in srgb, var(--color-text-ink) 52%, transparent);
-  font-size: 12px;
-  font-weight: 650;
+  width: min(300px, calc(100vw - 32px));
 }
 
 .home-workspace-menu__item {
   display: grid;
   width: 100%;
   min-width: 0;
-  height: 42px;
-  grid-template-columns: 18px minmax(0, 1fr) 18px;
+  min-height: 32px;
+  grid-template-columns: 13px minmax(0, 1fr) 13px;
   align-items: center;
-  gap: 9px;
-  padding: 0 10px;
+  gap: 8px;
+  padding: 5px 8px;
   border: 0;
-  border-radius: 10px;
+  border-radius: var(--radius-input);
   background: transparent;
-  color: inherit;
-  font-family: inherit;
-  font-size: inherit;
-  font-weight: inherit;
-  line-height: inherit;
+  color: var(--color-text-ink);
+  font-family: var(--font-sans);
+  font-size: var(--codex-text-sm);
+  font-weight: 400;
+  line-height: 16px;
   text-align: left;
   cursor: pointer;
 }
 
-.home-workspace-menu__item:hover,
+.home-workspace-menu__item:hover:not([aria-selected="true"]):not([aria-checked="true"]):not(:disabled) {
+  background: color-mix(in srgb, var(--color-action-sky) 9%, var(--color-background-paper));
+  color: color-mix(in srgb, var(--color-action-sky-hover) 72%, var(--color-text-ink));
+}
+
 .home-workspace-menu__item[aria-selected="true"],
 .home-workspace-menu__item[aria-checked="true"] {
-  background: color-mix(in srgb, var(--color-text-ink) 6%, transparent);
+  background: transparent;
+  color: var(--color-text-ink);
+  font-weight: 500;
+}
+
+.home-workspace-menu__item[aria-selected="true"]:hover,
+.home-workspace-menu__item[aria-checked="true"]:hover {
+  background: color-mix(in srgb, var(--color-action-sky) 9%, var(--color-background-paper));
+  color: var(--color-text-ink);
 }
 
 .home-workspace-menu__item:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--color-brand-primary) 55%, transparent);
+  outline: 2px solid color-mix(in srgb, var(--color-action-sky) 45%, transparent);
   outline-offset: -2px;
 }
 
@@ -480,20 +513,34 @@ body.memmy-window-fullscreen {
   white-space: nowrap;
 }
 
+.home-workspace-menu__item svg {
+  display: block;
+  width: 13px;
+  height: 13px;
+  color: inherit;
+  opacity: 0.72;
+}
+
+.home-workspace-menu__item[aria-selected="true"] > svg:last-child,
+.home-workspace-menu__item[aria-checked="true"] > svg:last-child {
+  color: var(--color-action-sky-hover);
+  opacity: 1;
+}
+
 .home-workspace-menu__search {
   display: flex;
-  height: 38px;
+  min-height: 30px;
   align-items: center;
   gap: 8px;
-  margin-bottom: 10px;
-  padding: 0 9px;
-  border: 1px solid color-mix(in srgb, var(--color-border-stone) 62%, transparent);
-  border-radius: 10px;
-  color: color-mix(in srgb, var(--color-text-ink) 48%, transparent);
+  margin: 0 2px 4px;
+  padding: 0 6px 6px;
+  border-bottom: var(--codex-separator-width) solid var(--home-workspace-menu-separator);
+  color: color-mix(in srgb, var(--color-text-ink) 45%, transparent);
 }
 
 .home-workspace-menu__search:focus-within {
-  border-color: color-mix(in srgb, var(--color-brand-primary) 55%, var(--color-border-stone));
+  color: var(--color-text-ink);
+  border-bottom-color: var(--home-workspace-menu-separator);
 }
 
 .home-workspace-menu__search input {
@@ -503,14 +550,18 @@ body.memmy-window-fullscreen {
   outline: 0;
   background: transparent;
   color: var(--color-text-ink);
-  font-family: inherit;
-  font-size: inherit;
-  font-weight: inherit;
-  line-height: inherit;
+  font-family: var(--font-sans);
+  font-size: var(--codex-text-sm);
+  font-weight: 400;
+  line-height: 16px;
+}
+
+.home-workspace-menu__search input::placeholder {
+  color: color-mix(in srgb, var(--color-text-ink) 42%, transparent);
 }
 
 .home-workspace-menu__branch-list {
-  max-height: calc(42px * var(--visible-branch-count, 5));
+  max-height: calc(32px * var(--visible-branch-count, 5));
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -520,25 +571,37 @@ body.memmy-window-fullscreen {
 .home-workspace-menu__branch-create-form {
   display: grid;
   gap: 8px;
-  margin-top: 8px;
-  padding: 10px 8px;
-  border-top: 1px solid color-mix(in srgb, var(--color-border-stone) 42%, transparent);
+  margin: 4px 2px 0;
+  padding: 8px 6px 2px;
+  border-top: var(--codex-separator-width) solid var(--home-workspace-menu-separator);
+}
+
+.home-workspace-menu__branch-create-base {
+  min-width: 0;
+  margin: 0;
+  color: color-mix(in srgb, var(--color-text-ink) 48%, transparent);
+  font-family: var(--font-sans);
+  font-size: var(--codex-text-sm);
+  line-height: 16px;
+  overflow-wrap: anywhere;
 }
 
 .home-workspace-menu__branch-create-form input {
   width: 100%;
-  height: 36px;
-  padding: 0 9px;
-  border: 1px solid color-mix(in srgb, var(--color-border-stone) 62%, transparent);
-  border-radius: 8px;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 48%, transparent);
+  border-radius: var(--radius-input);
+  outline: 0;
   background: transparent;
   color: var(--color-text-ink);
-  font-family: inherit;
-  font-size: 12px;
+  font-family: var(--font-sans);
+  font-size: var(--codex-text-sm);
+  line-height: 16px;
 }
 
 .home-workspace-menu__branch-create-form input:focus {
-  border-color: color-mix(in srgb, var(--color-brand-primary) 55%, var(--color-border-stone));
+  border-color: color-mix(in srgb, var(--color-action-sky) 45%, var(--color-border-stone));
 }
 
 .home-workspace-menu__branch-create-actions {
@@ -549,14 +612,29 @@ body.memmy-window-fullscreen {
 
 .home-workspace-menu__branch-create-actions button {
   min-height: 28px;
-  padding: 0 9px;
-  border-radius: 7px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--radius-input);
+  background: transparent;
   color: color-mix(in srgb, var(--color-text-ink) 70%, transparent);
-  font-size: 11px;
+  font-family: var(--font-sans);
+  font-size: var(--codex-text-sm);
+  line-height: 16px;
 }
 
 .home-workspace-menu__branch-create-actions button:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--color-text-ink) 6%, transparent);
+  background: color-mix(in srgb, var(--color-action-sky) 9%, var(--color-background-paper));
+  color: var(--color-text-ink);
+}
+
+.home-workspace-menu__branch-create-actions button[type="submit"] {
+  background: color-mix(in srgb, var(--color-action-sky) 10%, transparent);
+  color: var(--color-action-sky-hover);
+}
+
+.home-workspace-menu__branch-create-actions button[type="submit"]:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-action-sky) 14%, transparent);
+  color: var(--color-action-sky-hover);
 }
 
 .home-workspace-menu__branch-create-actions button:disabled {
@@ -565,38 +643,45 @@ body.memmy-window-fullscreen {
 }
 
 .home-workspace-menu__branch-footer {
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid color-mix(in srgb, var(--color-border-stone) 42%, transparent);
+  margin: 4px 2px 0;
+  padding-top: 4px;
+  border-top: var(--codex-separator-width) solid var(--home-workspace-menu-separator);
 }
 
 .home-workspace-menu__branch-create {
   display: flex;
   width: 100%;
-  height: 42px;
+  min-height: 30px;
   align-items: center;
-  gap: 9px;
-  padding: 0 10px;
-  border-radius: 10px;
+  gap: 8px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: var(--radius-input);
+  background: transparent;
   color: var(--color-text-ink);
-  font-family: inherit;
-  font-size: inherit;
+  font-family: var(--font-sans);
+  font-size: var(--codex-text-sm);
+  line-height: 16px;
   text-align: left;
+  cursor: pointer;
 }
 
-.home-workspace-menu__branch-create:hover,
-.home-workspace-menu__branch-create[aria-expanded="true"] {
-  background: color-mix(in srgb, var(--color-text-ink) 6%, transparent);
+.home-workspace-menu__branch-create:hover {
+  background: color-mix(in srgb, var(--color-action-sky) 9%, var(--color-background-paper));
+  color: color-mix(in srgb, var(--color-action-sky-hover) 72%, var(--color-text-ink));
 }
 
 .home-workspace-menu__empty {
-  margin: 14px 10px;
-  color: color-mix(in srgb, var(--color-text-ink) 44%, transparent);
-  font-size: 12px;
+  margin: 0;
+  padding: 8px;
+  color: color-mix(in srgb, var(--color-text-ink) 48%, transparent);
+  font-family: var(--font-sans);
+  font-size: var(--codex-text-sm);
+  line-height: 16px;
 }
 
 .home-workspace-menu__error {
-  margin: 8px 8px 2px;
+  margin: 4px 8px 2px;
   color: var(--color-danger, #b84c43);
   font-size: 11px;
   overflow-wrap: anywhere;
