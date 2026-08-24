@@ -1727,7 +1727,26 @@ function resolvePreparedRequiredUpdatePath(): string {
  * @returns The lock directory path next to the marker file.
  */
 function resolvePreparedRequiredUpdateLockPath(): string {
+  const relayLockPath = resolveWindowsUpgradeRelayLockPath();
+  if (relayLockPath && existsSync(relayLockPath)) {
+    return relayLockPath;
+  }
   return `${resolvePreparedRequiredUpdatePath()}.lock`;
+}
+
+/**
+ * Resolves the install-independent lock held by the Windows legacy-upgrade relay.
+ *
+ * The relay moves the old install-local data directory out of the way, so the legacy marker lock
+ * temporarily disappears. New Windows builds prefer this external lock while preserving the old
+ * marker lock as a fallback for updates that do not need the relay.
+ *
+ * @returns The relay lock path on Windows, or null when it cannot be resolved.
+ */
+function resolveWindowsUpgradeRelayLockPath(): string | null {
+  if (process.platform !== "win32") return null;
+  const localAppData = process.env.LOCALAPPDATA?.trim();
+  return localAppData ? join(localAppData, "Memmy", "upgrade-staging", "active.lock") : null;
 }
 
 /**
