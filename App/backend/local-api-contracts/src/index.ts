@@ -78,9 +78,14 @@ export const AppSettingsDtoSchema = z.object({
     // Notification sound enabled.
     notificationSoundEnabled: z.boolean().default(true),
     // Menu bar icon enabled.
-    menuBarIconEnabled: z.boolean().default(true)
+    menuBarIconEnabled: z.boolean().default(true),
+    // Stop the standalone Memory daemon when Desktop exits.
+    stopMemoryServiceOnExit: z.boolean().default(false)
 });
 export type AppSettingsDto = z.infer<typeof AppSettingsDtoSchema>;
+
+export const FirstEncounterReportStatusSchema = z.enum(["pending", "shown", "skipped"]);
+export type FirstEncounterReportStatus = z.infer<typeof FirstEncounterReportStatusSchema>;
 
 export const OnboardingStateDtoSchema = z.object({
   // Completed.
@@ -93,6 +98,8 @@ export const OnboardingStateDtoSchema = z.object({
   acceptedTermsVersion: z.string().nullable(),
   // Scan permission.
   scanPermission: ScanPermissionSchema,
+  // Installation-local first encounter report state.
+  firstEncounterReportStatus: FirstEncounterReportStatusSchema.optional(),
   // Improvement program.
   improvementProgram: ImprovementProgramSchema,
   // Completed at.
@@ -413,7 +420,12 @@ export type AgentSourceScanInput = z.infer<typeof AgentSourceScanInputSchema>;
 
 export const OnboardingInsightReportInputSchema = z.object({
     locale: z.enum(["zh-CN", "en-US"]).optional(),
-    stream: z.boolean().optional()
+    stream: z.boolean().optional(),
+    detectedAgents: z.array(z.object({
+        sourceId: z.string().min(1),
+        displayName: z.string().min(1),
+        recentSessionCount: z.number().int().nonnegative()
+    })).max(50).optional()
 }).default({});
 export type OnboardingInsightReportInput = z.infer<typeof OnboardingInsightReportInputSchema>;
 
@@ -598,7 +610,8 @@ export const PatchAppSettingsInputSchema = z
         defaultLaunchMode: DefaultLaunchModeSchema,
         taskDoneNotificationEnabled: z.boolean(),
         notificationSoundEnabled: z.boolean(),
-        menuBarIconEnabled: z.boolean()
+        menuBarIconEnabled: z.boolean(),
+        stopMemoryServiceOnExit: z.boolean()
     })
     .partial();
 export type PatchAppSettingsInput = z.infer<typeof PatchAppSettingsInputSchema>;
@@ -1022,11 +1035,22 @@ export const EffectiveModelCandidatesSchema = z.object({
 });
 export type EffectiveModelCandidates = z.infer<typeof EffectiveModelCandidatesSchema>;
 
+/** Runtime ownership switches stored under ~/.memmy/config.yaml#memmyMemory. */
+export const MemoryRuntimeModelSettingsSchema = z.object({
+    roleRouting: z.object({
+        summary: z.enum(["follow", "fixed"]),
+        evolution: z.enum(["follow", "fixed"])
+    }),
+    embeddingMode: z.enum(["cloud", "local", "custom"])
+});
+export type MemoryRuntimeModelSettings = z.infer<typeof MemoryRuntimeModelSettingsSchema>;
+
 /** Schema for model config view. */
 export const ModelConfigViewSchema = z.object({
     configRevision: z.string().min(1),
     providers: z.array(TextModelProviderViewSchema),
     modelAssignments: ModelAssignmentsSchema,
+    memorySettings: MemoryRuntimeModelSettingsSchema.optional(),
     effectiveCandidates: EffectiveModelCandidatesSchema,
     configured: z.boolean(),
     updatedAt: z.string().datetime()

@@ -8,7 +8,7 @@ import {
   type L3WorldModelFields,
   type L3WorldModelTraceHeadResponse,
   type WorkspaceUri
-} from "@memmy/local-api-contracts";
+} from "../contracts/index.js";
 import { retrievalDocumentForMemory } from "../algorithm/plugin-algorithms.js";
 import type {
   ProjectEnvironmentKind,
@@ -78,6 +78,14 @@ const BUNDLE_TABLES = [
   "runtime_kv",
   "artifacts",
   "audit_logs"
+] as const;
+const CLEAR_MEMORY_TABLES = [
+  ...BUNDLE_TABLES,
+  "memories_fts",
+  "user_memories_fts",
+  "memory_vector_entries",
+  "idempotency_keys",
+  "legacy_migration_ledger"
 ] as const;
 type BundleTableName = typeof BUNDLE_TABLES[number];
 const LOG_TABLE_RETENTION_LIMIT = 10_000;
@@ -1375,6 +1383,24 @@ export class UserMemoryRepository {
     return row.count;
   }
 
+  embeddingDimensionCounts(userId: string): {
+    totalSlots: number;
+    dimensions: Array<{ dimension: number; count: number }>;
+  } {
+    const where = "user_id = ? AND status = 'active' AND deleted_at IS NULL";
+    const totalSlots = Number(this.db.prepare(
+      `SELECT COUNT(*) FROM user_memories WHERE ${where}`
+    ).pluck().get(userId) ?? 0);
+    const dimensions = this.db.prepare(
+      `SELECT json_array_length(embedding_json) AS dimension, COUNT(*) AS count
+       FROM user_memories
+       WHERE ${where} AND embedding_json IS NOT NULL
+       GROUP BY json_array_length(embedding_json)
+       ORDER BY count DESC, dimension DESC`
+    ).all(userId) as Array<{ dimension: number; count: number }>;
+    return { totalSlots, dimensions };
+  }
+
   getActiveByNormalizedText(userId: string, hash: string): UserMemoryRecord | undefined {
     const row = this.db.prepare(
       `SELECT * FROM user_memories
@@ -1612,6 +1638,21 @@ export class RuntimeRepository {
            updated_at = excluded.updated_at`
       )
       .run(key, toJson(value), at);
+  }
+
+  listKv(prefix: string, limit = 200): Array<{ key: string; value: unknown; updatedAt: string }> {
+    const rows = this.db
+      .prepare(`SELECT key, value_json, updated_at FROM runtime_kv WHERE key LIKE ? ORDER BY updated_at DESC LIMIT ?`)
+      .all(`${prefix}%`, Math.max(1, Math.min(limit, 1_000))) as Array<{
+        key: string;
+        value_json: string;
+        updated_at: string;
+      }>;
+    return rows.map((row) => ({
+      key: row.key,
+      value: parseJson(row.value_json, undefined),
+      updatedAt: row.updated_at
+    }));
   }
 
   createSession(session: SessionRecord): SessionRecord {
@@ -5017,6 +5058,35 @@ export class Repositories {
 
   transaction<T>(fn: () => T): T {
     return this.db.transaction(fn)();
+  }
+
+  clearAllMemoryData(): Record<string, number> {
+    const existing = new Set(
+      (this.db.prepare("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')").pluck().all() as unknown[])
+        .map(String)
+    );
+    const vectorTables = [...existing].filter((name) => /^memory_vec_\d+$/.test(name));
+    const tables = [...new Set([...vectorTables, ...CLEAR_MEMORY_TABLES])].filter((name) => existing.has(name));
+    const foreignKeysEnabled = this.db.pragma("foreign_keys", { simple: true }) === 1;
+    this.db.pragma("foreign_keys = OFF");
+    try {
+      return this.db.transaction(() => {
+        const cleared: Record<string, number> = {};
+        for (const table of tables) {
+          cleared[table] = this.db.prepare(`DELETE FROM "${table}"`).run().changes;
+        }
+        if (existing.has("sqlite_sequence")) {
+          const sequenceTables = tables.filter((table) => !table.startsWith("memory_vec_"));
+          if (sequenceTables.length) {
+            this.db.prepare(`DELETE FROM sqlite_sequence WHERE name IN (${sequenceTables.map(() => "?").join(", ")})`)
+              .run(...sequenceTables);
+          }
+        }
+        return cleared;
+      })();
+    } finally {
+      if (foreignKeysEnabled) this.db.pragma("foreign_keys = ON");
+    }
   }
 }
 

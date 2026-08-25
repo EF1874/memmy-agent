@@ -423,6 +423,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const registeredAtText = formatRegisteredAt(state.account.registeredAt, t);
   const defaultLaunchMode = appSettings?.defaultLaunchMode ?? state.navigation.preferredMode ?? "last";
   const autoUpdateEnabled = appSettings?.autoUpdateEnabled ?? true;
+  const stopMemoryServiceOnExit = appSettings?.stopMemoryServiceOnExit ?? false;
   const taskDoneNotificationEnabled = appSettings?.taskDoneNotificationEnabled ?? true;
   const notificationSoundEnabled = appSettings?.notificationSoundEnabled ?? true;
   const improvementPlan = privacySettings?.allowMemoryImprovementUpload ?? false;
@@ -1515,6 +1516,13 @@ export function SettingsPageView(props: SettingsPageViewProps) {
               description={t(platform === "win32" ? "settings.window.menuBarIconDescWindows" : "settings.window.menuBarIconDesc")}
               checked={menuBarIcon}
               onChange={handleMenuBarIconChange}
+            />
+            <Divider />
+            <ToggleRow
+              label={t("settings.window.stopMemoryOnExit")}
+              description={t("settings.window.stopMemoryOnExitDesc")}
+              checked={stopMemoryServiceOnExit}
+              onChange={(checked) => persistSettings({ stopMemoryServiceOnExit: checked })}
             />
           </div>
         </Section>

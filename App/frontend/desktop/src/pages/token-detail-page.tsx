@@ -7,7 +7,7 @@ import { buildInvitationSignupEvent } from "../app/invitation-analytics.js";
 import { resolveInvitationToastKind } from "../app/invitation-result.js";
 import { persistLoginModeSelection } from "../app/login-mode.js";
 import { useApiClients } from "../app/providers.js";
-import { buildAccountOnboardingStartPatch, resolvePostLoginRoute } from "../app/routes.js";
+import { buildAccountOnboardingStartPatch, resolvePostLoginRoute, shouldShowFirstEncounterReport } from "../app/routes.js";
 import { setAnalyticsUserId } from "../analytics/analytics-context.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import { AuthCodeForm } from "../components/auth-code-form.js";
@@ -89,7 +89,7 @@ export function TokenDetailPage() {
       registeredAt: session.profile.registeredAt
     }));
 
-    if (session.profile.hasFinishedGuide) {
+    if (session.profile.hasFinishedGuide && state.bootstrap && !shouldShowFirstEncounterReport(state.bootstrap.onboarding)) {
       await continueAfterRegistration({
         completed: true,
         currentStep: "completed",
@@ -104,9 +104,9 @@ export function TokenDetailPage() {
 
   async function continueAfterRegistration(forcedOnboarding?: Partial<OnboardingStateDto>) {
     const onboarding = state.bootstrap?.onboarding;
-    const onboardingPatch = forcedOnboarding ?? buildAccountOnboardingStartPatch();
+    const onboardingPatch = forcedOnboarding ?? buildAccountOnboardingStartPatch(onboarding);
     const nextOnboarding = {
-      ...buildAccountOnboardingStartPatch(),
+      ...buildAccountOnboardingStartPatch(onboarding),
       ...onboarding,
       ...onboardingPatch
     };

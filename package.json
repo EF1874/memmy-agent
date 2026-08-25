@@ -51,6 +51,7 @@
     "memory:package": "npm run package:npm -w @memmy/memory",
     "memory:pack": "npm run pack:npm -w @memmy/memory",
     "memory:binary": "npm run binary -w @memmy/memory",
+    "memory:runtime:package": "npm run runtime:package -w @memmy/memory",
     "memory:dev": "npm run dev -w @memmy/memory",
     "memory:serve": "npm run serve -w @memmy/memory",
     "memory:serve:local": "npm run serve:local -w @memmy/memory",

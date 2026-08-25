@@ -7,8 +7,6 @@ import { createAppStateStore } from "./infrastructure/app-state-store/index.js";
 import { createHttpCloudClient, type CloudClient } from "./adapters/outbound/cloud-client/index.js";
 import {
   createHttpMemoryClient,
-  createMemosSqliteMemoryClient,
-  discoverMemosSqliteSources,
   type MemoryClient,
   type MemoryLayerConfig
 } from "./adapters/outbound/memory-client/index.js";
@@ -18,6 +16,10 @@ import {
   readConfiguredAgentTimeZone,
   readAgentGatewayBootstrapSecret
 } from "./infrastructure/memmy-config/index.js";
+import {
+  createMemoryScanPreferencesStore,
+  ensureMemoryScanPreferences
+} from "./infrastructure/memmy-config/agent-access.js";
 import { createPermissionManager } from "./permission/index.js";
 import { createLocalApiServer } from "./adapters/inbound/local-api/server.js";
 import { createBackendServices, type BootstrapScenario } from "./services/index.js";
@@ -100,6 +102,11 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       memmyConfigPath,
       accountChannel: options.accountChannel
     });
+    await ensureMemoryScanPreferences(
+      memmyConfigPath,
+      appStateStore.repositories.bootstrap.getScanPreferences()
+    );
+    const scanPreferencesStore = createMemoryScanPreferencesStore(memmyConfigPath);
 
     const permissionManager = createPermissionManager({
       appStateStore,
@@ -136,6 +143,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       bootstrapScenario: options.bootstrapScenario,
       memmyConfigWriter,
       memmyConfigPath,
+      scanPreferencesStore,
       accountChannel: options.accountChannel,
       memmyAgentAdminBootstrapSecret: await readAgentGatewayBootstrapSecret(memmyConfigPath)
     });
@@ -176,7 +184,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       localToken,
       intervalMs: options.agentSourceAutoScanIntervalMs ?? DEFAULT_AGENT_SOURCE_AUTO_SCAN_INTERVAL_MS,
       initialDelayMs: options.agentSourceAutoScanInitialDelayMs,
-      getScanPreferences: () => appStateStore.repositories.bootstrap.getScanPreferences()
+      getScanPreferences: () => scanPreferencesStore.getScanPreferences()
     });
     autoScan.start();
 
@@ -243,10 +251,8 @@ export function readMemoryLayerConfig(env: NodeJS.ProcessEnv): MemoryLayerConfig
 /**
  * Creates the default MemoryClient.
  *
- * Priority:
- * 1. The standard HTTP memory layer pointed to by MEMMY_MEMORY_LAYER_URL.
- * 2. A read-only client over this project's MemoryService SQLite database.
- * Fails outright when no real data source is available, to avoid the desktop app silently showing fake data.
+ * Memory is a process boundary: Desktop always talks to it over HTTP and never
+ * reads the service-owned SQLite database.
  */
 function createDefaultMemoryClient(env: NodeJS.ProcessEnv): MemoryClient {
   const memoryLayerConfig = readMemoryLayerConfig(env);
@@ -254,12 +260,5 @@ function createDefaultMemoryClient(env: NodeJS.ProcessEnv): MemoryClient {
     return createHttpMemoryClient(memoryLayerConfig);
   }
 
-  if (env.MEMMY_DISABLE_MEMOS_SQLITE !== "1") {
-    const sources = discoverMemosSqliteSources(env);
-    if (sources.length > 0) {
-      return createMemosSqliteMemoryClient({ sources });
-    }
-  }
-
-  throw new Error("MEMMY_MEMORY_LAYER_URL or a local Memmy memory SQLite source is required");
+  throw new Error("MEMMY_MEMORY_LAYER_URL is required");
 }

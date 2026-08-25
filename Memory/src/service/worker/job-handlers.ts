@@ -83,6 +83,7 @@ export interface WorkerJobHandlerDeps {
   repos: Pick<Repositories, "transaction" | "memories" | "userMemories" | "processing" | "runtime">;
   capture: { synthReflection: boolean };
   reward: { feedbackWindowSec: number };
+  lightweightMemory: { enabled: boolean };
   nowIso(): string;
   requireSession(id: string): SessionRecord;
   feedbackTargetFromEpisode(episode: EpisodeRecord): MemoryRow | undefined;
@@ -337,6 +338,7 @@ export function finalizeClosedEpisode(
   at: string,
   trigger: ClosedEpisodeTrigger
 ): EvolutionJobRecord[] {
+  if (deps.lightweightMemory.enabled) return [];
   const current = deps.repos.runtime.getEpisode(episode.id) ?? episode;
   if (current.status !== "closed" || current.l1MemoryIds.length === 0) return [];
   if (episodeHasPendingCaptureDecision(deps, current)) return [];

@@ -4,7 +4,7 @@
  */
 import {
   cloudServiceFromDesktopRuntimeManifest,
-} from "@memmy/local-api-contracts";
+} from "../contracts/desktop-runtime-manifest.js";
 import { config as loadDotenv } from "dotenv";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";

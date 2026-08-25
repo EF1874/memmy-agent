@@ -16,6 +16,8 @@ describe("HttpMemoryClient", () => {
     expect(Object.values(MEMORY_LAYER_PATHS)).toEqual([
       "/api/v1/health",
       "/api/v1/admin/reload-config",
+      "/api/v1/admin/export",
+      "/api/v1/admin/data",
       "/api/v1/sessions/open",
       "/api/v1/sessions/:sessionId/close",
       "/api/v1/turns/start",
@@ -79,6 +81,8 @@ describe("HttpMemoryClient", () => {
         summary: { routing: "fixed" }
       }
     });
+    await expect(client.exportBundle!()).resolves.toMatchObject({ manifest: { service: "memmy-memory-service" } });
+    await expect(client.clearAllData!()).resolves.toMatchObject({ ok: true, cleared: {} });
     await expect(client.openSession(openSessionInput())).resolves.toMatchObject({ status: "open" });
     await expect(client.closeSession(closeSessionInput())).resolves.toMatchObject({ status: "closed" });
     await expect(client.startTurn(startTurnInput())).resolves.toMatchObject({ status: [] });
@@ -109,6 +113,8 @@ describe("HttpMemoryClient", () => {
     expect(requests.map((request) => `${request.method} ${request.path}`)).toEqual([
       "GET /api/v1/health",
       "POST /api/v1/admin/reload-config",
+      "GET /api/v1/admin/export",
+      "DELETE /api/v1/admin/data",
       "POST /api/v1/sessions/open",
       "POST /api/v1/sessions/session-1/close",
       "POST /api/v1/turns/start",
@@ -409,6 +415,12 @@ function requestBodySource(body: unknown): string | undefined {
 function fixtureFor(method: string, path: string, body: unknown): unknown {
   if (method === "GET" && path === "/api/v1/health") return healthOutput();
   if (method === "POST" && path === "/api/v1/admin/reload-config") return reloadConfigOutput();
+  if (method === "GET" && path === "/api/v1/admin/export") {
+    return { manifest: { service: "memmy-memory-service" }, tables: {} };
+  }
+  if (method === "DELETE" && path === "/api/v1/admin/data") {
+    return { ok: true, cleared: {}, clearedAt: now(), serverTime: now() };
+  }
   if (method === "POST" && path === "/api/v1/sessions/open") return openSessionOutput();
   if (method === "POST" && path === "/api/v1/sessions/session-1/close") return closeSessionOutput();
   if (method === "POST" && path === "/api/v1/turns/start") return startTurnOutput(body);

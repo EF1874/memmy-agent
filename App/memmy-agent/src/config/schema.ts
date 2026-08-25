@@ -1071,35 +1071,60 @@ export class MemmyMemoryConfig extends Base {
   userId = "local-user";
   version?: number;
   storage?: Dict;
+  roleRouting?: Dict;
   summary?: Dict;
   evolution?: Dict;
   embedding?: Dict;
   algorithm?: Dict;
+  logging?: Dict;
+  telemetry?: Dict;
+  hub?: Dict;
+  agentAccess?: Dict;
+  private readonly additional: Dict;
 
   constructor(init: Dict = {}, options: { userId?: string } = {}) {
     super();
-    for (const legacy of ["enable", "activeProfile", "profiles", "summary", "evolution", "embedding"]) {
+    for (const legacy of ["enable", "activeProfile", "profiles"]) {
       if (Object.prototype.hasOwnProperty.call(init, legacy)) {
         throw new ValueError(`memmyMemory current contract does not accept legacy field '${legacy}'`);
       }
     }
+    this.additional = { ...init };
+    for (const key of [
+      "enabled", "userId", "version", "storage", "roleRouting", "summary", "evolution",
+      "embedding", "algorithm", "logging", "telemetry", "hub", "agentAccess"
+    ]) delete this.additional[key];
     this.enabled = pick(init, ["enabled"], true);
     this.userId = options.userId ?? pick(init, ["userId"], this.userId);
     this.version = pick<number | undefined>(init, ["version"], undefined);
     this.storage = pick<Dict | undefined>(init, ["storage"], undefined);
-    this.summary = undefined;
-    this.evolution = undefined;
-    this.embedding = undefined;
+    this.roleRouting = pick<Dict | undefined>(init, ["roleRouting"], undefined);
+    this.summary = pick<Dict | undefined>(init, ["summary"], undefined);
+    this.evolution = pick<Dict | undefined>(init, ["evolution"], undefined);
+    this.embedding = pick<Dict | undefined>(init, ["embedding"], undefined);
     this.algorithm = pick<Dict | undefined>(init, ["algorithm"], undefined);
+    this.logging = pick<Dict | undefined>(init, ["logging"], undefined);
+    this.telemetry = pick<Dict | undefined>(init, ["telemetry"], undefined);
+    this.hub = pick<Dict | undefined>(init, ["hub"], undefined);
+    this.agentAccess = pick<Dict | undefined>(init, ["agentAccess"], undefined);
   }
 
   override toObject(): Dict {
     return omitUndefined({
+      ...this.additional,
       enabled: this.enabled,
       userId: this.userId,
       version: this.version,
       storage: this.storage,
+      roleRouting: this.roleRouting,
+      summary: this.summary,
+      evolution: this.evolution,
+      embedding: this.embedding,
       algorithm: this.algorithm,
+      logging: this.logging,
+      telemetry: this.telemetry,
+      hub: this.hub,
+      agentAccess: this.agentAccess,
     });
   }
 }

@@ -273,7 +273,10 @@ export function createOnboardingInsightService(options: CreateOnboardingInsightS
   return {
     async generateReport(input = {}, signal) {
       const startedAt = now();
-      const sample = await sampleRecentQueries(options.samplers, options.conversationWindowReader, signal, now);
+      const sample = mergeDetectedAgents(
+        await sampleRecentQueries(options.samplers, options.conversationWindowReader, signal, now),
+        input.detectedAgents
+      );
       const profile = buildProfileSignals(sample);
       const locale = profile.preferredResponseLanguage ?? input.locale ?? inferLocale(sample.queries);
       const response = await buildReportResponse({
@@ -290,7 +293,10 @@ export function createOnboardingInsightService(options: CreateOnboardingInsightS
     },
     async *streamReport(input = {}, signal) {
       const startedAt = now();
-      const sample = await sampleRecentQueries(options.samplers, options.conversationWindowReader, signal, now);
+      const sample = mergeDetectedAgents(
+        await sampleRecentQueries(options.samplers, options.conversationWindowReader, signal, now),
+        input.detectedAgents
+      );
       const profile = buildProfileSignals(sample);
       const locale = profile.preferredResponseLanguage ?? input.locale ?? inferLocale(sample.queries);
       yield {
@@ -561,6 +567,38 @@ async function sampleRecentQueries(
   };
 }
 
+function mergeDetectedAgents(
+  sample: SampleBundle,
+  detectedAgents: OnboardingInsightReportInput["detectedAgents"]
+): SampleBundle {
+  if (!detectedAgents?.length) {
+    return sample;
+  }
+
+  const detectedBySource = new Map(detectedAgents.map((agent) => [agent.sourceId, agent]));
+  const discovered = sample.discovered.map((result) => {
+    const detected = detectedBySource.get(result.sourceId);
+    detectedBySource.delete(result.sourceId);
+    return detected
+      ? { ...result, recentSessionCount: Math.max(result.recentSessionCount, detected.recentSessionCount) }
+      : result;
+  });
+
+  for (const detected of detectedBySource.values()) {
+    discovered.push({
+      sourceId: detected.sourceId,
+      displayName: detected.displayName,
+      recentSessionCount: detected.recentSessionCount,
+      latestActivityAt: null,
+      queries: [],
+      recentMessages: [],
+      errors: []
+    });
+  }
+
+  return { ...sample, discovered };
+}
+
 function resolveLatestConversationReference(
   results: readonly OnboardingSampleResult[]
 ): OnboardingConversationReference | null {
@@ -736,7 +774,7 @@ async function buildReportResponse(input: {
   if (input.sample.queries.length === 0) {
     return {
       status: "ready",
-      reportMarkdown: renderEmptyHistoryReport(input.locale),
+      reportMarkdown: renderEmptyHistoryReport(input.locale, input.sample),
       diagnostics: diagnostics(input.sample, false, Math.max(0, input.now() - input.startedAt), input.locale)
     };
   }
@@ -775,7 +813,7 @@ async function* streamReportResponse(input: {
       type: "done",
       response: {
         status: "ready",
-        reportMarkdown: renderEmptyHistoryReport(input.locale),
+        reportMarkdown: renderEmptyHistoryReport(input.locale, input.sample),
         diagnostics: diagnostics(input.sample, false, input.elapsedMs, input.locale)
       }
     };
@@ -839,7 +877,19 @@ function renderFallbackReport(
   return locale === "en-US" ? renderEnglishReport(profile, sample) : renderChineseReport(profile, sample);
 }
 
-function renderEmptyHistoryReport(locale: "zh-CN" | "en-US"): string {
+function renderEmptyHistoryReport(locale: "zh-CN" | "en-US", sample: SampleBundle): string {
+  const agentNames = sample.discovered.map((agent) => agent.displayName);
+  if (agentNames.length > 0) {
+    const names = agentNames.join(", ");
+    return locale === "en-US" ? [
+      `Memmy found ${names} on this device, but the quick first scan did not return readable conversation history.`,
+      "Once you use Memmy with a real task, it will preserve the useful background, decisions, and next step for future conversations and other Agents."
+    ].join("\n\n") : [
+      `Memmy 已识别到这台设备上的 ${names}，但首次轻量扫描暂时没有读到可用的对话历史。`,
+      "之后用 Memmy 处理真实任务时，它会记住有用的背景、决策和下一步，方便新对话或其他 Agent 继续。"
+    ].join("\n\n");
+  }
+
   return locale === "en-US" ? [
     "There is no readable Agent history on this device yet, so there is nothing useful to pretend I already know.",
     "Tell Memmy about one real task. It will preserve the useful background, decisions, and next step so a new conversation—or another Agent such as Cursor or Codex—can continue without making you explain it again."

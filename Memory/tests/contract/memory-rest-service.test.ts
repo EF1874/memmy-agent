@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { canonicalJson, sha256Hex } from "@memmy/local-api-contracts";
+import { canonicalJson, sha256Hex } from "../../src/contracts/index.js";
 import {
   DEFAULT_MEMMY_CONFIG,
   MemoryDb,

@@ -157,11 +157,11 @@ describe("memory LLM JSON length retry", () => {
       .map((value) => JSON.parse(value) as Record<string, unknown>);
     expect(records).toContainEqual(expect.objectContaining({
       level: "warn",
-      message: "[l3.abstraction.v2] 模型输出被截断，将 maxTokens 从 4096 提升到 8192 后重试"
+      message: "[l3.abstraction.v2] Model output was truncated; retrying with maxTokens increased from 4096 to 8192"
     }));
     expect(records).toContainEqual(expect.objectContaining({
       level: "info",
-      message: "[l3.abstraction.v2] 模型 JSON 在第 2 次尝试后解析成功，maxTokens=8192"
+      message: "[l3.abstraction.v2] Model JSON parsing recovered on attempt 2, maxTokens=8192"
     }));
     expect(records.every((record) => /^\d{4}-\d{2}-\d{2}T/.test(String(record.timestamp)))).toBe(true);
     expect(records.every((record) => Object.keys(record).join(",") === "timestamp,level,message")).toBe(true);
@@ -188,7 +188,7 @@ describe("memory LLM JSON length retry", () => {
       .map((value) => JSON.parse(value) as Record<string, unknown>);
     expect(records).toContainEqual(expect.objectContaining({
       level: "error",
-      message: expect.stringContaining("[capture.summarize] 模型 JSON 解析失败")
+      message: expect.stringContaining("[capture.summarize] Model JSON parsing failed")
     }));
     expect(client.status().lastError).toBeTruthy();
   });

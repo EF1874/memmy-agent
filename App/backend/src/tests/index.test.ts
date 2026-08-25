@@ -197,7 +197,7 @@ describe("local api", () => {
     }
   });
 
-  it("fails fast when no real Memory Layer or local SQLite memory source is configured", async () => {
+  it("fails fast when no HTTP Memory Layer is configured", async () => {
     const previousMemoryLayerUrl = process.env.MEMMY_MEMORY_LAYER_URL;
     const previousMemoryDbPath = process.env.MEMMY_MEMORY_DB_PATH;
     const previousMemosDbPath = process.env.MEMMY_MEMOS_DB_PATH;
@@ -217,7 +217,7 @@ describe("local api", () => {
           cloudClient: createMockCloudClient(),
           memmyConfigPath: join(tempDir, "config.yaml")
         })
-      ).rejects.toThrow("MEMMY_MEMORY_LAYER_URL or a local Memmy memory SQLite source is required");
+      ).rejects.toThrow("MEMMY_MEMORY_LAYER_URL is required");
     } finally {
       restoreOptionalEnv("MEMMY_MEMORY_LAYER_URL", previousMemoryLayerUrl);
       restoreOptionalEnv("MEMMY_MEMORY_DB_PATH", previousMemoryDbPath);

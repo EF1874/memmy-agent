@@ -7,7 +7,7 @@ import { buildInvitationSignupEvent } from "../app/invitation-analytics.js";
 import { resolveInvitationToastKind } from "../app/invitation-result.js";
 import { persistLoginModeSelection } from "../app/login-mode.js";
 import { useApiClients } from "../app/providers.js";
-import { buildAccountOnboardingStartPatch, resolveByokEntry, resolvePostLoginRoute } from "../app/routes.js";
+import { buildAccountOnboardingStartPatch, resolveByokEntry, resolvePostLoginRoute, shouldShowFirstEncounterReport } from "../app/routes.js";
 import { AuthCodeForm } from "../components/auth-code-form.js";
 import { LanguageToggleButton } from "../components/language-toggle-button.js";
 import { Memmy } from "../components/mascot/memmy.js";
@@ -96,7 +96,7 @@ export function WelcomePage() {
       registeredAt: session.profile.registeredAt
     }));
 
-    if (session.profile.hasFinishedGuide) {
+    if (session.profile.hasFinishedGuide && state.bootstrap && !shouldShowFirstEncounterReport(state.bootstrap.onboarding)) {
       await continueAfterAccountEntry({
         completed: true,
         currentStep: "completed",
@@ -114,9 +114,9 @@ export function WelcomePage() {
   /** Handles continue after account entry. */
   async function continueAfterAccountEntry(forcedOnboarding?: Partial<OnboardingStateDto>) {
     const onboarding = state.bootstrap?.onboarding;
-    const onboardingPatch = forcedOnboarding ?? buildAccountOnboardingStartPatch();
+    const onboardingPatch = forcedOnboarding ?? buildAccountOnboardingStartPatch(onboarding);
     const nextOnboarding = {
-      ...buildAccountOnboardingStartPatch(),
+      ...buildAccountOnboardingStartPatch(onboarding),
       ...onboarding,
       ...onboardingPatch
     };

@@ -20,7 +20,6 @@ import { constants as fsConstants, cpSync, existsSync, mkdirSync, readFileSync }
 import { access, appendFile, chmod, copyFile, lstat, mkdir, open, readFile, readdir, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
-import YAML from "yaml";
 import {
   fullWindowOptions,
   parsePetWindowLayout,
@@ -91,7 +90,6 @@ import {
 } from "./logger.js";
 import { persistSharedAnalyticsClientId } from "./analytics-client-id-store.js";
 import { getOrCreateInstallationId } from "./installation-id-store.js";
-import { backupSqliteDatabase } from "./sqlite-backup.js";
 import {
   resolveStartupSplashHtml,
   resolveStartupSplashLanguage,
@@ -331,7 +329,10 @@ async function boot(): Promise<void> {
         : resolveDevelopmentRuntimeEntryPaths(import.meta.dirname),
       runtimeExecutable: app.isPackaged
         ? undefined
-        : resolveDevelopmentRuntimeExecutable()
+        : resolveDevelopmentRuntimeExecutable(),
+      offlineMemoryRuntimeDirectory: app.isPackaged
+        ? join(process.resourcesPath, "memory-runtime")
+        : undefined
     });
     runtimeConfig = await startLocalApi(runtimeServices);
     isBootReady = true;
@@ -4932,7 +4933,8 @@ async function cleanupBeforeQuit(): Promise<void> {
   memoryServiceControl = null;
   const backend = localBackend;
   localBackend = null;
-  await services?.close();
+  const stopMemory = backend?.getAppSettings().stopMemoryServiceOnExit ?? false;
+  await services?.close({ stopMemory });
   await backend?.close();
   await stopPackagedRendererServer();
   await sendAppExitEventBeforeQuit();
@@ -5265,19 +5267,25 @@ function desktopImageSaveFilters(name: string, mime: string | null): FileFilter[
 }
 
 /**
- * Prompts for a save path and creates a consistent Memory SQLite snapshot.
+ * Prompts for a save path and exports Memory through the standalone HTTP service.
  *
  * @param owner The window that triggered the export.
  * @returns The user cancellation or the export result.
  */
 async function exportMemoryDatabase(owner: BrowserWindow | null): Promise<MemoryDatabaseExportResult> {
-  const sourcePath = await resolveMemoryDatabasePathForExport();
-  await access(sourcePath, fsConstants.R_OK);
+  const service = memoryServiceControl;
+  if (!service) {
+    throw new Error("Memory service is unavailable");
+  }
 
   const options = {
-    title: "Export memory.sqlite",
+    title: "Export Memmy Memory",
     buttonLabel: "Export",
-    defaultPath: join(app.getPath("documents"), `memory-${formatExportTimestamp(new Date())}.sqlite`)
+    defaultPath: join(app.getPath("documents"), `memmy-memory-${formatExportTimestamp(new Date())}.json`),
+    filters: [
+      { name: "Memmy Memory Export", extensions: ["json"] },
+      { name: "All Files", extensions: ["*"] }
+    ]
   };
   const selected = owner && !owner.isDestroyed()
     ? await dialog.showSaveDialog(owner, options)
@@ -5286,11 +5294,22 @@ async function exportMemoryDatabase(owner: BrowserWindow | null): Promise<Memory
     return { canceled: true };
   }
 
-  const bytes = await backupSqliteDatabase(sourcePath, selected.filePath);
+  const response = await fetch(`${service.baseUrl.replace(/\/$/u, "")}/api/v1/admin/export`, {
+    cache: "no-store",
+    headers: {
+      "x-memmy-time-zone": Intl.DateTimeFormat().resolvedOptions().timeZone,
+      ...(service.token ? { authorization: `Bearer ${service.token}` } : {})
+    }
+  });
+  if (!response.ok) {
+    throw new Error(`Memory export failed: HTTP ${response.status}`);
+  }
+  const payload = new Uint8Array(await response.arrayBuffer());
+  await writeFile(selected.filePath, payload);
   return {
     canceled: false,
     exportPath: selected.filePath,
-    bytes
+    bytes: payload.byteLength
   };
 }
 
@@ -5398,42 +5417,6 @@ function buildDiagnosticsReport(): string {
  */
 function resolveLogsDirectory(): string {
   return app.getPath("logs");
-}
-
-async function resolveMemoryDatabasePathForExport(): Promise<string> {
-  if (runtimeServices?.memory.databasePath) {
-    return runtimeServices.memory.databasePath;
-  }
-
-  const explicitPath = [
-    process.env.MEMMY_MEMORY_DB_PATH,
-    process.env.MEMMY_MEMOS_DB_PATH,
-    process.env.MEMORY_SERVICE_DB,
-    process.env.MEMMY_MEMORY_DB
-  ].find((value) => typeof value === "string" && value.trim().length > 0);
-  if (explicitPath) {
-    return resolvePathValue(explicitPath);
-  }
-
-  const configPath = resolvePathValue(process.env.MEMMY_CONFIG ?? "~/.memmy/config.yaml");
-  const configuredPath = await readMemoryDatabasePathFromConfig(configPath);
-  return configuredPath ? resolvePathValue(configuredPath) : join(homedir(), ".memmy", "memory-service", "memory.sqlite");
-}
-
-async function readMemoryDatabasePathFromConfig(configPath: string): Promise<string | null> {
-  try {
-    const parsed = YAML.parse(await readFile(configPath, "utf8"));
-    const memmyMemory = recordValue(parsed)?.memmyMemory;
-    const storage = recordValue(memmyMemory)?.storage;
-    const sqlitePath = recordValue(storage)?.sqlitePath;
-    return typeof sqlitePath === "string" && sqlitePath.trim().length > 0 ? sqlitePath.trim() : null;
-  } catch {
-    return null;
-  }
-}
-
-function recordValue(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
 function resolvePathValue(path: string): string {

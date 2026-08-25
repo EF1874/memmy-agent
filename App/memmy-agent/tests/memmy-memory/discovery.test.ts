@@ -104,4 +104,22 @@ describe("memmy memory discovery", () => {
       userId: "user_config_1",
     });
   });
+
+  it("round-trips the authoritative Memory service configuration", () => {
+    const input = {
+      enabled: true,
+      roleRouting: { summary: "fixed", evolution: "follow" },
+      summary: { provider: "openai_compatible", endpoint: "https://summary.example/v1", model: "summary" },
+      evolution: { provider: "anthropic", endpoint: "https://evolution.example/v1", model: "evolution" },
+      embedding: { mode: "custom", provider: "openai_compatible", endpoint: "https://embedding.example/v1", model: "embedding" },
+      algorithm: { lightweightMemory: { enabled: false } },
+      logging: { detailedView: false },
+      telemetry: { enabled: false },
+      hub: { enabled: true, role: "client" },
+      agentAccess: { autoScanKnownAgents: true, watchFileChanges: true, autoInjectSkill: false },
+      futureMemorySetting: { keep: true },
+    };
+
+    expect(new Config({ memmyMemory: input }).toObject().memmyMemory).toMatchObject(input);
+  });
 });

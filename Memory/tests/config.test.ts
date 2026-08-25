@@ -60,6 +60,8 @@ describe("memmy memory config", () => {
     expect(loadMemmyConfig(configPath).config.algorithm.enableMemoryAdd).toBe(true);
     expect(loadMemmyConfig(configPath).config.algorithm.enableMemorySearch).toBe(true);
     expect(loadMemmyConfig(configPath).config.algorithm.enableQueryRewrite).toBe(false);
+    expect(loadMemmyConfig(configPath).config.algorithm.lightweightMemory.enabled).toBe(false);
+    expect(loadMemmyConfig(configPath).config.logging.detailedView).toBe(false);
     expect(loadMemmyConfig(configPath).config.algorithm.retrieval.minRecallScore).toBe(0.12);
     expect(loadMemmyConfig(configPath).config.algorithm.negativeExperience).toMatchObject({
       enabled: true,
@@ -134,6 +136,7 @@ describe("memmy memory config", () => {
           enableMemoryAdd: false,
           enableMemorySearch: false,
           enableQueryRewrite: true,
+          lightweightMemory: { enabled: true },
           retrieval: {
             llmFilterEnabled: false,
             minRecallScore: 0.35
@@ -145,6 +148,7 @@ describe("memmy memory config", () => {
     expect(loadMemmyConfig(configPath).config.algorithm.enableMemoryAdd).toBe(false);
     expect(loadMemmyConfig(configPath).config.algorithm.enableMemorySearch).toBe(false);
     expect(loadMemmyConfig(configPath).config.algorithm.enableQueryRewrite).toBe(true);
+    expect(loadMemmyConfig(configPath).config.algorithm.lightweightMemory.enabled).toBe(true);
     expect(loadMemmyConfig(configPath).config.algorithm.retrieval.llmFilterEnabled).toBe(false);
     expect(loadMemmyConfig(configPath).config.algorithm.retrieval.minRecallScore).toBe(0.35);
 
@@ -223,7 +227,7 @@ describe("memmy memory config", () => {
     expect(loadMemmyConfig(configPath).config.summary.maxTokens).toBe(512);
   });
 
-  it("resolves follow roles and cloud embedding from the account model projection", () => {
+  it("resolves follow roles and defaults account embedding to the cloud assignment", () => {
     const root = tempRoot();
     const configPath = join(root, "config.yaml");
     writeFileSync(configPath, YAML.stringify({
@@ -284,9 +288,6 @@ describe("memmy memory config", () => {
           summary: "follow",
           evolution: "follow"
         },
-        embedding: {
-          mode: "cloud"
-        },
         storage: {
           endpoint: "http://127.0.0.1:18960"
         }
@@ -341,7 +342,24 @@ describe("memmy memory config", () => {
     expect(config.evolution.thinkingBudget).toBeUndefined();
   });
 
-  it("rejects a legacy fixed BYOK evolution connection before runtime use", () => {
+  it("reports cloud embedding unavailable when no shared model catalog exists", () => {
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, YAML.stringify({
+      memmyMemory: {
+        embedding: { mode: "cloud" }
+      }
+    }));
+
+    expect(loadMemmyConfig(configPath).config.embedding).toMatchObject({
+      mode: "cloud",
+      provider: "openai_compatible",
+      model: "",
+      selectionError: "model_selection_unavailable"
+    });
+  });
+
+  it("uses fixed role connections from memmyMemory", () => {
     const root = tempRoot();
     const configPath = join(root, "config.yaml");
     writeFileSync(configPath, YAML.stringify({
@@ -363,9 +381,103 @@ describe("memmy memory config", () => {
       }
     }));
 
-    expect(() => loadMemmyConfig(configPath)).toThrow(
-      "memmyMemory legacy model config requires the registered runtime config migration"
-    );
+    const { config } = loadMemmyConfig(configPath);
+
+    expect(config.roleRouting.evolution).toBe("fixed");
+    expect(config.evolution).toMatchObject({
+      provider: "openai_compatible",
+      endpoint: "https://example.com/v1",
+      model: "qwen3.7-plus",
+      apiKey: "sk-user",
+      timeoutMs: 75_000
+    });
+  });
+
+  it("does not let catalog assignments override fixed memmyMemory models", () => {
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, YAML.stringify({
+      providers: {
+        openai: {
+          apiKey: "catalog-key",
+          endpoints: {
+            default: {
+              apiBase: "https://catalog.example/v1",
+              protocol: "openai-chat-completions"
+            },
+            embedding: {
+              apiBase: "https://catalog.example/v1",
+              protocol: "openai-embeddings"
+            }
+          }
+        }
+      },
+      modelPresets: {
+        summary: {
+          provider: "openai",
+          endpoint: "default",
+          model: "catalog-summary",
+          source: "byok",
+          capabilities: ["memory_summary"]
+        },
+        evolution: {
+          provider: "openai",
+          endpoint: "default",
+          model: "catalog-evolution",
+          source: "byok",
+          capabilities: ["memory_evolution"]
+        },
+        embedding: {
+          provider: "openai",
+          endpoint: "embedding",
+          model: "catalog-embedding",
+          source: "byok",
+          capabilities: ["embedding"]
+        }
+      },
+      modelAssignments: {
+        byok: {
+          memorySummary: "summary",
+          memoryEvolution: "evolution",
+          embedding: "embedding"
+        },
+        account: {}
+      },
+      app: { userMode: "byok" },
+      memmyMemory: {
+        roleRouting: { summary: "fixed", evolution: "fixed" },
+        summary: {
+          provider: "anthropic",
+          endpoint: "https://fixed-summary.example/v1",
+          model: "fixed-summary",
+          apiKey: "fixed-summary-key"
+        },
+        evolution: {
+          provider: "gemini",
+          endpoint: "https://fixed-evolution.example/v1",
+          model: "fixed-evolution",
+          apiKey: "fixed-evolution-key"
+        },
+        embedding: {
+          mode: "custom",
+          provider: "openai_compatible",
+          endpoint: "https://fixed-embedding.example/v1",
+          model: "fixed-embedding",
+          apiKey: "fixed-embedding-key"
+        }
+      }
+    }));
+
+    const { config } = loadMemmyConfig(configPath);
+
+    expect(config.summary.model).toBe("fixed-summary");
+    expect(config.evolution.model).toBe("fixed-evolution");
+    expect(config.embedding).toMatchObject({
+      mode: "custom",
+      endpoint: "https://fixed-embedding.example/v1",
+      model: "fixed-embedding",
+      apiKey: "fixed-embedding-key"
+    });
   });
 
   it("uses only MEMMY_CONFIG and the default config.yaml candidate", () => {

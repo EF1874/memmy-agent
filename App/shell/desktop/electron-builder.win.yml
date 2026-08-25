@@ -29,6 +29,10 @@ asarUnpack:
   - "dist/renderer/**"
 
 extraResources:
+  - from: dist/runtime/memory
+    to: memory-runtime
+    filter:
+      - "**/*"
   - from: dist/runtime/bin
     to: cli
     filter:

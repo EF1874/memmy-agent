@@ -3,12 +3,17 @@ import {
   canonicalJson,
   isLocalWorkspaceUri,
   sha256Hex
-} from "@memmy/local-api-contracts";
+} from "../contracts/index.js";
 import {
   skillMetaFromMemory,
   traceMetaFromMemory
 } from "../algorithm/plugin-algorithms.js";
 import { PROJECT_VERSION } from "../cli/project-version.js";
+import {
+  MEMORY_CAPABILITIES,
+  MEMORY_PROTOCOL_VERSION,
+  MEMORY_VIEWER_VERSION
+} from "../version.js";
 import {
   DEFAULT_MEMMY_CONFIG,
   loadMemmyConfig,
@@ -288,6 +293,7 @@ export class MemoryService {
       repos: this.repos,
       get capture() { return workerHandlerOwner.config.algorithm.capture; },
       get reward() { return workerHandlerOwner.config.algorithm.reward; },
+      get lightweightMemory() { return workerHandlerOwner.config.algorithm.lightweightMemory; },
       nowIso,
       requireSession: this.requireSession.bind(this),
       feedbackTargetFromEpisode: (episode) => this.feedbackExperience.feedbackTargetFromEpisode(episode),
@@ -650,6 +656,10 @@ export class MemoryService {
     const backend = this.storageCapabilities();
     return {
       ok: true,
+      serviceVersion: PROJECT_VERSION,
+      protocolVersion: MEMORY_PROTOCOL_VERSION,
+      viewerVersion: MEMORY_VIEWER_VERSION,
+      viewerUrl: viewerUrlFromEndpoint(this.config.storage.endpoint),
       version: PROJECT_VERSION,
       uptimeMs: Date.now() - this.startedAt,
       mode: this.mode,
@@ -689,7 +699,8 @@ export class MemoryService {
           "panel.items"
         ],
         memoryLayers: ["L1", "L2", "L3", "Skill"],
-        supportsCli: true
+        supportsCli: true,
+        service: [...MEMORY_CAPABILITIES]
       },
       ...(backend.backendId === "sqlite-local" && schema.version >= 6
         ? {
@@ -700,6 +711,35 @@ export class MemoryService {
         : {}),
       serverTime: nowIso()
     };
+  }
+
+  async testModels(): Promise<{
+    ok: boolean;
+    checkedAt: string;
+    models: {
+      summary: ModelProbeResult;
+      evolution: ModelProbeResult;
+      embedding: ModelProbeResult;
+    };
+  }> {
+    const summaryProbe = probeLlm(this.llm, "viewer.model-test.summary");
+    const evolutionProbe = this.skillLlm === this.llm
+      ? summaryProbe.then((result) => ({ ...result }))
+      : probeLlm(this.skillLlm, "viewer.model-test.evolution");
+    const [summary, evolution, embedding] = await Promise.all([
+      summaryProbe,
+      evolutionProbe,
+      probeEmbedding(this.embedder)
+    ]);
+    return {
+      ok: summary.ok && evolution.ok && embedding.ok,
+      checkedAt: nowIso(),
+      models: { summary, evolution, embedding }
+    };
+  }
+
+  hubRecords(limit = 200): Array<{ key: string; value: unknown; updatedAt: string }> {
+    return this.repos.runtime.listKv("legacy_hub:", limit);
   }
 
   reloadConfig(request: MemoryReloadConfigRequest = {}): MemoryReloadConfigResponse {
@@ -1290,6 +1330,17 @@ export class MemoryService {
         tables: Object.keys(tables)
       },
       tables,
+      serverTime: nowIso()
+    };
+  }
+
+  clearAllData(): { ok: true; cleared: Record<string, number>; clearedAt: string; serverTime: string } {
+    this.assertMemoryAddEnabled();
+    const clearedAt = nowIso();
+    return {
+      ok: true,
+      cleared: this.repos.clearAllMemoryData(),
+      clearedAt,
       serverTime: nowIso()
     };
   }
@@ -1963,6 +2014,84 @@ export class MemoryService {
     serverTime: string;
   } {
     return this.importJobs.retryMemoryProcessing(memoryId, request);
+  }
+
+  rebuildEmbeddings(): {
+    accepted: true;
+    enqueued: number;
+    serverTime: string;
+  } {
+    this.assertMemoryAddEnabled();
+    const at = nowIso();
+    let offset = 0;
+    let enqueued = 0;
+    for (;;) {
+      const memories = this.repos.memories.list({}, 250, offset);
+      for (const memory of memories) {
+        this.workerHandlers.enqueueEmbeddingRetry(memory, memory.memoryValue, at);
+        enqueued += 1;
+      }
+      if (memories.length < 250) break;
+      offset += memories.length;
+    }
+    const userId = this.config.userId?.trim() || "local-user";
+    offset = 0;
+    for (;;) {
+      const userMemories = this.repos.userMemories.listForPanel({
+        userId,
+        status: "active",
+        limit: 250,
+        offset
+      });
+      for (const memory of userMemories) {
+        this.workerHandlers.enqueueJob({
+          jobType: "user_memory_embedding",
+          userId: memory.userId,
+          targetMemoryId: memory.id,
+          payload: { contentHash: stableHash(memory.content) },
+          maxAttempts: 6,
+          createdAt: at
+        });
+        enqueued += 1;
+      }
+      if (userMemories.length < 250) break;
+      offset += userMemories.length;
+    }
+    return { accepted: true, enqueued, serverTime: at };
+  }
+
+  embeddingMaintenanceStats(): {
+    dimension: number;
+    available: boolean;
+    totalSlots: number;
+    ready: number;
+    missing: number;
+    dimMismatch: number;
+    needsRepair: number;
+  } {
+    const userId = this.config.userId?.trim() || "local-user";
+    const regular = this.repos.vectors.maintenanceDimensionCounts();
+    const user = this.repos.userMemories.embeddingDimensionCounts(userId);
+    const dimensions = new Map<number, number>();
+    for (const row of [...regular.dimensions, ...user.dimensions]) {
+      if (row.dimension > 0) dimensions.set(row.dimension, (dimensions.get(row.dimension) ?? 0) + row.count);
+    }
+    const [dimension = 0] = [...dimensions.entries()]
+      .sort((left, right) => right[1] - left[1] || right[0] - left[0])[0] ?? [];
+    const stored = [...dimensions.values()].reduce((sum, count) => sum + count, 0);
+    const totalSlots = regular.totalSlots + user.totalSlots;
+    const ready = dimension > 0 ? dimensions.get(dimension) ?? 0 : 0;
+    const missing = Math.max(0, totalSlots - stored);
+    const dimMismatch = Math.max(0, stored - ready);
+    return {
+      dimension,
+      available: this.embedder.status().configured,
+      totalSlots,
+      ready,
+      missing,
+      dimMismatch,
+      needsRepair: missing + dimMismatch
+    };
   }
 
   private restartFailedProcessing(at: string, limit = 10000): number {
@@ -2759,4 +2888,82 @@ function memoryConfigLogFields(config: MemmyConfig): Record<string, unknown> {
       skillMinGain: config.algorithm.skill.minGain
     }
   };
+}
+
+function viewerUrlFromEndpoint(endpoint?: string): string {
+  const base = new URL(endpoint ?? "http://127.0.0.1:18960");
+  base.pathname = "/viewer";
+  base.search = "";
+  base.hash = "";
+  return base.toString().replace(/\/$/, "");
+}
+
+interface ModelProbeResult {
+  ok: boolean;
+  provider: string;
+  model?: string;
+  latencyMs: number;
+  dimensions?: number;
+  error?: string;
+}
+
+async function probeLlm(client: LlmClient, operation: string): Promise<ModelProbeResult> {
+  const startedAt = Date.now();
+  const status = client.status();
+  if (!client.isConfigured()) {
+    return {
+      ok: false,
+      provider: status.provider,
+      model: status.model,
+      latencyMs: 0,
+      error: "model is not configured"
+    };
+  }
+  try {
+    const text = await client.complete(
+      [{ role: "user", content: "Reply with OK." }],
+      { operation, temperature: 0, maxTokens: 8, timeoutMs: 15_000, maxRetries: 0 }
+    );
+    if (!text.trim()) throw new Error("model returned an empty response");
+    return {
+      ok: true,
+      provider: status.provider,
+      model: status.model,
+      latencyMs: Date.now() - startedAt
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      provider: status.provider,
+      model: status.model,
+      latencyMs: Date.now() - startedAt,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+async function probeEmbedding(embedder: Embedder): Promise<ModelProbeResult> {
+  const startedAt = Date.now();
+  const status = embedder.status();
+  try {
+    const vector = await embedder.embedOne("Memmy model connectivity test", "query");
+    if (vector.length === 0 || vector.some((value) => !Number.isFinite(value))) {
+      throw new Error("embedding model returned an invalid vector");
+    }
+    return {
+      ok: true,
+      provider: status.provider,
+      model: status.model,
+      latencyMs: Date.now() - startedAt,
+      dimensions: vector.length
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      provider: status.provider,
+      model: status.model,
+      latencyMs: Date.now() - startedAt,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
 }

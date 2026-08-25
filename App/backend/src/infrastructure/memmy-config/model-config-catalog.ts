@@ -166,7 +166,167 @@ function mergeModelConfig(config: ConfigRecord, input: ModelConfigInput): Config
     modelPresets: nextPresets,
     modelAssignments
   };
+  projectMemoryConfig(next, modelAssignments, config, existingAssignments);
   patchCompatibilityDefault(next, modelAssignments);
+  return next;
+}
+
+function projectMemoryConfig(
+  config: ConfigRecord,
+  assignments: ModelAssignments,
+  previousConfig: ConfigRecord,
+  previousAssignments: ModelAssignments
+): void {
+  const mode = record(config.app).userMode === "account" ? "account" : "byok";
+  const assignment = assignments[mode];
+  const presets = record(config.modelPresets);
+  const memory = { ...record(config.memmyMemory) };
+  const routing = { ...record(memory.roleRouting) };
+
+  const previousModeAssignment = previousAssignments[mode];
+  const previousRouting = record(record(previousConfig.memmyMemory).roleRouting);
+  projectMemoryRole(
+    config,
+    memory,
+    routing,
+    "summary",
+    assignment.memorySummary,
+    assignment.agent.default,
+    previousModeAssignment.memorySummary,
+    previousRouting.summary
+  );
+  projectMemoryRole(
+    config,
+    memory,
+    routing,
+    "evolution",
+    assignment.memoryEvolution,
+    assignment.agent.default,
+    previousModeAssignment.memoryEvolution,
+    previousRouting.evolution
+  );
+  memory.roleRouting = routing;
+  memory.embedding = projectedMemoryEmbedding(
+    config,
+    record(memory.embedding),
+    assignment.embedding,
+    previousModeAssignment.embedding
+  );
+  config.memmyMemory = memory;
+
+  function projectMemoryRole(
+    root: ConfigRecord,
+    target: ConfigRecord,
+    roleRouting: ConfigRecord,
+    role: "summary" | "evolution",
+    presetId: string | null,
+    agentPresetId: string | null,
+    previousPresetId: string | null,
+    previousRoute: unknown
+  ): void {
+    const preset = record(presetId ? presets[presetId] : undefined);
+    const preservesFixedRoute = previousRoute === "fixed" && presetId === previousPresetId;
+    const followsAgent = !preservesFixedRoute && (!presetId
+      || preset.source === "account"
+      || presetId === agentPresetId);
+    roleRouting[role] = followsAgent ? "follow" : "fixed";
+    if (followsAgent) return;
+    const connection = memoryConnection(root, presetId!);
+    if (connection) target[role] = mergeMemoryConnection(record(target[role]), connection);
+  }
+}
+
+function projectedMemoryEmbedding(
+  config: ConfigRecord,
+  previous: ConfigRecord,
+  presetId: string | null,
+  previousPresetId: string | null
+): ConfigRecord {
+  if (presetId === previousPresetId && previous.mode === "custom") {
+    const connection = presetId ? memoryConnection(config, presetId) : null;
+    return connection
+      ? { ...mergeMemoryConnection(previous, connection), mode: "custom" }
+      : previous;
+  }
+  if (presetId === previousPresetId && previous.mode === "local") {
+    return {
+      ...withoutMemoryConnection(previous),
+      mode: "local",
+      provider: "local"
+    };
+  }
+  if (!presetId) {
+    return {
+      ...withoutMemoryConnection(previous),
+      mode: "local",
+      provider: "local"
+    };
+  }
+  const preset = record(record(config.modelPresets)[presetId]);
+  if (preset.source === "account") {
+    return {
+      ...withoutMemoryConnection(previous),
+      mode: "cloud"
+    };
+  }
+  const connection = memoryConnection(config, presetId);
+  return connection
+    ? {
+        ...mergeMemoryConnection(previous, connection),
+        mode: "custom",
+        provider: "openai_compatible"
+      }
+    : {
+        ...withoutMemoryConnection(previous),
+        mode: "local",
+        provider: "local"
+      };
+}
+
+function memoryConnection(config: ConfigRecord, presetId: string): ConfigRecord | null {
+  const preset = record(record(config.modelPresets)[presetId]);
+  const providerId = stringValue(preset.provider);
+  const endpointId = stringValue(preset.endpoint);
+  const model = stringValue(preset.model);
+  if (!providerId || !endpointId || !model) return null;
+  const provider = record(record(config.providers)[providerId]);
+  const endpoint = record(record(provider.endpoints)[endpointId]);
+  const apiBase = stringValue(endpoint.apiBase);
+  if (!apiBase) return null;
+  const apiKey = stringValue(endpoint.apiKey) ?? stringValue(provider.apiKey);
+  const extraHeaders = { ...record(provider.extraHeaders), ...record(endpoint.extraHeaders) };
+  const extraBody = { ...record(provider.extraBody), ...record(endpoint.extraBody) };
+  return {
+    provider: memoryProvider(providerId),
+    sourceProvider: providerId,
+    endpoint: apiBase,
+    model,
+    ...(apiKey ? { apiKey } : {}),
+    ...(Object.keys(extraHeaders).length ? { extraHeaders } : {}),
+    ...(Object.keys(extraBody).length ? { extraBody } : {})
+  };
+}
+
+function memoryProvider(providerId: string): string {
+  if (providerId === "anthropic") return "anthropic";
+  if (providerId === "gemini") return "gemini";
+  return "openai_compatible";
+}
+
+function mergeMemoryConnection(previous: ConfigRecord, connection: ConfigRecord): ConfigRecord {
+  return {
+    ...withoutMemoryConnection(previous),
+    ...connection
+  };
+}
+
+function withoutMemoryConnection(value: ConfigRecord): ConfigRecord {
+  const next = { ...value };
+  for (const key of [
+    "provider", "sourceProvider", "vendor", "endpoint", "apiBase", "baseUrl",
+    "model", "modelId", "apiKey", "extraHeaders", "extraBody", "custom",
+    "actualModelContext", "selectionError"
+  ]) delete next[key];
   return next;
 }
 
@@ -449,6 +609,7 @@ function buildModelConfigView(
     configRevision,
     providers: providerViews,
     modelAssignments: assignments,
+    memorySettings: memorySettings(config),
     effectiveCandidates,
     configured: Boolean(defaultId && byId.get(defaultId)?.available),
     updatedAt: updatedAtValue
@@ -569,8 +730,28 @@ function revisionFor(config: ConfigRecord): string {
     providers: config.providers ?? null,
     modelPresets: config.modelPresets ?? null,
     modelAssignments: config.modelAssignments ?? null,
+    memmyMemory: config.memmyMemory ?? null,
     agents: { defaults: record(config.agents).defaults ?? null }
   })).digest("hex");
+}
+
+function memorySettings(config: ConfigRecord): {
+  roleRouting: { summary: "follow" | "fixed"; evolution: "follow" | "fixed" };
+  embeddingMode: "cloud" | "local" | "custom";
+} {
+  const memory = record(config.memmyMemory);
+  const routing = record(memory.roleRouting);
+  const embedding = record(memory.embedding);
+  const appMode = record(config.app).userMode === "account" ? "account" : "byok";
+  return {
+    roleRouting: {
+      summary: routing.summary === "fixed" ? "fixed" : "follow",
+      evolution: routing.evolution === "fixed" ? "fixed" : "follow"
+    },
+    embeddingMode: embedding.mode === "cloud" || embedding.mode === "custom" || embedding.mode === "local"
+      ? embedding.mode
+      : appMode === "account" ? "cloud" : "local"
+  };
 }
 
 function stableJson(value: unknown): string {

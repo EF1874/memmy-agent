@@ -8,7 +8,7 @@ import {
   type ModelCapability,
   type ModelSelectionResolution,
   type RuntimeModelCatalog
-} from "@memmy/local-api-contracts";
+} from "../contracts/index.js";
 import { resolveTimeZone } from "../utils/time.js";
 
 export type LlmProviderName =
@@ -102,10 +102,23 @@ export interface StorageConfig {
   token?: string;
 }
 
+export interface LoggingConfig {
+  detailedView: boolean;
+}
+
+export interface AgentAccessConfig {
+  autoScanKnownAgents: boolean;
+  watchFileChanges: boolean;
+  autoInjectSkill: boolean;
+}
+
 export interface AlgorithmConfig {
   enableMemoryAdd: boolean;
   enableMemorySearch: boolean;
   enableQueryRewrite: boolean;
+  lightweightMemory: {
+    enabled: boolean;
+  };
   capture: {
     maxTextChars: number;
     maxToolOutputChars: number;
@@ -264,6 +277,8 @@ export interface MemmyConfig {
   summary: LlmConfig;
   evolution: LlmConfig;
   embedding: EmbeddingConfig;
+  logging: LoggingConfig;
+  agentAccess: AgentAccessConfig;
   algorithm: AlgorithmConfig;
 }
 
@@ -323,10 +338,21 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
     cache: true,
     normalize: false
   },
+  logging: {
+    detailedView: false
+  },
+  agentAccess: {
+    autoScanKnownAgents: true,
+    watchFileChanges: true,
+    autoInjectSkill: false
+  },
   algorithm: {
     enableMemoryAdd: true,
     enableMemorySearch: true,
     enableQueryRewrite: false,
+    lightweightMemory: {
+      enabled: false
+    },
     capture: {
       maxTextChars: 4_000,
       maxToolOutputChars: 2_000,
@@ -482,11 +508,12 @@ export function defaultConfigPaths(): string[] {
 
 export function loadMemmyConfig(configPath?: string): {
   config: MemmyConfig;
-  path?: string;
+  path: string;
 } {
   const selectedPath = configPath
     ? resolve(configPath)
-    : defaultConfigPaths().find((candidate) => existsSync(candidate));
+    : defaultConfigPaths().find((candidate) => existsSync(candidate))
+      ?? defaultConfigPaths().at(-1)!;
   const rootConfig = selectedPath && existsSync(selectedPath)
     ? parseConfigFile(selectedPath)
     : {};
@@ -571,10 +598,16 @@ function configFromEnv(): Record<string, unknown> {
       timeoutMs: numberEnv("MEMMY_EMBEDDING_TIMEOUT_MS"),
       maxRetries: numberEnv("MEMMY_EMBEDDING_MAX_RETRIES")
     }),
+    logging: compactRecord({
+      detailedView: booleanEnv("MEMMY_DETAILED_LOGS")
+    }),
     algorithm: compactRecord({
       enableMemoryAdd: booleanEnv("MEMMY_ENABLE_MEMORY_ADD"),
       enableMemorySearch: booleanEnv("MEMMY_ENABLE_MEMORY_SEARCH"),
       enableQueryRewrite: booleanEnv("MEMMY_ENABLE_QUERY_REWRITE"),
+      lightweightMemory: compactRecord({
+        enabled: booleanEnv("MEMMY_LIGHTWEIGHT_MEMORY")
+      }),
       retrieval: compactRecord({
         readOnlyInjectionProfile:
           process.env.MEMMY_RETRIEVAL_INJECTION_PROFILE ??
@@ -599,6 +632,8 @@ function normalizeConfig(input: Record<string, unknown>): MemmyConfig {
       }
     : normalizedEvolution;
   const embedding = normalizeEmbedding(asRecord(input.embedding));
+  const logging = normalizeLogging(asRecord(input.logging));
+  const agentAccess = normalizeAgentAccess(asRecord(input.agentAccess));
   const algorithm = normalizeAlgorithm(asRecord(input.algorithm));
   return {
     version: 1,
@@ -609,6 +644,8 @@ function normalizeConfig(input: Record<string, unknown>): MemmyConfig {
     summary,
     evolution,
     embedding,
+    logging,
+    agentAccess,
     algorithm
   };
 }
@@ -625,13 +662,10 @@ function resolveRuntimeMemmyMemoryConfig(
   const routing = normalizeRoleRouting(asRecord(input.roleRouting));
   const assignmentMode = runtimeAssignmentMode(rootConfig);
   const hasCatalog = isRecord(rootConfig.modelAssignments);
-  if (!hasCatalog && hasLegacyMemoryModelConnection(input)) {
-    throw new Error("memmyMemory legacy model config requires the registered runtime config migration");
-  }
-  const summary = hasCatalog
+  const summary = routing.summary === "follow" && hasCatalog
     ? resolveAssignedLlm(rootConfig, assignmentMode, "memory_summary", DEFAULT_MEMMY_CONFIG.summary)
     : asRecord(input.summary);
-  const evolution = hasCatalog
+  const evolution = routing.evolution === "follow" && hasCatalog
     ? resolveAssignedLlm(rootConfig, assignmentMode, "memory_evolution", DEFAULT_MEMMY_CONFIG.evolution)
     : asRecord(input.evolution);
   return {
@@ -640,9 +674,7 @@ function resolveRuntimeMemmyMemoryConfig(
     summary,
     evolution,
     evolutionSourceProvider: optionalString(evolution.sourceProvider),
-    embedding: hasCatalog
-      ? resolveAssignedEmbedding(input, rootConfig, assignmentMode)
-      : asRecord(input.embedding)
+    embedding: resolveMemoryEmbedding(input, rootConfig, assignmentMode, hasCatalog)
   };
 }
 
@@ -701,6 +733,29 @@ function normalizeEmbedding(input: Record<string, unknown>): EmbeddingConfig {
     maxRetries: numberValue(input.maxRetries, DEFAULT_MEMMY_CONFIG.embedding.maxRetries),
     cache: booleanValue(input.cache, DEFAULT_MEMMY_CONFIG.embedding.cache),
     normalize: booleanValue(input.normalize, DEFAULT_MEMMY_CONFIG.embedding.normalize)
+  };
+}
+
+function normalizeLogging(input: Record<string, unknown>): LoggingConfig {
+  return {
+    detailedView: booleanValue(input.detailedView, DEFAULT_MEMMY_CONFIG.logging.detailedView)
+  };
+}
+
+function normalizeAgentAccess(input: Record<string, unknown>): AgentAccessConfig {
+  return {
+    autoScanKnownAgents: booleanValue(
+      input.autoScanKnownAgents,
+      DEFAULT_MEMMY_CONFIG.agentAccess.autoScanKnownAgents
+    ),
+    watchFileChanges: booleanValue(
+      input.watchFileChanges,
+      DEFAULT_MEMMY_CONFIG.agentAccess.watchFileChanges
+    ),
+    autoInjectSkill: booleanValue(
+      input.autoInjectSkill,
+      DEFAULT_MEMMY_CONFIG.agentAccess.autoInjectSkill
+    )
   };
 }
 
@@ -796,31 +851,57 @@ function memoryLlmVendor(
   }
 }
 
-function resolveAssignedEmbedding(
+function resolveMemoryEmbedding(
   memory: Record<string, unknown>,
   rootConfig: Record<string, unknown>,
-  mode: "account" | "byok" | null
+  mode: "account" | "byok" | null,
+  hasCatalog: boolean
 ): Record<string, unknown> {
   const embedding = asRecord(memory.embedding);
-  const embeddingMode = memoryEmbeddingMode(
-    embedding.mode,
-    DEFAULT_MEMMY_CONFIG.embedding.mode
-  );
-  const resolved = resolveMemoryAssignment(rootConfig, mode, "embedding");
-  if (!resolved.ok) {
-    if (embeddingMode !== "local") {
-      return {
-        ...embedding,
-        provider: "openai_compatible",
-        model: "",
-        selectionError: "model_selection_unavailable"
-      };
-    }
+  const configuredMode = optionalString(embedding.mode);
+  const embeddingMode = configuredMode === "cloud"
+    || configuredMode === "local"
+    || configuredMode === "custom"
+    ? configuredMode
+    : mode === "account" && hasCatalog
+      ? "cloud"
+      : DEFAULT_MEMMY_CONFIG.embedding.mode;
+  if (embeddingMode === "local") {
     return {
       ...embedding,
-      mode: embeddingMode,
+      mode: "local",
       provider: "local",
       sourceProvider: "local"
+    };
+  }
+  if (embeddingMode === "custom") {
+    const custom = asRecord(embedding.custom);
+    return {
+      ...embedding,
+      ...custom,
+      mode: embeddingMode,
+      provider: optionalString(custom.provider)
+        ?? optionalString(embedding.provider)
+        ?? DEFAULT_MEMMY_CONFIG.embedding.provider
+    };
+  }
+  if (!hasCatalog) {
+    return {
+      ...embedding,
+      mode: "cloud",
+      provider: "openai_compatible",
+      model: "",
+      selectionError: "model_selection_unavailable"
+    };
+  }
+  const resolved = resolveMemoryAssignment(rootConfig, mode, "embedding");
+  if (!resolved.ok) {
+    return {
+      ...embedding,
+      mode: "cloud",
+      provider: "openai_compatible",
+      model: "",
+      selectionError: "model_selection_unavailable"
     };
   }
   if (!embeddingProtocolSupported(resolved.context.protocol)) {
@@ -833,7 +914,7 @@ function resolveAssignedEmbedding(
   }
   return {
     ...embedding,
-    mode: resolved.context.source === "account" ? "cloud" : "custom",
+    mode: "cloud",
     sourceProvider: resolved.context.provider,
     provider: "openai_compatible",
     endpoint: resolved.provider.apiBase,
@@ -875,22 +956,9 @@ function embeddingProtocolSupported(protocol: ActualModelContext["protocol"]): b
   return protocol === "openai-embeddings" || protocol === "memmy-account";
 }
 
-function hasLegacyMemoryModelConnection(memory: Record<string, unknown>): boolean {
-  const connectionFields = ["provider", "endpoint", "apiBase", "baseUrl", "model", "modelId", "apiKey"];
-  if (connectionFields.some((field) => field in asRecord(memory.summary))) return true;
-  if (connectionFields.some((field) => field in asRecord(memory.evolution))) return true;
-  const embedding = asRecord(memory.embedding);
-  const mode = optionalString(embedding.mode);
-  const provider = optionalString(embedding.provider);
-  const remoteEmbeddingFields = ["endpoint", "apiBase", "baseUrl", "model", "modelId", "apiKey"];
-  return mode === "cloud"
-    || mode === "custom"
-    || isRecord(embedding.custom)
-    || (Boolean(provider) && provider !== "local")
-    || remoteEmbeddingFields.some((field) => field in embedding);
-}
 
 function normalizeAlgorithm(input: Record<string, unknown>): AlgorithmConfig {
+  const lightweightMemory = asRecord(input.lightweightMemory);
   const capture = asRecord(input.capture);
   const reward = asRecord(input.reward);
   const feedback = asRecord(input.feedback);
@@ -904,6 +972,12 @@ function normalizeAlgorithm(input: Record<string, unknown>): AlgorithmConfig {
     enableMemoryAdd: booleanValue(input.enableMemoryAdd, DEFAULT_MEMMY_CONFIG.algorithm.enableMemoryAdd),
     enableMemorySearch: booleanValue(input.enableMemorySearch, DEFAULT_MEMMY_CONFIG.algorithm.enableMemorySearch),
     enableQueryRewrite: booleanValue(input.enableQueryRewrite, DEFAULT_MEMMY_CONFIG.algorithm.enableQueryRewrite),
+    lightweightMemory: {
+      enabled: booleanValue(
+        lightweightMemory.enabled,
+        DEFAULT_MEMMY_CONFIG.algorithm.lightweightMemory.enabled
+      )
+    },
     capture: {
       maxTextChars: numberValue(capture.maxTextChars, DEFAULT_MEMMY_CONFIG.algorithm.capture.maxTextChars),
       maxToolOutputChars: numberValue(capture.maxToolOutputChars, DEFAULT_MEMMY_CONFIG.algorithm.capture.maxToolOutputChars),

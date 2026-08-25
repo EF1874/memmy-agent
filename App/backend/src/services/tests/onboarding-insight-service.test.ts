@@ -81,7 +81,7 @@ describe("onboarding insight service", () => {
     expect(report.reportMarkdown).toContain("Hi");
   });
 
-  it("returns a fixed Memmy introduction when agents have no sampled memory", async () => {
+  it("acknowledges detected agents when they have no sampled memory", async () => {
     const generateReport = vi.fn(async () => "should not be used");
     const write = vi.fn(async () => undefined);
     const service = createOnboardingInsightService({
@@ -97,8 +97,8 @@ describe("onboarding insight service", () => {
 
     expect(report.status).toBe("ready");
     expect(report.reportMarkdown).toBe([
-      "这台设备上还没有可读取的 Agent 历史，所以我不会假装已经了解你。",
-      "先告诉 Memmy 一件你正在做的真实任务。它会记住有用的背景、决策和下一步；之后新开对话，或换到 Cursor、Codex，也不用再从头解释。"
+      "Memmy 已识别到这台设备上的 Codex，但首次轻量扫描暂时没有读到可用的对话历史。",
+      "之后用 Memmy 处理真实任务时，它会记住有用的背景、决策和下一步，方便新对话或其他 Agent 继续。"
     ].join("\n\n"));
     expect(report.reportMarkdown).not.toContain("not enough recent user messages");
     expect(report.diagnostics).toMatchObject({
@@ -853,15 +853,21 @@ describe("onboarding insight service", () => {
       now: () => Date.now()
     });
 
-    const eventsPromise = collectStreamEvents(service.streamReport({ locale: "zh-CN" }));
+    const eventsPromise = collectStreamEvents(service.streamReport({
+      locale: "zh-CN",
+      detectedAgents: [{ sourceId: "slow_agent", displayName: "Slow Agent", recentSessionCount: 7 }]
+    }));
     await vi.advanceTimersByTimeAsync(3_000);
     const events = await eventsPromise;
 
     expect(events[0]).toMatchObject({
       type: "sampled",
       diagnostics: {
-        discoveredAgentCount: 1,
-        sampledQueryCount: 1
+        discoveredAgentCount: 2,
+        sampledQueryCount: 1,
+        agents: expect.arrayContaining([
+          expect.objectContaining({ sourceId: "slow_agent", recentSessionCount: 7 })
+        ])
       }
     });
     expect(events.at(-1)).toMatchObject({
@@ -869,8 +875,11 @@ describe("onboarding insight service", () => {
       response: {
         status: "ready",
         diagnostics: {
-          discoveredAgentCount: 1,
-          sampledQueryCount: 1
+          discoveredAgentCount: 2,
+          sampledQueryCount: 1,
+          agents: expect.arrayContaining([
+            expect.objectContaining({ sourceId: "slow_agent", recentSessionCount: 7 })
+          ])
         }
       }
     });

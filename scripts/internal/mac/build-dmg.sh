@@ -318,8 +318,7 @@ EOF
 create_memory_runtime_manifest() {
   local output_dir="$1"
 
-  ROOT_DIR="$ROOT_DIR" MEMORY_DIR="$MEMORY_DIR" MEMORY_RUNTIME_DIR="$output_dir" \
-    LOCAL_API_CONTRACTS_DIR="$LOCAL_API_CONTRACTS_DIR" MIGRATIONS_DIR="$MIGRATIONS_DIR" \
+  ROOT_DIR="$ROOT_DIR" MEMORY_DIR="$MEMORY_DIR" MEMORY_RUNTIME_DIR="$output_dir" TARGET_CPU="$TARGET_CPU" \
     node --input-type=module <<'NODE'
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -327,20 +326,12 @@ import { join } from "node:path";
 const rootDir = requiredEnv("ROOT_DIR");
 const memoryDir = requiredEnv("MEMORY_DIR");
 const runtimeDir = requiredEnv("MEMORY_RUNTIME_DIR");
-const contractsDir = requiredEnv("LOCAL_API_CONTRACTS_DIR");
-const migrationsDir = requiredEnv("MIGRATIONS_DIR");
+const targetCpu = requiredEnv("TARGET_CPU");
 const runtimeName = "memmy-memory-runtime";
-const projectPackage = JSON.parse(await readFile(join(rootDir, "package.json"), "utf8"));
-const runtimeVersion = projectPackage.version;
-
 const memoryPackage = JSON.parse(await readFile(join(memoryDir, "package.json"), "utf8"));
-const contractsPackage = JSON.parse(await readFile(join(rootDir, "App/backend/local-api-contracts/package.json"), "utf8"));
-const migrationsPackage = JSON.parse(await readFile(join(rootDir, "Migrations/package.json"), "utf8"));
+const runtimeVersion = memoryPackage.version;
 const rootLock = JSON.parse(await readFile(join(rootDir, "package-lock.json"), "utf8"));
 const dependencies = { ...(memoryPackage.dependencies ?? {}) };
-delete dependencies["@memmy/local-api-contracts"];
-delete dependencies["@memmy/migrations"];
-Object.assign(dependencies, contractsPackage.dependencies, migrationsPackage.dependencies);
 const runtimePackage = {
   name: runtimeName,
   version: runtimeVersion,
@@ -380,6 +371,13 @@ for (const packageKey of selectedPackageKeys) {
 await mkdir(runtimeDir, { recursive: true });
 await writeFile(join(runtimeDir, "package.json"), `${JSON.stringify(runtimePackage, null, 2)}\n`);
 await writeFile(join(runtimeDir, "package-lock.json"), `${JSON.stringify(runtimeLock, null, 2)}\n`);
+await writeFile(join(runtimeDir, "memory-runtime.json"), `${JSON.stringify({
+  version: runtimeVersion,
+  protocolVersion: 1,
+  target: `darwin-${targetCpu}`,
+  entrypoint: "dist/src/server/index.js",
+  viewer: "dist/viewer/index.html"
+}, null, 2)}\n`);
 
 function requiredEnv(name) {
   const value = process.env[name];
@@ -753,7 +751,10 @@ mkdir -p "$RUNTIME_DIR/memory" "$RUNTIME_DIR/memmy-agent" "$CLI_BIN_DIR" "$DMG_H
 mkdir -p "$MIGRATIONS_STAGING_DIR"
 cp "$MIGRATIONS_DIR/package.json" "$MIGRATIONS_STAGING_DIR/package.json"
 cp -R "$MIGRATIONS_DIR/dist" "$MIGRATIONS_STAGING_DIR/dist"
-cp -R "$MEMORY_DIR/dist/src" "$RUNTIME_DIR/memory/src"
+mkdir -p "$RUNTIME_DIR/memory/dist"
+cp -R "$MEMORY_DIR/dist/src" "$RUNTIME_DIR/memory/dist/src"
+cp -R "$MEMORY_DIR/dist/viewer" "$RUNTIME_DIR/memory/dist/viewer"
+cp -R "$MEMORY_DIR/adapters" "$RUNTIME_DIR/memory/adapters"
 cp -R "$AGENT_DIR/dist" "$RUNTIME_DIR/memmy-agent/dist"
 package_step_start "Create Memory runtime manifest"
 create_memory_runtime_manifest "$RUNTIME_DIR/memory"
@@ -761,17 +762,6 @@ package_step_start "Resolve Memory runtime lockfile"
 npm install --prefix "$RUNTIME_DIR/memory" --package-lock-only --ignore-scripts --os=darwin --cpu="$TARGET_CPU"
 package_step_start "Install Memory runtime production dependencies"
 npm ci --prefix "$RUNTIME_DIR/memory" --omit=dev --os=darwin --cpu="$TARGET_CPU"
-package_step_start "Stage Memory workspace runtime packages"
-MEMORY_RUNTIME_CONTRACTS_DIR="$RUNTIME_DIR/memory/node_modules/@memmy/local-api-contracts"
-MEMORY_RUNTIME_MIGRATIONS_DIR="$RUNTIME_DIR/memory/node_modules/@memmy/migrations"
-rm -rf "$MEMORY_RUNTIME_CONTRACTS_DIR" "$MEMORY_RUNTIME_MIGRATIONS_DIR"
-mkdir -p "$MEMORY_RUNTIME_CONTRACTS_DIR" "$MEMORY_RUNTIME_MIGRATIONS_DIR"
-cp "$ROOT_DIR/App/backend/local-api-contracts/package.json" "$MEMORY_RUNTIME_CONTRACTS_DIR/package.json"
-cp -R "$ROOT_DIR/App/backend/local-api-contracts/dist" "$MEMORY_RUNTIME_CONTRACTS_DIR/dist"
-cp "$MIGRATIONS_STAGING_DIR/package.json" "$MEMORY_RUNTIME_MIGRATIONS_DIR/package.json"
-cp -R "$MIGRATIONS_STAGING_DIR/dist" "$MEMORY_RUNTIME_MIGRATIONS_DIR/dist"
-require_packaged_runtime_file "$MEMORY_RUNTIME_CONTRACTS_DIR/dist/index.js"
-require_packaged_runtime_file "$MEMORY_RUNTIME_MIGRATIONS_DIR/dist/index.js"
 package_step_start "Rebuild Memory native modules for Electron"
 ELECTRON_VERSION="$(node -p "require('./App/shell/desktop/node_modules/electron/package.json').version")"
 node_modules/.bin/electron-rebuild \
@@ -858,7 +848,7 @@ node_modules/.bin/electron-rebuild \
   -w better-sqlite3 \
   -m "$RUNTIME_DIR/memmy-agent"
 package_step_start "Create CLI launchers"
-create_cli_launcher "$CLI_BIN_DIR/memmy-memory" "dist/runtime/memory/src/cli/index.js"
+create_cli_launcher "$CLI_BIN_DIR/memmy-memory" "dist/runtime/memory/dist/src/cli/index.js"
 create_cli_launcher "$CLI_BIN_DIR/memmy" "dist/runtime/memmy-agent/dist/main.js"
 create_cli_installer "$CLI_BIN_DIR/install-cli"
 create_dmg_cli_installer_command "$DMG_HELPER_DIR/Install CLI.command"
@@ -872,6 +862,7 @@ node "$ROOT_DIR/scripts/internal/shared/verify-package-version.mjs" \
   --runtime-root "$RUNTIME_DIR"
 package_step_start "Prepare bundled embedding model"
 node "$ROOT_DIR/scripts/internal/shared/prepare-embedding-model.mjs" "$EMBEDDING_MODELS_DIR"
+cp -R "$EMBEDDING_MODELS_DIR" "$RUNTIME_DIR/memory/embedding-models"
 
 if [ "${MEMMY_PACKAGE_PREPARE_ONLY:-}" = "1" ]; then
   echo "Prepared desktop runtime resources at $RUNTIME_DIR"

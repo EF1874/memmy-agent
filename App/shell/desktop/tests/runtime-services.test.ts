@@ -358,7 +358,7 @@ describe("packaged desktop runtime config", () => {
 
     const server = createServer((_request, response) => {
       response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ ok: true }));
+      response.end(JSON.stringify({ ok: true, protocolVersion: 1 }));
     });
     testServers.push(server);
     setTimeout(() => server.listen(port, "127.0.0.1"), 100);
