@@ -78,6 +78,8 @@ import {
 } from "./onboard.js";
 import { StreamRenderer, ThinkingSpinner } from "./stream.js";
 import { prepareStartupMigrations } from "./startup-migrations.js";
+import { parseRootTerminalOptions } from "./root-terminal-options.js";
+import { runLinuxRootTerminal } from "./linux-systemd-gateway.js";
 
 const CLI_TEMPLATES_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../templates");
 
@@ -102,6 +104,37 @@ export type GatewayRuntime = {
   healthServer: http.Server;
   stop: () => Promise<void>;
 };
+
+type GatewayLifecycleProcess = Pick<NodeJS.Process, "on" | "off" | "exit">;
+
+export function installGatewaySignalLifecycle(
+  runtime: GatewayRuntime,
+  lifecycle: GatewayLifecycleProcess = process,
+): void {
+  let stopping = false;
+  const signals: NodeJS.Signals[] = ["SIGHUP", "SIGINT", "SIGTERM"];
+  const remove = () => {
+    for (const signal of signals) lifecycle.off(signal, shutdown);
+  };
+  const shutdown = () => {
+    if (stopping) return;
+    stopping = true;
+    remove();
+    const forceExit = setTimeout(() => lifecycle.exit(1), 10_000);
+    forceExit.unref?.();
+    void runtime.stop().then(
+      () => {
+        clearTimeout(forceExit);
+        lifecycle.exit(0);
+      },
+      () => {
+        clearTimeout(forceExit);
+        lifecycle.exit(1);
+      },
+    );
+  };
+  for (const signal of signals) lifecycle.on(signal, shutdown);
+}
 
 let cliRuntimeLogs = false;
 
@@ -351,7 +384,7 @@ export function resolveTerminalTarget(
     key = standalone || project ? `cli:${crypto.randomUUID()}` : "cli:direct";
     const existing = reload(key);
     if (!existing && !dependencies.hasUsableDefaultModel()) {
-      throw new Error("No usable default model is configured. Run `memmy onboard` first.");
+      throw new Error("No usable default model is configured. Run `memmy onboard --wizard` first.");
     }
     if (existing) {
       binding = readWebuiSessionBinding(existing);
@@ -457,9 +490,9 @@ export async function runRootInteractiveAgent({
   sessionId?: string | null;
   standalone?: boolean;
   project?: string | null;
-} = {}): Promise<unknown> {
+} = {}, runtimeConfig?: Config): Promise<unknown> {
   if (rootInteractiveRunnerForTest) return rootInteractiveRunnerForTest();
-  const loaded = loadRuntimeConfig(null, null);
+  const loaded = runtimeConfig ?? loadRuntimeConfig(null, null);
   const workspace = syncRuntimeWorkspaceTemplates(loaded);
   const target = resolveTerminalTarget({
     sessions: new SessionManager(path.join(workspace, "sessions"), {
@@ -479,31 +512,6 @@ export async function runRootInteractiveAgent({
   printCliRestartNoticeIfNeeded(target.sessionId, true);
   const { runInkInteractiveAgent } = await import("./tui.js");
   return runInkInteractiveAgent(loaded, target.sessionId, target);
-}
-
-function rootTerminalOptions(argv: string[]): {
-  sessionId?: string;
-  standalone?: boolean;
-  project?: string;
-} | null {
-  if (argv.length <= 2) return {};
-  const args = argv.slice(2);
-  const options: { sessionId?: string; standalone?: boolean; project?: string } = {};
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === "--standalone") options.standalone = true;
-    else if (arg === "--session" || arg === "-s") {
-      const value = args[++index];
-      if (!value || value.startsWith("-")) throw new Error("--session requires a sessionId");
-      options.sessionId = value;
-    } else if (arg === "--project") {
-      const value = args[++index];
-      if (!value || value.startsWith("-")) throw new Error("--project requires a path");
-      options.project = value;
-    }
-    else return null;
-  }
-  return options;
 }
 
 export async function runInternalCommand(argv: string[]): Promise<boolean> {
@@ -535,10 +543,18 @@ export async function main(argv: string[] = process.argv): Promise<void> {
     versionCallback(true);
     return;
   }
-  const rootTarget = rootTerminalOptions(argv);
+  const rootTarget = parseRootTerminalOptions(argv);
   if (rootTarget) {
     await prepareStartupMigrations();
-    await runRootInteractiveAgent(rootTarget);
+    if (rootInteractiveRunnerForTest) {
+      await runRootInteractiveAgent(rootTarget);
+      return;
+    }
+    await runLinuxRootTerminal({
+      loadConfig: () => loadRuntimeConfig(null, null),
+      onboardWizard: () => onboard({ wizard: true }),
+      runInteractive: (config) => runRootInteractiveAgent(rootTarget, config),
+    });
     return;
   }
 
@@ -596,7 +612,8 @@ export async function main(argv: string[] = process.argv): Promise<void> {
     .option("-c, --config <path>", "Path to config file")
     .option("-v, --verbose", "Enable verbose runtime logs", false)
     .action(async (opts) => {
-      await gateway(opts);
+      const runtime = await gateway(opts);
+      installGatewaySignalLifecycle(runtime);
     });
 
   app
