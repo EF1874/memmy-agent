@@ -752,7 +752,7 @@ describe("SettingsPageView", () => {
     expect(html).toContain("打磨 Agent 技能与偏好");
     expect(html).toContain("Embedding 检索");
     expect(html).toContain("记忆向量化检索");
-    expect(html).not.toContain("Xenova/all-MiniLM-L6-v2");
+    expect(html).toContain("Xenova/all-MiniLM-L6-v2");
     expect(html).toContain("语音识别 ASR");
     expect(html).toContain("生图模型");
     expect(html).toContain("未配置");
