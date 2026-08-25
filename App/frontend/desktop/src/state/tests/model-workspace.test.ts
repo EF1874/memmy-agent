@@ -736,6 +736,21 @@ describe("canonical model workspace adapter", () => {
     expect(assigned.catalog.modelAssignments.byok).toEqual(originalByok);
   });
 
+  it("清空本地 Embedding Assignment 时保留账号 Assignment 与目录项", () => {
+    const workspace = createModelWorkspace(catalog());
+    const before = modelConfigInput(workspace);
+
+    const cleared = modelConfigInput(setModelAssignment(workspace, "byok", "embedding", null));
+
+    expect(cleared.modelAssignments.byok).toEqual({
+      ...before.modelAssignments.byok,
+      embedding: null
+    });
+    expect(cleared.modelAssignments.account).toEqual(before.modelAssignments.account);
+    expect(cleared.providers).toEqual(before.providers);
+    expect(workspace.catalog.modelAssignments.byok.embedding).toBe("byok-embedding");
+  });
+
   it("删除账号空间可见的共享 BYOK 连接时同步清理两个空间的引用", () => {
     const result = deleteModelConnection(createModelWorkspace(catalog()), "account", "openai:chat");
 
