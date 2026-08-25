@@ -1168,14 +1168,7 @@ describe("MemoryService / session / turn capture", () => {
        WHERE job_type = 'l3_abstraction'
          AND json_extract(payload_json, '$.rawTurnId') = ?`
     ).get(compact.rawTurnId) as { target_memory_id: string | null; payload_json: string } | undefined;
-    expect(compactL3Job?.target_memory_id).toBeNull();
-    expect(JSON.parse(compactL3Job!.payload_json)).toMatchObject({
-      reason: "manual_compaction",
-      targetKind: "policy_cluster",
-      sourceMemoryId: compact.l1MemoryId,
-      episodeId: expect.stringMatching(/^episode_/),
-      rawTurnId: compact.rawTurnId
-    });
+    expect(compactL3Job).toBeUndefined();
 
     const compactWithoutL1 = service.compactSession(session.sessionId, {
       summary: "compact summary without l1 materialization",

@@ -364,19 +364,41 @@ function buildPersistedRawProfile(
 ): Record<string, unknown> {
   const result = stripCloudCredential(rawProfile);
   delete result[LOCAL_AUTH_CHANNEL_FIELD];
-  const persistedChannel = authChannel ?? resolveExplicitAccountAuthChannel(previous);
+  const persistedChannel = authChannel ?? resolveAccountAuthChannel(previous);
   if (persistedChannel) result[LOCAL_AUTH_CHANNEL_FIELD] = persistedChannel;
   return result;
 }
 
 function resolveAccountAuthChannel(row: AccountSessionRow | null): AccountChannel | null {
-  return resolveExplicitAccountAuthChannel(row);
+  return resolveExplicitAccountAuthChannel(row) ?? resolveLegacyAccountAuthChannel(row);
 }
 
 function resolveExplicitAccountAuthChannel(row: AccountSessionRow | null): AccountChannel | null {
   if (!row?.raw_profile_json) return null;
   const value = parseRawProfile(row.raw_profile_json)?.[LOCAL_AUTH_CHANNEL_FIELD];
   return value === "email" || value === "phone" ? value : null;
+}
+
+/**
+ * Infers the login channel for sessions written before `_memmyAuthChannel` existed.
+ *
+ * Only a single bound contact is trusted: an account containing both email and phone remains
+ * ambiguous and must still be rejected when a package requires a specific login channel.
+ *
+ * @param row the persisted account row.
+ * @returns the unambiguous legacy channel, or null when it cannot be inferred safely.
+ */
+function resolveLegacyAccountAuthChannel(row: AccountSessionRow | null): AccountChannel | null {
+  if (!row) return null;
+  const rawProfile = row.raw_profile_json ? parseRawProfile(row.raw_profile_json) : null;
+  const hasEmail = Boolean(row.email?.trim() || readRawProfileString(rawProfile?.email));
+  const hasPhone = Boolean(
+    row.phone?.trim()
+    || readRawProfileString(rawProfile?.phoneNumber)
+    || readRawProfileString(rawProfile?.phone)
+  );
+  if (hasEmail === hasPhone) return null;
+  return hasEmail ? "email" : "phone";
 }
 
 /**

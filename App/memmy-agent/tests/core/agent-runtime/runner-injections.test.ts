@@ -135,12 +135,29 @@ describe("AgentRunner injection drain", () => {
       return new LLMResponse({ content: calls === 1 ? "first" : "final" });
     });
     const pending = [injection];
+    const beforeFollowupModelRequest = vi.fn(async (context: any) => {
+      expect(context.currentTurnMessages).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          content: injection.content,
+          client_request_id: injection.client_request_id,
+          webui_queue_steer_recovery: injection.webui_queue_steer_recovery,
+        }),
+      ]));
+      return {
+        messages: [
+          { role: "system", content: "compacted history" },
+          ...context.currentTurnMessages,
+        ],
+      };
+    });
     const result = await new AgentRunner(provider).run(new AgentRunSpec({
       messages: [{ role: "user", content: "hello" }],
       provider,
       tools: makeTools(),
       maxIterations: 5,
       injectionCallback: drainArray(pending),
+      currentTurnMessageStartIndex: 0,
+      beforeFollowupModelRequest,
     }));
     const persisted = result.messages.find((message) => (
       message.client_request_id === injection.client_request_id
@@ -153,6 +170,7 @@ describe("AgentRunner injection drain", () => {
     });
     expect(providerMessages.at(-1)?.find((message) => message.content === injection.content))
       .toEqual({ role: "user", content: injection.content });
+    expect(beforeFollowupModelRequest).toHaveBeenCalledOnce();
   });
 });
 

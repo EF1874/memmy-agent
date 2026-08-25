@@ -23,7 +23,7 @@ describe("UserMemoriesSubPage", () => {
     );
     expect(html).toContain("用户记忆");
     expect(html).toContain('data-icon="user-round"');
-    expect(html).toContain("用户事实、偏好和明确指令");
+    expect(html).toContain("用户事实、生活偏好和稳定工作偏好");
     expect(html).toContain("搜索用户记忆");
   });
 });

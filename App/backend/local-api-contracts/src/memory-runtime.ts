@@ -1,5 +1,17 @@
 /** Memory runtime module. */
 import { z } from "zod";
+import {
+  L3WorldModelFeaturesSchema,
+  L3WorldModelFieldsSchema,
+  L3WorldModelRequestEnvelopeSchema
+} from "./memory-l3-world-model.js";
+import {
+  L3WorldModelProtocolVersionSchema,
+  L3WorldModelTransitionSchema,
+  WorkspaceIdentityFieldsSchema,
+  WorkspaceHostIdSchema,
+  WorkspaceUriSchema
+} from "./memory-workspace-identity.js";
 
 /** Schema for iso time. */
 export const IsoTimeSchema = z.string().datetime();
@@ -40,6 +52,8 @@ export const JobTypeSchema = z.enum([
   "l2_association",
   "l2_induction",
   "l3_abstraction",
+  "l3_world_model_update",
+  "project_environment_profile",
   "skill_crystallization",
   "skill_trial_resolve"
 ]);
@@ -99,11 +113,32 @@ export const RecallHitSchema = z.object({
 });
 export type RecallHit = z.infer<typeof RecallHitSchema>;
 
+const MemoryCaptureDiagnosticsSchema = z.object({
+  status: z.enum(["pending", "completed"]),
+  decided_at: IsoTimeSchema.optional(),
+  l1: z.array(z.object({
+    memory_id: NonEmptyStringSchema,
+    written: z.boolean(),
+    policy_eligible: z.boolean()
+  })).optional(),
+  user_memory: z.object({
+    written: z.boolean(),
+    action: z.enum(["none", "created", "updated", "confirmed", "corrected"]),
+    memory_id: NonEmptyStringSchema.optional(),
+    target_memory_id: NonEmptyStringSchema.optional()
+  }).optional()
+});
+
 export const RecallEvidenceOutputSchema = z.object({
   recallEventId: NonEmptyStringSchema,
   queryId: NonEmptyStringSchema,
   query: z.string(),
   hits: z.array(RecallHitSchema),
+  diagnostics: z.object({
+    candidateMemoryIds: z.array(NonEmptyStringSchema),
+    injectedMemoryIds: z.array(NonEmptyStringSchema),
+    capture: MemoryCaptureDiagnosticsSchema.optional()
+  }).optional(),
   createdAt: IsoTimeSchema,
   serverTime: IsoTimeSchema
 });
@@ -160,6 +195,21 @@ export const MemoryListItemSchema = z.object({
   version: z.number().int().nonnegative()
 });
 export type MemoryListItem = z.infer<typeof MemoryListItemSchema>;
+
+export const WorldModelScopeSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("general") }).strict(),
+  z.object({
+    kind: z.literal("project"),
+    projectLabel: z.string().nullable(),
+    workspaceDisplayPath: z.string().nullable()
+  }).strict()
+]);
+export type WorldModelScope = z.infer<typeof WorldModelScopeSchema>;
+
+export const PanelMemoryListItemSchema = MemoryListItemSchema.extend({
+  worldModelScope: WorldModelScopeSchema.optional()
+});
+export type PanelMemoryListItem = z.infer<typeof PanelMemoryListItemSchema>;
 
 /** Definition for memory detail item. */
 export const MemoryDetailItemSchema = MemoryListItemSchema.extend({
@@ -266,6 +316,7 @@ export const MemoryHealthSnapshotSchema = z.object({
     memoryLayers: z.array(MemoryLayerSchema),
     supportsCli: z.boolean()
   }),
+  features: L3WorldModelFeaturesSchema.optional(),
   models: MemoryModelsStatusSchema,
   serverTime: IsoTimeSchema
 });
@@ -285,11 +336,39 @@ export const MemoryReloadConfigOutputSchema = z.object({
 });
 export type MemoryReloadConfigOutput = z.infer<typeof MemoryReloadConfigOutputSchema>;
 
-/** Definition for open session input. */
-export const OpenSessionInputSchema = RuntimeRequestFieldsSchema.extend({
+const LegacyOpenSessionInputSchema = RuntimeRequestFieldsSchema.extend({
   sessionId: NonEmptyStringSchema.optional(),
   workspacePath: z.string().optional()
+}).strict();
+
+const V2OpenSessionInputSchema = L3WorldModelRequestEnvelopeSchema.safeExtend({
+  sessionId: NonEmptyStringSchema.optional(),
+  l3WorldModelProtocolVersion: L3WorldModelProtocolVersionSchema,
+  l3WorldModelTransition: L3WorldModelTransitionSchema,
+  workspaceUri: WorkspaceUriSchema.optional(),
+  workspaceHostId: WorkspaceHostIdSchema.optional(),
+  meta: UnknownRecordSchema.optional()
+}).strict().superRefine((value, context) => {
+  const identity = WorkspaceIdentityFieldsSchema.safeParse({
+    workspaceUri: value.workspaceUri,
+    workspaceHostId: value.workspaceHostId
+  });
+  if (!identity.success) {
+    for (const issue of identity.error.issues) {
+      context.addIssue({ ...issue, path: issue.path });
+    }
+  }
+  if (!value.sessionId && (value.namespace.projectId || value.namespace.workspaceId)) {
+    context.addIssue({
+      code: "custom",
+      path: ["namespace", value.namespace.projectId ? "projectId" : "workspaceId"],
+      message: "new v2 sessions must derive project scope from workspace identity"
+    });
+  }
 });
+
+/** Definition for open session input. */
+export const OpenSessionInputSchema = z.union([V2OpenSessionInputSchema, LegacyOpenSessionInputSchema]);
 export type OpenSessionInput = z.infer<typeof OpenSessionInputSchema>;
 
 /** Schema for open session output. */
@@ -298,6 +377,7 @@ export const OpenSessionOutputSchema = z.object({
   status: z.literal("open"),
   episodeId: NonEmptyStringSchema.optional(),
   resumed: z.boolean(),
+  projectId: NonEmptyStringSchema.nullable().optional(),
   serverTime: IsoTimeSchema
 });
 export type OpenSessionOutput = z.infer<typeof OpenSessionOutputSchema>;
@@ -448,6 +528,18 @@ export const AddMemoryOutputSchema = z.object({
 });
 export type AddMemoryOutput = z.infer<typeof AddMemoryOutputSchema>;
 
+const LegacyWorldModelDetailSchema = z.object({
+  sourceMemoryIds: z.array(NonEmptyStringSchema),
+  confidence: z.number().optional(),
+  summary: z.string().optional()
+}).strict();
+
+const V2WorldModelDetailSchema = L3WorldModelFieldsSchema.safeExtend({
+  schemaVersion: z.literal(2),
+  sourceMemoryIds: z.array(NonEmptyStringSchema),
+  summary: z.string().optional()
+}).strict();
+
 /** Schema for get memory output. */
 export const GetMemoryOutputSchema = z.object({
   item: MemoryDetailItemSchema.extend({
@@ -467,11 +559,7 @@ export const GetMemoryOutputSchema = z.object({
       })
       .optional(),
     worldModel: z
-      .object({
-        sourceMemoryIds: z.array(NonEmptyStringSchema),
-        confidence: z.number().optional(),
-        summary: z.string().optional()
-      })
+      .union([V2WorldModelDetailSchema, LegacyWorldModelDetailSchema])
       .optional(),
     skill: z
       .object({
@@ -703,7 +791,7 @@ export type PanelAnalysisOutput = z.infer<typeof PanelAnalysisOutputSchema>;
 
 /** Schema for panel items output. */
 export const PanelItemsOutputSchema = z.object({
-  items: z.array(MemoryListItemSchema),
+  items: z.array(PanelMemoryListItemSchema),
   page: z.number().int().positive(),
   pageSize: z.literal(20),
   total: z.number().int().nonnegative(),

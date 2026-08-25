@@ -15,10 +15,10 @@ const DEFAULT_MEMORY_URL = "http://127.0.0.1:18960";
 const DEFAULT_AGENT_GATEWAY_HEALTH_PORT = 18970;
 const DEFAULT_AGENT_WEBSOCKET_PORT = 18980;
 const STARTUP_TIMEOUT_MS = 30_000;
+const MEMORY_STARTUP_TIMEOUT_MS = 120_000;
 const POLL_INTERVAL_MS = 250;
 const HTTP_TIMEOUT_MS = 1_000;
 const STOP_MANAGED_CHILD_GRACE_MS = 1_000;
-const EXISTING_MEMORY_STARTUP_GRACE_MS = 10_000;
 
 type RuntimeEnv = Record<string, string | undefined>;
 type ConfigRecord = Record<string, unknown>;
@@ -29,6 +29,7 @@ export interface ManagedRuntimeServices {
     token: string;
     databasePath: string;
     configPath: string;
+    ready: Promise<void>;
   };
   agentGateway: {
     baseUrl: string;
@@ -198,10 +199,10 @@ export async function startManagedRuntimeServices(
       spawn,
       browserPreparationAttemptId
     );
-    memoryStartup = ensureMemoryService(entries, runtimeConfig, children, options)
-      .catch((error) => {
-        console.warn(`Memory service unavailable during desktop startup: ${errorMessage(error)}`);
-      });
+    const memoryReady = ensureMemoryService(entries, runtimeConfig, children, options);
+    memoryStartup = memoryReady.catch((error) => {
+      console.warn(`Memory service unavailable during desktop startup: ${errorMessage(error)}`);
+    });
     const agentGatewayStartupIssue = await startAgentGatewayWithRecovery(gatewaySupervisor);
 
     return {
@@ -209,7 +210,8 @@ export async function startManagedRuntimeServices(
         baseUrl: runtimeConfig.memoryBaseUrl,
         token: runtimeConfig.memoryToken,
         databasePath: runtimeConfig.memoryDatabasePath,
-        configPath: runtimeConfig.configPath
+        configPath: runtimeConfig.configPath,
+        ready: memoryReady
       },
       agentGateway: {
         baseUrl: runtimeConfig.agentGatewayBaseUrl,
@@ -237,7 +239,6 @@ export async function startManagedRuntimeServices(
       async close() {
         closing = true;
         browserPreparation?.stop();
-        await memoryStartup;
         await memoryRestart?.catch(() => undefined);
         await gatewaySupervisor.close();
         await stopManagedChildren(children);
@@ -250,7 +251,6 @@ export async function startManagedRuntimeServices(
     };
   } catch (error) {
     browserPreparation?.stop();
-    await memoryStartup;
     await gatewaySupervisor.close();
     await stopManagedChildren(children);
     throw error;
@@ -745,7 +745,13 @@ export async function ensureMemoryService(
   });
   children.push(memoryChild);
   try {
-    await waitForHttpService("memory", healthUrl, memoryChild, healthHeaders);
+    await waitForHttpService(
+      "memory",
+      healthUrl,
+      memoryChild,
+      healthHeaders,
+      MEMORY_STARTUP_TIMEOUT_MS
+    );
   } catch (error) {
     const lockOwner = readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath);
     if (!lockOwner || lockOwner.pid === memoryChild.process.pid) {
@@ -1294,7 +1300,7 @@ async function waitForExistingMemoryService(
       "existing memory",
       healthUrl,
       healthHeaders,
-      EXISTING_MEMORY_STARTUP_GRACE_MS
+      MEMORY_STARTUP_TIMEOUT_MS
     );
   } catch (error) {
     throw new Error(
@@ -1377,9 +1383,10 @@ async function waitForHttpService(
   name: string,
   url: string,
   child: ManagedChild,
-  headers: Record<string, string> = {}
+  headers: Record<string, string> = {},
+  timeoutMs = STARTUP_TIMEOUT_MS
 ): Promise<void> {
-  const deadline = Date.now() + STARTUP_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
   let lastError: unknown;
 
   while (Date.now() < deadline) {

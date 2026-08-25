@@ -652,6 +652,7 @@ async function ingestCollectedSource(
       deferProcessing: true,
       totalMessages: ingestMessages.length,
       scanMode: collected.scanMode ?? scanOptions.mode,
+      replaySeenConversationIds: findContentRevisedConversationIds(options, collected),
       onProgress(progress) {
         emitProgress(scanOptions, {
           sourceId: progress.sourceId,
@@ -768,6 +769,29 @@ function filterCheckpointedConversations(
     conversationIds: collected.conversationIds.filter((id) => included.has(id)),
     messages: collected.messages.filter((message) => included.has(message.conversationId))
   };
+}
+
+function findContentRevisedConversationIds(
+  options: CreateAgentSourceServiceOptions,
+  collected: CollectedSourceScan
+): ReadonlySet<string> {
+  const revised = new Set<string>();
+  for (const [conversationId, messages] of groupMessagesByConversation(collected.messages)) {
+    const latest = latestConversationMessage(messages);
+    const checkpoint = options.agentSourceRepository.getConversationCheckpoint(
+      collected.sourceId,
+      conversationId
+    );
+    if (
+      latest &&
+      checkpoint &&
+      compareMessageCursor(latest, checkpoint) === 0 &&
+      checkpoint.contentHash !== conversationContentHash(messages)
+    ) {
+      revised.add(conversationId);
+    }
+  }
+  return revised;
 }
 
 function updateConversationCheckpoints(

@@ -14,7 +14,6 @@ import { requestMcpReload } from "../../core/agent-runtime/tools/mcp.js";
 import { BaseChannel, type ChannelHandleMessageOptions } from "./base.js";
 import {
   OUTBOUND_META_AGENT_UI,
-  MessageBus,
   OutboundMessage,
   parseTurnSource,
   type TurnSource,
@@ -40,11 +39,7 @@ import type {
 } from "../../core/agent-runtime/loop.js";
 import { getMediaDir, getWorkspacePath } from "../../config/paths.js";
 import type { CronService } from "../../cron/service.js";
-import {
-  GOAL_TURN_INBOX_KEY,
-  goalStateWsBlob,
-  type GoalStatus,
-} from "../../core/session/goal-state.js";
+import { goalStateWsBlob, type GoalStatus } from "../../core/session/goal-state.js";
 import {
   readWebuiSessionBinding,
   Session,
@@ -253,6 +248,7 @@ const MCP_PRESET_ACTIONS_BY_PATH: Record<string, string> = {
   "/api/settings/mcp-presets/import": "import",
   "/api/settings/mcp-presets/import-cursor": "import-cursor",
   "/api/settings/mcp-presets/tools": "tools",
+  "/api/settings/mcp-presets/reload": "reload",
 };
 
 const MAX_ATTACHMENTS_PER_MESSAGE = 4;
@@ -1798,6 +1794,11 @@ export class WebSocketChannel extends BaseChannel {
   async handleSettingsMcpPresets(request: any, action: string | null = null): Promise<HttpLikeResponse> {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
     try {
+      if (action === "reload") {
+        if (!bearerToken(request?.headers)) return httpError(401, "Unauthorized");
+        if (String(request?.method ?? "GET").toUpperCase() !== "POST") return httpError(405, "Method Not Allowed");
+        return httpJsonResponse(await requestMcpReload(this.bus));
+      }
       const payload = await mcpPresetsSettingsAction(action, parseMcpSettingsQuery(request), {
         reloadMcp: () => requestMcpReload(this.bus),
       });

@@ -576,31 +576,15 @@ async maybeCreateFeedbackExperience(
     }
     const savedPolicy = policyMetaFromMemory(saved);
     if (savedPolicy?.status !== "active") return jobs;
-    jobs.push(
-      this.deps.enqueueJob({
-        jobType: "skill_crystallization",
-        userId: saved.userId,
-        sessionId: saved.sessionId,
-        episodeId: feedback.episodeId,
-        targetMemoryId: saved.id,
-        payload: { reason: "feedback.experience", feedbackId: feedback.id },
-        createdAt: at
-      }),
-      this.deps.enqueueJob({
-        jobType: "l3_abstraction",
-        userId: saved.userId,
-        sessionId: saved.sessionId,
-        episodeId: feedback.episodeId,
-        payload: {
-          reason: "feedback.experience",
-          targetKind: "policy_cluster",
-          seedPolicyId: saved.id,
-          policyIds: [saved.id],
-          feedbackId: feedback.id
-        },
-        createdAt: at
-      })
-    );
+    jobs.push(this.deps.enqueueJob({
+      jobType: "skill_crystallization",
+      userId: saved.userId,
+      sessionId: saved.sessionId,
+      episodeId: feedback.episodeId,
+      targetMemoryId: saved.id,
+      payload: { reason: "feedback.experience", feedbackId: feedback.id },
+      createdAt: at
+    }));
     return jobs;
   }
 

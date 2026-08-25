@@ -40,6 +40,8 @@ export function AgentWorkspaceContext({
   const rootRef = useRef<HTMLDivElement | null>(null);
   const branchSearchRef = useRef<HTMLInputElement | null>(null);
   const newBranchRef = useRef<HTMLInputElement | null>(null);
+  const createBranchActionRef = useRef<HTMLButtonElement | null>(null);
+  const restoreCreateActionFocusRef = useRef(false);
   const repository = snapshot?.status === "ready" ? snapshot.repository : null;
   const revision = repository?.branch
     ?? (repository?.head_sha ? `HEAD ${repository.head_sha.slice(0, 7)}` : null);
@@ -72,6 +74,12 @@ export function AgentWorkspaceContext({
 
   useEffect(() => {
     if (createBranchOpen) newBranchRef.current?.focus();
+  }, [createBranchOpen]);
+
+  useEffect(() => {
+    if (createBranchOpen || !restoreCreateActionFocusRef.current) return;
+    restoreCreateActionFocusRef.current = false;
+    createBranchActionRef.current?.focus();
   }, [createBranchOpen]);
 
   if (!revision) return null;
@@ -120,7 +128,6 @@ export function AgentWorkspaceContext({
         </button>
         {openMenu === "mode" ? (
           <div className="home-workspace-menu home-workspace-menu--mode" role="menu">
-            <p className="home-workspace-menu__heading">{t("home.environment.mode.title")}</p>
             <button type="button" className="home-workspace-menu__item" role="menuitemradio" aria-checked="true" onClick={() => setOpenMenu(null)}>
               <Laptop size={17} aria-hidden="true" />
               <span>{localLabel}</span>
@@ -161,7 +168,6 @@ export function AgentWorkspaceContext({
                 onChange={(event) => setQuery(event.target.value)}
               />
             </label>
-            <p className="home-workspace-menu__heading">{t("home.environment.branch.title")}</p>
             <div
               className="home-workspace-menu__branch-list"
               role="listbox"
@@ -192,6 +198,9 @@ export function AgentWorkspaceContext({
                   void createOrCheckoutBranch();
                 }}
               >
+                <p className="home-workspace-menu__branch-create-base">
+                  {t("home.environment.branch.createFrom", { branch: currentBranch ?? revision })}
+                </p>
                 <input
                   ref={newBranchRef}
                   value={newBranchName}
@@ -206,6 +215,7 @@ export function AgentWorkspaceContext({
                     type="button"
                     disabled={loading}
                     onClick={() => {
+                      restoreCreateActionFocusRef.current = true;
                       setCreateBranchOpen(false);
                       setNewBranchName("");
                     }}
@@ -218,8 +228,9 @@ export function AgentWorkspaceContext({
                 </div>
               </form>
             ) : null}
-            <div className="home-workspace-menu__branch-footer">
+            {!createBranchOpen ? <div className="home-workspace-menu__branch-footer">
               <button
+                ref={createBranchActionRef}
                 type="button"
                 className="home-workspace-menu__branch-create"
                 aria-expanded={createBranchOpen}
@@ -228,7 +239,7 @@ export function AgentWorkspaceContext({
                 <Plus size={17} aria-hidden="true" />
                 <span>{t("home.environment.branch.createOrCheckout")}</span>
               </button>
-            </div>
+            </div> : null}
           </div>
         ) : null}
       </div>

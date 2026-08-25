@@ -27,6 +27,7 @@ declare global {
   interface Window {
     memmy?: {
       platform: string;
+      notifyRendererReady(): void;
       getRuntimeConfig(): Promise<unknown>;
       getAppInfo(): Promise<DesktopAppInfo>;
       getInstallationId(): Promise<string>;

@@ -858,8 +858,16 @@ describe("agent source service", () => {
   it("rescans a conversation when its content changes without changing the message cursor", async () => {
     const repository = createRepository();
     let messages = createCompleteMemoryMessages("cursor", 1, "2026-05-28T10:00:02.000Z");
+    const replayedConversationIds: string[][] = [];
+    const ingestionService = createFakeIngestionService();
     const service = createService({
       repository,
+      ingestionService: {
+        async ingest(input, context) {
+          replayedConversationIds.push([...(context.replaySeenConversationIds ?? [])]);
+          return ingestionService.ingest(input, context);
+        }
+      },
       adapters: [createFakeAdapter("cursor", [], async function* () {
         for (const message of messages) yield message;
       })]
@@ -878,6 +886,24 @@ describe("agent source service", () => {
     await service.ingestCollected([revised]);
     const unchanged = await service.collectOne("cursor");
     expect(unchanged.messages).toEqual([]);
+
+    messages = [
+      ...messages,
+      {
+        ...messages[0]!,
+        messageId: "cursor-turn-2-user",
+        content: "follow-up question",
+        createdAt: "2026-05-28T10:01:00.000Z"
+      },
+      {
+        ...messages[1]!,
+        messageId: "cursor-turn-2-assistant",
+        content: "follow-up answer",
+        createdAt: "2026-05-28T10:01:01.000Z"
+      }
+    ];
+    await service.ingestCollected([await service.collectOne("cursor")]);
+    expect(replayedConversationIds).toEqual([[], ["cursor-conv-1"], []]);
   });
 
   it("groups messages by conversation before handing them to ingestion", async () => {
