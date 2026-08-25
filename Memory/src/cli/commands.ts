@@ -34,6 +34,7 @@ const COMPACT_GET_TOOL_FIELD_CHARS = 1200;
 export interface CommandContext {
   argv: string[];
   fetch?: typeof fetch;
+  stopInstalledService?: (home: string) => Promise<Record<string, unknown>>;
 }
 
 export async function runCommand(context: CommandContext): Promise<unknown> {
@@ -63,10 +64,15 @@ export async function runCommand(context: CommandContext): Promise<unknown> {
     return upgradeMemoryCli(setupOptions(parsed));
   }
 
+  if (words[0] === "stop") {
+    const home = optionString(options, "home") ?? "~/.memmy";
+    return (context.stopInstalledService ?? stopInstalledMemoryService)(home);
+  }
+
   if (words[0] === "service") {
     const home = optionString(options, "home") ?? "~/.memmy";
     if (words[1] === "start") return startInstalledMemoryService(home);
-    if (words[1] === "stop") return stopInstalledMemoryService();
+    if (words[1] === "stop") return (context.stopInstalledService ?? stopInstalledMemoryService)(home);
     if (words[1] === "status") return { ok: true, runtime: await currentInstalledRuntime(home) ?? null };
     throw new Error("service requires start, stop, or status");
   }
@@ -577,6 +583,7 @@ function helpText(): string {
     "  init [--agent <agent>]       Initialize CLI config and install agent skills",
     "  install [--service-only]     Install and start the standalone Memory service",
     "  upgrade [--version <ver>]    Upgrade Memory and installed agent adapters",
+    "  stop                         Stop the background Memory service",
     "  service start|stop|status    Control the installed user service",
     "  serve                        Explain how to connect to an external Memory service",
     "  health                       Check Memory service health",

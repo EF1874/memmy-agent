@@ -5,10 +5,12 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
+import { loadMemmyConfig } from "../config/index.js";
 import { MEMORY_PROTOCOL_VERSION, MEMORY_SERVICE_VERSION } from "../version.js";
 
 const DEFAULT_RELEASES_URL = "https://github.com/MemTensor/memmy-agent/releases";
 const INSTALL_LOCK_TIMEOUT_MS = 15_000;
+const SERVICE_STOP_TIMEOUT_MS = 5_000;
 
 export interface RuntimeAssetDescriptor { name: string; sha256: string; size?: number; url?: string; }
 export interface MemoryReleaseManifest {
@@ -174,9 +176,105 @@ export async function startInstalledMemoryService(home = "~/.memmy"): Promise<Re
   return { ok: true, action: "start", ...pointer };
 }
 
-export function stopInstalledMemoryService(): Record<string, unknown> {
-  stopUserService();
-  return { ok: true, action: "stop" };
+export interface StopInstalledMemoryServiceDependencies {
+  stopUserService?: () => void;
+  fetch?: typeof fetch;
+}
+
+interface MemoryRuntimeState {
+  pid?: number;
+  endpoint?: string;
+  configPath?: string;
+}
+
+export async function stopInstalledMemoryService(
+  home = "~/.memmy",
+  dependencies: StopInstalledMemoryServiceDependencies = {}
+): Promise<Record<string, unknown>> {
+  const resolvedHome = resolveHome(home);
+  const runtimeState = await readJsonFile<MemoryRuntimeState>(
+    join(resolvedHome, "memory-service", "runtime.json")
+  );
+  (dependencies.stopUserService ?? stopUserService)();
+
+  if (!runtimeState?.endpoint) {
+    return { ok: true, action: "stop" };
+  }
+
+  const endpoint = loopbackEndpoint(runtimeState.endpoint);
+  const configPath = runtimeState.configPath ?? join(resolvedHome, "config.yaml");
+  const token = loadMemmyConfig(configPath).config.storage.token ?? "";
+  const request = dependencies.fetch ?? fetch;
+  const headers: Record<string, string> = token ? { authorization: `Bearer ${token}` } : {};
+  const probe = await probeMemoryRuntime(endpoint, headers, request);
+  if (probe === "unexpected") {
+    throw new Error(`refusing to stop an unexpected service at ${endpoint}`);
+  }
+  if (probe === "memory") {
+    let shutdownError: unknown;
+    try {
+      const response = await request(`${endpoint}/api/v1/admin/shutdown`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...headers
+        },
+        body: "{}",
+        signal: AbortSignal.timeout(1_000)
+      });
+      if (!response.ok) {
+        throw new Error(`Memory shutdown request failed with HTTP ${response.status}`);
+      }
+    } catch (error) {
+      shutdownError = error;
+    }
+    const stopped = await waitForMemoryRuntimeStop(endpoint, headers, request);
+    if (!stopped) {
+      throw shutdownError instanceof Error
+        ? shutdownError
+        : new Error(`Memory service did not stop at ${endpoint}`);
+    }
+  }
+  return { ok: true, action: "stop", ...(runtimeState.pid ? { pid: runtimeState.pid } : {}) };
+}
+
+async function probeMemoryRuntime(
+  endpoint: string,
+  headers: Record<string, string>,
+  request: typeof fetch
+): Promise<"stopped" | "memory" | "unexpected"> {
+  try {
+    const response = await request(`${endpoint}/api/v1/health`, {
+      headers,
+      signal: AbortSignal.timeout(1_000)
+    });
+    if (!response.ok) return "unexpected";
+    const health = await response.json() as Record<string, unknown>;
+    return health.protocolVersion === MEMORY_PROTOCOL_VERSION ? "memory" : "unexpected";
+  } catch {
+    return "stopped";
+  }
+}
+
+async function waitForMemoryRuntimeStop(
+  endpoint: string,
+  headers: Record<string, string>,
+  request: typeof fetch
+): Promise<boolean> {
+  const deadline = Date.now() + SERVICE_STOP_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (await probeMemoryRuntime(endpoint, headers, request) === "stopped") return true;
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+  }
+  return false;
+}
+
+function loopbackEndpoint(value: string): string {
+  const url = new URL(value);
+  if (url.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) {
+    throw new Error(`Memory runtime endpoint must be loopback HTTP: ${value}`);
+  }
+  return url.href.replace(/\/$/, "");
 }
 
 async function reuseInstalledRuntime(

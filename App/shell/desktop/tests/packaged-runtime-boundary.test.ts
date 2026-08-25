@@ -1018,8 +1018,8 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain("app.exit(0)");
     expect(mainSource).toContain("async function cleanupBeforeQuit()");
     expect(mainSource).toContain("event.preventDefault()");
-    expect(mainSource).toContain("backend?.getAppSettings().stopMemoryServiceOnExit");
-    expect(mainSource).toContain("await services?.close({ stopMemory })");
+    expect(mainSource).toContain("readStopMemoryServiceOnExitSetting()");
+    expect(mainSource).toContain("await services?.close({ stopMemory: stopMemoryServiceForCurrentQuit })");
     expect(mainSource).toContain("app.quit()");
     expect(runtimeServicesSource).toContain("STOP_MANAGED_CHILD_GRACE_MS");
     expect(runtimeServicesSource).toContain("waitForManagedChildExit(child, STOP_MANAGED_CHILD_GRACE_MS)");

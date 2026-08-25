@@ -2,7 +2,7 @@ import { mutateRuntimeConfig } from "@memmy/migrations";
 import type { AgentGatewayStartupIssue } from "@memmy/local-api-contracts";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir, readdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -41,7 +41,7 @@ export interface ManagedRuntimeServices {
   };
   restartMemory(): Promise<void>;
   close(options?: { stopMemory?: boolean }): Promise<void>;
-  terminateSync(): void;
+  terminateSync(options?: { stopMemory?: boolean }): void;
 }
 
 export interface StartPackagedRuntimeServicesOptions {
@@ -98,6 +98,7 @@ export interface ManagedChild {
   stderrTail: string[];
   exitDescription: string | null;
   logWriter: RotatingWriter | null;
+  persistOnDesktopExit?: boolean;
 }
 
 export interface PackagedBrowserPreparation {
@@ -110,6 +111,7 @@ interface ServiceLogOptions {
   logLevel: LogLevel;
   ipc?: boolean;
   executablePath?: string;
+  persistOnDesktopExit?: boolean;
 }
 
 const DAEMON_LOG_MAX_SIZE = 5 * 1024 * 1024;
@@ -256,15 +258,23 @@ export async function startManagedRuntimeServices(
             options.offlineMemoryRuntimeDirectory,
             runtimeConfig,
             options,
-            ["service", "stop", "--home", dirname(runtimeConfig.configPath)]
+            ["stop", "--home", dirname(runtimeConfig.configPath)]
           );
         }
-        await stopManagedChildren(children);
+        await stopManagedChildrenForDesktopExit(children, closeOptions.stopMemory === true);
       },
-      terminateSync() {
+      terminateSync(terminateOptions = {}) {
         browserPreparation?.stop();
+        if (terminateOptions.stopMemory && options.offlineMemoryRuntimeDirectory) {
+          runBundledMemoryCliSync(
+            options.offlineMemoryRuntimeDirectory,
+            runtimeConfig,
+            options,
+            ["stop", "--home", dirname(runtimeConfig.configPath)]
+          );
+        }
         gatewaySupervisor.terminateSync();
-        terminateManagedChildrenSync(children);
+        terminateManagedChildrenForDesktopExit(children, terminateOptions.stopMemory === true);
       }
     };
   } catch (error) {
@@ -774,7 +784,8 @@ export async function ensureMemoryService(
   }, {
     logFilePath: join(options.logDirectory, "memory.log"),
     logLevel: options.logLevel,
-    executablePath: options.runtimeExecutable
+    executablePath: options.runtimeExecutable,
+    persistOnDesktopExit: true
   });
   children.push(memoryChild);
   try {
@@ -836,6 +847,7 @@ async function runBundledMemoryCli(
         ...process.env,
         ELECTRON_RUN_AS_NODE: "1",
         NODE_ENV: process.env.NODE_ENV ?? "production",
+        MEMMY_CLI_ANALYTICS_SKIP: "1",
         MEMMY_CONFIG: runtimeConfig.configPath
       },
       stdio: ["ignore", "pipe", "pipe"],
@@ -851,6 +863,32 @@ async function runBundledMemoryCli(
       else rejectInstall(new Error(`Bundled Memory command failed (${signal ? `signal ${signal}` : `code ${String(code)}`}): ${output.trim()}`));
     });
   });
+}
+
+function runBundledMemoryCliSync(
+  runtimeDirectory: string,
+  runtimeConfig: PackagedRuntimeConfig,
+  options: StartManagedRuntimeServicesOptions,
+  commandArgs: string[]
+): void {
+  const cliEntry = join(runtimeDirectory, "dist", "src", "cli", "index.js");
+  if (!existsSync(cliEntry)) return;
+  try {
+    execFileSync(options.runtimeExecutable ?? process.execPath, [cliEntry, ...commandArgs], {
+      env: {
+        ...process.env,
+        ELECTRON_RUN_AS_NODE: "1",
+        NODE_ENV: process.env.NODE_ENV ?? "production",
+        MEMMY_CLI_ANALYTICS_SKIP: "1",
+        MEMMY_CONFIG: runtimeConfig.configPath
+      },
+      stdio: "ignore",
+      timeout: 6_000,
+      windowsHide: true
+    });
+  } catch (error) {
+    console.warn(`Failed to stop the Memory service during forced Desktop shutdown: ${errorMessage(error)}`);
+  }
 }
 
 async function restartManagedMemoryService(
@@ -1277,23 +1315,42 @@ export function spawnNodeService(
     ELECTRON_RUN_AS_NODE: "1",
     NODE_ENV: process.env.NODE_ENV ?? "production"
   };
-  const child = spawn(logOptions.executablePath ?? process.execPath, [entry, ...args], {
-    env: childEnv,
-    stdio: logOptions.ipc ? ["ignore", "pipe", "pipe", "ipc"] : ["ignore", "pipe", "pipe"],
-    windowsHide: true
-  });
-  const logWriter = createRotatingWriter({
-    filePath: logOptions.logFilePath,
-    maxSize: DAEMON_LOG_MAX_SIZE,
-    maxFiles: DAEMON_LOG_MAX_FILES
-  });
+  const persistOnDesktopExit = logOptions.persistOnDesktopExit === true;
+  let logFileDescriptor: number | undefined;
+  if (persistOnDesktopExit) {
+    mkdirSync(dirname(logOptions.logFilePath), { recursive: true });
+    logFileDescriptor = openSync(logOptions.logFilePath, "a", 0o600);
+  }
+  let child: ChildProcess;
+  try {
+    child = spawn(logOptions.executablePath ?? process.execPath, [entry, ...args], {
+      env: childEnv,
+      stdio: persistOnDesktopExit
+        ? ["ignore", logFileDescriptor!, logFileDescriptor!]
+        : logOptions.ipc
+          ? ["ignore", "pipe", "pipe", "ipc"]
+          : ["ignore", "pipe", "pipe"],
+      detached: persistOnDesktopExit,
+      windowsHide: true
+    });
+  } finally {
+    if (logFileDescriptor !== undefined) closeSync(logFileDescriptor);
+  }
+  const logWriter = persistOnDesktopExit
+    ? null
+    : createRotatingWriter({
+      filePath: logOptions.logFilePath,
+      maxSize: DAEMON_LOG_MAX_SIZE,
+      maxFiles: DAEMON_LOG_MAX_FILES
+    });
   const managed: ManagedChild = {
     name,
     process: child,
     stdoutTail: [],
     stderrTail: [],
     exitDescription: null,
-    logWriter
+    logWriter,
+    persistOnDesktopExit
   };
 
   child.stdout?.setEncoding("utf8");
@@ -1301,17 +1358,18 @@ export function spawnNodeService(
   child.stdout?.on("data", (chunk) => {
     const text = String(chunk);
     appendTail(managed.stdoutTail, text);
-    logWriter.write(text);
+    logWriter?.write(text);
   });
   child.stderr?.on("data", (chunk) => {
     const text = String(chunk);
     appendTail(managed.stderrTail, text);
-    logWriter.write(text);
+    logWriter?.write(text);
   });
   child.once("exit", (code, signal) => {
     managed.exitDescription = signal ? `signal ${signal}` : `code ${code ?? "unknown"}`;
     managed.logWriter?.close();
   });
+  if (persistOnDesktopExit) child.unref();
 
   return managed;
 }
@@ -1539,6 +1597,13 @@ async function stopManagedChildren(children: ManagedChild[]): Promise<void> {
   await Promise.allSettled([...children].reverse().map((child) => stopManagedChild(child)));
 }
 
+export async function stopManagedChildrenForDesktopExit(
+  children: ManagedChild[],
+  stopMemory: boolean
+): Promise<void> {
+  await stopManagedChildren(children.filter((child) => stopMemory || !child.persistOnDesktopExit));
+}
+
 function isManagedChildRunning(child: ManagedChild): boolean {
   return !child.exitDescription && child.process.exitCode === null && child.process.signalCode === null;
 }
@@ -1568,6 +1633,13 @@ function terminateManagedChildrenSync(children: ManagedChild[]): void {
   for (const child of children) {
     terminateProcessTreeSync(child.process);
   }
+}
+
+export function terminateManagedChildrenForDesktopExit(
+  children: ManagedChild[],
+  stopMemory: boolean
+): void {
+  terminateManagedChildrenSync(children.filter((child) => stopMemory || !child.persistOnDesktopExit));
 }
 
 function terminateProcessTreeSync(child: ChildProcess): void {

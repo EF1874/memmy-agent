@@ -3,12 +3,14 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { createServer } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   compareVersions,
   currentInstalledRuntime,
   installMemoryRuntime,
-  runtimeTarget
+  runtimeTarget,
+  stopInstalledMemoryService
 } from "../src/cli/runtime-installer.js";
 
 const roots: string[] = [];
@@ -138,6 +140,56 @@ describe("standalone Memory runtime installer", () => {
     }));
     await expect(installMemoryRuntime({ home, version: "2.1.0", dryRun: true }))
       .rejects.toThrow("refusing to downgrade");
+  });
+
+  it("stops a running Memory process even when no user service is registered", async () => {
+    const root = tempRoot();
+    const home = join(root, "home");
+    const configPath = join(home, "config.yaml");
+    mkdirSync(join(home, "memory-service"), { recursive: true });
+    writeFileSync(configPath, [
+      "memmyMemory:",
+      "  storage:",
+      "    mode: local",
+      "    backend: sqlite",
+      `    sqlitePath: ${JSON.stringify(join(home, "memory-service", "memory.sqlite"))}`,
+      "    token: service-token",
+      ""
+    ].join("\n"));
+
+    let shutdownRequests = 0;
+    const server = createServer((request, response) => {
+      expect(request.headers.authorization).toBe("Bearer service-token");
+      if (request.method === "GET" && request.url === "/api/v1/health") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ ok: true, protocolVersion: 1 }));
+        return;
+      }
+      if (request.method === "POST" && request.url === "/api/v1/admin/shutdown") {
+        shutdownRequests += 1;
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ ok: true }));
+        response.once("finish", () => server.close());
+        return;
+      }
+      response.writeHead(404).end();
+    });
+    await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server did not bind a TCP port");
+    writeFileSync(join(home, "memory-service", "runtime.json"), JSON.stringify({
+      pid: 12345,
+      endpoint: `http://127.0.0.1:${address.port}`,
+      configPath
+    }));
+    let managerStops = 0;
+
+    await expect(stopInstalledMemoryService(home, {
+      stopUserService: () => { managerStops += 1; }
+    })).resolves.toMatchObject({ ok: true, action: "stop", pid: 12345 });
+
+    expect(managerStops).toBe(1);
+    expect(shutdownRequests).toBe(1);
   });
 });
 

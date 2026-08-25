@@ -23,6 +23,7 @@ import {
   startAgentGatewayWithRecovery,
   startPackagedBrowserPreparation,
   stopManagedChild,
+  stopManagedChildrenForDesktopExit,
   syncBundledAgentSkills,
   type ManagedChild,
   type PackagedRuntimeConfig,
@@ -1129,6 +1130,36 @@ describe("AgentGatewaySupervisor", () => {
 });
 
 describe("spawnNodeService 落盘与 env 注入", () => {
+  it("keeps persistent Memory alive on Desktop exit unless the setting requests a stop", async () => {
+    const root = await makeTempRoot();
+    const entry = join(root, "persistent-service.js");
+    await writeFile(entry, "setInterval(() => {}, 1000);\n");
+    const memory = spawnNodeService("memory", entry, [], {}, {
+      logFilePath: join(root, "memory.log"),
+      logLevel: "info",
+      persistOnDesktopExit: true
+    });
+    const gateway = spawnNodeService("agent-gateway", entry, [], {}, {
+      logFilePath: join(root, "agent-gateway.log"),
+      logLevel: "info"
+    });
+
+    try {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+      await stopManagedChildrenForDesktopExit([memory, gateway], false);
+
+      expect(gateway.process.exitCode !== null || gateway.process.signalCode !== null).toBe(true);
+      expect(memory.process.exitCode).toBeNull();
+      expect(memory.process.signalCode).toBeNull();
+
+      await stopManagedChildrenForDesktopExit([memory], true);
+      expect(memory.process.exitCode !== null || memory.process.signalCode !== null).toBe(true);
+    } finally {
+      await stopManagedChild(memory);
+      await stopManagedChild(gateway);
+    }
+  });
+
   it("把子进程 stdout 落盘到指定日志文件", async () => {
     const root = await makeTempRoot();
     const entry = join(root, "entry.js");

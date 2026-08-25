@@ -122,6 +122,7 @@ let isReplayingMainWindowAction = false;
 let isQuitting = false;
 let isQuitCleanupInProgress = false;
 let isQuitCleanupComplete = false;
+let stopMemoryServiceForCurrentQuit = false;
 let quitCleanupForceExitTimer: ReturnType<typeof setTimeout> | null = null;
 let areIpcHandlersRegistered = false;
 let isBootReady = false;
@@ -2909,19 +2910,19 @@ function shouldQuitForManualUpdateInstall(filePath: string): boolean {
 function scheduleQuitForManualUpdateInstall(): void {
   setTimeout(() => {
     isQuitting = true;
+    stopMemoryServiceForCurrentQuit = readStopMemoryServiceOnExitSetting();
     const forceExitDelayMs = process.platform === "win32" ? WINDOWS_UPDATE_INSTALL_FORCE_EXIT_DELAY_MS : UPDATE_INSTALL_FORCE_EXIT_DELAY_MS;
     if (process.platform === "win32") {
       hideAppShellForQuit();
-      runtimeServices?.terminateSync();
+      runtimeServices?.terminateSync({ stopMemory: stopMemoryServiceForCurrentQuit });
       app.exit(0);
       return;
     }
     app.quit();
     if (!updateInstallForceExitTimer) {
       updateInstallForceExitTimer = setTimeout(() => {
-        // Synchronously kill the child services before force-exiting, so memory / agent-gateway do
-        // not become orphans holding ports and drag down the new instance reopened after the update.
-        runtimeServices?.terminateSync();
+        // Apply the same service-lifecycle choice even if update shutdown needs a forced exit.
+        runtimeServices?.terminateSync({ stopMemory: stopMemoryServiceForCurrentQuit });
         app.exit(0);
       }, forceExitDelayMs);
       updateInstallForceExitTimer.unref?.();
@@ -4815,6 +4816,7 @@ app.on("before-quit", (event) => {
   }
 
   isQuitCleanupInProgress = true;
+  stopMemoryServiceForCurrentQuit = readStopMemoryServiceOnExitSetting();
   void writePackagedStartupLog("quit:cleanup-start");
   armQuitCleanupForceExitTimer();
   void cleanupBeforeQuit()
@@ -4850,9 +4852,8 @@ function armQuitCleanupForceExitTimer(): void {
   clearQuitCleanupForceExitTimer();
   quitCleanupForceExitTimer = setTimeout(() => {
     console.warn("quit cleanup timed out; forcing app exit");
-    // Before force-exiting on a cleanup timeout, synchronously kill the child services, so leftover
-    // orphan processes do not keep holding the fixed ports.
-    runtimeServices?.terminateSync();
+    // Apply the same service-lifecycle choice when graceful cleanup times out.
+    runtimeServices?.terminateSync({ stopMemory: stopMemoryServiceForCurrentQuit });
     relaunchAfterQuitCleanupIfRequested();
     app.exit(0);
   }, APP_QUIT_CLEANUP_FORCE_EXIT_DELAY_MS);
@@ -4933,11 +4934,18 @@ async function cleanupBeforeQuit(): Promise<void> {
   memoryServiceControl = null;
   const backend = localBackend;
   localBackend = null;
-  const stopMemory = backend?.getAppSettings().stopMemoryServiceOnExit ?? false;
-  await services?.close({ stopMemory });
+  await services?.close({ stopMemory: stopMemoryServiceForCurrentQuit });
   await backend?.close();
   await stopPackagedRendererServer();
   await sendAppExitEventBeforeQuit();
+}
+
+function readStopMemoryServiceOnExitSetting(): boolean {
+  try {
+    return localBackend?.getAppSettings().stopMemoryServiceOnExit ?? false;
+  } catch {
+    return false;
+  }
 }
 
 async function copyDesktopImageToClipboard(request: DesktopImageActionRequest, senderUrl: string): Promise<void> {
