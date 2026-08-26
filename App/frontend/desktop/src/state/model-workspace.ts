@@ -553,13 +553,18 @@ export function setModelAssignment(
   workspace: ModelWorkspace,
   mode: ModelWorkspaceMode,
   kind: ModelAssignmentKind,
-  candidateId: string
+  candidateId: string | null
 ): ModelWorkspace {
+  const key = kind === "image" ? "imageGeneration" : kind;
+  if (candidateId === null) {
+    const next = cloneCatalog(workspace.catalog);
+    next.modelAssignments[mode][key] = null;
+    return createModelWorkspace(next);
+  }
   const capability = assignmentCapability(kind);
   const allowed = new Set(getModelCandidates(workspace, mode, capability).map((candidate) => candidate.id));
   if (!allowed.has(candidateId)) return workspace;
   const next = cloneCatalog(workspace.catalog);
-  const key = kind === "image" ? "imageGeneration" : kind;
   next.modelAssignments[mode][key] = candidateId;
   return createModelWorkspace(next);
 }
