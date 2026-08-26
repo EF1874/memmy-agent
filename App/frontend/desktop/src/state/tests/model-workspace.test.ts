@@ -443,6 +443,50 @@ describe("canonical model workspace adapter", () => {
     expect(Object.values(raw.modelPresets ?? {})).not.toContainEqual(expect.objectContaining({ provider: "dashscope" }));
   });
 
+  it("真实 Backend catalog：删除共享配置时同时清理账号空间的失效平台 preset 引用", async () => {
+    const file = catalogFixture();
+    const empty = await readModelConfigCatalog(file);
+    let workspace = createModelWorkspace(empty);
+    const created = upsertByokPreset(workspace, {
+      provider: "openai",
+      endpoint: "https://api.openai.com/v1",
+      protocol: "openai-chat-completions",
+      apiKey: "test-api-key",
+      model: "gpt-4o",
+      capabilities: ["agent"]
+    });
+    workspace = assignCatalogPreset(created.workspace, "byok", "agent", created.presetId);
+    workspace = assignCatalogPreset(workspace, "account", "agent", created.presetId);
+    const createdCatalog = await persistModelCatalogMutation(modelConfigInput(workspace), {
+      read: () => readModelConfigCatalog(file),
+      write: (input) => writeModelConfigCatalog(file, input)
+    }, empty);
+    const byokPresetId = createdCatalog.modelAssignments.byok.agent.default!;
+    const staleAccountPresetId = "memmy-account-946b1209029f-agent";
+    const raw = YAML.parse(readFileSync(file, "utf8")) as any;
+    raw.modelAssignments.account = {
+      ownerAccountId: "owner-a",
+      agent: { candidates: [staleAccountPresetId, byokPresetId], default: staleAccountPresetId },
+      memorySummary: null,
+      memoryEvolution: null,
+      embedding: null,
+      asr: null,
+      imageGeneration: null
+    };
+    writeFileSync(file, YAML.stringify(raw), "utf8");
+
+    const base = await readModelConfigCatalog(file);
+    const connection = createModelWorkspace(base).spaces.account.connections.find((item) => item.provider === "openai")!;
+    const deleted = deleteModelConnection(createModelWorkspace(base), "account", connection.id);
+    const saved = await persistModelCatalogMutation(modelConfigInput(deleted.workspace), {
+      read: () => readModelConfigCatalog(file),
+      write: (input) => writeModelConfigCatalog(file, input)
+    }, base);
+
+    expect(saved.providers.some((provider) => provider.provider === "openai")).toBe(false);
+    expect(saved.modelAssignments.account.agent).toEqual({ candidates: [], default: null });
+  });
+
   it("真实 Backend catalog：删除遇到不可见 Key 并发轮换时拒绝重放", async () => {
     const file = catalogFixture();
     const base = await deletionCatalogFixture(file);
