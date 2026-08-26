@@ -5059,6 +5059,10 @@ body.memmy-platform-windows .memory-panel__header {
   -webkit-app-region: no-drag;
 }
 
+body.memmy-platform-windows .memory-drawer {
+  padding-top: var(--codex-toolbar-height);
+}
+
 .memory-drawer,
 .memory-drawer * {
   -webkit-app-region: no-drag;
