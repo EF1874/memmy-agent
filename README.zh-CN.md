@@ -20,9 +20,8 @@
 </p>
 
 <div align="center">
-
-<div align="center">
 [安装](#安装) · [支持的 Agent](#所有-agent-共享同一个-memory-server) · [项目简介](#tencentdb-agent-memory-是什么) · [团队玩法](#一种玩法给一个人的公司组一支会成长的-agent-队伍) · [技术实现](#技术实现) · [Benchmark](#benchmark) · [Roadmap](#roadmap)
+</div>
 
 <a id="what"></a>
 
@@ -43,14 +42,13 @@
 </table>
 
 ## 你正在用的 Agent，大多都能接入
-** deepseek harness, openclaw, hermes, claude code, codex, cursor, workbuddy, openCode, pi...都能用！**
+**deepseek harness, openclaw, hermes, claude code, codex, cursor, workbuddy, openCode, pi...都能用!**
+<br>
+<br>
 ![cross-agent-cn.png](docs/assets/cross-agent-cn.png)
 
-- **跨 Agent 共享记忆**：无论是在 Codex、Claude Code、Cursor 还是 OpenClaw 中工作，都可以继续使用相同的上下文和经验，无需重复介绍背景。
-- **MemOS 驱动的记忆引擎**：自动采集、理解并结构化你的知识、偏好和工作经验，将分散的对话和行为沉淀为可检索、可复用的长期记忆。
-- **历史上下文接入**：支持导入已有 Agent 的历史记录，将过去的对话和项目经验转化为持续生长的个人知识资产。
 
-### 🕸️ 本地 Agent Runtime
+### 数据安全
 
 本地优先，记忆由你控制
 
