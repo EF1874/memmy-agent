@@ -711,6 +711,8 @@ function createCliAssets(assetRoot: string): void {
 }
 
 function createAllAgentRoots(root: string): void {
+  setEnv("OPENCODE_CONFIG_DIR", "");
+  setEnv("XDG_CONFIG_HOME", join(root, ".config"));
   mkdirSync(join(root, ".codex"), { recursive: true });
   mkdirSync(join(root, ".cursor"), { recursive: true });
   mkdirSync(join(root, ".claude"), { recursive: true });
