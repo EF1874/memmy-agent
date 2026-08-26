@@ -827,7 +827,7 @@ export function isValidImageGenerationMaxImagesPerTurn(value: unknown): value is
 }
 
 export class ImageGenerationToolConfig extends Base {
-  enabled = false;
+  enabled = true;
   provider = "openai";
   model = "gpt-image-2";
   apiKey = "";
@@ -851,7 +851,7 @@ export class ImageGenerationToolConfig extends Base {
         throw new ValueError(`tools.imageGeneration current contract does not accept legacy model field '${legacy}'`);
       }
     }
-    this.enabled = pick(init, ["enabled"], false);
+    this.enabled = pick(init, ["enabled"], true);
     this.profileMode = false;
     this.defaultAspectRatio = pick(
       init,
