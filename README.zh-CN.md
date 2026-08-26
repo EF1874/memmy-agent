@@ -57,9 +57,10 @@
 ## 如何使用 Memmy？
 
 ### 桌面端（推荐）
+
 <p align="center">
-  <img src="docs/assets/first-scan-cn.png" width="50%" alt="首次扫描">
-  <img src="docs/assets/first-report-cn.png" width="50%" alt="初见报告">
+  <img src="docs/assets/first-scan-cn.png" width="58%" alt="首次扫描">
+  <img src="docs/assets/first-report-cn.png" width="38%" alt="初见报告">
 </p>
 
 桌面端负责配置、历史扫描、Agent 接入及本地服务启动，支持 macOS 和 Windows。
