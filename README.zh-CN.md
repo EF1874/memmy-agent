@@ -86,6 +86,24 @@
 #### 2. 使用 memmy CLI /TUI
 ![tui.png](docs/assets/tui.png)
 
+Linux x64 或 arm64（需 Node.js 22 或更高版本，并且 systemd 用户会话可用）可一行安装：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MemTensor/memmy-agent/main/scripts/install.sh | bash
+memmy
+```
+
+安装器会立即启用本地 Memory Service（`memmy-memory.service`）。首次裸执行 `memmy` 时，如尚未配置模型，会在当前终端进入配置向导；保存后启用 `memmy-gateway.service`，等待就绪并进入 TUI。二者均为只绑定本机地址的 `systemd --user` 服务，退出 TUI 或关闭终端不会停止；以后登录时会自动启动。安装器不会启用 linger。只有安装器生成的 launcher 会启用这套服务管理，源码构建的 Linux CLI 保持原有行为。
+
+启动或重新连接 Gateway 前，`memmy` 会把配置引用的环境变量、常用 Provider 凭据和终端 `PATH` 刷新到权限为 `0600` 的私有文件 `~/.memmy/systemd/gateway.env`。这些值发生变化后，下次裸执行 `memmy` 会使用新环境重启用户服务。
+
+```bash
+systemctl --user status memmy-memory.service
+systemctl --user status memmy-gateway.service
+```
+
+安装阶段只初始化 Memory 基础配置，不会修改 Codex、Claude Code、Cursor 等外部 Agent。需要接入时，由用户明确执行 `memmy-memory init`（接入检测到的 Agent）或 `memmy-memory init --agent <agent>` 安装对应的 Memory Skill 及受支持的 Hook/插件。
+
 ```bash
 memmy onboard                              # 初始化配置和 workspace
 memmy status                               # 检查配置、模型和 Provider
