@@ -47,7 +47,7 @@
 <table align="center">
   <tr align="center" valign="middle">
     <td width="100%" valign="middle">
-      <video src="https://github.com/user-attachments/assets/7eb81e31-31a8-4539-8e01-a1f734c81bb6" width="100%" controls playsinline></video>
+      <video src="https://github.com/user-attachments/assets/8d3c7cdb-3481-4941-b143-5652c87a3eae" width="100%" controls playsinline></video>
     </td>
   </tr>
 </table>
