@@ -1184,7 +1184,7 @@ function envelopeWithPrincipal<T extends Record<string, unknown>>(
   principal: AuthPrincipal
 ): T & RequestEnvelope {
   const existing = isRecord(body.namespace) ? body.namespace as unknown as RuntimeNamespace : undefined;
-  const namespace = mergeNamespaces(mergeNamespaces(existing, namespaceFromSource(body.source)), principal.namespace);
+  const namespace = mergeNamespaces(mergeNamespaces(namespaceFromSource(body.source), existing), principal.namespace);
   assertNamespaceScope(existing, principal.namespace);
   return {
     ...body,
@@ -1218,7 +1218,7 @@ function strictEnvelopeWithPrincipal(
     }
   }
   const namespace = mergeNamespaces(
-    mergeNamespaces(requestNamespace, namespaceFromSource(body.source)),
+    mergeNamespaces(namespaceFromSource(body.source), requestNamespace),
     principalNamespace
   );
   if (!namespace) {
