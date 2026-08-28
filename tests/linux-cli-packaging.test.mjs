@@ -261,6 +261,17 @@ describe("Linux CLI package boundary", () => {
     expect(installer).not.toMatch(/nohup|disown|pkill|killall|enable-linger/);
   });
 
+  it("installs standalone Agent dependencies before Linux archive contract tests", () => {
+    const linuxWorkflow = readFileSync(linuxWorkflowPath, "utf8");
+    const agentInstall = "run: npm ci --prefix App/memmy-agent";
+    const contractTests = "run: npm run test:linux-cli";
+
+    expect(linuxWorkflow).toContain(agentInstall);
+    expect(linuxWorkflow.indexOf(agentInstall)).toBeLessThan(
+      linuxWorkflow.indexOf(contractTests),
+    );
+  });
+
   it("builds an archive with compiled CLI packages and no desktop payload", () => {
     const output = temporaryRoot("memmy-linux-archive-");
     const modelSource = path.join(output, "model-source", "Xenova", "all-MiniLM-L6-v2");
