@@ -1420,6 +1420,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
             platformUsage={tokenUsage}
             byokUsage={byokUsage}
             byokUsageStatus={byokUsageStatus}
+            modelCatalog={state.modelConfig.catalog}
           />
         </div>
 
@@ -1782,6 +1783,7 @@ export interface UsageDetailsProps {
   platformUsage: TokenUsageDto;
   byokUsage: ByokTokenUsageSummary;
   byokUsageStatus: UsageLoadStatus;
+  modelCatalog?: ModelConfigView;
 }
 
 /**
@@ -1801,31 +1803,61 @@ export function UsageDetails(props: UsageDetailsProps) {
   const byokUsageByKind = TOKEN_USAGE_SCENES.map((kind) => (
     props.byokUsage.byKind.find((usage) => usage.kind === kind) ?? emptyByokUsage(kind)
   ));
+  const classifiedByokModels = props.byokUsage.byModel.filter(isClassifiedByokUsageModel);
   const selectedUsageModelKey = selectedUsageModelId === "all"
-    || props.byokUsage.byModel.some((usage) => byokUsageModelKey(usage) === selectedUsageModelId)
+    || classifiedByokModels.some((usage) => byokUsageModelKey(usage) === selectedUsageModelId)
     ? selectedUsageModelId
     : "all";
+  const uniqueByokModels = new Map<string, ByokTokenUsageByModel>();
+  for (const usage of classifiedByokModels) {
+    const value = byokUsageModelKey(usage);
+    if (!uniqueByokModels.has(value)) {
+      uniqueByokModels.set(value, usage);
+    }
+  }
+  const modelLabelCounts = new Map<string, number>();
+  for (const usage of uniqueByokModels.values()) {
+    const label = byokUsageModelLabel(usage);
+    modelLabelCounts.set(label, (modelLabelCounts.get(label) ?? 0) + 1);
+  }
+  const discriminatorCounts = new Map<string, number>();
+  for (const usage of uniqueByokModels.values()) {
+    const label = byokUsageModelLabel(usage);
+    if (modelLabelCounts.get(label) === 1) continue;
+    const discriminator = byokUsageModelDiscriminator(usage, props.modelCatalog);
+    const collisionKey = JSON.stringify([label, discriminator]);
+    discriminatorCounts.set(collisionKey, (discriminatorCounts.get(collisionKey) ?? 0) + 1);
+  }
   const byokUsageModelOptions: SelectOption[] = [
     {
       value: "all",
       label: t("settings.token.allModels"),
       selectedLabel: t("settings.token.allModels")
     },
-    ...props.byokUsage.byModel.map((usage) => ({
-      value: byokUsageModelKey(usage),
-      label: byokUsageModelLabel(usage, t),
-      selectedLabel: usage.model ?? t("settings.token.historicalUnclassified")
-    }))
+    ...[...uniqueByokModels.entries()].map(([value, usage]) => {
+      const label = byokUsageModelLabel(usage);
+      const baseDiscriminator = modelLabelCounts.get(label) === 1
+        ? null
+        : byokUsageModelDiscriminator(usage, props.modelCatalog);
+      const discriminator = baseDiscriminator
+        && discriminatorCounts.get(JSON.stringify([label, baseDiscriminator])) !== 1
+        ? `${baseDiscriminator} · ${usage.presetId}`
+        : baseDiscriminator;
+      return {
+        value,
+        label: discriminator ? `${label} · ${discriminator}` : label,
+        selectedLabel: discriminator ? `${usage.model} · ${discriminator}` : usage.model ?? ""
+      };
+    })
   ];
-  const displayedByokModels = selectedUsageModelKey === "all"
-    ? props.byokUsage.byModel
-    : props.byokUsage.byModel.filter((usage) => byokUsageModelKey(usage) === selectedUsageModelKey);
+  const selectedByokModels = classifiedByokModels
+    .filter((usage) => byokUsageModelKey(usage) === selectedUsageModelKey);
   const displayedByokUsage = selectedUsageModelKey === "all"
     ? byokUsageByKind
-    : summarizeByokModelsByKind(displayedByokModels);
+    : summarizeByokModelsByKind(selectedByokModels);
   const displayedByokSummary = selectedUsageModelKey === "all"
     ? props.byokUsage
-    : summarizeByokModels(displayedByokModels);
+    : summarizeByokModels(selectedByokModels);
   const showPlatform = props.showPlatform && platformScenes.length > 0;
   // Sum the Cloud/Nacos scene budgets — same additive total the exhausted modal
   // uses — so the section heading mirrors the rows below it.
@@ -1922,21 +1954,6 @@ export function UsageDetails(props: UsageDetailsProps) {
                   {t("settings.token.modelBreakdownPending")}
                 </p>
               )}
-              {displayedByokModels.length > 0 && (
-                <>
-                  <div className={usageStyles.byokPurposeTitle}>
-                    {t("settings.token.byModel")}
-                  </div>
-                  <div className={usageStyles.byokPurposeRows}>
-                    {displayedByokModels.map((usage) => (
-                      <ByokModelUsageRow key={byokUsageModelKey(usage)} usage={usage} />
-                    ))}
-                  </div>
-                </>
-              )}
-              <div className={usageStyles.byokPurposeTitle}>
-                {t("settings.token.byPurpose")}
-              </div>
               <div className={usageStyles.byokPurposeRows}>
                 {displayedByokUsage.map((usage) => (
                   <ByokUsageRow
@@ -2018,14 +2035,22 @@ function emptyByokUsage(kind: ByokTokenUsageKind): ByokTokenUsageByKind {
 }
 
 function byokUsageModelKey(usage: ByokTokenUsageByModel): string {
-  return JSON.stringify([usage.presetId, usage.provider, usage.model, usage.capability]);
+  return JSON.stringify([usage.presetId, usage.provider, usage.model]);
 }
 
-function byokUsageModelLabel(usage: ByokTokenUsageByModel, t: SettingsTranslate): string {
-  if (!usage.provider || !usage.model || !usage.capability) {
-    return t("settings.token.historicalUnclassified");
-  }
-  return `${usage.provider} · ${usage.model} · ${usageSceneMeta(capabilityToUsageKind(usage.capability), t).label}`;
+function isClassifiedByokUsageModel(usage: ByokTokenUsageByModel): boolean {
+  return Boolean(usage.presetId && usage.provider && usage.model && usage.capability);
+}
+
+function byokUsageModelLabel(usage: ByokTokenUsageByModel): string {
+  return `${usage.provider} · ${usage.model}`;
+}
+
+function byokUsageModelDiscriminator(usage: ByokTokenUsageByModel, catalog?: ModelConfigView): string {
+  const provider = catalog?.providers.find((item) => item.provider === usage.provider);
+  const preset = provider?.models.find((item) => item.presetId === usage.presetId);
+  const endpoint = provider?.endpoints.find((item) => item.endpointId === preset?.endpointId);
+  return endpoint?.apiBase ?? usage.presetId ?? "";
 }
 
 function capabilityToUsageKind(capability: ByokTokenUsageCapability): ByokTokenUsageKind {
@@ -2140,27 +2165,6 @@ function ByokUsageRow(props: {
       <div className={usageStyles.byokUsageValue}>
         <strong>{props.breakdownUnavailable ? "—" : formatCompactTokenCount(props.usage.totalTokens)}</strong>
         {!props.breakdownUnavailable && <em>Token</em>}
-      </div>
-    </article>
-  );
-}
-
-function ByokModelUsageRow(props: { usage: ByokTokenUsageByModel }) {
-  const { t } = useTranslation();
-  const classified = Boolean(props.usage.provider && props.usage.model && props.usage.capability);
-  const purpose = props.usage.capability
-    ? usageSceneMeta(capabilityToUsageKind(props.usage.capability), t).label
-    : t("settings.token.historicalUnclassifiedHint");
-
-  return (
-    <article className={usageStyles.byokUsageRow} data-testid="byok-model-usage-row">
-      <div className={usageStyles.compactScene}>
-        <h3>{classified ? props.usage.model : t("settings.token.historicalUnclassified")}</h3>
-        <p>{classified ? `${props.usage.provider} · ${purpose}` : purpose}</p>
-      </div>
-      <div className={usageStyles.byokUsageValue}>
-        <strong>{formatCompactTokenCount(props.usage.totalTokens)}</strong>
-        <em>Token</em>
       </div>
     </article>
   );

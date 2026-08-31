@@ -667,9 +667,14 @@ describe("SettingsPageView", () => {
     expect(styles).toContain(".byokUsageList");
     expect(styles).not.toContain(".backButton");
     expect(source).toContain("const byokUsageByKind = TOKEN_USAGE_SCENES.map");
-    expect(source).toContain("props.byokUsage.byModel.map");
-    expect(source).toContain("function ByokModelUsageRow");
-    expect(source).toContain('t("settings.token.historicalUnclassified")');
+    expect(source).toContain("const classifiedByokModels = props.byokUsage.byModel.filter");
+    expect(source).toContain("const uniqueByokModels = new Map<string, ByokTokenUsageByModel>();");
+    expect(source).not.toContain("function ByokModelUsageRow");
+    expect(source).not.toContain("usageStyles.byokPurposeTitle");
+    expect(styles).not.toContain(".byokPurposeTitle");
+    expect(source).not.toContain('t("settings.token.byModel")');
+    expect(source).not.toContain('t("settings.token.byPurpose")');
+    expect(source).not.toContain('t("settings.token.historicalUnclassified")');
     expect(source).not.toContain("getTaskModelCandidates(workspace, workspaceMode)");
     expect(source).toContain('"settings.token.modelBreakdownPending"');
     expect(source).toContain("usageSceneMeta(props.usage.scene, t)");
