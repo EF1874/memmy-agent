@@ -224,7 +224,8 @@ export function createHttpMemoryClient(
           priorityCohortOnly: input.priorityCohortOnly
         },
         signal: input.signal,
-        timeoutMs: input.timeoutMs
+        timeoutMs: input.timeoutMs,
+        maxRetries: 0
       });
     },
 
