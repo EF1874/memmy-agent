@@ -10,7 +10,8 @@ import {
   currentInstalledRuntime,
   installMemoryRuntime,
   runtimeTarget,
-  stopInstalledMemoryService
+  stopInstalledMemoryService,
+  userServiceRestartCommand
 } from "../src/cli/runtime-installer.js";
 
 const roots: string[] = [];
@@ -28,6 +29,20 @@ describe("standalone Memory runtime installer", () => {
     expect(runtimeTarget("win32", "arm64")).toBe("windows-arm64");
     expect(runtimeTarget("win32", "x64")).toBe("windows-x64");
     expect(() => runtimeTarget("freebsd", "x64")).toThrow("unsupported platform");
+  });
+
+  it("maps service restarts to each user service manager", () => {
+    expect(userServiceRestartCommand("darwin", 501)).toEqual({
+      command: "launchctl",
+      args: ["kickstart", "-k", "gui/501/com.memtensor.memmy-memory"]
+    });
+    expect(userServiceRestartCommand("linux")).toEqual({
+      command: "systemctl",
+      args: ["--user", "restart", "memmy-memory.service"]
+    });
+    expect(userServiceRestartCommand("win32")).toMatchObject({
+      command: "powershell.exe"
+    });
   });
 
   it("compares stable and prerelease versions", () => {

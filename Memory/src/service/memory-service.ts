@@ -91,6 +91,7 @@ import type {
 import { MemoryServiceError } from "../utils/error.js";
 import { newId,stableHash,stableStringify } from "../utils/id.js";
 import { isRecord,stringifyForMemory } from "../utils/json.js";
+import { memoryCaptureQaHash, normalizeMemoryCaptureSource } from "../utils/memory-capture-claim.js";
 import { clip,firstLine } from "../utils/text.js";
 import { nowIso, resolveTimeZone } from "../utils/time.js";
 import {
@@ -112,6 +113,7 @@ import {
   isAgentSourceImportMemoryAdd,
   memoryAddImportTrace,
   memoryAddKey,
+  memoryAddQaPair,
   memoryAddTags,
   normalizeMemoryAddCreatedAt,
   titleFromImportTrace,
@@ -170,11 +172,6 @@ const serviceLogger = createMemoryLogger("memory-service");
 
 export type { FeedbackResponse } from "./feedback/feedback-experience.js";
 
-
-function evolutionUsesSharedLlm(config: MemmyConfig): boolean {
-  const evolution = config.evolution;
-  return !evolution.provider && !evolution.model && !evolution.endpoint && !evolution.apiKey;
-}
 
 function createConfiguredMemoryLlm(config: MemmyConfig, modelRole: MemoryLlmModelRole): LlmClient {
   return createLlmClient(
@@ -293,7 +290,6 @@ export class MemoryService {
       repos: this.repos,
       get capture() { return workerHandlerOwner.config.algorithm.capture; },
       get reward() { return workerHandlerOwner.config.algorithm.reward; },
-      get lightweightMemory() { return workerHandlerOwner.config.algorithm.lightweightMemory; },
       nowIso,
       requireSession: this.requireSession.bind(this),
       feedbackTargetFromEpisode: (episode) => this.feedbackExperience.feedbackTargetFromEpisode(episode),
@@ -395,6 +391,9 @@ export class MemoryService {
       assertSessionInScope: this.assertSessionInScope.bind(this),
       normalizeMemoryAddCreatedAt,
       memoryAddImportTrace,
+      memoryAddQaPair,
+      memoryCaptureQaHash,
+      normalizeMemoryCaptureSource,
       isAgentSourceImportMemoryAdd,
       titleFromImportTrace,
       memoryAddTags,
@@ -409,6 +408,7 @@ export class MemoryService {
       recordApiLog: (operation, request, result, latencyMs, success, at, agentId) =>
         recordApiLog(this.repos.runtime, operation, request, result, latencyMs, success, at, agentId),
       memories: this.repos.memories,
+      captureClaims: this.repos.captureClaims,
       processing: this.repos.processing,
       runtime: this.repos.runtime
     });
@@ -609,11 +609,7 @@ export class MemoryService {
     const summary = this.options.llm
       ?? createConfiguredMemoryLlm(taskConfig, "memory_summary");
     const evolution = this.options.skillLlm
-      ?? (
-        this.options.llm && evolutionUsesSharedLlm(taskConfig)
-          ? this.options.llm
-          : createConfiguredMemoryLlm(taskConfig, "memory_evolution")
-      );
+      ?? createConfiguredMemoryLlm(taskConfig, "memory_evolution");
     const embedding = this.options.embedder ?? createEmbedder(taskConfig.embedding);
     freezeModelSelectionConfig(taskConfig);
     return {
@@ -1165,6 +1161,7 @@ export class MemoryService {
     tags: string[];
     createdAt: string;
     serverTime: string;
+    duplicate?: boolean;
   } {
     return this.importJobs.addMemory(this.withTimeZone(request));
   }
@@ -1941,7 +1938,7 @@ export class MemoryService {
     return this.panelReadModel.panelItems(this.withTimeZone(input));
   }
 
-  panelTasks(input: RequestEnvelope & { q?: string; page?: number }): {
+  panelTasks(input: RequestEnvelope & { q?: string; sourceAgent?: string; page?: number }): {
     tasks: Array<{
       id: string;
       episode: Record<string, unknown>;

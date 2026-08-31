@@ -1076,7 +1076,6 @@ export class MemmyMemoryConfig extends Base {
   evolution?: Dict;
   embedding?: Dict;
   algorithm?: Dict;
-  logging?: Dict;
   telemetry?: Dict;
   hub?: Dict;
   agentAccess?: Dict;
@@ -1102,8 +1101,12 @@ export class MemmyMemoryConfig extends Base {
     this.summary = pick<Dict | undefined>(init, ["summary"], undefined);
     this.evolution = pick<Dict | undefined>(init, ["evolution"], undefined);
     this.embedding = pick<Dict | undefined>(init, ["embedding"], undefined);
-    this.algorithm = pick<Dict | undefined>(init, ["algorithm"], undefined);
-    this.logging = pick<Dict | undefined>(init, ["logging"], undefined);
+    const algorithm = pick<Dict | undefined>(init, ["algorithm"], undefined);
+    if (algorithm) {
+      const supportedAlgorithm = { ...algorithm };
+      delete supportedAlgorithm.lightweightMemory;
+      this.algorithm = supportedAlgorithm;
+    }
     this.telemetry = pick<Dict | undefined>(init, ["telemetry"], undefined);
     this.hub = pick<Dict | undefined>(init, ["hub"], undefined);
     this.agentAccess = pick<Dict | undefined>(init, ["agentAccess"], undefined);
@@ -1121,7 +1124,6 @@ export class MemmyMemoryConfig extends Base {
       evolution: this.evolution,
       embedding: this.embedding,
       algorithm: this.algorithm,
-      logging: this.logging,
       telemetry: this.telemetry,
       hub: this.hub,
       agentAccess: this.agentAccess,

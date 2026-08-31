@@ -54,7 +54,7 @@ export interface HealthPayload {
   /**
    * `available` is `true` when the slot has a usable upstream — either a
    * concrete `provider+model+apiKey` of its own (`inherited=false`) or it
-   * inherits from `llm.*` and that slot is itself available
+   * inherits from the Agent Chat model and that slot is itself available
    * (`inherited=true`). The viewer's setup banner uses this flag.
    */
   skillEvolver?:

@@ -628,7 +628,7 @@ function helpText(): string {
     "  --version, -v                Show CLI version",
     "",
     "Supported agents:",
-    "  codex, cursor, claude, opencode, openclaw, hermes, dsh",
+    "  codex, cursor, claude, opencode, openclaw, hermes, dsh, workbuddy, pi, qwenwork",
     "",
     `Default URL: ${DEFAULT_MEMORY_URL}`
   ].join("\n");

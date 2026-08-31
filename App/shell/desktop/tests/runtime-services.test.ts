@@ -1160,6 +1160,32 @@ describe("spawnNodeService 落盘与 env 注入", () => {
     }
   });
 
+  it("keeps the restart IPC channel available for persistent Memory", async () => {
+    const root = await makeTempRoot();
+    const entry = join(root, "persistent-memory-ipc.js");
+    await writeFile(entry, [
+      "process.send?.({ type: 'memmy-memory:restart' });",
+      "setInterval(() => {}, 1000);",
+    ].join("\n"));
+    const memory = spawnNodeService("memory", entry, [], {
+      MEMMY_DESKTOP_MANAGED_MEMORY: "1",
+    }, {
+      logFilePath: join(root, "memory-ipc.log"),
+      logLevel: "info",
+      ipc: true,
+      persistOnDesktopExit: true,
+    });
+
+    try {
+      await expect(new Promise((resolveMessage) => {
+        memory.process.once("message", resolveMessage);
+      })).resolves.toEqual({ type: "memmy-memory:restart" });
+      expect(memory.process.connected).toBe(true);
+    } finally {
+      await stopManagedChild(memory);
+    }
+  });
+
   it("把子进程 stdout 落盘到指定日志文件", async () => {
     const root = await makeTempRoot();
     const entry = join(root, "entry.js");

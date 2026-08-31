@@ -1,28 +1,29 @@
 /**
- * Settings view — three tabs:
+ * Settings view.
  *
  *   - AI Models   — embedding / summarizer / **skill evolver** slots,
  *                   each with a "测试" button that calls
  *                   `POST /api/v1/models/test`.
- *   - Team Sharing — hub on/off + address + tokens.
- *   - General     — language, theme, memory self-evolution, logging,
- *                   telemetry, password protection, and danger zone.
+ *   - Team Sharing — temporarily hidden until sharing is released.
+ *   - General     — language, theme, telemetry, password protection,
+ *                   and danger zone.
  *
- * Save flow: `PATCH /api/v1/config` → show restart overlay → call
- * `POST /api/v1/admin/restart` → poll `GET /api/v1/health` until the
- * server is back → reload the page.
+ * All service-backed settings are updated optimistically and persisted in the
+ * background. Successful writes stay silent; failures are surfaced and the
+ * server remains responsible for hot-reloading the canonical config.
  */
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { api } from "../api/client";
 import { classifyModelTestFailure } from "../model-test-error";
-import { saveSettingsAndRestart } from "../settings-save";
 import { t, locale, setLocale } from "../stores/i18n";
 import { theme, setTheme } from "../stores/theme";
 import { health } from "../stores/health";
 import { Icon } from "../components/Icon";
+import { Select } from "../components/Select";
+import { AgentSourceLogo } from "../components/AgentSourceLogo";
 import { HubAdminPanel } from "../components/HubAdminPanel";
+import { TEAM_SHARING_UI_ENABLED } from "../features";
 import {
-  triggerRestart,
   triggerCleared,
   beginClearData,
   markClearResultUnknown,
@@ -38,12 +39,6 @@ interface ProviderBlock {
   apiKey?: string;
   temperature?: number;
   batchSize?: number;
-}
-
-interface AlgorithmBlock {
-  lightweightMemory?: {
-    enabled?: boolean;
-  };
 }
 
 interface AgentAccessBlock {
@@ -63,13 +58,51 @@ interface AgentSourceView {
   lastScannedAt: string | null;
 }
 
+interface ViewerCliStatus {
+  installed: boolean;
+  path: string;
+}
+
+interface ViewerCliInstallResult extends ViewerCliStatus {
+  pathUpdated: boolean;
+  profilePaths: string[];
+}
+
+interface MemoryServiceHealth {
+  ok?: boolean;
+  uptimeMs?: number;
+}
+
+interface AgentSourceScanState {
+  running: boolean;
+  jobId: string | null;
+  sourceId: string | null;
+  mode: "initial_subset" | "incremental" | "full" | null;
+  progress: {
+    sourceId: string;
+    phase: "discover" | "read" | "redact" | "emit" | "scan" | "add" | "summarize" | "done" | "stopped";
+    current: number;
+    total: number;
+    message?: string;
+  } | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  error: string | null;
+}
+
+type AgentSourceScanPhase = NonNullable<AgentSourceScanState["progress"]>["phase"];
+
+interface InfrastructureFeedback {
+  kind: "ok" | "error";
+  text: string;
+}
+
 interface ResolvedConfig {
   version?: number;
   viewer?: { port: number; bindHost?: string };
   embedding?: ProviderBlock;
   llm?: ProviderBlock;
   skillEvolver?: ProviderBlock;
-  algorithm?: AlgorithmBlock;
   hub?: {
     enabled?: boolean;
     role?: "hub" | "client";
@@ -80,7 +113,6 @@ interface ResolvedConfig {
     nickname?: string;
   };
   telemetry?: { enabled?: boolean };
-  logging?: { level?: string; detailedView?: boolean };
   agentAccess?: AgentAccessBlock;
 }
 
@@ -114,45 +146,96 @@ const EMBEDDING_PROVIDERS = [
   "openai_compatible",
   "gemini",
 ];
+const LOCAL_EMBEDDING_MODEL = "Xenova/all-MiniLM-L6-v2";
 
 const LLM_PROVIDERS = [
-  "", // inherit from agent
+  "", // inherit from skill evolution
   "openai_compatible",
   "gemini",
   "anthropic",
 ];
 
 const SKILL_PROVIDERS = [
-  "", // inherit from llm
+  "", // inherit from Agent Chat
   "openai_compatible",
   "gemini",
   "anthropic",
 ];
 
+function mergeConfig(
+  base: Partial<ResolvedConfig>,
+  patch: Partial<ResolvedConfig>,
+): ResolvedConfig {
+  return mergeConfigRecord(
+    base as Record<string, unknown>,
+    patch as Record<string, unknown>,
+  ) as ResolvedConfig;
+}
+
+function mergeConfigRecord(
+  base: Record<string, unknown>,
+  patch: Record<string, unknown>,
+): Record<string, unknown> {
+  const next = { ...base };
+  for (const [key, value] of Object.entries(patch)) {
+    const current = next[key];
+    next[key] = isConfigRecord(current) && isConfigRecord(value)
+      ? mergeConfigRecord(current, value)
+      : value;
+  }
+  return next;
+}
+
+function isConfigRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function sameConfig(left: ResolvedConfig | null, right: ResolvedConfig): boolean {
+  return left !== null && JSON.stringify(left) === JSON.stringify(right);
+}
+
 export function SettingsView({ initialTab }: { initialTab?: Tab } = {}) {
-  const [tab, setTab] = useState<Tab>(initialTab ?? "models");
+  const [tab, setTab] = useState<Tab>(
+    initialTab === "hub" && !TEAM_SHARING_UI_ENABLED
+      ? "models"
+      : initialTab ?? "models",
+  );
   const [config, setConfig] = useState<ResolvedConfig | null>(null);
-  const [dirty, setDirty] = useState<Partial<ResolvedConfig>>({});
-  const [saving, setSaving] = useState<"idle" | "saving">("idle");
+  const configRef = useRef<ResolvedConfig>({});
   const [error, setError] = useState<string | null>(null);
+  const pendingPatch = useRef<Partial<ResolvedConfig>>({});
+  const saveTimer = useRef<number | null>(null);
+  const saveInFlight = useRef(false);
+  const mounted = useRef(true);
 
   useEffect(() => {
     const ctrl = new AbortController();
     api
       .get<ResolvedConfig>("/api/v1/config", { signal: ctrl.signal })
-      .then(setConfig)
-      .catch(() => setConfig({}));
+      .then((next) => {
+        configRef.current = next;
+        setConfig(next);
+      })
+      .catch(() => {
+        configRef.current = {};
+        setConfig({});
+      });
     return () => ctrl.abort();
   }, []);
 
-  const hasUnsavedChanges = Object.keys(dirty).length > 0;
   useEffect(() => {
-    if (hasUnsavedChanges) return;
     let active = true;
     const refresh = () => {
+      if (saveInFlight.current || Object.keys(pendingPatch.current).length > 0) return;
       void api.get<ResolvedConfig>("/api/v1/config")
         .then((next) => {
-          if (active) setConfig(next);
+          if (active) {
+            setConfig((current) => {
+              if (sameConfig(current, next)) return current;
+              configRef.current = next;
+              return next;
+            });
+          }
         })
         .catch(() => undefined);
     };
@@ -161,92 +244,95 @@ export function SettingsView({ initialTab }: { initialTab?: Tab } = {}) {
       active = false;
       window.clearInterval(timer);
     };
-  }, [hasUnsavedChanges]);
+  }, []);
+
+  useEffect(() => () => {
+    mounted.current = false;
+    if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
+    void flushPendingConfig();
+  }, []);
+
+  const flushPendingConfig = async () => {
+    if (saveInFlight.current) return;
+    const nextPatch = pendingPatch.current;
+    if (Object.keys(nextPatch).length === 0) return;
+    pendingPatch.current = {};
+    saveInFlight.current = true;
+    try {
+      await api.patch<ResolvedConfig>("/api/v1/config", nextPatch);
+      if (mounted.current) setError(null);
+    } catch (cause) {
+      if (mounted.current) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+        try {
+          const saved = await api.get<ResolvedConfig>("/api/v1/config");
+          const next = mergeConfig(saved, pendingPatch.current);
+          configRef.current = next;
+          setConfig(next);
+        } catch {
+          // Keep the optimistic values visible while the service is unavailable.
+        }
+      }
+    } finally {
+      saveInFlight.current = false;
+      if (Object.keys(pendingPatch.current).length > 0) scheduleConfigSave(0);
+    }
+  };
+
+  const scheduleConfigSave = (delayMs: number) => {
+    if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(() => {
+      saveTimer.current = null;
+      void flushPendingConfig();
+    }, delayMs);
+  };
 
   const patch = <K extends keyof ResolvedConfig>(
     key: K,
     partial: Partial<NonNullable<ResolvedConfig[K]>>,
+    delayMs = 300,
   ) => {
-    setDirty((prev) => {
-      const existing = (prev[key] as Record<string, unknown>) ?? {};
-      return { ...prev, [key]: { ...existing, ...partial } };
-    });
-  };
-
-  const save = async () => {
-    if (Object.keys(dirty).length === 0) return;
-    setSaving("saving");
     setError(null);
-    try {
-      const pending: Partial<ResolvedConfig> = { ...dirty };
-      if (dirty.embedding) pending.embedding = get("embedding");
-      if (dirty.llm) pending.llm = get("llm");
-      if (dirty.skillEvolver) pending.skillEvolver = get("skillEvolver");
-      await saveSettingsAndRestart(
-        pending,
-        (patch) => api.patch<ResolvedConfig>("/api/v1/config", patch),
-        (saved) => {
-          // PATCH returns the fully resolved, secret-masked config. Publish it
-          // before clearing dirty state so the form never falls back to the
-          // stale snapshot captured when this SPA first mounted.
-          setConfig(saved);
-          setDirty({});
-        },
-        triggerRestart,
-      );
-      // For Hermes/generic the page stays; reset the button state.
-      setSaving("idle");
-    } catch (err) {
-      setError((err as Error).message);
-      setSaving("idle");
-    }
+    const next = mergeConfig(configRef.current, { [key]: partial });
+    configRef.current = next;
+    setConfig(next);
+    pendingPatch.current = mergeConfig(pendingPatch.current, {
+      [key]: next[key],
+    });
+    scheduleConfigSave(delayMs);
   };
 
-  // Merge the saved config (`config[key]`) with any unsaved edits
-  // (`dirty[key]`). Previously this returned whichever side was set,
-  // which meant editing a single field (e.g. `model`) hid all other
-  // saved fields (`provider`, `endpoint`, `apiKey`) from the card —
-  // users were forced to re-enter them. Deep merge preserves saved
-  // fields unless explicitly overwritten by the current edit session.
   const get = <K extends keyof ResolvedConfig>(
     key: K,
-  ): ResolvedConfig[K] => {
-    const base = config?.[key];
-    const patchVal = dirty[key];
-    if (base === undefined || base === null) return patchVal as ResolvedConfig[K];
-    if (patchVal === undefined || patchVal === null) return base;
-    if (typeof base === "object" && typeof patchVal === "object") {
-      return { ...base, ...(patchVal as object) } as ResolvedConfig[K];
+  ): ResolvedConfig[K] => config?.[key];
+
+  const updateAgentAccess = async (
+    partial: Partial<AgentAccessBlock>,
+  ): Promise<AgentAccessBlock> => {
+    const previous = (configRef.current.agentAccess ?? {}) as AgentAccessBlock;
+    const optimistic = mergeConfig(configRef.current, {
+      agentAccess: { ...previous, ...partial },
+    });
+    configRef.current = optimistic;
+    setConfig(optimistic);
+    try {
+      const saved = await api.patch<ResolvedConfig>("/api/v1/config", {
+        agentAccess: partial,
+      });
+      return saved.agentAccess ?? { ...previous, ...partial };
+    } catch (cause) {
+      const rolledBack = mergeConfig(configRef.current, { agentAccess: previous });
+      configRef.current = rolledBack;
+      setConfig(rolledBack);
+      throw cause;
     }
-    return patchVal as ResolvedConfig[K];
   };
 
   return (
     <>
       <div class="view-header">
         <div class="view-header__title">
-          <h1>{t("settings.title")}</h1>
-        </div>
-        <div class="view-header__actions">
-          {hasUnsavedChanges && (
-            <>
-              <button
-                class="btn btn--ghost btn--sm"
-                onClick={() => setDirty({})}
-                disabled={saving === "saving"}
-              >
-                {t("common.reset")}
-              </button>
-              <button
-                class="btn btn--primary btn--sm"
-                onClick={save}
-                disabled={saving === "saving"}
-              >
-                <Icon name="check" size={14} />
-                {t("settings.saveAndRestart")}
-              </button>
-            </>
-          )}
+          <h1>{tab === "agents" ? t("settings.tab.agents") : t("settings.title")}</h1>
         </div>
       </div>
 
@@ -262,8 +348,10 @@ export function SettingsView({ initialTab }: { initialTab?: Tab } = {}) {
       <div class="segmented" style="margin-bottom:var(--sp-6)">
         {[
           { v: "models" as Tab, k: "settings.tab.models" as const, icon: "cpu" as const },
-          { v: "agents" as Tab, k: "settings.tab.agents" as const, icon: "cable" as const },
-          { v: "hub" as Tab, k: "settings.tab.hub" as const, icon: "users" as const },
+          { v: "agents" as Tab, k: "settings.tab.agents" as const, icon: "link-2" as const },
+          ...(TEAM_SHARING_UI_ENABLED
+            ? [{ v: "hub" as Tab, k: "settings.tab.hub" as const, icon: "users" as const }]
+            : []),
           { v: "general" as Tab, k: "settings.tab.general" as const, icon: "settings-2" as const },
         ].map((o) => (
           <button
@@ -289,10 +377,9 @@ export function SettingsView({ initialTab }: { initialTab?: Tab } = {}) {
         />
       )}
 
-      {tab === "hub" && (
+      {TEAM_SHARING_UI_ENABLED && tab === "hub" && (
         <HubTab
           hub={(get("hub") ?? {}) as NonNullable<ResolvedConfig["hub"]>}
-          hasUnsavedChanges={!!dirty.hub}
           onPatch={(p) => patch("hub", p)}
         />
       )}
@@ -300,18 +387,14 @@ export function SettingsView({ initialTab }: { initialTab?: Tab } = {}) {
       {tab === "agents" && (
         <AgentAccessTab
           agentAccess={(get("agentAccess") ?? {}) as AgentAccessBlock}
-          onPatch={(p) => patch("agentAccess", p)}
+          onPatch={updateAgentAccess}
         />
       )}
 
       {tab === "general" && (
         <GeneralTab
           telemetry={(get("telemetry") ?? {}) as NonNullable<ResolvedConfig["telemetry"]>}
-          logging={(get("logging") ?? {}) as NonNullable<ResolvedConfig["logging"]>}
-          algorithm={(get("algorithm") ?? {}) as AlgorithmBlock}
-          onPatchTelemetry={(p) => patch("telemetry", p)}
-          onPatchLogging={(p) => patch("logging", p)}
-          onPatchAlgorithm={(p) => patch("algorithm", p)}
+          onPatchTelemetry={(p) => patch("telemetry", p, 0)}
         />
       )}
     </>
@@ -428,6 +511,9 @@ function ModelCard({
     | { ok: false; error: string }
     | null
   >(null);
+  const selectedProvider = block.provider ?? providers[0];
+  const inherits = (type === "skillEvolver" || type === "summarizer") && !selectedProvider;
+  const isLocal = type === "embedding" && selectedProvider === "local";
 
   // `block.apiKey` from the server comes back masked as "••••". If we
   // echo that back in the request body it ends up in an HTTP header
@@ -452,9 +538,9 @@ function ModelCard({
     try {
       const r = await api.post<typeof result>(`/api/v1/models/test`, {
         type,
-        provider: block.provider,
+        provider: selectedProvider,
         endpoint: block.endpoint,
-        model: block.model,
+        model: isLocal ? LOCAL_EMBEDDING_MODEL : block.model,
         apiKey: sanitizeApiKey(block.apiKey),
       });
       setResult(r);
@@ -475,9 +561,6 @@ function ModelCard({
       setTesting(false);
     }
   };
-
-  const inherits = (type === "skillEvolver" || type === "summarizer") && !block.provider;
-  const isLocal = type === "embedding" && block.provider === "local";
 
   return (
     <section class="card">
@@ -523,64 +606,66 @@ function ModelCard({
       <div
         style={`display:grid;grid-template-columns:${
           type === "embedding"
-            ? "repeat(5,minmax(0,1fr))"
+            ? isLocal
+              ? "repeat(2,minmax(0,1fr))"
+              : "repeat(5,minmax(0,1fr))"
             : "repeat(auto-fit,minmax(240px,1fr))"
         };gap:var(--sp-4)`}
       >
-        <Field label={t("settings.provider")}>
-          <select
-            class="select"
-            value={block.provider ?? providers[0]}
-            onChange={(e) =>
-              onPatch({ provider: (e.target as HTMLSelectElement).value })
-            }
-          >
-            {providers.map((p) => (
-              <option key={p} value={p}>
-                {p || "(inherit)"}
-              </option>
-            ))}
-          </select>
+        <Field label={type === "embedding" ? t("settings.embedding.providerLabel") : t("settings.provider")}>
+          <Select
+            value={selectedProvider}
+            ariaLabel={type === "embedding" ? t("settings.embedding.providerLabel") : t("settings.provider")}
+            options={providers.map((provider) => ({
+              value: provider,
+              label: modelProviderLabel(type, provider),
+            }))}
+            onChange={(provider) => onPatch({ provider })}
+          />
         </Field>
         <Field label={t("settings.model")}>
           <input
             class="input"
             type="text"
-            disabled={inherits}
-            value={block.model ?? ""}
+            disabled={inherits || isLocal}
+            value={isLocal ? LOCAL_EMBEDDING_MODEL : block.model ?? ""}
             placeholder="e.g. gpt-4o-mini"
             onInput={(e) => onPatch({ model: (e.target as HTMLInputElement).value })}
           />
         </Field>
-        <Field label={t("settings.endpoint")}>
-          <input
-            class="input"
-            type="url"
-            disabled={inherits}
-            value={block.endpoint ?? ""}
-            placeholder="https://api.openai.com/v1"
-            onInput={(e) => onPatch({ endpoint: (e.target as HTMLInputElement).value })}
-          />
-        </Field>
-        <Field label={t("settings.apiKey")}>
-          <input
-            class="input"
-            type="password"
-            disabled={inherits}
-            // Don't echo the masked "••••" back into the input — it
-            // would ship bullet chars to /models/test and crash fetch
-            // with "Cannot convert argument to a ByteString" (the
-            // legacy viewer had the same bug until its 3.x rewrite).
-            // Empty input = "keep the saved key"; the placeholder
-            // makes that state legible.
-            value={API_KEY_MASKED(block.apiKey) ? "" : block.apiKey ?? ""}
-            placeholder={
-              API_KEY_MASKED(block.apiKey) ? t("settings.apiKey.saved") : "sk-…"
-            }
-            onInput={(e) => onPatch({ apiKey: (e.target as HTMLInputElement).value })}
-          />
-        </Field>
-        {type === "embedding" && (
+        {!isLocal && (
+          <Field label={t("settings.endpoint")}>
+            <input
+              class="input"
+              type="url"
+              disabled={inherits}
+              value={block.endpoint ?? ""}
+              placeholder="https://api.openai.com/v1"
+              onInput={(e) => onPatch({ endpoint: (e.target as HTMLInputElement).value })}
+            />
+          </Field>
+        )}
+        {!isLocal && (
+          <Field label={t("settings.apiKey")}>
+            <input
+              class="input"
+              type="password"
+              disabled={inherits}
+              // Don't echo the masked "••••" back into the input — it
+              // would ship bullet chars to /models/test and crash fetch
+              // with "Cannot convert argument to a ByteString" (the
+              // legacy viewer had the same bug until its 3.x rewrite).
+              // Empty input = "keep the saved key"; the placeholder
+              // makes that state legible.
+              value={API_KEY_MASKED(block.apiKey) ? "" : block.apiKey ?? ""}
+              placeholder={
+                API_KEY_MASKED(block.apiKey) ? t("settings.apiKey.saved") : "sk-…"
+              }
+              onInput={(e) => onPatch({ apiKey: (e.target as HTMLInputElement).value })}
+            />
+          </Field>
+        )}
+        {type === "embedding" && !isLocal && (
           <Field label={t("settings.embedding.providerBatchSize.label")}>
             <input
               class="input"
@@ -653,6 +738,21 @@ function ModelCard({
       {type === "embedding" && <EmbeddingMaintenancePanel />}
     </section>
   );
+}
+
+function modelProviderLabel(
+  type: "embedding" | "summarizer" | "skillEvolver",
+  provider: string,
+): string {
+  if (!provider && type === "summarizer") {
+    return t("settings.summarizer.inheritOption");
+  }
+  if (!provider && type === "skillEvolver") {
+    return t("settings.skillEvolver.inheritOption");
+  }
+  if (type !== "embedding") return provider;
+  if (provider === "local") return t("settings.embedding.provider.local");
+  return provider;
 }
 
 function EmbeddingMaintenancePanel() {
@@ -782,11 +882,9 @@ function EmbeddingMaintenancePanel() {
 
 function HubTab({
   hub,
-  hasUnsavedChanges,
   onPatch,
 }: {
   hub: NonNullable<ResolvedConfig["hub"]>;
-  hasUnsavedChanges: boolean;
   onPatch: (p: Partial<NonNullable<ResolvedConfig["hub"]>>) => void;
 }) {
   return (
@@ -925,7 +1023,7 @@ function HubTab({
           >
             {hub.role === "hub" ? t("settings.hub.admin") : t("settings.hub.status")}
           </h4>
-          <HubAdminPanel hasUnsavedHubChanges={hasUnsavedChanges} />
+          <HubAdminPanel hasUnsavedHubChanges={false} />
         </div>
       )}
     </div>
@@ -939,21 +1037,48 @@ function AgentAccessTab({
   onPatch,
 }: {
   agentAccess: AgentAccessBlock;
-  onPatch: (patch: Partial<AgentAccessBlock>) => void;
+  onPatch: (patch: Partial<AgentAccessBlock>) => Promise<AgentAccessBlock>;
 }) {
   const [sources, setSources] = useState<AgentSourceView[]>([]);
-  const [executorAvailable, setExecutorAvailable] = useState(false);
+  const sourcesRef = useRef<AgentSourceView[]>([]);
   const [loading, setLoading] = useState(true);
   const [busySource, setBusySource] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [cliStatus, setCliStatus] = useState<ViewerCliStatus | null>(null);
+  const [cliStatusFailed, setCliStatusFailed] = useState(false);
+  const [cliBusy, setCliBusy] = useState(false);
+  const [serviceBusy, setServiceBusy] = useState(false);
+  const [scanStatus, setScanStatus] = useState<AgentSourceScanState | null>(null);
+  const [scanControlBusy, setScanControlBusy] = useState<"pause" | "resume" | "cancel" | null>(null);
+  const [scanCompletion, setScanCompletion] = useState<string | null>(null);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showFullScanConfirm, setShowFullScanConfirm] = useState(false);
+  const [fullScanTargetSourceId, setFullScanTargetSourceId] = useState("");
+  const [cliFeedback, setCliFeedback] = useState<InfrastructureFeedback | null>(null);
+  const [serviceFeedback, setServiceFeedback] = useState<InfrastructureFeedback | null>(null);
+  const [automationBusy, setAutomationBusy] = useState(false);
+  const [automationError, setAutomationError] = useState<string | null>(null);
+  const activeScanJob = useRef<string | null>(null);
+  const scannableSources = visibleAgentSources(sources);
+  const scanPaused = scanStatus?.progress?.phase === "stopped";
+  const scanSessionActive = scanStatus?.running === true || scanPaused;
+  const scanProgress = scanStatus?.progress;
+  const scanDeterminate = Boolean(scanProgress && scanProgress.total > 0);
+  const scanPercent = scanDeterminate && scanProgress
+    ? Math.max(0, Math.min(scanProgress.phase === "done" ? 100 : 99, Math.round((scanProgress.current / scanProgress.total) * 100)))
+    : 0;
+  const scanSourceName = sourceDisplayName(
+    scanStatus?.sourceId ?? scanProgress?.sourceId ?? "all",
+    sources,
+  );
 
   const loadSources = async () => {
     try {
-      const response = await api.get<{ executorAvailable: boolean; sources: AgentSourceView[] }>(
+      const response = await api.get<{ executorAvailable: true; sources: AgentSourceView[] }>(
         "/api/v1/agent-sources",
       );
+      sourcesRef.current = response.sources;
       setSources(response.sources);
-      setExecutorAvailable(response.executorAvailable);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
@@ -963,20 +1088,184 @@ function AgentAccessTab({
 
   useEffect(() => {
     void loadSources();
+    void api
+      .get<ViewerCliStatus>("/api/v1/system/cli")
+      .then(setCliStatus)
+      .catch(() => {
+        setCliStatusFailed(true);
+        setCliFeedback({
+          kind: "error",
+          text: t("settings.agents.cliStatusFailed"),
+        });
+      });
+    let active = true;
+    const refreshScan = async () => {
+      try {
+        const next = await api.get<AgentSourceScanState>("/api/v1/agent-sources/scan/status");
+        if (!active) return;
+        const paused = next.progress?.phase === "stopped";
+        if (next.running || paused) {
+          activeScanJob.current = next.jobId;
+          setScanStatus(next);
+          setBusySource(next.running ? next.sourceId ?? next.progress?.sourceId ?? "all" : null);
+          return;
+        }
+        if (activeScanJob.current && next.jobId === activeScanJob.current) {
+          const completedSourceId = next.sourceId ?? next.progress?.sourceId ?? "all";
+          activeScanJob.current = null;
+          setScanStatus(null);
+          setBusySource(null);
+          if (next.error) {
+            setMessage(next.error);
+          } else {
+            setScanCompletion(t("settings.agents.scanCompletedNotice", {
+              agent: sourceDisplayName(completedSourceId, sourcesRef.current),
+            }));
+          }
+          await loadSources();
+        }
+      } catch {
+        // Other infrastructure status remains usable while scan polling is unavailable.
+      }
+    };
+    void refreshScan();
+    const timer = window.setInterval(() => void refreshScan(), 500);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
   }, []);
 
-  const scan = async (sourceId: string) => {
+  const installCli = async () => {
+    setCliBusy(true);
+    setCliFeedback(null);
+    try {
+      const result = await api.post<ViewerCliInstallResult>("/api/v1/system/cli/install", {});
+      setCliStatus(result);
+      setCliStatusFailed(false);
+      setCliFeedback({
+        kind: "ok",
+        text: result.pathUpdated
+          ? t("settings.agents.cliInstalledPathUpdated", {
+              path: result.path,
+              profiles: formatProfilePaths(result.profilePaths),
+            })
+          : t("settings.agents.cliInstalled", { path: result.path }),
+      });
+    } catch (error) {
+      setCliFeedback({
+        kind: "error",
+        text: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setCliBusy(false);
+    }
+  };
+
+  const restartService = async () => {
+    setServiceBusy(true);
+    setServiceFeedback(null);
+    try {
+      const before = await api.get<MemoryServiceHealth>("/api/v1/health");
+      const requestedAt = Date.now();
+      await api.post("/api/v1/system/restart", {});
+      const running = await waitForMemoryService(before.uptimeMs, requestedAt);
+      if (!running) throw new Error(t("settings.agents.serviceRestartFailed"));
+      setServiceFeedback({ kind: "ok", text: t("settings.agents.serviceRestarted") });
+    } catch (error) {
+      setServiceFeedback({
+        kind: "error",
+        text: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setServiceBusy(false);
+    }
+  };
+
+  const scan = async (sourceId: string, mode?: "full") => {
     setBusySource(sourceId);
     setMessage(null);
+    setScanCompletion(null);
     try {
-      await api.post("/api/v1/agent-sources/scan", { sourceId });
-      setMessage(t("settings.agents.scanQueued"));
-      window.setTimeout(() => void loadSources(), 1_500);
+      const result = await api.post<{ accepted: true; jobId: string }>(
+        "/api/v1/agent-sources/scan",
+        { sourceId, ...(mode ? { mode } : {}) },
+      );
+      activeScanJob.current = result.jobId;
+      setScanStatus({
+        running: true,
+        jobId: result.jobId,
+        sourceId,
+        mode: mode ?? null,
+        progress: {
+          sourceId,
+          phase: "scan",
+          current: 0,
+          total: 0,
+        },
+        startedAt: new Date().toISOString(),
+        completedAt: null,
+        error: null,
+      });
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+      setBusySource(null);
+    }
+  };
+
+  const pauseScan = async () => {
+    if (!scanStatus?.running) return;
+    setScanControlBusy("pause");
+    setMessage(null);
+    try {
+      await api.post("/api/v1/agent-sources/scan/stop", {});
+      const next = await api.get<AgentSourceScanState>("/api/v1/agent-sources/scan/status");
+      setScanStatus(next);
+      setBusySource(null);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
-      setBusySource(null);
+      setScanControlBusy(null);
     }
+  };
+
+  const resumeScan = async () => {
+    const sourceId = scanStatus?.sourceId ?? scanStatus?.progress?.sourceId;
+    if (!scanPaused || !sourceId) return;
+    setScanControlBusy("resume");
+    try {
+      await scan(sourceId, scanStatus?.mode === "full" ? "full" : undefined);
+    } finally {
+      setScanControlBusy(null);
+    }
+  };
+
+  const cancelScan = async () => {
+    if (!scanSessionActive) return;
+    setScanControlBusy("cancel");
+    setMessage(null);
+    try {
+      await api.post("/api/v1/agent-sources/scan/cancel", {});
+      activeScanJob.current = null;
+      setScanStatus(null);
+      setBusySource(null);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setScanControlBusy(null);
+    }
+  };
+
+  const openFullScanConfirm = () => {
+    setFullScanTargetSourceId("");
+    setShowFullScanConfirm(true);
+  };
+
+  const startFullScan = () => {
+    if (!fullScanTargetSourceId) return;
+    const sourceId = fullScanTargetSourceId;
+    setShowFullScanConfirm(false);
+    void scan(sourceId, "full");
   };
 
   const toggleConnection = async (source: AgentSourceView) => {
@@ -998,105 +1287,205 @@ function AgentAccessTab({
     }
   };
 
+  const updateAutomation = async (patch: Partial<AgentAccessBlock>) => {
+    if (automationBusy) return;
+    setAutomationBusy(true);
+    setAutomationError(null);
+    try {
+      await onPatch(patch);
+    } catch (error) {
+      setAutomationError(
+        t("settings.agents.automationSaveFailed", {
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    } finally {
+      setAutomationBusy(false);
+    }
+  };
+
   return (
     <div class="vstack" style="gap:var(--sp-5)">
       <section class="card">
-        <div class="card__header" style="margin-bottom:var(--sp-3)">
-          <div>
-            <h3 class="card__title">{t("settings.agents.automation")}</h3>
-            <p class="card__subtitle">{t("settings.agents.automation.desc")}</p>
-          </div>
-        </div>
-        <div class="vstack" style="gap:var(--sp-4)">
-          <SettingToggle
-            title={t("settings.agents.startupScan")}
-            description={t("settings.agents.startupScan.desc")}
-            checked={agentAccess.autoScanKnownAgents !== false}
-            onChange={(checked) => onPatch({ autoScanKnownAgents: checked })}
+        <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--sp-5)">
+          <InfrastructureItem
+            icon="cable"
+            title={t("settings.agents.cli")}
+            status={cliStatusFailed ? "error" : cliStatus === null ? "checking" : cliStatus.installed ? "ok" : "error"}
+            okLabel={t("settings.agents.installed")}
+            errorLabel={t(cliStatusFailed ? "settings.agents.statusUnavailable" : "settings.agents.notInstalled")}
+            value={cliStatus?.path ?? "~/.local/bin/memmy-memory"}
+            description={t("settings.agents.cli.desc")}
+            actionLabel={t(
+              cliBusy
+                ? "settings.agents.cliInstalling"
+                : cliStatus?.installed
+                  ? "settings.agents.reinstallPath"
+                  : "settings.agents.installPath",
+            )}
+            busy={cliBusy}
+            onAction={() => void installCli()}
+            feedback={cliFeedback}
           />
-          <SettingToggle
-            title={t("settings.agents.scheduledScan")}
-            description={t("settings.agents.scheduledScan.desc")}
-            checked={agentAccess.watchFileChanges !== false}
-            onChange={(checked) => onPatch({ watchFileChanges: checked })}
-          />
-          <SettingToggle
-            title={t("settings.agents.autoConnect")}
-            description={t("settings.agents.autoConnect.desc")}
-            checked={agentAccess.autoInjectSkill === true}
-            onChange={(checked) => onPatch({ autoInjectSkill: checked })}
+          <InfrastructureItem
+            icon="database"
+            title={t("settings.agents.service")}
+            status={serviceBusy ? "checking" : "ok"}
+            okLabel={t("settings.agents.running")}
+            errorLabel={t("settings.agents.stopped")}
+            value={memoryServiceEndpoint()}
+            description={t("settings.agents.service.desc")}
+            actionLabel={t(
+              serviceBusy
+                ? "settings.agents.serviceRestarting"
+                : "settings.agents.restartService",
+            )}
+            busy={serviceBusy}
+            onAction={() => void restartService()}
+            feedback={serviceFeedback}
+            bordered
           />
         </div>
       </section>
 
+      <section class="card card--flat" style="border-left:3px solid var(--accent)">
+        <div class="hstack" style="gap:var(--sp-2);align-items:flex-start">
+          <Icon name="info" size={14} style="margin-top:3px;flex-shrink:0;color:var(--accent)" />
+          <div class="vstack" style="gap:var(--sp-1);font-size:var(--fs-sm);line-height:1.6">
+            <p style="margin:0">{t("settings.agents.scanHint")}</p>
+            <p style="margin:0">{t("settings.agents.incrementHint")}</p>
+          </div>
+        </div>
+      </section>
+
+      {scanCompletion && (
+        <div class="agent-scan-notice" role="status">
+          <Icon name="circle-check-big" size={16} />
+          <span>{scanCompletion}</span>
+        </div>
+      )}
+
+      {scanSessionActive && (
+        <section class="agent-scan-progress" aria-busy={scanStatus?.running === true}>
+          <div class="agent-scan-progress__header">
+            <div class="agent-scan-progress__summary">
+              <span class={`agent-scan-progress__icon${scanStatus?.running ? " agent-scan-progress__icon--running" : ""}`}>
+                <Icon name="refresh-cw" size={18} class={scanStatus?.running ? "spin" : ""} />
+              </span>
+              <div>
+                <h3 class="agent-scan-progress__title">
+                  {t(scanProgressTitleKey(scanProgress?.phase ?? "scan"))}
+                </h3>
+                <p class="agent-scan-progress__description">
+                  {scanDeterminate && scanProgress
+                    ? t("settings.agents.scanProgress.count", {
+                        agent: scanSourceName,
+                        current: scanProgress.current,
+                        total: scanProgress.total,
+                      })
+                    : t("settings.agents.scanProgress.indeterminate", {
+                        agent: scanSourceName,
+                        current: scanProgress?.current ?? 0,
+                      })}
+                </p>
+              </div>
+            </div>
+          </div>
+          <div class="agent-scan-progress__controls">
+            <div class="agent-scan-progress__track" aria-hidden="true">
+              <span
+                class={`agent-scan-progress__fill${scanDeterminate ? "" : " agent-scan-progress__fill--indeterminate"}${scanPaused ? " agent-scan-progress__fill--paused" : ""}`}
+                style={scanDeterminate ? `width:${scanPercent}%` : undefined}
+              />
+            </div>
+            <button
+              class="btn btn--ghost btn--sm"
+              disabled={scanControlBusy !== null}
+              onClick={() => void (scanPaused ? resumeScan() : pauseScan())}
+            >
+              <Icon
+                name={scanControlBusy === "pause" || scanControlBusy === "resume" ? "loader-2" : scanPaused ? "play" : "pause"}
+                size={13}
+                class={scanControlBusy === "pause" || scanControlBusy === "resume" ? "spin" : ""}
+              />
+              {t(scanPaused ? "settings.agents.scanContinue" : "settings.agents.scanPause")}
+            </button>
+            <button
+              class="btn btn--danger btn--sm"
+              disabled={scanControlBusy !== null}
+              onClick={() => void cancelScan()}
+            >
+              <Icon name={scanControlBusy === "cancel" ? "loader-2" : "x"} size={13} class={scanControlBusy === "cancel" ? "spin" : ""} />
+              {t("settings.agents.scanStop")}
+            </button>
+          </div>
+          <div class="agent-scan-progress__meta">
+            <span>{t(scanProgressPhaseKey(scanProgress?.phase ?? "scan"))}</span>
+            <span>{scanPaused ? "" : scanDeterminate ? `${scanPercent}%` : t("settings.agents.scanProgress.waiting")}</span>
+          </div>
+        </section>
+      )}
+
       <section class="card">
         <div class="card__header" style="margin-bottom:var(--sp-3)">
           <div>
-            <h3 class="card__title">{t("settings.agents.sources")}</h3>
+            <h3 class="card__title">
+              {t("settings.agents.sources", { count: visibleAgentSources(sources).length })}
+            </h3>
             <p class="card__subtitle">{t("settings.agents.sources.desc")}</p>
           </div>
           <button
             class="btn btn--primary btn--sm"
-            disabled={!executorAvailable || busySource !== null}
+            disabled={scanSessionActive || busySource !== null}
             onClick={() => void scan("all")}
           >
             <Icon name={busySource === "all" ? "loader-2" : "refresh-cw"} size={14} class={busySource === "all" ? "spin" : ""} />
-            {t("settings.agents.scanAll")}
+            {t("settings.agents.syncNew")}
           </button>
         </div>
-
-        {!executorAvailable && !loading && (
-          <div class="card card--flat" style="margin-bottom:var(--sp-3);border-left:3px solid var(--warning)">
-            <div class="hstack" style="gap:var(--sp-2);align-items:flex-start">
-              <Icon name="info" size={14} style="margin-top:2px;flex-shrink:0" />
-              <span style="font-size:var(--fs-sm)">{t("settings.agents.executorOffline")}</span>
-            </div>
-          </div>
-        )}
 
         {message && <p class="card__subtitle" role="status" style="margin-bottom:var(--sp-3)">{message}</p>}
         {loading ? (
           <div class="empty"><Icon name="loader-2" size={18} class="spin" /></div>
         ) : (
           <div class="vstack" style="gap:var(--sp-2)">
-            {sources.map((source) => {
+            {visibleAgentSources(sources).map((source) => {
               const connected = source.status !== "not_connected";
               const busy = busySource === source.sourceId;
+              const action = agentConnectionAction(source);
               return (
-                <div class="card card--flat hstack" style="justify-content:space-between;gap:var(--sp-3)" key={source.sourceId}>
-                  <div style="min-width:0">
-                    <div class="hstack" style="gap:var(--sp-2)">
-                      <strong>{source.displayName}</strong>
-                      <span class={`pill ${connected ? "pill--active" : source.available ? "pill--info" : "pill--subtle"}`}>
-                        {connected
-                          ? t("settings.agents.connected")
-                          : source.available
-                            ? t("settings.agents.detected")
-                            : t("settings.agents.notDetected")}
-                      </span>
+                <div class="card card--flat agent-source-item" key={source.sourceId}>
+                  <div class="agent-source-item__identity">
+                    <AgentSourceLogo sourceId={source.sourceId} displayName={source.displayName} />
+                    <div style="min-width:0">
+                      <div class="hstack" style="gap:var(--sp-2)">
+                        <strong>{source.displayName}</strong>
+                        <span class={`pill ${connected ? "pill--active" : source.available ? "pill--info" : "pill--subtle"}`}>
+                          {t(agentStatusKey(source))}
+                        </span>
+                      </div>
+                      <p class="card__subtitle agent-source-item__meta">
+                        {t("settings.agents.memoryCount", { count: source.messageCount })}
+                        {source.dataPath ? ` · ${source.dataPath}` : ""}
+                      </p>
                     </div>
-                    <p class="card__subtitle" style="margin-top:var(--sp-1)">
-                      {source.messageCount > 0
-                        ? t("settings.agents.memoryCount", { n: source.messageCount })
-                        : source.dataPath || t("settings.agents.noData")}
-                    </p>
                   </div>
                   <div class="hstack" style="gap:var(--sp-2);flex-shrink:0">
                     <button
+                      class={`btn btn--sm ${connected ? "btn--danger" : "btn--primary"}`}
+                      disabled={!source.available || scanSessionActive || busySource !== null}
+                      onClick={() => void toggleConnection(source)}
+                    >
+                      <Icon name={busy ? "loader-2" : agentActionIcon(action)} size={13} class={busy ? "spin" : ""} />
+                      {t(agentActionKey(action))}
+                    </button>
+                    <button
                       class="btn btn--ghost btn--sm"
-                      disabled={!executorAvailable || !source.available || busySource !== null}
+                      disabled={!source.available || scanSessionActive || busySource !== null}
                       onClick={() => void scan(source.sourceId)}
                     >
                       <Icon name={busy ? "loader-2" : "refresh-cw"} size={13} class={busy ? "spin" : ""} />
-                      {t("settings.agents.scan")}
-                    </button>
-                    <button
-                      class={`btn btn--sm ${connected ? "btn--danger" : "btn--primary"}`}
-                      disabled={!executorAvailable || !source.available || busySource !== null}
-                      onClick={() => void toggleConnection(source)}
-                    >
-                      <Icon name={busy ? "loader-2" : connected ? "x" : "plug"} size={13} class={busy ? "spin" : ""} />
-                      {connected ? t("settings.agents.disconnect") : t("settings.agents.connect")}
+                      {t(source.lastScannedAt ? "settings.agents.syncNew" : "settings.agents.firstScan")}
                     </button>
                   </div>
                 </div>
@@ -1104,7 +1493,234 @@ function AgentAccessTab({
             })}
           </div>
         )}
+
+        <div class="card card--flat" style="margin-top:var(--sp-3)">
+          <button
+            class="btn btn--ghost btn--sm"
+            aria-expanded={showAdvanced}
+            onClick={() => setShowAdvanced((value) => !value)}
+          >
+            <Icon name="settings-2" size={13} />
+            {t("settings.agents.advanced")}
+          </button>
+          {showAdvanced && (
+            <div style="margin-top:var(--sp-3);padding-top:var(--sp-3);border-top:1px solid var(--border)">
+              <div class="hstack" style="justify-content:space-between;gap:var(--sp-4)">
+                <div>
+                  <h4 class="card__title" style="font-size:var(--fs-md)">
+                    {t("settings.agents.deepScan")}
+                  </h4>
+                  <p class="card__subtitle">{t("settings.agents.deepScan.desc")}</p>
+                </div>
+                <button
+                  class="btn btn--danger btn--sm"
+                  disabled={scanSessionActive || busySource !== null}
+                  onClick={openFullScanConfirm}
+                >
+                  <Icon name="history" size={13} />
+                  {t("settings.agents.deepScan.action")}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
       </section>
+
+      <section class="card">
+        <div class="card__header" style="margin-bottom:var(--sp-3)">
+          <h3 class="card__title">{t("settings.agents.automation")}</h3>
+        </div>
+        <div class="vstack" style="gap:var(--sp-4)">
+          <SettingToggle
+            title={t("settings.agents.startupScan")}
+            description={t("settings.agents.startupScan.desc")}
+            checked={agentAccess.autoScanKnownAgents !== false}
+            disabled={automationBusy}
+            onChange={(checked) => void updateAutomation({ autoScanKnownAgents: checked })}
+          />
+          <SettingToggle
+            title={t("settings.agents.scheduledScan")}
+            description={t("settings.agents.scheduledScan.desc")}
+            checked={agentAccess.watchFileChanges !== false}
+            disabled={automationBusy}
+            onChange={(checked) => void updateAutomation({ watchFileChanges: checked })}
+          />
+          <SettingToggle
+            title={t("settings.agents.autoConnect")}
+            description={t("settings.agents.autoConnect.desc")}
+            checked={agentAccess.autoInjectSkill === true}
+            disabled={automationBusy}
+            onChange={(checked) => void updateAutomation({ autoInjectSkill: checked })}
+          />
+        </div>
+        {automationError && (
+          <p
+            role="alert"
+            style="margin:var(--sp-3) 0 0;color:var(--danger);font-size:var(--fs-xs)"
+          >
+            {automationError}
+          </p>
+        )}
+      </section>
+
+      {showFullScanConfirm && (
+        <div class="modal-backdrop" onClick={() => setShowFullScanConfirm(false)}>
+          <div
+            class="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="full-scan-dialog-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div class="modal__header">
+              <div class="hstack" style="gap:var(--sp-2);align-items:center">
+                <span class="full-scan-dialog__icon">
+                  <Icon name="circle-alert" size={17} />
+                </span>
+                <h3 id="full-scan-dialog-title" class="modal__title">
+                  {t("settings.agents.deepScan.confirmTitle")}
+                </h3>
+              </div>
+            </div>
+            <div class="modal__body">
+              <p class="full-scan-dialog__description">
+                {t("settings.agents.deepScan.confirmBody")}
+              </p>
+              <div>
+                <div class="full-scan-targets__label">
+                  {t("settings.agents.deepScan.targetLabel")}
+                </div>
+                <div
+                  class="full-scan-targets"
+                  role="radiogroup"
+                  aria-label={t("settings.agents.deepScan.targetLabel")}
+                >
+                  <FullScanTargetOption
+                    checked={fullScanTargetSourceId === "all"}
+                    label={t("settings.agents.deepScan.targetAll")}
+                    description={t("settings.agents.deepScan.targetAllDescription", {
+                      count: scannableSources.length,
+                    })}
+                    onChange={() => setFullScanTargetSourceId("all")}
+                  />
+                  {scannableSources.map((source) => (
+                    <FullScanTargetOption
+                      key={source.sourceId}
+                      checked={fullScanTargetSourceId === source.sourceId}
+                      label={source.displayName}
+                      description={t("settings.agents.memoryCount", { count: source.messageCount })}
+                      onChange={() => setFullScanTargetSourceId(source.sourceId)}
+                    />
+                  ))}
+                </div>
+              </div>
+            </div>
+            <div class="modal__footer">
+              <button
+                class="btn btn--ghost btn--sm"
+                onClick={() => setShowFullScanConfirm(false)}
+              >
+                {t("common.cancel")}
+              </button>
+              <button
+                class="btn btn--danger btn--sm"
+                disabled={!fullScanTargetSourceId || scanSessionActive || busySource !== null}
+                onClick={startFullScan}
+              >
+                <Icon name="history" size={13} />
+                {t("settings.agents.deepScan.action")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FullScanTargetOption({
+  checked,
+  label,
+  description,
+  onChange,
+}: {
+  checked: boolean;
+  label: string;
+  description: string;
+  onChange: () => void;
+}) {
+  return (
+    <label class={`full-scan-target${checked ? " full-scan-target--selected" : ""}`}>
+      <input
+        class="full-scan-target__input"
+        type="radio"
+        name="memory-full-scan-target"
+        checked={checked}
+        onChange={onChange}
+      />
+      <span class="full-scan-target__radio" aria-hidden="true">
+        {checked && <span />}
+      </span>
+      <span class="full-scan-target__content">
+        <span class="full-scan-target__label">{label}</span>
+        <span class="full-scan-target__description">{description}</span>
+      </span>
+    </label>
+  );
+}
+
+function InfrastructureItem({
+  icon,
+  title,
+  status,
+  okLabel,
+  errorLabel,
+  value,
+  description,
+  actionLabel,
+  busy,
+  feedback,
+  bordered,
+  onAction,
+}: {
+  icon: "cable" | "database";
+  title: string;
+  status: "checking" | "ok" | "error";
+  okLabel: string;
+  errorLabel: string;
+  value: string;
+  description: string;
+  actionLabel: string;
+  busy: boolean;
+  feedback?: InfrastructureFeedback | null;
+  bordered?: boolean;
+  onAction: () => void;
+}) {
+  return (
+    <div style={bordered ? "border-left:1px solid var(--border);padding-left:var(--sp-5)" : undefined}>
+      <div class="hstack" style="justify-content:space-between;margin-bottom:var(--sp-2)">
+        <div class="hstack" style="gap:var(--sp-2)">
+          <Icon name={icon} size={14} />
+          <strong style="font-size:var(--fs-sm)">{title}</strong>
+        </div>
+        <span class={`pill ${status === "ok" ? "pill--active" : status === "error" ? "pill--failed" : "pill--subtle"}`}>
+          {status === "ok" ? okLabel : status === "error" ? errorLabel : t("common.loading")}
+        </span>
+      </div>
+      <code class="mono muted" style="display:block;font-size:var(--fs-xs);margin-bottom:var(--sp-2)">{value}</code>
+      <p class="card__subtitle" style="margin-bottom:var(--sp-2)">{description}</p>
+      <button class="btn btn--ghost btn--sm" disabled={busy} onClick={onAction}>
+        <Icon name={busy ? "loader-2" : "refresh-cw"} size={13} class={busy ? "spin" : ""} />
+        {actionLabel}
+      </button>
+      {feedback && (
+        <p
+          role={feedback.kind === "error" ? "alert" : "status"}
+          style={`margin:var(--sp-3) 0 0;color:${feedback.kind === "error" ? "var(--danger)" : "var(--success)"};font-size:var(--fs-xs)`}
+        >
+          {feedback.text}
+        </p>
+      )}
     </div>
   );
 }
@@ -1113,11 +1729,13 @@ function SettingToggle({
   title,
   description,
   checked,
+  disabled = false,
   onChange,
 }: {
   title: string;
   description: string;
   checked: boolean;
+  disabled?: boolean;
   onChange: (checked: boolean) => void;
 }) {
   return (
@@ -1126,38 +1744,182 @@ function SettingToggle({
         <h4 class="card__title" style="font-size:var(--fs-md)">{title}</h4>
         <p class="card__subtitle">{description}</p>
       </div>
-      <ToggleSwitch checked={checked} onChange={onChange} />
+      <ToggleSwitch checked={checked} disabled={disabled} onChange={onChange} />
     </div>
   );
 }
 
+const NATIVE_PLUGIN_AGENT_IDS = new Set(["opencode", "openclaw", "hermes", "deepseek_harness"]);
+const HOOK_AGENT_IDS = new Set(["codex", "claude_code", "cursor"]);
+
+type AgentConnectionAction =
+  | "install_plugin"
+  | "remove_plugin"
+  | "install_hook"
+  | "remove_hook"
+  | "install_skill"
+  | "remove_skill";
+
+function visibleAgentSources(sources: AgentSourceView[]): AgentSourceView[] {
+  return sources.filter((source) => !source.builtin || source.available);
+}
+
+function sourceDisplayName(sourceId: string, sources: AgentSourceView[]): string {
+  if (sourceId === "all") return t("settings.agents.deepScan.targetAll");
+  return sources.find((source) => source.sourceId === sourceId)?.displayName ?? sourceId;
+}
+
+function scanProgressTitleKey(phase: AgentSourceScanPhase):
+  | "settings.agents.scanProgress.title.scan"
+  | "settings.agents.scanProgress.title.add"
+  | "settings.agents.scanProgress.title.summarize"
+  | "settings.agents.scanProgress.title.done"
+  | "settings.agents.scanProgress.title.stopped" {
+  if (phase === "add" || phase === "emit") return "settings.agents.scanProgress.title.add";
+  if (phase === "summarize") return "settings.agents.scanProgress.title.summarize";
+  if (phase === "done") return "settings.agents.scanProgress.title.done";
+  if (phase === "stopped") return "settings.agents.scanProgress.title.stopped";
+  return "settings.agents.scanProgress.title.scan";
+}
+
+function scanProgressPhaseKey(phase: AgentSourceScanPhase):
+  | "settings.agents.scanProgress.phase.discover"
+  | "settings.agents.scanProgress.phase.read"
+  | "settings.agents.scanProgress.phase.redact"
+  | "settings.agents.scanProgress.phase.emit"
+  | "settings.agents.scanProgress.phase.scan"
+  | "settings.agents.scanProgress.phase.add"
+  | "settings.agents.scanProgress.phase.summarize"
+  | "settings.agents.scanProgress.phase.done"
+  | "settings.agents.scanProgress.phase.stopped" {
+  const keys = {
+    discover: "settings.agents.scanProgress.phase.discover",
+    read: "settings.agents.scanProgress.phase.read",
+    redact: "settings.agents.scanProgress.phase.redact",
+    emit: "settings.agents.scanProgress.phase.emit",
+    scan: "settings.agents.scanProgress.phase.scan",
+    add: "settings.agents.scanProgress.phase.add",
+    summarize: "settings.agents.scanProgress.phase.summarize",
+    done: "settings.agents.scanProgress.phase.done",
+    stopped: "settings.agents.scanProgress.phase.stopped",
+  } as const;
+  return keys[phase];
+}
+
+function agentConnectionAction(source: AgentSourceView): AgentConnectionAction {
+  if (NATIVE_PLUGIN_AGENT_IDS.has(source.sourceId)) {
+    return source.status === "plugin_installed" ? "remove_plugin" : "install_plugin";
+  }
+  if (HOOK_AGENT_IDS.has(source.sourceId)) {
+    return source.status === "plugin_installed" ? "remove_hook" : "install_hook";
+  }
+  return source.status === "not_connected" ? "install_skill" : "remove_skill";
+}
+
 function agentConnectionKind(sourceId: string): "plugin" | "skill" {
-  return new Set(["opencode", "openclaw", "hermes", "deepseek_harness", "codex", "claude_code", "cursor"])
-    .has(sourceId)
+  return NATIVE_PLUGIN_AGENT_IDS.has(sourceId) || HOOK_AGENT_IDS.has(sourceId)
     ? "plugin"
     : "skill";
+}
+
+function agentStatusKey(source: AgentSourceView):
+  | "settings.agents.skillInstalled"
+  | "settings.agents.hookInstalled"
+  | "settings.agents.pluginInstalled"
+  | "settings.agents.skillNotInstalled"
+  | "settings.agents.hookNotInstalled"
+  | "settings.agents.pluginNotInstalled" {
+  if (source.status === "skill_installed") return "settings.agents.skillInstalled";
+  if (source.status === "plugin_installed") {
+    return HOOK_AGENT_IDS.has(source.sourceId)
+      ? "settings.agents.hookInstalled"
+      : "settings.agents.pluginInstalled";
+  }
+  if (NATIVE_PLUGIN_AGENT_IDS.has(source.sourceId)) return "settings.agents.pluginNotInstalled";
+  return HOOK_AGENT_IDS.has(source.sourceId)
+    ? "settings.agents.hookNotInstalled"
+    : "settings.agents.skillNotInstalled";
+}
+
+function agentActionKey(action: AgentConnectionAction):
+  | "settings.agents.installSkill"
+  | "settings.agents.installHook"
+  | "settings.agents.installPlugin"
+  | "settings.agents.removeSkill"
+  | "settings.agents.removeHook"
+  | "settings.agents.removePlugin" {
+  const keys = {
+    install_skill: "settings.agents.installSkill",
+    install_hook: "settings.agents.installHook",
+    install_plugin: "settings.agents.installPlugin",
+    remove_skill: "settings.agents.removeSkill",
+    remove_hook: "settings.agents.removeHook",
+    remove_plugin: "settings.agents.removePlugin",
+  } as const;
+  return keys[action];
+}
+
+function agentActionIcon(action: AgentConnectionAction):
+  | "plug"
+  | "terminal"
+  | "download"
+  | "trash-2" {
+  if (action === "install_plugin") return "plug";
+  if (action === "install_hook") return "terminal";
+  if (action === "install_skill") return "download";
+  return "trash-2";
+}
+
+function memoryServiceEndpoint(): string {
+  return typeof location === "undefined" ? "http://127.0.0.1:18960" : location.origin;
+}
+
+function formatProfilePaths(paths: string[]): string {
+  return paths
+    .map((path) => path.replace(/^\/Users\/[^/]+(?=\/|$)/, "~"))
+    .join(" / ");
+}
+
+async function waitForMemoryService(
+  previousUptimeMs: number | undefined,
+  requestedAt: number,
+): Promise<boolean> {
+  let observedDown = false;
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    await new Promise((resolve) => window.setTimeout(resolve, 250));
+    try {
+      const result = await api.get<MemoryServiceHealth>("/api/v1/health");
+      const expectedPreviousUptime = previousUptimeMs === undefined
+        ? undefined
+        : previousUptimeMs + Date.now() - requestedAt;
+      if (
+        result.ok !== false
+        && (
+          observedDown
+          || (
+            expectedPreviousUptime !== undefined
+            && result.uptimeMs !== undefined
+            && result.uptimeMs + 100 < expectedPreviousUptime
+          )
+        )
+      ) return true;
+    } catch {
+      observedDown = true;
+    }
+  }
+  return false;
 }
 
 // ─── General tab (merged Account + General) ─────────────────────────
 
 function GeneralTab({
   telemetry,
-  logging,
-  algorithm,
   onPatchTelemetry,
-  onPatchLogging,
-  onPatchAlgorithm,
 }: {
   telemetry: NonNullable<ResolvedConfig["telemetry"]>;
-  logging: NonNullable<ResolvedConfig["logging"]>;
-  algorithm: AlgorithmBlock;
   onPatchTelemetry: (
     p: Partial<NonNullable<ResolvedConfig["telemetry"]>>,
   ) => void;
-  onPatchLogging: (
-    p: Partial<NonNullable<ResolvedConfig["logging"]>>,
-  ) => void;
-  onPatchAlgorithm: (p: Partial<AlgorithmBlock>) => void;
 }) {
   return (
     <div class="vstack" style="gap:var(--sp-4)">
@@ -1203,32 +1965,6 @@ function GeneralTab({
               {t(opt.k)}
             </button>
           ))}
-        </div>
-      </section>
-
-      <section class="card">
-        <div class="hstack" style="justify-content:space-between;margin-bottom:var(--sp-2)">
-          <div>
-            <h3 class="card__title">{t("settings.general.lightweightMemory")}</h3>
-            <p class="card__subtitle">{t("settings.general.lightweightMemory.desc")}</p>
-          </div>
-          <ToggleSwitch
-            checked={algorithm.lightweightMemory?.enabled === false}
-            onChange={(v) => onPatchAlgorithm({ lightweightMemory: { enabled: !v } })}
-          />
-        </div>
-      </section>
-
-      <section class="card">
-        <div class="hstack" style="justify-content:space-between;margin-bottom:var(--sp-2)">
-          <div>
-            <h3 class="card__title">{t("settings.general.detailedLogs")}</h3>
-            <p class="card__subtitle">{t("settings.general.detailedLogs.desc")}</p>
-          </div>
-          <ToggleSwitch
-            checked={!!logging.detailedView}
-            onChange={(v) => onPatchLogging({ detailedView: v })}
-          />
         </div>
       </section>
 
@@ -1484,20 +2220,25 @@ function Field({
 
 function ToggleSwitch({
   checked,
+  disabled = false,
   onChange,
 }: {
   checked: boolean;
+  disabled?: boolean;
   onChange: (v: boolean) => void;
 }) {
   return (
     <button
       role="switch"
       aria-checked={checked}
+      disabled={disabled}
       onClick={() => onChange(!checked)}
       style={`
         position:relative;width:40px;height:22px;border-radius:999px;
         background:${checked ? "var(--accent)" : "var(--border-strong)"};
-        border:none;cursor:pointer;transition:background var(--dur-xs);flex-shrink:0
+        border:none;cursor:${disabled ? "not-allowed" : "pointer"};
+        opacity:${disabled ? "0.6" : "1"};
+        transition:background var(--dur-xs),opacity var(--dur-xs);flex-shrink:0
       `}
     >
       <span

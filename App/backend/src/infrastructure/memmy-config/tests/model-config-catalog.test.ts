@@ -285,7 +285,7 @@ describe("model config catalog", () => {
             endpointId: "chat",
             model: "agent-model",
             source: "byok",
-            capabilities: ["agent", "memory_summary"]
+            capabilities: ["agent", "memory_summary", "memory_evolution"]
           },
           {
             endpointId: "chat",
@@ -336,13 +336,7 @@ describe("model config catalog", () => {
     const saved = await writeModelConfigCatalog(file, assigned);
     const raw = YAML.parse(readFileSync(file, "utf8")) as any;
     expect(raw.memmyMemory).toMatchObject({
-      roleRouting: { summary: "fixed", evolution: "fixed" },
-      summary: {
-        provider: "openai_compatible",
-        endpoint: "https://models.example/v1",
-        model: "memory-model",
-        apiKey: "sk-memory"
-      },
+      roleRouting: { summary: "follow", evolution: "fixed" },
       evolution: {
         provider: "openai_compatible",
         endpoint: "https://models.example/v1",
@@ -358,15 +352,17 @@ describe("model config catalog", () => {
       }
     });
     expect(saved.memorySettings).toEqual({
-      roleRouting: { summary: "fixed", evolution: "fixed" },
+      roleRouting: { summary: "follow", evolution: "fixed" },
       embeddingMode: "custom"
     });
 
     const followInput = structuredClone(assigned);
     followInput.configRevision = saved.configRevision;
     followInput.modelAssignments.byok.memorySummary = agentId;
+    followInput.modelAssignments.byok.memoryEvolution = agentId;
     const followed = await writeModelConfigCatalog(file, followInput);
     expect(followed.memorySettings?.roleRouting.summary).toBe("follow");
+    expect(followed.memorySettings?.roleRouting.evolution).toBe("follow");
     expect((YAML.parse(readFileSync(file, "utf8")) as any).memmyMemory.roleRouting.summary).toBe("follow");
   });
 

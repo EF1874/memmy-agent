@@ -524,7 +524,8 @@ export const AddMemoryOutputSchema = z.object({
   summary: z.string(),
   tags: z.array(z.string()),
   createdAt: IsoTimeSchema,
-  serverTime: IsoTimeSchema
+  serverTime: IsoTimeSchema,
+  duplicate: z.boolean().optional()
 });
 export type AddMemoryOutput = z.infer<typeof AddMemoryOutputSchema>;
 

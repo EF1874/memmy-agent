@@ -7,12 +7,12 @@ import type { MemoryGovernanceRequest, MemoryImportRequest, RecallMemoryLayer } 
 import { MemoryService } from "../service/memory-service.js";
 import { MemoryServiceError } from "../utils/error.js";
 import { resolveTimeZone } from "../utils/time.js";
+import type { AgentSourceExecutor } from "../agent-source/runtime.js";
 import {
-  agentSourceScanStatus,
-  listAgentSources,
-  mutateAgentSourceConnection,
-  startAgentSourceScan
-} from "./agent-source-bridge.js";
+  installViewerCli,
+  viewerCliStatus,
+  type ViewerCliOptions,
+} from "./viewer-cli.js";
 
 export const VIEWER_API_ROUTES = [
   "GET /api/v1/auth/status",
@@ -37,10 +37,15 @@ export const VIEWER_API_ROUTES = [
   "GET /api/v1/agent-sources",
   "POST /api/v1/agent-sources/scan",
   "GET /api/v1/agent-sources/scan/status",
+  "POST /api/v1/agent-sources/scan/stop",
+  "POST /api/v1/agent-sources/scan/cancel",
   "POST /api/v1/agent-sources/:id/plugin",
   "DELETE /api/v1/agent-sources/:id/plugin",
   "POST /api/v1/agent-sources/:id/skill",
   "DELETE /api/v1/agent-sources/:id/skill",
+  "GET /api/v1/system/cli",
+  "POST /api/v1/system/cli/install",
+  "POST /api/v1/system/restart",
   "POST /api/v1/models/test",
   "GET /api/v1/embeddings/maintenance",
   "POST /api/v1/embeddings/rebuild",
@@ -58,12 +63,16 @@ export interface ViewerApiContext {
   routes: readonly string[];
   scheduleWorker(): void;
   timeZone?: string;
+  viewerCli?: ViewerCliOptions;
+  restartService?: () => void | Promise<void>;
+  agentSources: AgentSourceExecutor;
 }
 
 export interface ViewerRouteResult {
   status?: number;
   body: unknown;
   headers?: Record<string, string>;
+  afterResponse?: () => void | Promise<void>;
 }
 
 export function isViewerApiRequest(request: IncomingMessage, url: URL): boolean {
@@ -138,6 +147,7 @@ export async function routeViewerRequest(
       body: context.service.panelTasks({
         ...envelope,
         q: query(url, "q"),
+        sourceAgent: query(url, "sourceAgent"),
         page: numberQuery(url, "page")
       })
     };
@@ -151,6 +161,7 @@ export async function routeViewerRequest(
         layer,
         q: query(url, "q"),
         status: statusQuery(url),
+        sourceAgent: query(url, "sourceAgent"),
         page: numberQuery(url, "page"),
         limit: numberQuery(url, "limit")
       })
@@ -159,6 +170,8 @@ export async function routeViewerRequest(
   if (method === "GET" && path === "/api/v1/api-logs") {
     return {
       body: context.service.apiLogs({
+        tools: apiLogToolsQuery(url),
+        sourceAgent: query(url, "sourceAgent"),
         limit: numberQuery(url, "limit"),
         offset: numberQuery(url, "offset")
       })
@@ -186,18 +199,40 @@ export async function routeViewerRequest(
     return { body: await patchViewerConfig(context, body) };
   }
   if (method === "GET" && path === "/api/v1/agent-sources") {
-    return { body: await listAgentSources() };
+    return { body: await context.agentSources.list() };
+  }
+  if (method === "GET" && path === "/api/v1/system/cli") {
+    return { body: await viewerCliStatus(context.viewerCli) };
+  }
+  if (method === "POST" && path === "/api/v1/system/cli/install") {
+    return { body: await installViewerCli(context.viewerCli) };
+  }
+  if (method === "POST" && path === "/api/v1/system/restart") {
+    if (!context.restartService) {
+      throw new MemoryServiceError("conflict", "Memory service restart is unavailable");
+    }
+    return {
+      status: 202,
+      body: { accepted: true, serverTime: new Date().toISOString() },
+      afterResponse: context.restartService,
+    };
   }
   if (method === "POST" && path === "/api/v1/agent-sources/scan") {
-    return { status: 202, body: await startAgentSourceScan(body) };
+    return { status: 202, body: await context.agentSources.startScan(body) };
   }
   if (method === "GET" && path === "/api/v1/agent-sources/scan/status") {
-    return { body: await agentSourceScanStatus() };
+    return { body: context.agentSources.scanStatus() };
+  }
+  if (method === "POST" && path === "/api/v1/agent-sources/scan/stop") {
+    return { body: await context.agentSources.pauseScan() };
+  }
+  if (method === "POST" && path === "/api/v1/agent-sources/scan/cancel") {
+    return { body: await context.agentSources.cancelScan() };
   }
   const sourceConnection = path.match(/^\/api\/v1\/agent-sources\/([^/]+)\/(plugin|skill)$/);
   if ((method === "POST" || method === "DELETE") && sourceConnection?.[1] && sourceConnection[2]) {
     return {
-      body: await mutateAgentSourceConnection(
+      body: await context.agentSources.mutateConnection(
         decodeURIComponent(sourceConnection[1]),
         sourceConnection[2] as "plugin" | "skill",
         method
@@ -414,6 +449,16 @@ function numberQuery(url: URL, key: string): number | undefined {
   if (!value) return undefined;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function apiLogToolsQuery(url: URL): Array<"memory_add" | "memory_search"> | undefined {
+  const value = query(url, "tools");
+  if (!value) return undefined;
+  const allowed = new Set(["memory_add", "memory_search"]);
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item): item is "memory_add" | "memory_search" => allowed.has(item));
 }
 
 function stringArray(value: unknown): string[] {

@@ -54,6 +54,7 @@ import {
 type SqlValue = string | number | Buffer | null;
 const BUNDLE_TABLES = [
   "memories",
+  "memory_capture_claims",
   "l3_world_model_scopes",
   "user_memories",
   "sessions",
@@ -185,6 +186,17 @@ export interface RawTurnRecord {
   status: string;
   redactedAt?: string | null;
   deletedAt?: string | null;
+  createdAt: string;
+}
+
+export type MemoryCaptureClaimOrigin = "turn_complete" | "agent_source_scan";
+
+export interface MemoryCaptureClaimRecord {
+  userId: string;
+  source: string;
+  qaHash: string;
+  primaryMemoryId: string;
+  capturedBy: MemoryCaptureClaimOrigin;
   createdAt: string;
 }
 
@@ -1240,6 +1252,56 @@ export class MemoryRepository {
   }
 }
 
+export class MemoryCaptureClaimRepository {
+  constructor(private readonly db: Database.Database) {}
+
+  claim(input: MemoryCaptureClaimRecord): {
+    claimed: boolean;
+    claim: MemoryCaptureClaimRecord;
+  } {
+    const result = this.db.prepare(
+      `INSERT OR IGNORE INTO memory_capture_claims (
+         user_id, source, qa_hash, primary_memory_id, captured_by, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?)`
+    ).run(
+      input.userId,
+      input.source,
+      input.qaHash,
+      input.primaryMemoryId,
+      input.capturedBy,
+      input.createdAt
+    );
+    const claim = this.get(input.userId, input.source, input.qaHash);
+    if (!claim) {
+      throw new Error("memory capture claim was not persisted");
+    }
+    return { claimed: result.changes === 1, claim };
+  }
+
+  get(userId: string, source: string, qaHash: string): MemoryCaptureClaimRecord | undefined {
+    const row = this.db.prepare(
+      `SELECT user_id, source, qa_hash, primary_memory_id, captured_by, created_at
+       FROM memory_capture_claims
+       WHERE user_id = ? AND source = ? AND qa_hash = ?`
+    ).get(userId, source, qaHash) as {
+      user_id: string;
+      source: string;
+      qa_hash: string;
+      primary_memory_id: string;
+      captured_by: MemoryCaptureClaimOrigin;
+      created_at: string;
+    } | undefined;
+    return row ? {
+      userId: row.user_id,
+      source: row.source,
+      qaHash: row.qa_hash,
+      primaryMemoryId: row.primary_memory_id,
+      capturedBy: row.captured_by,
+      createdAt: row.created_at
+    } : undefined;
+  }
+}
+
 export class UserMemoryRepository {
   constructor(private readonly db: Database.Database) {}
 
@@ -1360,6 +1422,7 @@ export class UserMemoryRepository {
     userId: string;
     status?: UserMemoryStatus;
     query?: string;
+    sourceAgent?: string;
     limit: number;
     offset: number;
   }): UserMemoryRecord[] {
@@ -1376,6 +1439,7 @@ export class UserMemoryRepository {
     userId: string;
     status?: UserMemoryStatus;
     query?: string;
+    sourceAgent?: string;
   }): number {
     const { where, params } = userMemoryPanelFilter(input);
     const row = this.db.prepare(`SELECT COUNT(*) AS count FROM user_memories WHERE ${where}`)
@@ -1946,8 +2010,8 @@ export class RuntimeRepository {
     return counts;
   }
 
-  countEpisodes(userId?: string, query?: string): number {
-    const built = buildEpisodeWhere(userId, query);
+  countEpisodes(userId?: string, query?: string, sourceAgent?: string): number {
+    const built = buildEpisodeWhere(userId, query, sourceAgent);
     const row = this.db
       .prepare(
         `SELECT COUNT(*) AS count
@@ -1958,8 +2022,8 @@ export class RuntimeRepository {
     return Number(row?.count ?? 0);
   }
 
-  listEpisodes(userId?: string, limit = 50, offset = 0, query?: string): EpisodeRecord[] {
-    const built = buildEpisodeWhere(userId, query);
+  listEpisodes(userId?: string, limit = 50, offset = 0, query?: string, sourceAgent?: string): EpisodeRecord[] {
+    const built = buildEpisodeWhere(userId, query, sourceAgent);
     const rows = this.db
       .prepare(
         `SELECT *
@@ -5039,6 +5103,7 @@ function projectEnvironmentStateFromSql(row: SqlProjectEnvironmentStateRow): Pro
 
 export class Repositories {
   readonly memories: MemoryRepository;
+  readonly captureClaims: MemoryCaptureClaimRepository;
   readonly userMemories: UserMemoryRepository;
   readonly processing: MemoryProcessingRepository;
   readonly runtime: RuntimeRepository;
@@ -5049,6 +5114,7 @@ export class Repositories {
   constructor(readonly db: Database.Database) {
     this.vectors = new SqliteVecStore(db);
     this.memories = new MemoryRepository(db, this.vectors);
+    this.captureClaims = new MemoryCaptureClaimRepository(db);
     this.userMemories = new UserMemoryRepository(db);
     this.processing = new MemoryProcessingRepository(db);
     this.runtime = new RuntimeRepository(db);
@@ -5434,6 +5500,7 @@ function userMemoryPanelFilter(input: {
   userId: string;
   status?: UserMemoryStatus;
   query?: string;
+  sourceAgent?: string;
 }): { where: string; params: Array<string> } {
   const clauses = ["user_id = ?"];
   const params = [input.userId];
@@ -5447,6 +5514,22 @@ function userMemoryPanelFilter(input: {
   if (query) {
     clauses.push("lower(content) LIKE ? ESCAPE '\\'");
     params.push(`%${escapeLikePattern(query)}%`);
+  }
+  const sourceAgent = input.sourceAgent?.trim();
+  if (sourceAgent) {
+    clauses.push(`EXISTS (
+      SELECT 1
+      FROM raw_turns
+      INNER JOIN sessions ON sessions.id = raw_turns.session_id
+      WHERE (
+        raw_turns.id = user_memories.source_turn_id
+        OR raw_turns.id IN (
+          SELECT CAST(value AS TEXT) FROM json_each(user_memories.source_turn_refs_json)
+        )
+      )
+      AND lower(replace(replace(TRIM(sessions.source), '-', '_'), ' ', '_')) = ?
+    )`);
+    params.push(normalizeAgentIdKey(sourceAgent));
   }
   return { where: clauses.join(" AND "), params };
 }
@@ -5932,12 +6015,23 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
   }
 }
 
-function buildEpisodeWhere(userId?: string, query?: string): { where: string; params: SqlValue[] } {
+function buildEpisodeWhere(userId?: string, query?: string, sourceAgent?: string): { where: string; params: SqlValue[] } {
   const clauses = ["1=1"];
   const params: SqlValue[] = [];
   if (userId) {
     clauses.push("episodes.user_id = ?");
     params.push(userId);
+  }
+
+  const normalizedSourceAgent = sourceAgent?.trim();
+  if (normalizedSourceAgent) {
+    clauses.push(`EXISTS (
+      SELECT 1
+      FROM sessions
+      WHERE sessions.id = episodes.session_id
+        AND lower(replace(replace(TRIM(sessions.source), '-', '_'), ' ', '_')) = ?
+    )`);
+    params.push(normalizeAgentIdKey(normalizedSourceAgent));
   }
 
   const normalizedQuery = query?.trim();
@@ -6729,6 +6823,7 @@ function bundleIdentity(
   row: Record<string, unknown>
 ): BundleIdentity | undefined {
   const newTableIdentityColumns: Partial<Record<BundleTableName, string[]>> = {
+    memory_capture_claims: ["user_id", "source", "qa_hash"],
     l3_world_model_scopes: ["scope_key"],
     l3_world_model_session_cursors: ["session_id"],
     l3_world_model_input_traces: ["session_id", "trace_seq"],

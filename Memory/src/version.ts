@@ -9,5 +9,7 @@ export const MEMORY_CAPABILITIES = [
   "viewer-sse",
   "config-hot-reload",
   "import-export",
-  "local-plugin-adapters"
+  "local-plugin-adapters",
+  "agent-source-scan",
+  "agent-source-integration"
 ] as const;

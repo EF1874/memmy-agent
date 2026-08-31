@@ -120,6 +120,19 @@ describe("memmy memory discovery", () => {
       futureMemorySetting: { keep: true },
     };
 
-    expect(new Config({ memmyMemory: input }).toObject().memmyMemory).toMatchObject(input);
+    const resolved = new Config({ memmyMemory: input }).toObject().memmyMemory;
+    expect(resolved).toMatchObject({
+      enabled: true,
+      roleRouting: input.roleRouting,
+      summary: input.summary,
+      evolution: input.evolution,
+      embedding: input.embedding,
+      algorithm: {},
+      telemetry: input.telemetry,
+      hub: input.hub,
+      agentAccess: input.agentAccess,
+      futureMemorySetting: input.futureMemorySetting,
+    });
+    expect(resolved).not.toHaveProperty("logging");
   });
 });

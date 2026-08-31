@@ -15,13 +15,19 @@ import { openSse } from "../api/sse";
 import { t } from "../stores/i18n";
 import { Icon } from "../components/Icon";
 import { Pager } from "../components/Pager";
+import { RefreshButton } from "../components/RefreshButton";
 import { ShareScopePill } from "../components/ShareScopePill";
-import { LightweightModeEmpty } from "../components/LightweightModeEmpty";
-import { NamespaceSelect, appendNamespaceParams } from "../components/NamespaceSelect";
+import { AgentSearchBar } from "../components/AgentSearchBar";
+import {
+  agentClass,
+  appendSourceAgentParam,
+  sourceAgentLabel,
+} from "../components/AgentSourceSelect";
 import { Markdown } from "../components/Markdown";
 import { route } from "../stores/router";
 import { clearEntryId, linkTo } from "../stores/cross-link";
 import type { CoreEvent, SkillDTO } from "../api/types";
+import { displayMemoryId } from "../utils/memory-id";
 import { areAllIdsSelected, toggleIdsInSelection } from "../utils/selection";
 import {
   loadHubSharingEnabled,
@@ -29,7 +35,7 @@ import {
   SHARE_SCOPE_OPTIONS,
   type ShareScope,
 } from "../utils/share";
-import { useLightweightMemoryMode } from "../hooks/useLightweightMemoryMode";
+import { TEAM_SHARING_UI_ENABLED } from "../features";
 
 interface SkillUsage {
   sourcePolicies: Array<{
@@ -66,7 +72,7 @@ interface SkillRefusalNotice {
 export function SkillsView() {
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<StatusFilter>("");
-  const [namespaceFilter, setNamespaceFilter] = useState("");
+  const [sourceAgentFilter, setSourceAgentFilter] = useState("");
   const [skills, setSkills] = useState<SkillDTO[] | null>(null);
   const [detail, setDetail] = useState<SkillDTO | null>(null);
   const [loading, setLoading] = useState(false);
@@ -77,7 +83,6 @@ export function SkillsView() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [refusalNotices, setRefusalNotices] = useState<SkillRefusalNotice[]>([]);
   const [showRefusalNotices, setShowRefusalNotices] = useState(false);
-  const lightweight = useLightweightMemoryMode();
   const toggleSel = (id: string) => {
     setSelected((prev) => {
       const n = new Set(prev);
@@ -100,7 +105,7 @@ export function SkillsView() {
       qs.set("limit", String(pageSize));
       qs.set("offset", String(nextPage * pageSize));
       if (status) qs.set("status", status);
-      appendNamespaceParams(qs, namespaceFilter);
+      appendSourceAgentParam(qs, sourceAgentFilter);
       const r = await api.get<{ skills: SkillDTO[]; nextOffset?: number; total?: number }>(
         `/api/v1/skills?${qs.toString()}`,
       );
@@ -117,19 +122,8 @@ export function SkillsView() {
     }
   };
   useEffect(() => {
-    if (lightweight.loading || lightweight.enabled) return;
     void load(0);
-  }, [status, pageSize, namespaceFilter, lightweight.loading, lightweight.enabled]);
-
-  useEffect(() => {
-    if (!lightweight.enabled) return;
-    setSkills([]);
-    setDetail(null);
-    setSelected(new Set());
-    setHasMore(false);
-    setTotal(0);
-    setPage(0);
-  }, [lightweight.enabled]);
+  }, [status, pageSize, sourceAgentFilter]);
 
   useEffect(() => {
     const handle = openSse("/api/v1/events", (_, data) => {
@@ -157,7 +151,6 @@ export function SkillsView() {
 
   // Deep-link: `#/skills?id=sk_xxx` auto-opens the drawer.
   useEffect(() => {
-    if (lightweight.loading || lightweight.enabled) return;
     const id = route.value.params.id;
     if (!id) return;
     const ctrl = new AbortController();
@@ -172,7 +165,7 @@ export function SkillsView() {
       })
       .catch(() => void 0);
     return () => ctrl.abort();
-  }, [route.value.params.id, lightweight.loading, lightweight.enabled]);
+  }, [route.value.params.id]);
 
   const filtered = (skills ?? []).filter((s) => {
     if (!query) return true;
@@ -192,8 +185,7 @@ export function SkillsView() {
           <h1>{t("skills.title")}</h1>
           <p>{t("skills.subtitle")}</p>
         </div>
-        {!lightweight.enabled && (
-          <div class="view-header__actions">
+        <div class="view-header__actions">
             <SkillRefusalDropdown
               notices={refusalNotices}
               open={showRefusalNotices}
@@ -203,60 +195,18 @@ export function SkillsView() {
                 setShowRefusalNotices(false);
               }}
             />
-            {/*
-             * Refresh — matches MemoriesView / TasksView / PoliciesView /
-             * WorldModelsView. Clears search + status filter, drops
-             * selection, and re-fetches page 0 so the list visibly
-             * snaps back to "fresh top state". The old implementation
-             * only re-queried the CURRENT page with the CURRENT filters
-             * still applied, which looked like a no-op whenever the
-             * filtered slice hadn't actually changed.
-             */}
-            <button
-              class="btn btn--ghost btn--sm"
-              onClick={() => {
-                setQuery("");
-                setStatus("");
-                setNamespaceFilter("");
-                setSelected(new Set());
-                void load(0);
-              }}
-            >
-              <Icon name="refresh-cw" size={14} />
-              {t("common.refresh")}
-            </button>
-          </div>
-        )}
+            <RefreshButton onRefresh={() => load(page)} />
+        </div>
       </div>
 
-      {lightweight.loading && (
-        <div class="list">
-          {[0, 1, 2].map((i) => (
-            <div key={i} class="skeleton" style="height:64px" />
-          ))}
-        </div>
-      )}
-
-      {!lightweight.loading && lightweight.enabled && (
-        <LightweightModeEmpty
-          icon="wand-sparkles"
-          message={t("skills.lightweight.empty")}
-        />
-      )}
-
-      {!lightweight.loading && !lightweight.enabled && (
-        <>
           <div class="toolbar">
-            <label class="input-search">
-              <Icon name="search" size={16} />
-              <input
-                class="input input--search"
-                type="search"
-                placeholder={t("skills.search.placeholder")}
-                value={query}
-                onInput={(e) => setQuery((e.target as HTMLInputElement).value)}
-              />
-            </label>
+            <AgentSearchBar
+              query={query}
+              placeholder={t("skills.search.placeholder")}
+              sourceAgent={sourceAgentFilter}
+              onQueryChange={setQuery}
+              onSourceAgentChange={setSourceAgentFilter}
+            />
           </div>
 
           <div class="toolbar" style="margin-top:calc(-1 * var(--sp-2))">
@@ -277,7 +227,6 @@ export function SkillsView() {
                 </button>
               ))}
             </div>
-            <NamespaceSelect value={namespaceFilter} onChange={setNamespaceFilter} />
           </div>
 
           {loading && (
@@ -323,7 +272,12 @@ export function SkillsView() {
                     <div class="mem-card__body">
                       <div class="mem-card__title">{s.name}</div>
                       <div class="mem-card__meta">
-                        <ShareScopePill scope={s.share?.scope} />
+                        {s.ownerAgentKind && (
+                          <span class={`pill pill--agent pill--agent-${agentClass(s.ownerAgentKind)}`}>
+                            {sourceAgentLabel(s.ownerAgentKind)}
+                          </span>
+                        )}
+                        {TEAM_SHARING_UI_ENABLED && <ShareScopePill scope={s.share?.scope} />}
                         <span class={`pill pill--${s.status}`}>
                           {t(`status.${s.status}` as "status.active")}
                         </span>
@@ -431,8 +385,6 @@ export function SkillsView() {
               </button>
             </div>
           )}
-        </>
-      )}
     </>
   );
 }
@@ -643,7 +595,7 @@ function SkillDrawer({
         <header class="drawer__header">
           <div>
             <div class="muted mono" style="font-size:var(--fs-xs);margin-bottom:2px">
-              skill {skill.id.slice(0, 16)}
+              {displayMemoryId(skill.id)}
             </div>
             <h2 class="drawer__title">{skill.name}</h2>
           </div>
@@ -674,8 +626,12 @@ function SkillDrawer({
                   {t(`status.${skill.status}` as "status.active")}
                 </span>
               </dd>
-              <dt class="muted">{t("memories.field.share")}</dt>
-              <dd><ShareScopePill scope={skill.share?.scope} /></dd>
+              {TEAM_SHARING_UI_ENABLED && (
+                <>
+                  <dt class="muted">{t("memories.field.share")}</dt>
+                  <dd><ShareScopePill scope={skill.share?.scope} /></dd>
+                </>
+              )}
               <dt class="muted">{t("skills.detail.version")}</dt>
               <dd>v{skill.version ?? 1}</dd>
               <dt class="muted">{t("memories.field.eta")}</dt>
@@ -908,7 +864,7 @@ function SkillDrawer({
             </>
           )}
 
-          {mode === "share" && (
+          {TEAM_SHARING_UI_ENABLED && mode === "share" && (
             <section class="card card--flat">
               <div class="modal__field">
                 <label>{t("memories.share.scope")}</label>
@@ -965,12 +921,14 @@ function SkillDrawer({
                 <Icon name="download" size={14} />
                 {t("skills.detail.download")}
               </button>
-              <button class="btn btn--sm" disabled={busy} onClick={() => setMode("share")}>
-                <Icon name="share" size={14} />
-                {skill.share?.scope
-                  ? t("memories.act.unshare")
-                  : t("memories.act.share")}
-              </button>
+              {TEAM_SHARING_UI_ENABLED && (
+                <button class="btn btn--sm" disabled={busy} onClick={() => setMode("share")}>
+                  <Icon name="share" size={14} />
+                  {skill.share?.scope
+                    ? t("memories.act.unshare")
+                    : t("memories.act.share")}
+                </button>
+              )}
               <button
                 class="btn btn--primary btn--sm"
                 disabled={busy}
@@ -997,7 +955,7 @@ function SkillDrawer({
               </button>
             </>
           )}
-          {mode === "share" && (
+          {TEAM_SHARING_UI_ENABLED && mode === "share" && (
             <>
               {skill.share?.scope && (
                 <button

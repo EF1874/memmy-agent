@@ -55,9 +55,6 @@ export function localViewerResponse(method: string, path: string): { handled: bo
   if (method === "POST" && pathname === "/api/v1/admin/restart") {
     return { handled: true, payload: { ok: true, restarting: false, hotReloaded: true } };
   }
-  if (method === "GET" && pathname === "/api/v1/diag/namespace") {
-    return { handled: true, payload: { namespaces: [] } };
-  }
   const timeline = pathname.match(/^\/api\/v1\/episodes\/([^/]+)\/timeline$/);
   if (method === "GET" && timeline?.[1]) {
     return {
@@ -115,7 +112,10 @@ function health(value: JsonRecord): JsonRecord {
     version: string(value.serviceVersion) || string(value.version),
     agent: "memmy",
     llm: modelInfo(summary),
-    skillEvolver: { ...modelInfo(evolution), inherited: false },
+    skillEvolver: {
+      ...modelInfo(evolution),
+      inherited: string(evolution.routing) === "follow"
+    },
     embedder: { ...modelInfo(embedding), dim: number(embedding.dimension) }
   };
 }
@@ -139,6 +139,10 @@ function overview(value: JsonRecord): JsonRecord {
     skills: { total: skillTotal, active: skillTotal, candidate: 0, archived: 0 },
     policies: { total: policyTotal, active: policyTotal, candidate: 0, archived: 0 },
     worldModels: number(layers.L3),
+    sourceDistribution: array(panelSummary.sourceDistribution).map((item) => {
+      const entry = record(item);
+      return { source: string(entry.source), count: number(entry.count) };
+    }),
     dailyActivity: array(panelSummary.dailyActivity).map((item) => {
       const entry = record(item);
       return { date: string(entry.date), count: number(entry.count) };
@@ -196,7 +200,6 @@ function trace(item: JsonRecord): JsonRecord {
     alpha: number(meta.alpha ?? internal.alpha),
     priority: number(meta.priority ?? internal.priority),
     ownerAgentKind: string(meta.sourceAgent ?? meta.source ?? "memmy"),
-    ownerProfileId: string(meta.profileId ?? "default"),
     share: null
   };
 }
@@ -220,8 +223,7 @@ function policy(item: JsonRecord): JsonRecord {
     sourceEpisodeIds: strings(meta.sourceEpisodeIds ?? meta.source_episode_ids),
     sourceTraceIds: strings(meta.sourceTraceIds ?? meta.source_memory_ids),
     share: null,
-    ownerAgentKind: string(meta.sourceAgent ?? "memmy"),
-    ownerProfileId: string(meta.profileId ?? "default")
+    ownerAgentKind: string(meta.sourceAgent ?? "memmy")
   };
 }
 
@@ -238,8 +240,7 @@ function worldModel(item: JsonRecord): JsonRecord {
     version: positiveInt(item.version, 1),
     status: item.status === "archived" ? "archived" : "active",
     share: null,
-    ownerAgentKind: string(meta.sourceAgent ?? "memmy"),
-    ownerProfileId: string(meta.profileId ?? "default")
+    ownerAgentKind: string(meta.sourceAgent ?? "memmy")
   };
 }
 
@@ -267,8 +268,7 @@ function skill(item: JsonRecord): JsonRecord {
     version: positiveInt(item.version, 1),
     usageCount: number(meta.usageCount),
     share: null,
-    ownerAgentKind: string(meta.sourceAgent ?? "memmy"),
-    ownerProfileId: string(meta.profileId ?? "default")
+    ownerAgentKind: string(meta.sourceAgent ?? "memmy")
   };
 }
 
@@ -280,6 +280,10 @@ function episodes(value: JsonRecord): JsonRecord {
     const startedAt = epoch(ep.startedAt ?? turns[0]?.createdAt ?? task.updatedAt);
     const endedAt = ep.status === "closed" ? epoch(ep.endedAt ?? task.updatedAt) : undefined;
     const id = string(task.id ?? ep.id);
+    const firstUserText = turns.map((turn) => optionalString(turn.userText)).find(Boolean) ?? null;
+    const firstAssistantText = turns.map((turn) => optionalString(turn.assistantText)).find(Boolean) ?? null;
+    const title = truncate(optionalString(ep.title) ?? optionalString(ep.summary) ?? firstUserText ?? id, 100);
+    const summary = truncate(optionalString(ep.summary) ?? firstAssistantText ?? title, 180);
     const timeline = {
       episodeId: id,
       traces: turns.map((turn, index) => ({
@@ -305,15 +309,22 @@ function episodes(value: JsonRecord): JsonRecord {
       startedAt,
       ...(endedAt ? { endedAt } : {}),
       status: ep.status === "closed" ? "closed" : "open",
-      rTask: ep.reward == null ? null : number(ep.reward),
-      turnCount: turns.length,
-      preview: string(turns[0]?.userText ?? ep.title ?? ep.summary),
+      rTask: ep.rTask == null ? null : number(ep.rTask),
+      turnCount: ep.turnCount == null ? turns.length : number(ep.turnCount),
+      preview: title,
+      summary,
       tags: strings(ep.tags),
-      closeReason: ep.status === "closed" ? "finalized" : null,
-      topicState: ep.status === "closed" ? "ended" : "active",
+      skillStatus: optionalString(ep.skillStatus),
+      skillReason: optionalString(ep.skillReason),
+      linkedSkillId: optionalString(ep.linkedSkillId),
+      closeReason: optionalString(ep.closeReason),
+      topicState: optionalString(ep.topicState),
+      pauseReason: optionalString(ep.pauseReason),
+      abandonReason: optionalString(ep.abandonReason),
+      rewardSkipped: ep.rewardSkipped === true,
+      rewardReason: optionalString(ep.rewardReason),
       hasAssistantReply: turns.some((turn) => Boolean(string(turn.assistantText))),
-      ownerAgentKind: "memmy",
-      ownerProfileId: "default"
+      ownerAgentKind: "memmy"
     };
   });
   const page = positiveInt(value.page, 1);
@@ -328,9 +339,11 @@ function episodes(value: JsonRecord): JsonRecord {
 function apiLogs(value: JsonRecord): JsonRecord {
   const logs = array(value.logs).map((entry, index) => {
     const row = record(entry);
+    const sourceAgent = string(row.sourceAgent);
     return {
       id: number(row.id) || index + 1,
       toolName: string(row.toolName),
+      ...(sourceAgent ? { sourceAgent } : {}),
       inputJson: jsonText(row.inputJson),
       outputJson: jsonText(row.outputJson),
       durationMs: number(row.durationMs),
@@ -375,10 +388,6 @@ function config(value: JsonRecord): JsonRecord {
     hub: record(raw.hub),
     telemetry: record(raw.telemetry),
     agentAccess: record(raw.agentAccess),
-    logging: {
-      level: string(record(raw.logging).level) || "info",
-      detailedView: record(raw.logging).detailedView === true
-    }
   };
 }
 
@@ -506,6 +515,8 @@ function record(value: unknown): JsonRecord {
 function array(value: unknown): unknown[] { return Array.isArray(value) ? value : []; }
 function strings(value: unknown): string[] { return array(value).filter((item): item is string => typeof item === "string"); }
 function string(value: unknown): string { return typeof value === "string" ? value : ""; }
+function optionalString(value: unknown): string | null { return typeof value === "string" && value.length > 0 ? value : null; }
+function truncate(value: string, maxLength: number): string { return value.length > maxLength ? `${value.slice(0, maxLength - 3)}...` : value; }
 function number(value: unknown): number { return typeof value === "number" && Number.isFinite(value) ? value : typeof value === "string" && Number.isFinite(Number(value)) ? Number(value) : 0; }
 function positiveInt(value: unknown, fallback: number): number { const parsed = Math.floor(number(value)); return parsed > 0 ? parsed : fallback; }
 function nonNegativeInt(value: unknown, fallback: number): number { const parsed = Math.floor(number(value)); return parsed >= 0 ? parsed : fallback; }

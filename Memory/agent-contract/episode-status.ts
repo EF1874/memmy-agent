@@ -69,11 +69,11 @@ export function deriveEpisodeStatus(
   if (row.closeReason === "finalized" && row.endedAt != null) {
     if (now - row.endedAt < ACTIVE_GRACE_WINDOW_MS) return "active";
   }
-  // Reward-scored episodes are classified by R_task regardless of
-  // how they were closed (finalized or abandoned).
+  // A skipped reward writes a neutral R_task=0 for audit purposes;
+  // the explicit skip marker remains authoritative.
   if (row.rTask != null && row.rTask <= R_NEGATIVE_FLOOR) return "failed";
-  if (row.rTask != null) return "completed";
   if (row.rewardSkipped) return "skipped";
+  if (row.rTask != null) return "completed";
   // Skill pipeline produced a skill → the task contributed
   // meaningful knowledge even when rTask is null (e.g. plugin
   // crashed after skill generation but before rTask was persisted).

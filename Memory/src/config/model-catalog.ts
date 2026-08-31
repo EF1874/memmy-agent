@@ -14,11 +14,11 @@ export function syncMemoryModelCatalog(
   const routing = record(memory.roleRouting);
   const touchedRouting = Object.prototype.hasOwnProperty.call(patch, "roleRouting");
 
-  if (touchedRouting || Object.prototype.hasOwnProperty.call(patch, "summary")) {
-    syncMemoryRole("summary", "memorySummary", "memory_summary");
-  }
   if (touchedRouting || Object.prototype.hasOwnProperty.call(patch, "evolution")) {
     syncMemoryRole("evolution", "memoryEvolution", "memory_evolution");
+  }
+  if (touchedRouting || Object.prototype.hasOwnProperty.call(patch, "summary")) {
+    syncMemoryRole("summary", "memorySummary", "memory_summary");
   }
   if (Object.prototype.hasOwnProperty.call(patch, "embedding")) {
     const embedding = record(memory.embedding);
@@ -38,7 +38,13 @@ export function syncMemoryModelCatalog(
     assignmentKey: "memorySummary" | "memoryEvolution",
     capability: "memory_summary" | "memory_evolution"
   ): void {
-    if (routing[role] !== "fixed") return;
+    if (routing[role] !== "fixed") {
+      const agent = record(assignment.agent);
+      assignment[assignmentKey] = role === "evolution"
+        ? stringValue(agent.default) ?? null
+        : stringValue(assignment.memoryEvolution) ?? stringValue(agent.default) ?? null;
+      return;
+    }
     const presetId = upsertMemoryCatalogPreset(root, record(memory[role]), capability);
     if (presetId) assignment[assignmentKey] = presetId;
   }

@@ -506,6 +506,29 @@ describe("onboarding insight service", () => {
     }));
   });
 
+  it("does not wait for the Memory service before completing the first-login report", async () => {
+    let finishWrite = () => undefined;
+    const write = vi.fn(() => new Promise<void>((resolve) => {
+      finishWrite = resolve;
+    }));
+    const service = createOnboardingInsightService({
+      samplers: [
+        sampler("codex", "Codex", [
+          query("codex", "1", "直接读取最近任务并快速生成初见报告")
+        ])
+      ],
+      reportGenerator: null,
+      memoryWriter: { write },
+      now: () => 100
+    });
+
+    const report = await service.generateReport({ locale: "zh-CN" });
+
+    expect(report.status).toBe("ready");
+    expect(write).toHaveBeenCalledTimes(1);
+    finishWrite();
+  });
+
   it("keeps task context hidden even when the model omits the report closing tag", async () => {
     const write = vi.fn(async () => undefined);
     const service = createOnboardingInsightService({

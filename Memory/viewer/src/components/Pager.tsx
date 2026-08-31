@@ -1,6 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import { t } from "../stores/i18n";
 import { Icon } from "./Icon";
+import { Select } from "./Select";
 
 interface PagerProps {
   page: number;
@@ -95,24 +96,24 @@ export function Pager({
         {t("pager.totalPerPage", { total: totalItems, pageSize })}
       </span>
 
-      <label class="pager__page-size">
-        <select
-          class="select pager__page-size-select"
+      <div class="pager__page-size">
+        <Select
+          className="pager__page-size-select"
           value={pageSize}
           disabled={loading || !onPageSizeChange}
-          onChange={(event) => {
-            const nextSize = Number.parseInt((event.target as HTMLSelectElement).value, 10);
+          width="auto"
+          placement="top"
+          ariaLabel={t("pager.pageSize.label")}
+          options={Array.from(new Set([...pageSizeOptions, pageSize])).sort((a, b) => a - b).map((option) => ({
+            value: String(option),
+            label: t("pager.pageSize.option", { pageSize: option }),
+          }))}
+          onChange={(value) => {
+            const nextSize = Number.parseInt(value, 10);
             if (Number.isFinite(nextSize) && nextSize !== pageSize) onPageSizeChange?.(nextSize);
           }}
-          aria-label={t("pager.pageSize.label")}
-        >
-          {Array.from(new Set([...pageSizeOptions, pageSize])).sort((a, b) => a - b).map((option) => (
-            <option key={option} value={option}>
-              {t("pager.pageSize.option", { pageSize: option })}
-            </option>
-          ))}
-        </select>
-      </label>
+        />
+      </div>
 
       <form class="pager__jump" onSubmit={submitJump}>
         <span class="pager__jump-label">

@@ -2,6 +2,10 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import {
+  createAgentSourceExecutor,
+  type AgentSourceExecutor
+} from "../agent-source/runtime.js";
+import {
   L3WorldModelBoundaryRequestSchema,
   L3WorldModelRequestEnvelopeSchema,
   OpenSessionInputSchema
@@ -34,6 +38,7 @@ import {
   trackExternalToolCall,
   type PluginRuntimeAnalytics,
 } from "./plugin-runtime-analytics.js";
+import type { ViewerCliOptions } from "./viewer-cli.js";
 import {
   VIEWER_API_ROUTES,
   assertLocalViewerRequest,
@@ -88,6 +93,10 @@ export interface MemoryHttpServerOptions {
   onShutdownRequested?: () => void;
   pluginRuntimeAnalytics?: PluginRuntimeAnalytics;
   configPath?: string;
+  viewerCli?: ViewerCliOptions;
+  onRestartRequested?: () => void | Promise<void>;
+  agentSourceExecutor?: AgentSourceExecutor;
+  startAgentSourceAutomation?: boolean;
 }
 
 export interface MemoryHttpAuthOptions {
@@ -125,6 +134,11 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
     postHealthDelayMs: options.workerPostHealthDelayMs ?? DEFAULT_WORKER_POST_HEALTH_DELAY_MS
   });
   const pluginRuntimeAnalytics = options.pluginRuntimeAnalytics ?? createPluginRuntimeAnalytics();
+  const agentSources = options.agentSourceExecutor ?? createAgentSourceExecutor({
+    service: options.service,
+    configPath: options.configPath,
+    scheduleWorker: autoWorker.schedule
+  });
   const server = createServer(async (request, response) => {
     const startedAt = Date.now();
     const requestId = requestIdFromHeaders(request) ?? randomUUID();
@@ -154,7 +168,8 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
           configPath: options.configPath,
           routes: API_ROUTES,
           scheduleWorker: autoWorker.schedule,
-          timeZone: requestTimeZone(request, options.timeZone)
+          timeZone: requestTimeZone(request, options.timeZone),
+          agentSources
         }, request, response, url);
         return;
       }
@@ -169,9 +184,22 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
           configPath: options.configPath,
           routes: API_ROUTES,
           scheduleWorker: autoWorker.schedule,
-          timeZone: principal.timeZone
+          timeZone: principal.timeZone,
+          viewerCli: options.viewerCli,
+          restartService: options.onRestartRequested,
+          agentSources
         }, request.method, url, body);
         if (viewerResult) {
+          if (viewerResult.afterResponse) {
+            response.once("finish", () => {
+              void Promise.resolve()
+                .then(() => viewerResult.afterResponse?.())
+                .catch((error) => logger.error("service.restart.failed", {
+                  requestId,
+                  ...memoryErrorFields(error)
+                }));
+            });
+          }
           writeJson(response, viewerResult.status ?? 200, viewerResult.body, viewerResult.headers);
           return;
         }
@@ -217,8 +245,14 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
       writeError(response, error, requestId);
     }
   });
-  server.once("listening", () => autoWorker.start());
-  server.on("close", () => autoWorker.dispose());
+  server.once("listening", () => {
+    autoWorker.start();
+    if (options.startAgentSourceAutomation) agentSources.startAutomation();
+  });
+  server.on("close", () => {
+    autoWorker.dispose();
+    agentSources.dispose();
+  });
   return server;
 }
 

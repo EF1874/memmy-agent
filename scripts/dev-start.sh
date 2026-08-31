@@ -352,6 +352,9 @@ is_managed_user_cli_target() {
   if [[ "$contents" == '#!/usr/bin/env bash'* ]] && [[ "$contents" == *'exec node "'*"$expected_suffix"'" "$@"'* ]]; then
     return 0
   fi
+  if [[ "$contents" == $'#!/bin/sh\nexec env ELECTRON_RUN_AS_NODE=1 '*"$expected_suffix"*' "$@"' ]]; then
+    return 0
+  fi
   [[ "$contents" == *'rem Managed by Memmy dev-start.'* ]] \
     && [[ "$contents" == *'node "'*"$expected_suffix"'" %*'* ]]
 }
@@ -393,9 +396,12 @@ install_user_cli_link() {
   fi
 
   if [[ -e "$target" || -L "$target" ]]; then
-    if [[ ! -L "$target" ]]; then
+    if [[ ! -L "$target" ]] && ! is_managed_user_cli_target "$name" "$target"; then
       printf '[dev-start] refusing to replace non-symlink CLI at %s\n' "$target" >&2
       exit 1
+    fi
+    if [[ ! -L "$target" ]]; then
+      log "removing legacy managed $name command at $target"
     fi
     unlink "$target"
   fi

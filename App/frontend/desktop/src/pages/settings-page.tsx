@@ -74,6 +74,7 @@ import {
   createTestModelConnectionMessages,
   createMemmyMemoryProviderConfig,
   createModelFormValues,
+  modelFormValuesAsPrimary,
   createModelProtocolPatch,
   hydrateModelConfigForm,
   fromProtocol,
@@ -476,8 +477,11 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     apiKeyMasked,
     configured: Boolean(apiKey.trim() || apiKeyMasked)
   };
-  const memoryModelFormValues = createModelFormValues(memoryModel, primaryModelValues);
   const skillModelFormValues = createModelFormValues(skillModel, primaryModelValues);
+  const memoryModelFormValues = createModelFormValues(
+    memoryModel,
+    modelFormValuesAsPrimary(skillModelFormValues)
+  );
   const embTestKey = createModelConfigValidationKey(embFormValues);
   const isEmbeddingTestStale = Boolean(embValidation.testedKey && embValidation.testedKey !== embTestKey);
   const asrFormValues = createAsrModelFormValues(asrModelId, asrEndpoint, asrApiKey, asrApiKeyMasked);
@@ -880,7 +884,10 @@ export function SettingsPageView(props: SettingsPageViewProps) {
    * @param patch The model-state patch function.
    */
   function testModelConfigConnection(config: ModelConfig, patch: (patch: Partial<ModelConfig>) => void, secretTarget: "memory" | "skill") {
-    const values = createModelFormValues(config, primaryModelValues);
+    const inheritedModel = secretTarget === "memory"
+      ? modelFormValuesAsPrimary(skillModelFormValues)
+      : primaryModelValues;
+    const values = createModelFormValues(config, inheritedModel);
     testModelConnection({
       configClient,
       values,

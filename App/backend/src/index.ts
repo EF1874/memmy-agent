@@ -23,11 +23,6 @@ import {
 import { createPermissionManager } from "./permission/index.js";
 import { createLocalApiServer } from "./adapters/inbound/local-api/server.js";
 import { createBackendServices, type BootstrapScenario } from "./services/index.js";
-import {
-  createAgentSourceAutoScanService,
-  DEFAULT_AGENT_SOURCE_AUTO_SCAN_INTERVAL_MS,
-  type AgentSourceAutoScanService
-} from "./services/agent-source-auto-scan-service.js";
 import { resolveCloudClientConfig, type CloudClientConfig } from "./config/service-urls.js";
 import { resetAccountRuntimeForDesktopInstallChange } from "./services/desktop-install-state-service.js";
 import {
@@ -63,10 +58,6 @@ export interface CreateLocalBackendOptions {
   desktopInstallFingerprint?: string;
   /** Login channel supported by the current desktop package. */
   accountChannel?: AccountChannel;
-  /** Agent source auto scan interval in ms. Defaults to one hour. */
-  agentSourceAutoScanIntervalMs?: number;
-  /** Agent source startup scan delay in ms. Defaults to five minutes. */
-  agentSourceAutoScanInitialDelayMs?: number;
 }
 
 export interface LocalBackend {
@@ -86,7 +77,6 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
   }
   const appStateStore = createAppStateStore({ databasePath: options.databasePath });
   let server: Awaited<ReturnType<typeof createLocalApiServer>> | null = null;
-  let autoScan: AgentSourceAutoScanService | null = null;
 
   try {
     if (options.desktopInstallFingerprint) {
@@ -179,17 +169,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       memory: options.memoryBaseUrl ? { baseUrl: options.memoryBaseUrl } : undefined
     });
     await writeRuntimeConfigFile(runtimeConfig, options.runtimeConfigPath ?? resolveDefaultRuntimeConfigPath());
-    autoScan = createAgentSourceAutoScanService({
-      baseUrl: runtimeConfig.baseUrl,
-      localToken,
-      intervalMs: options.agentSourceAutoScanIntervalMs ?? DEFAULT_AGENT_SOURCE_AUTO_SCAN_INTERVAL_MS,
-      initialDelayMs: options.agentSourceAutoScanInitialDelayMs,
-      getScanPreferences: () => scanPreferencesStore.getScanPreferences()
-    });
-    autoScan.start();
-
     const boundServer = server;
-    const boundAutoScan = autoScan;
     return {
       runtimeConfig,
       getAppSettings() {
@@ -199,13 +179,11 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
         return appStateStore.repositories.bootstrap.recordLastLaunchMode(mode);
       },
       async close() {
-        boundAutoScan.close();
         await boundServer.close();
         appStateStore.close();
       }
     };
   } catch (error) {
-    autoScan?.close();
     await server?.close().catch(() => undefined);
     appStateStore.close();
     throw error;

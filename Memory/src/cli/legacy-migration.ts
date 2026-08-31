@@ -163,7 +163,6 @@ async function importLegacyConfig(source: LegacySource, targetPath: string): Pro
   await mutateMemoryConfig(targetPath, (root) => {
     const memory = record(root.memmyMemory);
     const hub = record(legacy.hub);
-    const logging = record(legacy.logging);
     const telemetry = record(legacy.telemetry);
     const nextMemory = {
       ...memory,
@@ -176,7 +175,6 @@ async function importLegacyConfig(source: LegacySource, targetPath: string): Pro
       evolution,
       embedding: mapEmbedding(embedding),
       algorithm: mergeLegacyAlgorithm(record(memory.algorithm), algorithm),
-      ...(Object.keys(logging).length ? { logging: { ...record(memory.logging), ...logging } } : {}),
       ...(Object.keys(telemetry).length ? { telemetry: { ...record(memory.telemetry), ...telemetry } } : {}),
       ...(Object.keys(hub).length ? { hub: { ...hub, migratedFrom: source.agent } } : {}),
       migratedFrom: source.agent
@@ -221,7 +219,7 @@ function mapEmbedding(value: Row): Row {
 
 function mergeLegacyAlgorithm(current: Row, legacy: Row): Row {
   const result = structuredClone(current);
-  for (const section of ["lightweightMemory", "capture", "reward", "feedback", "l2Induction", "l3Abstraction", "skill", "session", "retrieval"]) {
+  for (const section of ["capture", "reward", "feedback", "l2Induction", "l3Abstraction", "skill", "session", "retrieval"]) {
     if (Object.keys(record(legacy[section])).length) result[section] = { ...record(result[section]), ...record(legacy[section]) };
   }
   return result;

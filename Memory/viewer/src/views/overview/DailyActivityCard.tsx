@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from "preact/hooks";
 import { Icon } from "../../components/Icon";
 import { locale, t } from "../../stores/i18n";
+import { useRef, useState } from "preact/hooks";
 
 export interface DailyActivityPoint {
   date: string;
@@ -16,38 +16,22 @@ interface ActivityWeek {
   cells: ActivityCell[];
 }
 
+const ACTIVITY_CELL_SIZE = 12;
+const ACTIVITY_GAP = 3;
+
 export function DailyActivityCard({ values }: { values: DailyActivityPoint[] }) {
-  const chartRef = useRef<HTMLDivElement>(null);
-  const [chartWidth, setChartWidth] = useState(0);
+  const cardRef = useRef<HTMLElement>(null);
+  const [tooltip, setTooltip] = useState<{ text: string; left: number; top: number } | null>(null);
   const weeks = buildWeeks(values);
   const maxCount = Math.max(0, ...values.map((item) => item.count));
-  const gap = 3;
-  const labelWidth = 34;
-  const defaultCellSize = 10;
-  const availableGridWidth = chartWidth > 0 ? Math.max(0, chartWidth - labelWidth - gap) : 0;
-  const fittedCellSize = weeks.length > 0 && availableGridWidth > 0
-    ? Math.floor((availableGridWidth - gap * (weeks.length - 1)) / weeks.length)
-    : defaultCellSize;
-  const cellSize = Math.max(6, Math.min(16, fittedCellSize));
-  const gridWidth = weeks.length * cellSize + Math.max(0, weeks.length - 1) * gap;
+  const gridWidth = weeks.length * ACTIVITY_CELL_SIZE + Math.max(0, weeks.length - 1) * ACTIVITY_GAP;
   const language = locale.value === "zh" ? "zh-CN" : "en";
   const monthLabels = buildMonthLabels(weeks, language);
-  const weekdays = buildWeekdayLabels(language);
   const total = values.reduce((sum, item) => sum + item.count, 0);
 
-  useEffect(() => {
-    const element = chartRef.current;
-    if (!element) return;
-    const update = () => setChartWidth(element.clientWidth);
-    update();
-    const observer = new ResizeObserver(update);
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, []);
-
   return (
-    <section class="card" data-daily-activity-card="true">
-      <div class="card__header" style="margin-bottom:var(--sp-4)">
+    <section ref={cardRef} class="card daily-activity-card" data-daily-activity-card="true">
+      <div class="card__header" style="margin-bottom:var(--sp-2)">
         <div>
           <h3 class="card__title" style="display:flex;align-items:center;gap:var(--sp-2)">
             <Icon name="bar-chart-3" size={16} />
@@ -63,74 +47,74 @@ export function DailyActivityCard({ values }: { values: DailyActivityPoint[] }) 
       {weeks.length === 0 ? (
         <div class="empty__hint">{t("common.empty")}</div>
       ) : (
-        <div ref={chartRef} style="width:100%;overflow:hidden;padding-bottom:2px">
-          <div style={`width:${labelWidth + gap + gridWidth}px;max-width:100%`}>
+        <div style="width:100%;overflow:hidden;padding-bottom:var(--sp-2)">
+          <div style={`width:${gridWidth}px;max-width:100%;margin-inline:auto`}>
             <div
-              style={`display:grid;grid-template-columns:${labelWidth}px ${gridWidth}px;column-gap:${gap}px;margin-bottom:7px;color:var(--fg-dim);font-size:var(--fs-2xs);line-height:1`}
+              role="img"
+              aria-label={t("overview.daily.title")}
+              style={`display:grid;grid-auto-flow:column;grid-template-rows:repeat(7,${ACTIVITY_CELL_SIZE}px);grid-auto-columns:${ACTIVITY_CELL_SIZE}px;gap:${ACTIVITY_GAP}px`}
             >
-              <span aria-hidden="true" />
-              <div
-                style={`display:grid;grid-template-columns:repeat(${weeks.length},${cellSize}px);column-gap:${gap}px;height:12px`}
-              >
-                {monthLabels.map((item) => (
+              {weeks.flatMap((week) => week.cells.map((cell) => {
+                const tooltip = t("overview.daily.count", {
+                  date: formatDate(cell.date, language),
+                  count: cell.count,
+                });
+                return (
                   <span
-                    key={item.key}
-                    data-activity-month-label={item.label}
-                    style={`grid-column:${item.weekIndex + 1};white-space:nowrap`}
-                  >
-                    {item.label}
-                  </span>
-                ))}
-              </div>
+                    key={cell.date}
+                    data-activity-cell={cell.date}
+                    data-activity-count={cell.count}
+                    aria-label={tooltip}
+                    tabIndex={0}
+                    onMouseEnter={(event) => showTooltip(event.currentTarget, tooltip)}
+                    onMouseLeave={() => setTooltip(null)}
+                    onFocus={(event) => showTooltip(event.currentTarget, tooltip)}
+                    onBlur={() => setTooltip(null)}
+                    style={`display:block;width:${ACTIVITY_CELL_SIZE}px;height:${ACTIVITY_CELL_SIZE}px;border-radius:3px;background:${activityColor(cell, maxCount)};opacity:${cell.inRange ? 1 : 0.35}`}
+                  />
+                );
+              }))}
             </div>
 
-            <div style={`display:grid;grid-template-columns:${labelWidth}px ${gridWidth}px;column-gap:${gap}px;align-items:start`}>
-              <div
-                style={`display:grid;grid-template-rows:repeat(7,${cellSize}px);row-gap:${gap}px;color:var(--fg-dim);font-size:var(--fs-2xs);line-height:${cellSize}px`}
-              >
-                {weekdays.map((label, index) => (
-                  <span key={`${label}-${index}`}>{index === 1 || index === 3 || index === 5 ? label : ""}</span>
-                ))}
-              </div>
-              <div
-                role="img"
-                aria-label={t("overview.daily.title")}
-                style={`display:grid;grid-auto-flow:column;grid-template-rows:repeat(7,${cellSize}px);grid-auto-columns:${cellSize}px;gap:${gap}px`}
-              >
-                {weeks.flatMap((week) => week.cells.map((cell) => {
-                  const tooltip = t("overview.daily.count", {
-                    date: formatDate(cell.date, language),
-                    count: cell.count,
-                  });
-                  return (
-                    <span
-                      key={cell.date}
-                      data-activity-cell={cell.date}
-                      data-activity-count={cell.count}
-                      title={tooltip}
-                      aria-label={tooltip}
-                      style={`display:block;width:${cellSize}px;height:${cellSize}px;border-radius:2px;background:${activityColor(cell, maxCount)};opacity:${cell.inRange ? 1 : 0.35}`}
-                    />
-                  );
-                }))}
-              </div>
-            </div>
-
-            <div style="display:flex;align-items:center;justify-content:flex-end;gap:4px;margin-top:var(--sp-3);color:var(--fg-dim);font-size:var(--fs-2xs)">
-              <span>{t("overview.daily.less")}</span>
-              {[0, 1, 2, 3, 4].map((level) => (
+            <div
+              style={`display:grid;grid-template-columns:repeat(${weeks.length},${ACTIVITY_CELL_SIZE}px);column-gap:${ACTIVITY_GAP}px;height:12px;margin-top:10px;color:var(--fg-dim);font-size:var(--fs-2xs);line-height:1`}
+            >
+              {monthLabels.map((item) => (
                 <span
-                  key={level}
-                  style={`display:block;width:${cellSize}px;height:${cellSize}px;border-radius:2px;background:${colorForLevel(level)}`}
-                />
+                  key={item.key}
+                  data-activity-month-label={item.label}
+                  style={`grid-column:${item.weekIndex + 1};white-space:nowrap`}
+                >
+                  {item.label}
+                </span>
               ))}
-              <span>{t("overview.daily.more")}</span>
             </div>
           </div>
         </div>
       )}
+      {tooltip && (
+        <span
+          class="daily-activity-tooltip"
+          role="tooltip"
+          style={`left:${tooltip.left}px;top:${tooltip.top}px`}
+        >
+          {tooltip.text}
+        </span>
+      )}
     </section>
   );
+
+  function showTooltip(cell: HTMLElement, text: string) {
+    const card = cardRef.current;
+    if (!card) return;
+    const cardRect = card.getBoundingClientRect();
+    const cellRect = cell.getBoundingClientRect();
+    setTooltip({
+      text,
+      left: cellRect.left - cardRect.left + cellRect.width / 2,
+      top: cellRect.top - cardRect.top - 8,
+    });
+  }
 }
 
 function buildWeeks(values: DailyActivityPoint[]): ActivityWeek[] {
@@ -173,13 +157,6 @@ function buildMonthLabels(weeks: ActivityWeek[], language: string): Array<{ key:
   return labels;
 }
 
-function buildWeekdayLabels(language: string): string[] {
-  const sunday = new Date(Date.UTC(2026, 0, 4));
-  return Array.from({ length: 7 }, (_, index) =>
-    new Intl.DateTimeFormat(language, { weekday: "short", timeZone: "UTC" }).format(addDays(sunday, index)),
-  );
-}
-
 function activityColor(cell: ActivityCell, maxCount: number): string {
   if (!cell.inRange || cell.count <= 0 || maxCount <= 0) return colorForLevel(0);
   return colorForLevel(Math.max(1, Math.min(4, Math.ceil((cell.count / maxCount) * 4))));
@@ -188,11 +165,11 @@ function activityColor(cell: ActivityCell, maxCount: number): string {
 function colorForLevel(level: number): string {
   return [
     "color-mix(in srgb, var(--bg-hover) 70%, var(--bg-card))",
-    "color-mix(in srgb, var(--success) 22%, var(--bg-card))",
-    "color-mix(in srgb, var(--success) 42%, var(--bg-card))",
-    "color-mix(in srgb, var(--success) 70%, var(--bg-card))",
-    "color-mix(in srgb, var(--success) 88%, var(--fg))",
-  ][level] ?? "var(--success)";
+    "color-mix(in srgb, var(--accent) 20%, var(--bg-card))",
+    "color-mix(in srgb, var(--accent) 40%, var(--bg-card))",
+    "color-mix(in srgb, var(--accent) 65%, var(--bg-card))",
+    "var(--accent)",
+  ][level] ?? "var(--accent)";
 }
 
 function parseDate(value: string): Date | null {

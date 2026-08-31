@@ -788,7 +788,13 @@ async function buildReportResponse(input: {
   const generatedReport = await generateReportSafely(input.reportGenerator, generationInput);
   const reportMarkdown = generatedReport?.reportMarkdown ?? renderFallbackReport(input.profile, input.sample, input.locale);
   const taskContext = generatedReport?.taskContext ?? buildFallbackTaskContext(generationInput);
-  await persistFirstReportMemory(input.memoryWriter, input.sample, input.locale, reportMarkdown, taskContext);
+  persistFirstReportMemoryInBackground(
+    input.memoryWriter,
+    input.sample,
+    input.locale,
+    reportMarkdown,
+    taskContext
+  );
 
   return {
     status: "ready",
@@ -857,7 +863,13 @@ async function* streamReportResponse(input: {
     : await generateReportSafely(input.reportGenerator, generationInput);
   const reportMarkdown = generatedReport?.reportMarkdown ?? renderFallbackReport(input.profile, input.sample, input.locale);
   const taskContext = generatedReport?.taskContext ?? buildFallbackTaskContext(generationInput);
-  await persistFirstReportMemory(input.memoryWriter, input.sample, input.locale, reportMarkdown, taskContext);
+  persistFirstReportMemoryInBackground(
+    input.memoryWriter,
+    input.sample,
+    input.locale,
+    reportMarkdown,
+    taskContext
+  );
 
   yield {
     type: "done",
@@ -935,6 +947,21 @@ async function persistFirstReportMemory(
       workspacePath: latestConversation.workspacePath
     }
   });
+}
+
+function persistFirstReportMemoryInBackground(
+  memoryWriter: OnboardingFirstReportMemoryWriter | null | undefined,
+  sample: SampleBundle,
+  locale: "zh-CN" | "en-US",
+  reportMarkdown: string,
+  taskContext: OnboardingTaskContextSummary
+): void {
+  void persistFirstReportMemory(memoryWriter, sample, locale, reportMarkdown, taskContext)
+    .catch((error) => {
+      console.warn(
+        `[onboarding-insight] First-report memory persistence failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+    });
 }
 
 function normalizeGeneratedOutput(output: string | null): string | null {

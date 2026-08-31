@@ -179,7 +179,6 @@ function projectMemoryConfig(
 ): void {
   const mode = record(config.app).userMode === "account" ? "account" : "byok";
   const assignment = assignments[mode];
-  const presets = record(config.modelPresets);
   const memory = { ...record(config.memmyMemory) };
   const routing = { ...record(memory.roleRouting) };
 
@@ -189,21 +188,21 @@ function projectMemoryConfig(
     config,
     memory,
     routing,
-    "summary",
-    assignment.memorySummary,
-    assignment.agent.default,
-    previousModeAssignment.memorySummary,
-    previousRouting.summary
-  );
-  projectMemoryRole(
-    config,
-    memory,
-    routing,
     "evolution",
     assignment.memoryEvolution,
     assignment.agent.default,
     previousModeAssignment.memoryEvolution,
     previousRouting.evolution
+  );
+  projectMemoryRole(
+    config,
+    memory,
+    routing,
+    "summary",
+    assignment.memorySummary,
+    assignment.memoryEvolution ?? assignment.agent.default,
+    previousModeAssignment.memorySummary,
+    previousRouting.summary
   );
   memory.roleRouting = routing;
   memory.embedding = projectedMemoryEmbedding(
@@ -220,17 +219,14 @@ function projectMemoryConfig(
     roleRouting: ConfigRecord,
     role: "summary" | "evolution",
     presetId: string | null,
-    agentPresetId: string | null,
+    inheritedPresetId: string | null,
     previousPresetId: string | null,
     previousRoute: unknown
   ): void {
-    const preset = record(presetId ? presets[presetId] : undefined);
     const preservesFixedRoute = previousRoute === "fixed" && presetId === previousPresetId;
-    const followsAgent = !preservesFixedRoute && (!presetId
-      || preset.source === "account"
-      || presetId === agentPresetId);
-    roleRouting[role] = followsAgent ? "follow" : "fixed";
-    if (followsAgent) return;
+    const followsInheritedModel = !preservesFixedRoute && (!presetId || presetId === inheritedPresetId);
+    roleRouting[role] = followsInheritedModel ? "follow" : "fixed";
+    if (followsInheritedModel) return;
     const connection = memoryConnection(root, presetId!);
     if (connection) target[role] = mergeMemoryConnection(record(target[role]), connection);
   }

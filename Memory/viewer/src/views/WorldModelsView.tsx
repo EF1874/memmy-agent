@@ -15,12 +15,18 @@ import { api } from "../api/client";
 import { t } from "../stores/i18n";
 import { Icon } from "../components/Icon";
 import { Pager } from "../components/Pager";
+import { RefreshButton } from "../components/RefreshButton";
 import { ShareScopePill } from "../components/ShareScopePill";
-import { LightweightModeEmpty } from "../components/LightweightModeEmpty";
-import { NamespaceSelect, appendNamespaceParams } from "../components/NamespaceSelect";
+import { AgentSearchBar } from "../components/AgentSearchBar";
+import {
+  agentClass,
+  appendSourceAgentParam,
+  sourceAgentLabel,
+} from "../components/AgentSourceSelect";
 import { route } from "../stores/router";
 import { clearEntryId, linkTo } from "../stores/cross-link";
 import type { WorldModelDTO } from "../api/types";
+import { displayMemoryId } from "../utils/memory-id";
 import { areAllIdsSelected, toggleIdsInSelection } from "../utils/selection";
 import {
   loadHubSharingEnabled,
@@ -28,7 +34,7 @@ import {
   SHARE_SCOPE_OPTIONS,
   type ShareScope,
 } from "../utils/share";
-import { useLightweightMemoryMode } from "../hooks/useLightweightMemoryMode";
+import { TEAM_SHARING_UI_ENABLED } from "../features";
 
 interface WorldModelUsage {
   policies: Array<{
@@ -51,7 +57,7 @@ interface ListResponse {
 
 export function WorldModelsView() {
   const [query, setQuery] = useState("");
-  const [namespaceFilter, setNamespaceFilter] = useState("");
+  const [sourceAgentFilter, setSourceAgentFilter] = useState("");
   const [rows, setRows] = useState<WorldModelDTO[]>([]);
   const [loading, setLoading] = useState(false);
   const [page, setPage] = useState(0);
@@ -61,7 +67,6 @@ export function WorldModelsView() {
   const [detail, setDetail] = useState<WorldModelDTO | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const lightweight = useLightweightMemoryMode();
   const toggleSel = (id: string) => {
     setSelected((prev) => {
       const n = new Set(prev);
@@ -84,7 +89,7 @@ export function WorldModelsView() {
       qs.set("limit", String(pageSize));
       qs.set("offset", String(opts.page * pageSize));
       if (opts.q) qs.set("q", opts.q);
-      appendNamespaceParams(qs, namespaceFilter);
+      appendSourceAgentParam(qs, sourceAgentFilter);
       const res = await api.get<ListResponse>(`/api/v1/world-models?${qs.toString()}`);
       setRows(res.worldModels);
       setHasMore(res.nextOffset != null);
@@ -100,27 +105,15 @@ export function WorldModelsView() {
   };
 
   useEffect(() => {
-    if (lightweight.loading || lightweight.enabled) return;
     const h = setTimeout(() => {
       void load({ q: query.trim(), page: 0 });
     }, 200);
     return () => clearTimeout(h);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [query, pageSize, namespaceFilter, lightweight.loading, lightweight.enabled]);
-
-  useEffect(() => {
-    if (!lightweight.enabled) return;
-    setRows([]);
-    setDetail(null);
-    setSelected(new Set());
-    setHasMore(false);
-    setTotal(0);
-    setPage(0);
-  }, [lightweight.enabled]);
+  }, [query, pageSize, sourceAgentFilter]);
 
   // Deep-link: `#/world-models?id=wm_xxx` auto-opens the drawer.
   useEffect(() => {
-    if (lightweight.loading || lightweight.enabled) return;
     const id = route.value.params.id;
     if (!id) return;
     const ctrl = new AbortController();
@@ -132,7 +125,7 @@ export function WorldModelsView() {
       .then(setDetail)
       .catch(() => void 0);
     return () => ctrl.abort();
-  }, [route.value.params.id, lightweight.loading, lightweight.enabled]);
+  }, [route.value.params.id]);
 
   const deleteModel = async (m: WorldModelDTO) => {
     if (!confirm(t("worldModels.delete.confirm"))) return;
@@ -157,61 +150,19 @@ export function WorldModelsView() {
           <h1>{t("worldModels.title")}</h1>
           <p>{t("worldModels.subtitle")}</p>
         </div>
-        {!lightweight.enabled && (
-          <div class="view-header__actions">
-            {/*
-             * Refresh — same pattern as MemoriesView / PoliciesView /
-             * TasksView so every list page behaves consistently. Clears
-             * the search box + selection and re-fetches page 0.
-             */}
-            <button
-              class="btn btn--ghost btn--sm"
-              onClick={() => {
-                setQuery("");
-                setNamespaceFilter("");
-                setSelected(new Set());
-                void load({ q: "", page: 0 });
-              }}
-            >
-              <Icon name="refresh-cw" size={14} />
-              {t("common.refresh")}
-            </button>
-          </div>
-        )}
+        <div class="view-header__actions">
+            <RefreshButton onRefresh={() => load({ q: query.trim(), page })} />
+        </div>
       </div>
 
-      {lightweight.loading && (
-        <div class="list">
-          {[0, 1, 2].map((i) => (
-            <div key={i} class="skeleton" style="height:68px" />
-          ))}
-        </div>
-      )}
-
-      {!lightweight.loading && lightweight.enabled && (
-        <LightweightModeEmpty
-          icon="globe"
-          message={t("worldModels.lightweight.empty")}
-        />
-      )}
-
-      {!lightweight.loading && !lightweight.enabled && (
-        <>
           <div class="toolbar">
-            <label class="input-search">
-              <Icon name="search" size={16} />
-              <input
-                class="input input--search"
-                type="search"
-                placeholder={t("worldModels.search.placeholder")}
-                value={query}
-                onInput={(e) => setQuery((e.target as HTMLInputElement).value)}
-              />
-            </label>
-          </div>
-
-          <div class="toolbar" style="margin-top:calc(-1 * var(--sp-2))">
-            <NamespaceSelect value={namespaceFilter} onChange={setNamespaceFilter} />
+            <AgentSearchBar
+              query={query}
+              placeholder={t("worldModels.search.placeholder")}
+              sourceAgent={sourceAgentFilter}
+              onQueryChange={setQuery}
+              onSourceAgentChange={setSourceAgentFilter}
+            />
           </div>
 
           {loading && rows.length === 0 && (
@@ -254,7 +205,12 @@ export function WorldModelsView() {
                     <div class="mem-card__body">
                       <div class="mem-card__title">{m.title || "(untitled)"}</div>
                       <div class="mem-card__meta">
-                        <ShareScopePill scope={m.share?.scope} />
+                        {m.ownerAgentKind && (
+                          <span class={`pill pill--agent pill--agent-${agentClass(m.ownerAgentKind)}`}>
+                            {sourceAgentLabel(m.ownerAgentKind)}
+                          </span>
+                        )}
+                        {TEAM_SHARING_UI_ENABLED && <ShareScopePill scope={m.share?.scope} />}
                         <span class="pill pill--info" title={t("worldModels.version.title")}>
                           v{m.version ?? 1}
                         </span>
@@ -346,9 +302,6 @@ export function WorldModelsView() {
               </button>
             </div>
           )}
-        </>
-      )}
-
       {toast && (
         <div class="toast-stack">
           <div class="toast toast--info">{toast}</div>
@@ -460,7 +413,9 @@ function WorldModelDrawer({
       <aside class="drawer" role="dialog" onClick={(e) => e.stopPropagation()}>
         <header class="drawer__header">
           <div>
-            <div class="muted" style="font-size:var(--fs-xs);margin-bottom:2px">world-model</div>
+            <div class="muted mono" style="font-size:var(--fs-xs);margin-bottom:2px;overflow-wrap:anywhere">
+              {displayMemoryId(worldModel.id)}
+            </div>
             <h2 class="drawer__title">{worldModel.title}</h2>
           </div>
           <button
@@ -488,8 +443,12 @@ function WorldModelDrawer({
                   {t(`status.${worldModel.status}` as "status.active")}
                 </span>
               </dd>
-              <dt class="muted">{t("memories.field.share")}</dt>
-              <dd><ShareScopePill scope={worldModel.share?.scope} /></dd>
+              {TEAM_SHARING_UI_ENABLED && (
+                <>
+                  <dt class="muted">{t("memories.field.share")}</dt>
+                  <dd><ShareScopePill scope={worldModel.share?.scope} /></dd>
+                </>
+              )}
               <dt class="muted">{t("memories.field.createdAt")}</dt>
               <dd>{new Date(worldModel.createdAt).toLocaleString()}</dd>
               <dt class="muted">{t("memories.field.updatedAt")}</dt>
@@ -585,7 +544,7 @@ function WorldModelDrawer({
             </>
           )}
 
-          {mode === "share" && (
+          {TEAM_SHARING_UI_ENABLED && mode === "share" && (
             <section class="card card--flat">
               <div class="modal__field">
                 <label>{t("memories.share.scope")}</label>
@@ -636,12 +595,14 @@ function WorldModelDrawer({
                   {t("policies.act.retire")}
                 </button>
               )}
-              <button class="btn btn--sm" disabled={busy} onClick={() => setMode("share")}>
-                <Icon name="share" size={14} />
-                {worldModel.share?.scope
-                  ? t("memories.act.unshare")
-                  : t("memories.act.share")}
-              </button>
+              {TEAM_SHARING_UI_ENABLED && (
+                <button class="btn btn--sm" disabled={busy} onClick={() => setMode("share")}>
+                  <Icon name="share" size={14} />
+                  {worldModel.share?.scope
+                    ? t("memories.act.unshare")
+                    : t("memories.act.share")}
+                </button>
+              )}
               <button
                 class="btn btn--primary btn--sm"
                 disabled={busy}
@@ -668,7 +629,7 @@ function WorldModelDrawer({
               </button>
             </>
           )}
-          {mode === "share" && (
+          {TEAM_SHARING_UI_ENABLED && mode === "share" && (
             <>
               {worldModel.share?.scope && (
                 <button

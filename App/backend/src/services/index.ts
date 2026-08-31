@@ -214,6 +214,8 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       getScanPreferences: () => options.scanPreferencesStore?.getScanPreferences()
         ?? options.appStateStore.repositories.bootstrap.getScanPreferences()
     }),
+    // First-report sampling stays inside Desktop: it reads a small recent-history
+    // window for onboarding and is separate from Memory's persistent Agent scan.
     onboardingInsight: createOnboardingInsightService({
       samplers: createBuiltinOnboardingInsightSamplers(),
       conversationWindowReader: createSourceRegistryOnboardingConversationWindowReader(sourceRegistry),

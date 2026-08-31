@@ -10,6 +10,7 @@ import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import { MemoryService } from "../service/memory-service.js";
 import { listenMemoryHttpServer } from "./http.js";
 import { loadCloudServiceEnv } from "../cli/load-env.js";
+import { requestMemoryServiceRestart } from "./service-restart.js";
 import { MEMORY_PROTOCOL_VERSION, MEMORY_SERVICE_VERSION } from "../version.js";
 
 const logger = createMemoryLogger("server");
@@ -67,10 +68,12 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
             port,
             timeZone: config.timeZone,
             onShutdownRequested: () => requestShutdown?.(),
+            onRestartRequested: requestMemoryServiceRestart,
             auth: config.storage.token
                 ? { localServiceToken: config.storage.token }
                 : { allowAnonymous: true },
-            configPath
+            configPath,
+            startAgentSourceAutomation: true
         });
         server = listening.server;
         const { url } = listening;

@@ -60,8 +60,8 @@ describe("memmy memory config", () => {
     expect(loadMemmyConfig(configPath).config.algorithm.enableMemoryAdd).toBe(true);
     expect(loadMemmyConfig(configPath).config.algorithm.enableMemorySearch).toBe(true);
     expect(loadMemmyConfig(configPath).config.algorithm.enableQueryRewrite).toBe(false);
-    expect(loadMemmyConfig(configPath).config.algorithm.lightweightMemory.enabled).toBe(false);
-    expect(loadMemmyConfig(configPath).config.logging.detailedView).toBe(false);
+    expect(loadMemmyConfig(configPath).config.algorithm).not.toHaveProperty("lightweightMemory");
+    expect(loadMemmyConfig(configPath).config).not.toHaveProperty("logging");
     expect(loadMemmyConfig(configPath).config.algorithm.retrieval.minRecallScore).toBe(0.12);
     expect(loadMemmyConfig(configPath).config.algorithm.negativeExperience).toMatchObject({
       enabled: true,
@@ -148,7 +148,7 @@ describe("memmy memory config", () => {
     expect(loadMemmyConfig(configPath).config.algorithm.enableMemoryAdd).toBe(false);
     expect(loadMemmyConfig(configPath).config.algorithm.enableMemorySearch).toBe(false);
     expect(loadMemmyConfig(configPath).config.algorithm.enableQueryRewrite).toBe(true);
-    expect(loadMemmyConfig(configPath).config.algorithm.lightweightMemory.enabled).toBe(true);
+    expect(loadMemmyConfig(configPath).config.algorithm).not.toHaveProperty("lightweightMemory");
     expect(loadMemmyConfig(configPath).config.algorithm.retrieval.llmFilterEnabled).toBe(false);
     expect(loadMemmyConfig(configPath).config.algorithm.retrieval.minRecallScore).toBe(0.35);
 
@@ -244,6 +244,14 @@ describe("memmy memory config", () => {
         }
       },
       modelPresets: {
+        "memmy-account-agent": {
+          provider: "memmy_account",
+          endpoint: "memory",
+          model: "agent_chat",
+          source: "account",
+          ownerAccountId: "user_account",
+          capabilities: ["agent"]
+        },
         "memmy-account-summary": {
           provider: "memmy_account",
           endpoint: "memory",
@@ -273,6 +281,10 @@ describe("memmy memory config", () => {
         byok: {},
         account: {
           ownerAccountId: "user_account",
+          agent: {
+            candidates: ["memmy-account-agent"],
+            default: "memmy-account-agent"
+          },
           memorySummary: "memmy-account-summary",
           memoryEvolution: "memmy-account-evolution",
           embedding: "memmy-account-embedding"
@@ -308,7 +320,7 @@ describe("memmy memory config", () => {
     expect(config.evolution).toMatchObject({
       provider: "openai_compatible",
       sourceProvider: "memmy_account",
-      model: "memory_evolution",
+      model: "agent_chat",
       thinkingBudget: 1_000,
       timeoutMs: 180_000
     });
@@ -390,6 +402,42 @@ describe("memmy memory config", () => {
       model: "qwen3.7-plus",
       apiKey: "sk-user",
       timeoutMs: 75_000
+    });
+    expect(config.summary).toMatchObject({
+      provider: "openai_compatible",
+      endpoint: "https://example.com/v1",
+      model: "qwen3.7-plus",
+      apiKey: "sk-user",
+      enableThinking: false,
+      maxTokens: 512
+    });
+  });
+
+  it("does not let the evolution model inherit the weaker summary model", () => {
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, YAML.stringify({
+      memmyMemory: {
+        roleRouting: {
+          summary: "fixed",
+          evolution: "follow"
+        },
+        summary: {
+          provider: "openai_compatible",
+          endpoint: "https://summary.example/v1",
+          model: "summary-only",
+          apiKey: "sk-summary"
+        }
+      }
+    }));
+
+    const { config } = loadMemmyConfig(configPath);
+
+    expect(config.summary.model).toBe("summary-only");
+    expect(config.evolution).toMatchObject({
+      provider: "",
+      model: "",
+      enableThinking: true
     });
   });
 

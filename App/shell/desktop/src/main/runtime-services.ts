@@ -119,6 +119,8 @@ const DAEMON_LOG_MAX_SIZE = 5 * 1024 * 1024;
 const DAEMON_LOG_MAX_FILES = 5;
 const AGENT_GATEWAY_RESTART_DELAYS_MS = [250, 1_000, 2_000, 5_000, 10_000] as const;
 const AGENT_GATEWAY_STABLE_MS = 30_000;
+const DESKTOP_MANAGED_MEMORY_ENV = "MEMMY_DESKTOP_MANAGED_MEMORY";
+const MEMORY_RESTART_IPC_TYPE = "memmy-memory:restart";
 const DESKTOP_MANAGED_GATEWAY_ENV = "MEMMY_DESKTOP_MANAGED_GATEWAY";
 const BROWSER_PREPARATION_ATTEMPT_ID_ENV = "MEMMY_BROWSER_PREPARATION_ATTEMPT_ID";
 const MANAGED_RESTART_IPC_TYPE = "memmy-agent:restart";
@@ -193,6 +195,29 @@ export async function startManagedRuntimeServices(
   let browserPreparation: PackagedBrowserPreparation | null = null;
   let closing = false;
 
+  async function restartMemoryRuntime(): Promise<void> {
+    if (closing) throw new Error("Memmy is shutting down");
+    await memoryStartup;
+    if (closing) throw new Error("Memmy is shutting down");
+    if (!memoryRestart) {
+      memoryRestart = restartManagedMemoryService(
+        entries,
+        runtimeConfig,
+        children,
+        options,
+        requestMemoryRestart
+      ).finally(() => {
+        memoryRestart = null;
+      });
+    }
+    await memoryRestart;
+  }
+  function requestMemoryRestart(): void {
+    void restartMemoryRuntime().catch((error) => {
+      console.warn(`Memory service restart request failed: ${errorMessage(error)}`);
+    });
+  }
+
   try {
     await syncBundledAgentSkills({
       agentEntry: entries.agentEntry,
@@ -210,7 +235,8 @@ export async function startManagedRuntimeServices(
       runtimeConfig,
       children,
       options,
-      memmyConfigPreexisting
+      memmyConfigPreexisting,
+      requestMemoryRestart
     );
     memoryStartup = memoryReady.catch((error) => {
       console.warn(`Memory service unavailable during desktop startup: ${errorMessage(error)}`);
@@ -233,20 +259,7 @@ export async function startManagedRuntimeServices(
         ...(agentGatewayStartupIssue ? { startupIssue: agentGatewayStartupIssue } : {})
       },
       async restartMemory() {
-        if (closing) {
-          throw new Error("Memmy is shutting down");
-        }
-        await memoryStartup;
-        if (closing) {
-          throw new Error("Memmy is shutting down");
-        }
-        if (!memoryRestart) {
-          memoryRestart = restartManagedMemoryService(entries, runtimeConfig, children, options)
-            .finally(() => {
-              memoryRestart = null;
-            });
-        }
-        await memoryRestart;
+        await restartMemoryRuntime();
       },
       async close(closeOptions = {}) {
         closing = true;
@@ -731,7 +744,8 @@ export async function ensureMemoryService(
   runtimeConfig: PackagedRuntimeConfig,
   children: ManagedChild[],
   options: StartManagedRuntimeServicesOptions,
-  memmyConfigPreexisting = true
+  memmyConfigPreexisting = true,
+  onRestartRequested?: () => void
 ): Promise<void> {
   const healthUrl = `${runtimeConfig.memoryBaseUrl}/api/v1/health`;
   const healthHeaders = memoryAuthHeaders(runtimeConfig.memoryToken);
@@ -780,13 +794,22 @@ export async function ensureMemoryService(
     MEMMY_EMBEDDING_MODEL_ROOT: join(options.resourcesPath, "embedding-models"),
     MEMORY_SERVICE_URL: runtimeConfig.memoryBaseUrl,
     MEMORY_SERVICE_TOKEN: runtimeConfig.memoryToken,
-    MEMORY_SERVICE_DB: runtimeConfig.memoryDatabasePath
+    MEMORY_SERVICE_DB: runtimeConfig.memoryDatabasePath,
+    ...(onRestartRequested ? { [DESKTOP_MANAGED_MEMORY_ENV]: "1" } : {})
   }, {
     logFilePath: join(options.logDirectory, "memory.log"),
     logLevel: options.logLevel,
+    ipc: Boolean(onRestartRequested),
     executablePath: options.runtimeExecutable,
     persistOnDesktopExit: true
   });
+  if (onRestartRequested) {
+    memoryChild.process.on("message", (message) => {
+      if (isRecord(message) && message.type === MEMORY_RESTART_IPC_TYPE) {
+        onRestartRequested();
+      }
+    });
+  }
   children.push(memoryChild);
   try {
     await waitForHttpService(
@@ -895,7 +918,8 @@ async function restartManagedMemoryService(
   entries: RuntimeEntryPaths,
   runtimeConfig: PackagedRuntimeConfig,
   children: ManagedChild[],
-  options: StartManagedRuntimeServicesOptions
+  options: StartManagedRuntimeServicesOptions,
+  onRestartRequested?: () => void
 ): Promise<void> {
   const healthUrl = `${runtimeConfig.memoryBaseUrl}/api/v1/health`;
   const healthHeaders = memoryAuthHeaders(runtimeConfig.memoryToken);
@@ -919,7 +943,7 @@ async function restartManagedMemoryService(
 
   removeManagedChildrenByName(children, "memory");
   await waitForHttpServiceStop(healthUrl, healthHeaders);
-  await ensureMemoryService(entries, runtimeConfig, children, options);
+  await ensureMemoryService(entries, runtimeConfig, children, options, true, onRestartRequested);
 }
 
 export async function restartExternalMemoryService(input: {
@@ -1326,7 +1350,9 @@ export function spawnNodeService(
     child = spawn(logOptions.executablePath ?? process.execPath, [entry, ...args], {
       env: childEnv,
       stdio: persistOnDesktopExit
-        ? ["ignore", logFileDescriptor!, logFileDescriptor!]
+        ? logOptions.ipc
+          ? ["ignore", logFileDescriptor!, logFileDescriptor!, "ipc"]
+          : ["ignore", logFileDescriptor!, logFileDescriptor!]
         : logOptions.ipc
           ? ["ignore", "pipe", "pipe", "ipc"]
           : ["ignore", "pipe", "pipe"],
@@ -1369,7 +1395,10 @@ export function spawnNodeService(
     managed.exitDescription = signal ? `signal ${signal}` : `code ${code ?? "unknown"}`;
     managed.logWriter?.close();
   });
-  if (persistOnDesktopExit) child.unref();
+  if (persistOnDesktopExit) {
+    child.unref();
+    child.channel?.unref();
+  }
 
   return managed;
 }

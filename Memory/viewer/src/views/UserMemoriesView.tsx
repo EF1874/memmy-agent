@@ -1,9 +1,14 @@
 import { useEffect, useState } from "preact/hooks";
 import { api } from "../api/client";
 import { Icon } from "../components/Icon";
+import { AgentSearchBar } from "../components/AgentSearchBar";
+import { appendSourceAgentParam } from "../components/AgentSourceSelect";
+import { RefreshButton } from "../components/RefreshButton";
 import { Markdown } from "../components/Markdown";
 import { Pager } from "../components/Pager";
 import { t } from "../stores/i18n";
+import { displayMemoryId } from "../utils/memory-id";
+import { userMemoryTypeLabel } from "./user-memory-label";
 
 type UserMemoryStatus = "active" | "archived" | "deleted";
 type StatusFilter = "" | "active" | "archived";
@@ -36,6 +41,7 @@ const DEFAULT_PAGE_SIZE = 20;
 export function UserMemoriesView() {
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<StatusFilter>("");
+  const [sourceAgentFilter, setSourceAgentFilter] = useState("");
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [items, setItems] = useState<UserMemoryDTO[]>([]);
@@ -54,6 +60,7 @@ export function UserMemoriesView() {
       });
       if (query.trim()) qs.set("q", query.trim());
       if (status) qs.set("status", status);
+      appendSourceAgentParam(qs, sourceAgentFilter);
       const response = await api.get<ListResponse>(`/api/v1/memories?${qs}`, { signal });
       setItems(response.userMemories ?? []);
       setTotal(response.total ?? 0);
@@ -76,7 +83,7 @@ export function UserMemoriesView() {
       clearTimeout(timer);
       controller.abort();
     };
-  }, [query, status, page, pageSize]);
+  }, [query, status, sourceAgentFilter, page, pageSize]);
 
   const remove = async (memory: UserMemoryDTO) => {
     if (!confirm(t("memories.user.delete.confirm"))) return;
@@ -91,14 +98,6 @@ export function UserMemoriesView() {
     }
   };
 
-  const reset = () => {
-    const alreadyReset = !query && !status && page === 0;
-    setQuery("");
-    setStatus("");
-    setPage(0);
-    if (alreadyReset) void load();
-  };
-
   return (
     <>
       <div class="view-header">
@@ -108,23 +107,20 @@ export function UserMemoriesView() {
         </div>
       </div>
       <div class="toolbar">
-        <label class="input-search">
-          <Icon name="search" size={16} />
-          <input
-            class="input input--search"
-            type="search"
-            placeholder={t("memories.user.search.placeholder")}
-            value={query}
-            onInput={(event) => {
-              setPage(0);
-              setQuery((event.target as HTMLInputElement).value);
-            }}
-          />
-        </label>
-        <button class="btn btn--ghost btn--sm" onClick={reset}>
-          <Icon name="refresh-cw" size={14} />
-          {t("common.refresh")}
-        </button>
+        <AgentSearchBar
+          query={query}
+          placeholder={t("memories.user.search.placeholder")}
+          sourceAgent={sourceAgentFilter}
+          onQueryChange={(value) => {
+            setPage(0);
+            setQuery(value);
+          }}
+          onSourceAgentChange={(value) => {
+            setPage(0);
+            setSourceAgentFilter(value);
+          }}
+        />
+        <RefreshButton onRefresh={() => load()} />
       </div>
 
       <div class="toolbar" style="margin-top:calc(-1 * var(--sp-2))">
@@ -194,7 +190,7 @@ export function UserMemoriesView() {
                     {t(`memories.user.status.${memory.status}` as never)}
                   </span>
                   {memory.memoryTypes.map((type) => (
-                    <span key={type} class="pill pill--info">{type}</span>
+                    <span key={type} class="pill pill--info">{userMemoryTypeLabel(type, t)}</span>
                   ))}
                   <span>{formatTime(memory.updatedAt || memory.createdAt)}</span>
                 </div>
@@ -246,8 +242,8 @@ function UserMemoryDrawer({
       <aside class="drawer" role="dialog" onClick={(event) => event.stopPropagation()}>
         <header class="drawer__header">
           <div style="min-width:0">
-            <div class="muted" style="font-size:var(--fs-xs);margin-bottom:2px">
-              {t("memories.section.user")}
+            <div class="muted mono" style="font-size:var(--fs-xs);margin-bottom:2px;overflow-wrap:anywhere">
+              {displayMemoryId(memory.id)}
             </div>
             <h2 class="drawer__title truncate">{memory.title || memory.content}</h2>
           </div>
@@ -270,7 +266,7 @@ function UserMemoryDrawer({
               <dt class="muted">{t("memories.field.status")}</dt>
               <dd>{t(`memories.user.status.${memory.status}` as never)}</dd>
               <dt class="muted">{t("memories.user.types")}</dt>
-              <dd>{memory.memoryTypes.length ? memory.memoryTypes.join(" · ") : "—"}</dd>
+              <dd>{memory.memoryTypes.length ? memory.memoryTypes.map((type) => userMemoryTypeLabel(type, t)).join(" · ") : "—"}</dd>
               <dt class="muted">{t("memories.field.createdAt")}</dt>
               <dd>{formatTime(memory.createdAt)}</dd>
               <dt class="muted">{t("memories.field.updatedAt")}</dt>

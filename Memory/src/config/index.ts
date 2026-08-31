@@ -102,10 +102,6 @@ export interface StorageConfig {
   token?: string;
 }
 
-export interface LoggingConfig {
-  detailedView: boolean;
-}
-
 export interface AgentAccessConfig {
   autoScanKnownAgents: boolean;
   watchFileChanges: boolean;
@@ -116,9 +112,6 @@ export interface AlgorithmConfig {
   enableMemoryAdd: boolean;
   enableMemorySearch: boolean;
   enableQueryRewrite: boolean;
-  lightweightMemory: {
-    enabled: boolean;
-  };
   capture: {
     maxTextChars: number;
     maxToolOutputChars: number;
@@ -277,7 +270,6 @@ export interface MemmyConfig {
   summary: LlmConfig;
   evolution: LlmConfig;
   embedding: EmbeddingConfig;
-  logging: LoggingConfig;
   agentAccess: AgentAccessConfig;
   algorithm: AlgorithmConfig;
 }
@@ -338,9 +330,6 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
     cache: true,
     normalize: false
   },
-  logging: {
-    detailedView: false
-  },
   agentAccess: {
     autoScanKnownAgents: true,
     watchFileChanges: true,
@@ -350,9 +339,6 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
     enableMemoryAdd: true,
     enableMemorySearch: true,
     enableQueryRewrite: false,
-    lightweightMemory: {
-      enabled: false
-    },
     capture: {
       maxTextChars: 4_000,
       maxToolOutputChars: 2_000,
@@ -536,17 +522,7 @@ export function loadMemmyConfig(configPath?: string): {
 }
 
 export function resolveEvolutionConfig(config: MemmyConfig): LlmConfig {
-  const evolution = config.evolution;
-  if (evolution.provider || evolution.model || evolution.endpoint || evolution.apiKey) {
-    return evolution;
-  }
-  return {
-    ...config.summary,
-    enableThinking: config.evolution.enableThinking,
-    maxTokens: config.evolution.maxTokens ?? config.summary.maxTokens,
-    timeoutMs: config.evolution.timeoutMs,
-    malformedRetries: config.evolution.malformedRetries ?? config.summary.malformedRetries
-  };
+  return config.evolution;
 }
 
 function parseConfigFile(path: string): Record<string, unknown> {
@@ -598,16 +574,10 @@ function configFromEnv(): Record<string, unknown> {
       timeoutMs: numberEnv("MEMMY_EMBEDDING_TIMEOUT_MS"),
       maxRetries: numberEnv("MEMMY_EMBEDDING_MAX_RETRIES")
     }),
-    logging: compactRecord({
-      detailedView: booleanEnv("MEMMY_DETAILED_LOGS")
-    }),
     algorithm: compactRecord({
       enableMemoryAdd: booleanEnv("MEMMY_ENABLE_MEMORY_ADD"),
       enableMemorySearch: booleanEnv("MEMMY_ENABLE_MEMORY_SEARCH"),
       enableQueryRewrite: booleanEnv("MEMMY_ENABLE_QUERY_REWRITE"),
-      lightweightMemory: compactRecord({
-        enabled: booleanEnv("MEMMY_LIGHTWEIGHT_MEMORY")
-      }),
       retrieval: compactRecord({
         readOnlyInjectionProfile:
           process.env.MEMMY_RETRIEVAL_INJECTION_PROFILE ??
@@ -632,7 +602,6 @@ function normalizeConfig(input: Record<string, unknown>): MemmyConfig {
       }
     : normalizedEvolution;
   const embedding = normalizeEmbedding(asRecord(input.embedding));
-  const logging = normalizeLogging(asRecord(input.logging));
   const agentAccess = normalizeAgentAccess(asRecord(input.agentAccess));
   const algorithm = normalizeAlgorithm(asRecord(input.algorithm));
   return {
@@ -644,7 +613,6 @@ function normalizeConfig(input: Record<string, unknown>): MemmyConfig {
     summary,
     evolution,
     embedding,
-    logging,
     agentAccess,
     algorithm
   };
@@ -662,12 +630,18 @@ function resolveRuntimeMemmyMemoryConfig(
   const routing = normalizeRoleRouting(asRecord(input.roleRouting));
   const assignmentMode = runtimeAssignmentMode(rootConfig);
   const hasCatalog = isRecord(rootConfig.modelAssignments);
-  const summary = routing.summary === "follow" && hasCatalog
-    ? resolveAssignedLlm(rootConfig, assignmentMode, "memory_summary", DEFAULT_MEMMY_CONFIG.summary)
-    : asRecord(input.summary);
   const evolution = routing.evolution === "follow" && hasCatalog
-    ? resolveAssignedLlm(rootConfig, assignmentMode, "memory_evolution", DEFAULT_MEMMY_CONFIG.evolution)
+    ? resolveAssignedLlm(rootConfig, assignmentMode, "agent", DEFAULT_MEMMY_CONFIG.evolution)
     : asRecord(input.evolution);
+  const summary = routing.summary === "follow"
+    ? inheritLlmConnection(
+        evolution,
+        deepMerge(
+          DEFAULT_MEMMY_CONFIG.summary as unknown as Record<string, unknown>,
+          asRecord(input.summary)
+        )
+      )
+    : asRecord(input.summary);
   return {
     ...input,
     roleRouting: routing,
@@ -736,12 +710,6 @@ function normalizeEmbedding(input: Record<string, unknown>): EmbeddingConfig {
   };
 }
 
-function normalizeLogging(input: Record<string, unknown>): LoggingConfig {
-  return {
-    detailedView: booleanValue(input.detailedView, DEFAULT_MEMMY_CONFIG.logging.detailedView)
-  };
-}
-
 function normalizeAgentAccess(input: Record<string, unknown>): AgentAccessConfig {
   return {
     autoScanKnownAgents: booleanValue(
@@ -771,7 +739,7 @@ function normalizeRoleRouting(
 function resolveAssignedLlm(
   rootConfig: Record<string, unknown>,
   mode: "account" | "byok" | null,
-  capability: "memory_summary" | "memory_evolution",
+  capability: "agent" | "memory_summary" | "memory_evolution",
   defaults: LlmConfig
 ): Record<string, unknown> {
   const resolved = resolveMemoryAssignment(rootConfig, mode, capability);
@@ -791,6 +759,28 @@ function resolveAssignedLlm(
     extraBody: resolved.provider.extraBody,
     actualModelContext: resolved.context
   };
+}
+
+function inheritLlmConnection(
+  source: Record<string, unknown>,
+  target: Record<string, unknown>
+): Record<string, unknown> {
+  const inherited = { ...target };
+  for (const key of [
+    "provider",
+    "sourceProvider",
+    "vendor",
+    "endpoint",
+    "model",
+    "apiKey",
+    "extraHeaders",
+    "extraBody",
+    "actualModelContext",
+    "selectionError"
+  ]) {
+    inherited[key] = source[key];
+  }
+  return inherited;
 }
 
 function unavailableLlm(defaults: LlmConfig): Record<string, unknown> {
@@ -958,7 +948,6 @@ function embeddingProtocolSupported(protocol: ActualModelContext["protocol"]): b
 
 
 function normalizeAlgorithm(input: Record<string, unknown>): AlgorithmConfig {
-  const lightweightMemory = asRecord(input.lightweightMemory);
   const capture = asRecord(input.capture);
   const reward = asRecord(input.reward);
   const feedback = asRecord(input.feedback);
@@ -972,12 +961,6 @@ function normalizeAlgorithm(input: Record<string, unknown>): AlgorithmConfig {
     enableMemoryAdd: booleanValue(input.enableMemoryAdd, DEFAULT_MEMMY_CONFIG.algorithm.enableMemoryAdd),
     enableMemorySearch: booleanValue(input.enableMemorySearch, DEFAULT_MEMMY_CONFIG.algorithm.enableMemorySearch),
     enableQueryRewrite: booleanValue(input.enableQueryRewrite, DEFAULT_MEMMY_CONFIG.algorithm.enableQueryRewrite),
-    lightweightMemory: {
-      enabled: booleanValue(
-        lightweightMemory.enabled,
-        DEFAULT_MEMMY_CONFIG.algorithm.lightweightMemory.enabled
-      )
-    },
     capture: {
       maxTextChars: numberValue(capture.maxTextChars, DEFAULT_MEMMY_CONFIG.algorithm.capture.maxTextChars),
       maxToolOutputChars: numberValue(capture.maxToolOutputChars, DEFAULT_MEMMY_CONFIG.algorithm.capture.maxToolOutputChars),

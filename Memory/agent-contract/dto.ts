@@ -256,6 +256,7 @@ export interface TraceDTO extends OwnershipDTO {
 export interface ApiLogDTO {
   id: number;
   toolName: string;
+  sourceAgent?: string;
   inputJson: string;
   outputJson: string;
   durationMs: number;

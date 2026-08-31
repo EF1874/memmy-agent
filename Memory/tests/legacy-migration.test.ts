@@ -73,8 +73,8 @@ describe("Local Plugin 2.0 migration", () => {
     const config = parseYaml(readFileSync(configPath, "utf8")) as Record<string, any>;
     expect(config.memmyMemory.summary.model).toBe("OpenClaw model");
     expect(config.memmyMemory.roleRouting).toEqual({ summary: "fixed", evolution: "fixed" });
-    expect(config.memmyMemory.algorithm.lightweightMemory.enabled).toBe(true);
-    expect(config.memmyMemory.logging.detailedView).toBe(true);
+    expect(config.memmyMemory.algorithm).not.toHaveProperty("lightweightMemory");
+    expect(config.memmyMemory).not.toHaveProperty("logging");
     expect(config.memmyMemory.telemetry.enabled).toBe(false);
     expect(config.memmyMemory.hub).toMatchObject({ enabled: true, role: "client", migratedFrom: "openclaw" });
     expect(config.hub).toBeUndefined();

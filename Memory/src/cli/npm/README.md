@@ -89,6 +89,9 @@ Supported agents:
 - `openclaw`
 - `hermes`
 - `dsh`
+- `workbuddy`
+- `pi`
+- `qwenwork`
 
 ## Commands
 

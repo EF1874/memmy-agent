@@ -9,6 +9,7 @@ import { WorldModelsView } from "../views/WorldModelsView";
 import { AnalyticsView } from "../views/AnalyticsView";
 import { LogsView } from "../views/LogsView";
 import { SettingsView } from "../views/SettingsView";
+import { TEAM_SHARING_UI_ENABLED } from "../features";
 import { Icon } from "./Icon";
 import { t } from "../stores/i18n";
 
@@ -20,7 +21,7 @@ export function ContentRouter() {
   const settingsTabParam = route.value.params.tab;
   const settingsTab =
     settingsTabParam === "models" ||
-    settingsTabParam === "hub" ||
+    (TEAM_SHARING_UI_ENABLED && settingsTabParam === "hub") ||
     settingsTabParam === "agents" ||
     settingsTabParam === "general"
       ? settingsTabParam
@@ -35,10 +36,9 @@ export function ContentRouter() {
     case "/world-models": return <WorldModelsView />;
     case "/analytics":    return <AnalyticsView />;
     case "/logs":         return <LogsView />;
-    // Legacy `/admin` deep-link — the top-level sidebar entry was
-    // removed, but old bookmarks still work by landing directly on
-    // Settings → Team Sharing.
-    case "/admin":        return <SettingsView initialTab="hub" />;
+    // Keep legacy `/admin` bookmarks inside Settings. While sharing is
+    // hidden they land on Models instead of exposing the retired tab.
+    case "/admin":        return <SettingsView initialTab={TEAM_SHARING_UI_ENABLED ? "hub" : "models"} />;
     case "/settings":     return <SettingsView initialTab={settingsTab} />;
     default:
       return (

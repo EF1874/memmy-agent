@@ -15,12 +15,18 @@ import { api } from "../api/client";
 import { t } from "../stores/i18n";
 import { Icon } from "../components/Icon";
 import { Pager } from "../components/Pager";
+import { RefreshButton } from "../components/RefreshButton";
 import { ShareScopePill } from "../components/ShareScopePill";
-import { LightweightModeEmpty } from "../components/LightweightModeEmpty";
-import { NamespaceSelect, appendNamespaceParams } from "../components/NamespaceSelect";
+import { AgentSearchBar } from "../components/AgentSearchBar";
+import {
+  agentClass,
+  appendSourceAgentParam,
+  sourceAgentLabel,
+} from "../components/AgentSourceSelect";
 import { route } from "../stores/router";
 import { clearEntryId, linkTo } from "../stores/cross-link";
 import type { PolicyDTO } from "../api/types";
+import { displayMemoryId } from "../utils/memory-id";
 import { areAllIdsSelected, toggleIdsInSelection } from "../utils/selection";
 import {
   loadHubSharingEnabled,
@@ -28,7 +34,7 @@ import {
   SHARE_SCOPE_OPTIONS,
   type ShareScope,
 } from "../utils/share";
-import { useLightweightMemoryMode } from "../hooks/useLightweightMemoryMode";
+import { TEAM_SHARING_UI_ENABLED } from "../features";
 
 interface PolicyUsage {
   skills: Array<{ id: string; name: string; status: string; eta: number }>;
@@ -51,7 +57,7 @@ interface ListResponse {
 export function PoliciesView() {
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<StatusFilter>("");
-  const [namespaceFilter, setNamespaceFilter] = useState("");
+  const [sourceAgentFilter, setSourceAgentFilter] = useState("");
   const [rows, setRows] = useState<PolicyDTO[]>([]);
   const [loading, setLoading] = useState(false);
   const [page, setPage] = useState(0);
@@ -61,7 +67,6 @@ export function PoliciesView() {
   const [detail, setDetail] = useState<PolicyDTO | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const lightweight = useLightweightMemoryMode();
   const toggleSel = (id: string) => {
     setSelected((prev) => {
       const n = new Set(prev);
@@ -85,7 +90,7 @@ export function PoliciesView() {
       qs.set("offset", String(opts.page * pageSize));
       if (opts.q) qs.set("q", opts.q);
       if (opts.status) qs.set("status", opts.status);
-      appendNamespaceParams(qs, namespaceFilter);
+      appendSourceAgentParam(qs, sourceAgentFilter);
       const res = await api.get<ListResponse>(`/api/v1/policies?${qs.toString()}`);
       setRows(res.policies);
       setHasMore(res.nextOffset != null);
@@ -101,29 +106,17 @@ export function PoliciesView() {
   };
 
   useEffect(() => {
-    if (lightweight.loading || lightweight.enabled) return;
     const h = setTimeout(() => {
       void load({ q: query.trim(), status, page: 0 });
     }, 200);
     return () => clearTimeout(h);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [query, status, pageSize, namespaceFilter, lightweight.loading, lightweight.enabled]);
-
-  useEffect(() => {
-    if (!lightweight.enabled) return;
-    setRows([]);
-    setDetail(null);
-    setSelected(new Set());
-    setHasMore(false);
-    setTotal(0);
-    setPage(0);
-  }, [lightweight.enabled]);
+  }, [query, status, pageSize, sourceAgentFilter]);
 
   // Deep-link: `#/policies?id=po_xxx` auto-opens the row's drawer.
   // Lets other views (Skills / WorldModels / Tasks) link straight
   // into a specific policy without the user searching for it.
   useEffect(() => {
-    if (lightweight.loading || lightweight.enabled) return;
     const id = route.value.params.id;
     if (!id) return;
     const ctrl = new AbortController();
@@ -135,7 +128,7 @@ export function PoliciesView() {
       .then((p) => setDetail(p))
       .catch(() => void 0);
     return () => ctrl.abort();
-  }, [route.value.params.id, lightweight.loading, lightweight.enabled]);
+  }, [route.value.params.id]);
 
   const showToast = (msg: string) => {
     setToast(msg);
@@ -186,59 +179,20 @@ export function PoliciesView() {
           <h1>{t("policies.title")}</h1>
           <p>{t("policies.subtitle")}</p>
         </div>
-        {!lightweight.enabled && (
-          <div class="view-header__actions">
-            {/*
-             * Refresh — mirrors MemoriesView. Clears search + status
-             * filter, drops selection, and re-fetches page 0 so the user
-             * sees freshly-induced policies without a full page reload.
-             */}
-            <button
-              class="btn btn--ghost btn--sm"
-              onClick={() => {
-                setQuery("");
-                setStatus("");
-                setNamespaceFilter("");
-                setSelected(new Set());
-                void load({ q: "", status: "", page: 0 });
-              }}
-            >
-              <Icon name="refresh-cw" size={14} />
-              {t("common.refresh")}
-            </button>
-          </div>
-        )}
+        <div class="view-header__actions">
+            <RefreshButton onRefresh={() => load({ q: query.trim(), status, page })} />
+        </div>
       </div>
 
-      {lightweight.loading && (
-        <div class="list">
-          {[0, 1, 2].map((i) => (
-            <div key={i} class="skeleton" style="height:68px" />
-          ))}
-        </div>
-      )}
-
-      {!lightweight.loading && lightweight.enabled && (
-        <LightweightModeEmpty
-          icon="sparkles"
-          message={t("policies.lightweight.empty")}
-        />
-      )}
-
-      {!lightweight.loading && !lightweight.enabled && (
-        <>
           {/* Row 1: search box */}
           <div class="toolbar">
-            <label class="input-search">
-              <Icon name="search" size={16} />
-              <input
-                class="input input--search"
-                type="search"
-                placeholder={t("policies.search.placeholder")}
-                value={query}
-                onInput={(e) => setQuery((e.target as HTMLInputElement).value)}
-              />
-            </label>
+            <AgentSearchBar
+              query={query}
+              placeholder={t("policies.search.placeholder")}
+              sourceAgent={sourceAgentFilter}
+              onQueryChange={setQuery}
+              onSourceAgentChange={setSourceAgentFilter}
+            />
           </div>
 
           {/* Row 2: filter chips — own row, matches TasksView / MemoriesView */}
@@ -255,7 +209,6 @@ export function PoliciesView() {
                 </button>
               ))}
             </div>
-            <NamespaceSelect value={namespaceFilter} onChange={setNamespaceFilter} />
           </div>
 
           {loading && rows.length === 0 && (
@@ -298,7 +251,12 @@ export function PoliciesView() {
                   <div class="mem-card__body">
                     <div class="mem-card__title">{p.title || "(untitled)"}</div>
                     <div class="mem-card__meta">
-                      <ShareScopePill scope={p.share?.scope} />
+                      {p.ownerAgentKind && (
+                        <span class={`pill pill--agent pill--agent-${agentClass(p.ownerAgentKind)}`}>
+                          {sourceAgentLabel(p.ownerAgentKind)}
+                        </span>
+                      )}
+                      {TEAM_SHARING_UI_ENABLED && <ShareScopePill scope={p.share?.scope} />}
                       <span class={`pill pill--${p.status}`}>{t(`status.${p.status}` as never)}</span>
                       <span>support {p.support}</span>
                       <span>gain {p.gain.toFixed(2)}</span>
@@ -405,9 +363,6 @@ export function PoliciesView() {
               </button>
             </div>
           )}
-        </>
-      )}
-
       {toast && (
         <div class="toast-stack">
           <div class="toast toast--info">{toast}</div>
@@ -505,7 +460,7 @@ function PolicyDrawer({
         <header class="drawer__header">
           <div>
             <div class="muted mono" style="font-size:var(--fs-xs);margin-bottom:2px">
-              policy {policy.id}
+              {displayMemoryId(policy.id)}
             </div>
             <h2 class="drawer__title">{policy.title}</h2>
           </div>
@@ -519,7 +474,12 @@ function PolicyDrawer({
             <h3 class="card__title" style="font-size:var(--fs-md)">{t("tasks.detail.meta")}</h3>
             <dl style="display:grid;grid-template-columns:120px 1fr;gap:6px 16px;margin:0;font-size:var(--fs-sm)">
               <dt class="muted">{t("memories.field.status")}</dt><dd><span class={`pill pill--${policy.status}`}>{t(`status.${policy.status}` as never)}</span></dd>
-              <dt class="muted">{t("memories.field.share")}</dt><dd><ShareScopePill scope={policy.share?.scope} /></dd>
+              {TEAM_SHARING_UI_ENABLED && (
+                <>
+                  <dt class="muted">{t("memories.field.share")}</dt>
+                  <dd><ShareScopePill scope={policy.share?.scope} /></dd>
+                </>
+              )}
               <dt class="muted">{t("memories.field.support")}</dt><dd>{policy.support}</dd>
               <dt class="muted">{t("memories.field.gain")}</dt><dd>{policy.gain.toFixed(3)}</dd>
               <dt class="muted">{t("memories.field.createdAt")}</dt><dd>{new Date(policy.createdAt).toLocaleString()}</dd>
@@ -677,7 +637,7 @@ function PolicyDrawer({
             </>
           )}
 
-          {mode === "share" && (
+          {TEAM_SHARING_UI_ENABLED && mode === "share" && (
             <section class="card card--flat">
               <div class="modal__field">
                 <label>{t("memories.share.scope")}</label>
@@ -753,16 +713,18 @@ function PolicyDrawer({
                   {t("policies.act.candidate")}
                 </button>
               )}
-              <button
-                class="btn btn--sm"
-                disabled={busy}
-                onClick={() => setMode("share")}
-              >
-                <Icon name="share" size={14} />
-                {policy.share?.scope
-                  ? t("memories.act.unshare")
-                  : t("memories.act.share")}
-              </button>
+              {TEAM_SHARING_UI_ENABLED && (
+                <button
+                  class="btn btn--sm"
+                  disabled={busy}
+                  onClick={() => setMode("share")}
+                >
+                  <Icon name="share" size={14} />
+                  {policy.share?.scope
+                    ? t("memories.act.unshare")
+                    : t("memories.act.share")}
+                </button>
+              )}
               <button
                 class="btn btn--primary btn--sm"
                 disabled={busy}
@@ -789,7 +751,7 @@ function PolicyDrawer({
               </button>
             </>
           )}
-          {mode === "share" && (
+          {TEAM_SHARING_UI_ENABLED && mode === "share" && (
             <>
               {policy.share?.scope && (
                 <button

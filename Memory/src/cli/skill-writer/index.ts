@@ -3,7 +3,18 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const SUPPORTED_MEMMY_AGENT_IDS = ["codex", "cursor", "claude", "opencode", "openclaw", "hermes", "dsh"] as const;
+export const SUPPORTED_MEMMY_AGENT_IDS = [
+  "codex",
+  "cursor",
+  "claude",
+  "opencode",
+  "openclaw",
+  "hermes",
+  "dsh",
+  "workbuddy",
+  "pi",
+  "qwenwork"
+] as const;
 export type MemmyAgentId = typeof SUPPORTED_MEMMY_AGENT_IDS[number];
 
 export interface AgentSkillInstallOptions {
@@ -61,6 +72,18 @@ const AGENT_TARGETS: Record<MemmyAgentId, Omit<AgentTarget, "id" | "root">> = {
     skillsRelativePath: "skills"
   },
   dsh: {
+    injectRelativePath: null,
+    skillsRelativePath: "skills"
+  },
+  workbuddy: {
+    injectRelativePath: null,
+    skillsRelativePath: "skills"
+  },
+  pi: {
+    injectRelativePath: null,
+    skillsRelativePath: "skills"
+  },
+  qwenwork: {
     injectRelativePath: null,
     skillsRelativePath: "skills"
   }
@@ -141,6 +164,9 @@ function normalizeAgentId(agent: string): MemmyAgentId {
     case "openclaw":
     case "hermes":
     case "dsh":
+    case "workbuddy":
+    case "pi":
+    case "qwenwork":
       return agent;
     case "claude":
     case "claude_code":
@@ -179,6 +205,15 @@ function defaultAgentRoot(agent: MemmyAgentId): string {
       return configuredDirectory("HERMES_HOME", join(homeDirectory(), ".hermes"));
     case "dsh":
       return configuredDirectory("DSH_HOME", join(homeDirectory(), ".dsh"));
+    case "workbuddy":
+      return configuredDirectory(
+        "WORKBUDDY_CONFIG_DIR",
+        configuredDirectory("CODEBUDDY_CONFIG_DIR", join(homeDirectory(), ".workbuddy"))
+      );
+    case "pi":
+      return configuredDirectory("PI_CODING_AGENT_DIR", join(homeDirectory(), ".pi", "agent"));
+    case "qwenwork":
+      return configuredDirectory("QWENWORK_CONFIG_DIR", join(homeDirectory(), ".qwenworkcn"));
   }
 }
 

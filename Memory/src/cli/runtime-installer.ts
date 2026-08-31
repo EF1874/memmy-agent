@@ -4,7 +4,7 @@ import { chmod, copyFile, cp, mkdir, open, readFile, rename, rm, unlink, writeFi
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { loadMemmyConfig } from "../config/index.js";
 import { MEMORY_PROTOCOL_VERSION, MEMORY_SERVICE_VERSION } from "../version.js";
 
@@ -174,6 +174,59 @@ export async function startInstalledMemoryService(home = "~/.memmy"): Promise<Re
   }
   registerAndStartUserService(resolvedHome, serviceHome);
   return { ok: true, action: "start", ...pointer };
+}
+
+export interface UserServiceRestartCommand {
+  command: string;
+  args: string[];
+}
+
+export function userServiceRestartCommand(
+  platform: NodeJS.Platform = process.platform,
+  uid = process.getuid?.() ?? 0
+): UserServiceRestartCommand {
+  if (platform === "darwin") {
+    return {
+      command: "launchctl",
+      args: ["kickstart", "-k", `gui/${uid}/com.memtensor.memmy-memory`]
+    };
+  }
+  if (platform === "linux") {
+    return {
+      command: "systemctl",
+      args: ["--user", "restart", "memmy-memory.service"]
+    };
+  }
+  if (platform === "win32") {
+    return {
+      command: "powershell.exe",
+      args: [
+        "-NoProfile",
+        "-NonInteractive",
+        "-WindowStyle",
+        "Hidden",
+        "-Command",
+        "Start-Sleep -Milliseconds 250; schtasks.exe /End /TN 'Memmy Memory Service' | Out-Null; Start-Sleep -Seconds 1; schtasks.exe /Run /TN 'Memmy Memory Service' | Out-Null"
+      ]
+    };
+  }
+  throw new Error(`unsupported platform: ${platform}`);
+}
+
+export function restartInstalledMemoryService(): Promise<void> {
+  const restart = userServiceRestartCommand();
+  return new Promise((resolveRestart, rejectRestart) => {
+    const child = spawn(restart.command, restart.args, {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true
+    });
+    child.once("error", rejectRestart);
+    child.once("spawn", () => {
+      child.unref();
+      resolveRestart();
+    });
+  });
 }
 
 export interface StopInstalledMemoryServiceDependencies {

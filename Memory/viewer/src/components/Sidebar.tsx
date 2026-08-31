@@ -34,12 +34,12 @@ const SECTIONS: NavSection[] = [
     titleKey: "nav.section.work",
     items: [
       { path: "/overview", icon: "layers", labelKey: "nav.overview" },
-      { path: "/user-memories", icon: "users", labelKey: "nav.userMemories" },
       { path: "/memories", icon: "brain-circuit", labelKey: "nav.memories" },
       { path: "/tasks", icon: "list-checks", labelKey: "nav.tasks" },
       { path: "/policies", icon: "sparkles", labelKey: "nav.policies" },
       { path: "/world-models", icon: "globe", labelKey: "nav.worldModels" },
       { path: "/skills", icon: "wand-sparkles", labelKey: "nav.skills" },
+      { path: "/user-memories", icon: "users", labelKey: "nav.userMemories" },
     ],
   },
   {

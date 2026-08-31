@@ -11,14 +11,14 @@ import { useEffect, useState } from "preact/hooks";
 import { api } from "../api/client";
 import { t } from "../stores/i18n";
 import { Icon } from "../components/Icon";
+import { AgentSearchBar } from "../components/AgentSearchBar";
+import { appendSourceAgentParam } from "../components/AgentSourceSelect";
 import { Pager } from "../components/Pager";
-import { LightweightModeEmpty } from "../components/LightweightModeEmpty";
-import { NamespaceSelect, appendNamespaceParams } from "../components/NamespaceSelect";
+import { RefreshButton } from "../components/RefreshButton";
 import { route } from "../stores/router";
 import { clearEntryId, linkTo } from "../stores/cross-link";
 import { ChatLog, flattenChat, type TimelineTrace } from "./tasks-chat";
 import { areAllIdsSelected, toggleIdsInSelection } from "../utils/selection";
-import { useLightweightMemoryMode } from "../hooks/useLightweightMemoryMode";
 import {
   deriveEpisodeStatus,
   type DerivedTaskStatus,
@@ -41,6 +41,7 @@ interface EpisodeRow {
   rTask?: number | null;
   turnCount?: number;
   preview?: string;
+  summary?: string;
   tags?: string[];
   skillStatus?:
     | "queued"
@@ -83,7 +84,7 @@ export function TasksView() {
   // discrete to the user and triggers a request immediately.
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [status, setStatus] = useState<TaskStatusFilter>("");
-  const [namespaceFilter, setNamespaceFilter] = useState("");
+  const [sourceAgentFilter, setSourceAgentFilter] = useState("");
   const [rows, setRows] = useState<EpisodeRow[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [page, setPage] = useState(0);
@@ -93,7 +94,7 @@ export function TasksView() {
   const [detail, setDetail] = useState<EpisodeRow | null>(null);
   const [timeline, setTimeline] = useState<Timeline | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const lightweight = useLightweightMemoryMode();
+  const [toast, setToast] = useState<{ message: string; kind: "success" | "error" } | null>(null);
   const toggleSel = (id: string) => {
     setSelected((prev) => {
       const n = new Set(prev);
@@ -108,67 +109,49 @@ export function TasksView() {
     return () => window.clearTimeout(handle);
   }, [query]);
 
-  const loadPage = (nextPage: number) => {
-    const ctrl = new AbortController();
+  const loadPage = async (nextPage: number, signal?: AbortSignal) => {
     setLoading(true);
     const qs = new URLSearchParams();
     qs.set("limit", String(pageSize));
     qs.set("offset", String(nextPage * pageSize));
     if (status) qs.set("status", status);
     if (debouncedQuery) qs.set("q", debouncedQuery);
-    appendNamespaceParams(qs, namespaceFilter);
-    api
-      .get<EpisodeListResponse>(
+    appendSourceAgentParam(qs, sourceAgentFilter);
+    try {
+      const r = await api.get<EpisodeListResponse>(
         `/api/v1/episodes?${qs.toString()}`,
-        { signal: ctrl.signal },
-      )
-      .then((r) => {
-        setRows(r.episodes ?? []);
-        setHasMore(r.nextOffset != null);
-        setTotal(r.total ?? 0);
-        setPage(nextPage);
-      })
-      .catch(() => {
-        setRows([]);
-        setHasMore(false);
-        setTotal(0);
-      })
-      .finally(() => setLoading(false));
-    return ctrl;
+        { signal },
+      );
+      setRows(r.episodes ?? []);
+      setHasMore(r.nextOffset != null);
+      setTotal(r.total ?? 0);
+      setPage(nextPage);
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
-    if (lightweight.loading || lightweight.enabled) return;
     if (route.value.params.id) return;
-    const ctrl = loadPage(0);
+    const ctrl = new AbortController();
+    void loadPage(0, ctrl.signal).catch(() => undefined);
     return () => ctrl.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pageSize, status, debouncedQuery, namespaceFilter, route.value.params.id, lightweight.loading, lightweight.enabled]);
+  }, [pageSize, status, debouncedQuery, sourceAgentFilter, route.value.params.id]);
 
   useEffect(() => {
-    if (lightweight.loading || lightweight.enabled) return;
     const id = route.value.params.id;
     if (!id) return;
     const ctrl = new AbortController();
     void openLinkedEpisode(id, ctrl.signal);
     return () => ctrl.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [route.value.params.id, pageSize, lightweight.loading, lightweight.enabled]);
-
-  useEffect(() => {
-    if (!lightweight.enabled) return;
-    setRows([]);
-    setHasMore(false);
-    setTotal(0);
-    setPage(0);
-    setDetail(null);
-    setTimeline(null);
-    setSelected(new Set());
-  }, [lightweight.enabled]);
+  }, [route.value.params.id, pageSize]);
 
   const openLinkedEpisode = async (id: string, signal: AbortSignal) => {
     setQuery("");
     setStatus("");
+    setSourceAgentFilter("");
     setLoading(true);
     try {
       const pageSizeForLookup = pageSize;
@@ -176,7 +159,6 @@ export function TasksView() {
       const qs = new URLSearchParams();
       qs.set("limit", String(pageSizeForLookup));
       qs.set("offset", String(targetPage * pageSizeForLookup));
-      appendNamespaceParams(qs, namespaceFilter);
       const res = await api.get<EpisodeListResponse>(
         `/api/v1/episodes?${qs.toString()}`,
         { signal },
@@ -196,10 +178,6 @@ export function TasksView() {
   };
 
   useEffect(() => {
-    if (lightweight.enabled) {
-      setTimeline(null);
-      return;
-    }
     if (!detail) {
       setTimeline(null);
       return;
@@ -212,7 +190,7 @@ export function TasksView() {
       .then(setTimeline)
       .catch(() => setTimeline(null));
     return () => ctrl.abort();
-  }, [detail?.id, lightweight.enabled]);
+  }, [detail?.id]);
 
   // The server is now the single source of truth for filtering — the
   // viewer used to do a per-page `Array.filter` that left the pager
@@ -222,12 +200,32 @@ export function TasksView() {
   const filtered = rows ?? [];
   const pageIds = filtered.map((r) => r.id);
   const isPageSelected = areAllIdsSelected(selected, pageIds);
-  const filterActive = !!status || debouncedQuery.length > 0;
+  const filterActive = !!status || debouncedQuery.length > 0 || !!sourceAgentFilter;
 
   const togglePageSelection = () => {
     setSelected((prev) => toggleIdsInSelection(prev, pageIds));
   };
   const deselectAll = () => setSelected(new Set());
+
+  const deleteTask = async (episode: EpisodeRow) => {
+    if (!confirm(t("tasks.delete.confirm"))) return;
+    try {
+      await api.del(`/api/v1/panel/tasks/${encodeURIComponent(episode.id)}`);
+      setSelected((prev) => {
+        const next = new Set(prev);
+        next.delete(episode.id);
+        return next;
+      });
+      setDetail(null);
+      clearEntryId();
+      setToast({ message: t("tasks.delete.done"), kind: "success" });
+      window.setTimeout(() => setToast(null), 2200);
+      await loadPage(page);
+    } catch {
+      setToast({ message: t("tasks.delete.failed"), kind: "error" });
+      window.setTimeout(() => setToast(null), 2200);
+    }
+  };
 
   return (
     <>
@@ -236,63 +234,19 @@ export function TasksView() {
           <h1>{t("tasks.title")}</h1>
           <p>{t("tasks.subtitle")}</p>
         </div>
-        {!lightweight.enabled && (
-          <div class="view-header__actions">
-          {/*
-           * Refresh — same affordance MemoriesView exposes. Clears the
-           * search + status filter, drops any multi-select, and reloads
-           * page 0 so the user can instantly see the freshest task list
-           * after the agent produced a new episode in the background.
-           */}
-          <button
-            class="btn btn--ghost btn--sm"
-            onClick={() => {
-              // Clearing the chips and the search box already
-              // triggers a reload via the [status, debouncedQuery]
-              // useEffect — we deliberately don't call loadPage(0)
-              // here to avoid two overlapping requests.
-              setQuery("");
-              setStatus("");
-              setNamespaceFilter("");
-              setSelected(new Set());
-              if (!status && !query && !lightweight.enabled) loadPage(0);
-            }}
-          >
-            <Icon name="refresh-cw" size={14} />
-            {t("common.refresh")}
-          </button>
-          </div>
-        )}
+        <div class="view-header__actions">
+          <RefreshButton onRefresh={() => loadPage(page)} />
+        </div>
       </div>
 
-      {lightweight.loading && (
-        <div class="list">
-          {[0, 1, 2].map((i) => (
-            <div key={i} class="skeleton" style="height:62px" />
-          ))}
-        </div>
-      )}
-
-      {!lightweight.loading && lightweight.enabled && (
-        <LightweightModeEmpty
-          icon="list-checks"
-          message={t("tasks.lightweight.empty")}
-        />
-      )}
-
-      {!lightweight.loading && !lightweight.enabled && (
-        <>
           <div class="toolbar">
-            <label class="input-search">
-              <Icon name="search" size={16} />
-              <input
-                class="input input--search"
-                type="search"
-                placeholder={t("tasks.search.placeholder")}
-                value={query}
-                onInput={(e) => setQuery((e.target as HTMLInputElement).value)}
-              />
-            </label>
+            <AgentSearchBar
+              query={query}
+              placeholder={t("tasks.search.placeholder")}
+              sourceAgent={sourceAgentFilter}
+              onQueryChange={setQuery}
+              onSourceAgentChange={setSourceAgentFilter}
+            />
           </div>
 
           <div class="toolbar" style="margin-top:calc(-1 * var(--sp-2))">
@@ -314,7 +268,6 @@ export function TasksView() {
                 </button>
               ))}
             </div>
-            <NamespaceSelect value={namespaceFilter} onChange={setNamespaceFilter} />
           </div>
 
           {loading && (
@@ -374,6 +327,9 @@ export function TasksView() {
                       <div class="mem-card__title">
                         {r.preview || t("tasks.untitled")}
                       </div>
+                      <div class="mem-card__summary">
+                        {r.summary || r.preview || t("tasks.untitled")}
+                      </div>
                       <div class="mem-card__meta">
                         <span class={`pill pill--${taskStatus}`}>
                           {t(`status.${taskStatus}` as "status.active")}
@@ -388,20 +344,21 @@ export function TasksView() {
                             {t(`tasks.skill.${r.skillStatus}` as never)}
                           </span>
                         )}
-                        <span>{new Date(r.startedAt).toLocaleString()}</span>
-                        {typeof r.turnCount === "number" && (
-                          <span>{r.turnCount} turns</span>
+                        <span>
+                          {t("tasks.startedAt", { value: new Date(r.startedAt).toLocaleString() })}
+                        </span>
+                        {r.endedAt && (
+                          <span>
+                            {t("tasks.endedAt", { value: new Date(r.endedAt).toLocaleString() })}
+                          </span>
                         )}
-                        {r.rTask != null && <span>R {r.rTask.toFixed(2)}</span>}
+                        {typeof r.turnCount === "number" && (
+                          <span>{t("tasks.turnCount", { count: r.turnCount })}</span>
+                        )}
+                        {r.rTask != null && (
+                          <span>{t("tasks.rTask", { value: r.rTask.toFixed(2) })}</span>
+                        )}
                       </div>
-                      {statusReason(r) && (
-                        <div
-                          class="muted"
-                          style="font-size:var(--fs-xs);line-height:1.5"
-                        >
-                          {statusReason(r)}
-                        </div>
-                      )}
                     </div>
                     <div class="mem-card__tail">
                       <Icon name="chevron-right" size={16} />
@@ -428,7 +385,7 @@ export function TasksView() {
               loading={loading}
               onPageSizeChange={setPageSize}
               onPageChange={(nextPage) => {
-                loadPage(nextPage);
+                void loadPage(nextPage).catch(() => undefined);
               }}
             />
           )}
@@ -437,6 +394,7 @@ export function TasksView() {
             <TaskDrawer
               episode={detail}
               timeline={timeline}
+              onDelete={() => deleteTask(detail)}
               onClose={() => {
                 setDetail(null);
                 clearEntryId();
@@ -459,8 +417,12 @@ export function TasksView() {
               </button>
             </div>
           )}
-        </>
-      )}
+
+          {toast && (
+            <div class="toast-stack">
+              <div class={`toast toast--${toast.kind}`}>{toast.message}</div>
+            </div>
+          )}
     </>
   );
 }
@@ -646,19 +608,27 @@ function skillIcon(
 function TaskDrawer({
   episode,
   timeline,
+  onDelete,
   onClose,
 }: {
   episode: EpisodeRow;
   timeline: Timeline | null;
+  onDelete: () => Promise<void> | void;
   onClose: () => void;
 }) {
+  const reason = statusReason(episode) ?? (
+    episode.skillReasonKey
+      ? t(episode.skillReasonKey as any, episode.skillReasonParams ?? undefined)
+      : episode.skillReason
+  );
+
   return (
     <div class="drawer-backdrop" onClick={onClose}>
       <aside class="drawer" role="dialog" onClick={(e) => e.stopPropagation()}>
         <header class="drawer__header">
           <div>
             <div class="muted mono" style="font-size:var(--fs-xs);margin-bottom:2px">
-              {t("tasks.detail.id", { id: episode.id.slice(0, 12) })}
+              {episode.id}
             </div>
             <h2 class="drawer__title">
               {episode.preview?.slice(0, 80) || t("tasks.detail.fallbackTitle")}
@@ -670,20 +640,22 @@ function TaskDrawer({
         </header>
 
         <div class="drawer__body">
-          {statusReason(episode) && (
+          {reason && (
             <section
               class="card card--flat"
               style={`border-left:3px solid ${
                 deriveStatus(episode) === "failed" ? "var(--red)" : "var(--text-muted)"
               }`}
             >
-              <div class="hstack" style="gap:var(--sp-2);align-items:flex-start">
+              <div class="hstack" style="gap:var(--sp-3);align-items:center">
                 <Icon
-                  name={deriveStatus(episode) === "failed" ? "circle-alert" : "info"}
-                  size={14}
+                  name="circle-alert"
+                  size={16}
+                  strokeWidth={2}
+                  style="flex-shrink:0"
                 />
                 <p style="margin:0;font-size:var(--fs-sm);line-height:1.55">
-                  {statusReason(episode)}
+                  {reason}
                 </p>
               </div>
             </section>
@@ -762,16 +734,6 @@ function TaskDrawer({
                   </button>
                 )}
               </div>
-              {(episode.skillReasonKey || episode.skillReason) && (
-                <p
-                  class="muted"
-                  style="font-size:var(--fs-sm);line-height:1.6;margin:0"
-                >
-                  {episode.skillReasonKey
-                    ? t(episode.skillReasonKey as any, episode.skillReasonParams ?? undefined)
-                    : episode.skillReason}
-                </p>
-              )}
             </section>
           )}
 
@@ -798,6 +760,14 @@ function TaskDrawer({
             )}
           </section>
         </div>
+
+        <footer class="drawer__footer">
+          <button class="btn btn--danger btn--sm" onClick={() => void onDelete()}>
+            <Icon name="trash-2" size={14} />
+            {t("memories.act.delete")}
+          </button>
+          <div class="batch-bar__spacer" />
+        </footer>
       </aside>
     </div>
   );

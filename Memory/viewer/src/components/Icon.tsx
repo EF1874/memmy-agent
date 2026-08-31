@@ -64,6 +64,8 @@ export type IconName =
   | "zap"
   | "sparkles"
   | "cable"
+  | "link-2"
+  | "terminal"
   | "cpu"
   | "eye"
   | "eye-off"
@@ -306,7 +308,7 @@ const ICONS: Record<IconName, ComponentChildren> = {
     <>
       <circle cx={12} cy={12} r={10} />
       <line x1={12} x2={12} y1={8} y2={12} />
-      <line x1={12} x2={12.01} y1={16} y2={16} />
+      <circle cx={12} cy={16} r={1} fill="currentColor" stroke="none" />
     </>
   ),
   info: (
@@ -377,6 +379,19 @@ const ICONS: Record<IconName, ComponentChildren> = {
       <path d="M21 3v2a2 2 0 0 1-2 2h-3a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5z" />
       <path d="M5 3h4a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1H4a2 2 0 0 1-2-2V3z" />
       <path d="M7 21v-2a1 1 0 0 0-1-1v-1a2 2 0 0 0-2-2h-.01a2 2 0 0 0-1.999 2v1a1 1 0 0 0 1 1v2" />
+    </>
+  ),
+  "link-2": (
+    <>
+      <path d="M9 17H7A5 5 0 0 1 7 7h2" />
+      <path d="M15 7h2a5 5 0 1 1 0 10h-2" />
+      <line x1={8} x2={16} y1={12} y2={12} />
+    </>
+  ),
+  terminal: (
+    <>
+      <polyline points="4 17 10 11 4 5" />
+      <line x1={12} x2={20} y1={19} y2={19} />
     </>
   ),
   cpu: (

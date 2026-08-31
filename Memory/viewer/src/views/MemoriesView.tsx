@@ -52,12 +52,20 @@ import { api } from "../api/client";
 import { t } from "../stores/i18n";
 import { Icon } from "../components/Icon";
 import { Pager } from "../components/Pager";
+import { RefreshButton } from "../components/RefreshButton";
 import { ShareScopePill } from "../components/ShareScopePill";
 import { Markdown } from "../components/Markdown";
-import { NamespaceSelect, agentClass, appendNamespaceParams, namespaceLabel } from "../components/NamespaceSelect";
+import { AgentSearchBar } from "../components/AgentSearchBar";
+import {
+  agentClass,
+  appendSourceAgentParam,
+  sourceAgentLabel,
+} from "../components/AgentSourceSelect";
 import { route } from "../stores/router";
 import { clearEntryId } from "../stores/cross-link";
+import { TEAM_SHARING_UI_ENABLED } from "../features";
 import type { TraceDTO } from "../api/types";
+import { displayMemoryId } from "../utils/memory-id";
 import { areAllIdsSelected, toggleIdsInSelection } from "../utils/selection";
 import {
   loadHubSharingEnabled,
@@ -96,7 +104,6 @@ interface MemoryGroup {
   aggAlpha: number;
   hasReflection: boolean;
   ownerAgentKind: string;
-  ownerProfileId: string;
   scope: ShareScope;
   shared: boolean;
 }
@@ -123,7 +130,7 @@ function TraceMemoriesView() {
   // navigate here with a pending query.
   const [query, setQuery] = useState(() => route.value.params.q ?? "");
   const [role, setRole] = useState<RoleFilter>("");
-  const [namespaceFilter, setNamespaceFilter] = useState("");
+  const [sourceAgentFilter, setSourceAgentFilter] = useState("");
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [loading, setLoading] = useState(false);
@@ -156,7 +163,7 @@ function TraceMemoriesView() {
       qs.set("groupByTurn", "true");
       qs.set("includeTotal", "false");
       if (opts.q) qs.set("q", opts.q);
-      appendNamespaceParams(qs, namespaceFilter);
+      appendSourceAgentParam(qs, sourceAgentFilter);
       const res = await api.get<ListResponse>(`/api/v1/traces?${qs.toString()}`);
       const pageGroupCount = buildGroups(res.traces ?? []).length;
       setTraces(res.traces);
@@ -187,7 +194,7 @@ function TraceMemoriesView() {
     }, 200);
     return () => clearTimeout(h);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [query, pageSize, role, namespaceFilter, route.value.params.id]);
+  }, [query, pageSize, role, sourceAgentFilter, route.value.params.id]);
 
   useEffect(() => {
     const id = route.value.params.id;
@@ -201,7 +208,7 @@ function TraceMemoriesView() {
   const openLinkedMemory = async (id: string, signal: AbortSignal) => {
     setQuery("");
     setRole("");
-    setNamespaceFilter("");
+    setSourceAgentFilter("");
     setLoading(true);
     try {
       const targetTrace = await api.get<TraceDTO>(
@@ -386,36 +393,6 @@ function TraceMemoriesView() {
   };
 
   /**
-   * The edit modal targets the **head trace** of the group — that's
-   * the only row that carries `userText` / `summary` / tags (sub-steps
-   * have empty user text by construction, see `step-extractor`).
-   * Tool inputs / outputs are immutable.
-   */
-  const saveEdit = async (
-    id: string,
-    patch: {
-      summary?: string | null;
-      userText?: string;
-      agentText?: string;
-      tags?: string[];
-    },
-  ) => {
-    try {
-      const updated = await api.patch<TraceDTO>(
-        `/api/v1/traces/${encodeURIComponent(id)}`,
-        patch,
-      );
-      setTraces((prev) => prev.map((x) => (x.id === id ? updated : x)));
-      setDetail((prev) =>
-        prev ? rebuildGroupAfterTracePatch(prev, updated) : prev,
-      );
-      showToast(t("memories.edit.saved"));
-    } catch {
-      showToast("Failed", "error");
-    }
-  };
-
-  /**
    * Share applies to every trace in the group — they belong to the
    * same user turn and should always be public/private together.
    */
@@ -451,29 +428,14 @@ function TraceMemoriesView() {
     <>
       {/* Row 1: search */}
       <div class="toolbar">
-        <label class="input-search">
-          <Icon name="search" size={16} />
-          <input
-            class="input input--search"
-            type="search"
-            placeholder={t("memories.search.placeholder")}
-            value={query}
-            onInput={(e) => setQuery((e.target as HTMLInputElement).value)}
-          />
-        </label>
-        <button
-          class="btn btn--ghost btn--sm"
-          onClick={() => {
-            setQuery("");
-            setNamespaceFilter("");
-            setSelected(new Set());
-            setLoadError(null);
-            void loadPage({ q: "", page: 0 });
-          }}
-        >
-          <Icon name="refresh-cw" size={14} />
-          {t("common.refresh")}
-        </button>
+        <AgentSearchBar
+          query={query}
+          placeholder={t("memories.search.placeholder")}
+          sourceAgent={sourceAgentFilter}
+          onQueryChange={setQuery}
+          onSourceAgentChange={setSourceAgentFilter}
+        />
+        <RefreshButton onRefresh={() => loadPage({ q: query.trim(), page })} />
       </div>
 
       {/* Row 2: filter chips — own row, matches TasksView layout */}
@@ -495,7 +457,6 @@ function TraceMemoriesView() {
             </button>
           ))}
         </div>
-        <NamespaceSelect value={namespaceFilter} onChange={setNamespaceFilter} />
       </div>
 
       {/*
@@ -516,14 +477,18 @@ function TraceMemoriesView() {
               ? t("common.deselectPage")
               : t("memories.bulk.selectPage")}
           </button>
-          <button class="btn btn--sm" onClick={() => bulkShare("public")}>
-            <Icon name="share" size={14} />
-            {t("memories.bulk.share")}
-          </button>
-          <button class="btn btn--sm" onClick={() => bulkShare(null)}>
-            <Icon name="x" size={14} />
-            {t("memories.bulk.unshare")}
-          </button>
+          {TEAM_SHARING_UI_ENABLED && (
+            <>
+              <button class="btn btn--sm" onClick={() => bulkShare("public")}>
+                <Icon name="share" size={14} />
+                {t("memories.bulk.share")}
+              </button>
+              <button class="btn btn--sm" onClick={() => bulkShare(null)}>
+                <Icon name="x" size={14} />
+                {t("memories.bulk.unshare")}
+              </button>
+            </>
+          )}
           <button class="btn btn--sm" onClick={bulkExport}>
             <Icon name="copy" size={14} />
             {t("memories.bulk.export")}
@@ -606,12 +571,9 @@ function TraceMemoriesView() {
                   <div class="mem-card__title">{line}</div>
                   <div class="mem-card__meta">
                     <span class={`pill pill--agent pill--agent-${agentClass(g.ownerAgentKind)}`}>
-                      {namespaceLabel({
-                        agentKind: g.ownerAgentKind,
-                        profileId: g.ownerProfileId,
-                      })}
+                      {sourceAgentLabel(g.ownerAgentKind)}
                     </span>
-                    <ShareScopePill scope={g.scope} />
+                    {TEAM_SHARING_UI_ENABLED && <ShareScopePill scope={g.scope} />}
                     <span>{formatTs(g.ts)}</span>
                     <span class="mono">{groupScoreLabel(g)}</span>
                     {g.toolCount > 0 && (
@@ -666,7 +628,6 @@ function TraceMemoriesView() {
             setDetail(null);
             clearEntryId();
           }}
-          onSave={saveEdit}
           onShare={(scope) => applyShareGroup(detail, scope)}
           onDelete={() => deleteGroup(detail)}
         />
@@ -980,7 +941,6 @@ function buildGroups(traces: readonly TraceDTO[]): MemoryGroup[] {
       aggAlpha: bucket.length === 0 ? 0 : sumA / bucket.length,
       hasReflection: bucket.some((t) => Boolean((t.reflection ?? "").trim())),
       ownerAgentKind: pickGroupAgent(bucket),
-      ownerProfileId: pickGroupProfile(bucket),
       scope,
       shared: scope !== "private",
     };
@@ -1007,10 +967,6 @@ function pickGroupAgent(traces: readonly TraceDTO[]): string {
   return traces.find((t) => t.ownerAgentKind && t.ownerAgentKind !== "unknown")?.ownerAgentKind ?? "unknown";
 }
 
-function pickGroupProfile(traces: readonly TraceDTO[]): string {
-  return traces.find((t) => t.ownerProfileId && t.ownerProfileId !== "unknown")?.ownerProfileId ?? "default";
-}
-
 function truncateForExport(tc: { input?: unknown; output?: unknown; errorCode?: string }): string {
   if (tc.errorCode) return `ERROR[${tc.errorCode}]`;
   const out = tc.output;
@@ -1021,18 +977,6 @@ function truncateForExport(tc: { input?: unknown; output?: unknown; errorCode?: 
   } catch {
     return String(out).slice(0, 200);
   }
-}
-
-/**
- * After the edit modal patches the head trace, rebuild the open
- * group so the drawer reflects the new userText / summary / tags
- * without a round-trip refetch.
- */
-function rebuildGroupAfterTracePatch(prev: MemoryGroup, updated: TraceDTO): MemoryGroup {
-  const traces = prev.traces.map((t) => (t.id === updated.id ? updated : t));
-  const head =
-    traces.find((t) => (t.userText ?? "").trim().length > 0) ?? traces[0]!;
-  return { ...prev, traces, head };
 }
 
 function formatTs(ts: number): string {
@@ -1080,12 +1024,7 @@ function formatStepTime(ts: number): string {
  *      value/α/reflection without leaving the "one round = one memory"
  *      mental model. The first step (head) is expanded by default.
  *
- * Edit and share intentionally diverge in scope:
- *   - **Edit** patches the head trace only — that's the row that
- *     carries `userText` / `summary` / `tags`. Sub-steps have empty
- *     user text by construction (`step-extractor` only stamps the
- *     query onto the first sub-step) and their tool inputs/outputs
- *     are immutable.
+ * Group actions operate on the full turn:
  *   - **Share** flips every member of the group to the same scope so
  *     "this turn is public" stays a coherent mental model.
  *   - **Delete** wipes every member id so the card never half-disappears.
@@ -1093,55 +1032,24 @@ function formatStepTime(ts: number): string {
 function TraceDrawer({
   group,
   onClose,
-  onSave,
   onShare,
   onDelete,
 }: {
   group: MemoryGroup;
   onClose: () => void;
-  onSave: (
-    id: string,
-    patch: {
-      summary?: string | null;
-      userText?: string;
-      agentText?: string;
-      tags?: string[];
-    },
-  ) => Promise<void> | void;
   onShare: (scope: ShareScope | null) => Promise<void> | void;
   onDelete: () => Promise<void> | void;
 }) {
   const head = group.head;
   const displaySummary = pickGroupSummary(group);
-  const [mode, setMode] = useState<"view" | "edit" | "share">("view");
-  const [summary, setSummary] = useState(head.summary ?? "");
-  const [userText, setUserText] = useState(head.userText ?? "");
-  const [agentText, setAgentText] = useState(head.agentText ?? "");
-  const [tags, setTags] = useState((head.tags ?? []).join(", "));
+  const [mode, setMode] = useState<"view" | "share">("view");
   const [scope, setScope] = useState<ShareScope>(normalizeShareScope(head.share?.scope ?? "public"));
 
   useEffect(() => {
-    setSummary(head.summary ?? "");
-    setUserText(head.userText ?? "");
-    setAgentText(head.agentText ?? "");
-    setTags((head.tags ?? []).join(", "));
     setScope(normalizeShareScope(head.share?.scope ?? "public"));
   }, [head]);
 
   const title = displaySummary.slice(0, 100) || t("memories.detail.fallbackTitle");
-
-  const submitEdit = () => {
-    void onSave(head.id, {
-      summary: summary.trim() ? summary.trim() : null,
-      userText,
-      agentText,
-      tags: tags
-        .split(/[,，]/)
-        .map((s) => s.trim())
-        .filter(Boolean),
-    });
-    setMode("view");
-  };
 
   const submitShare = (s: ShareScope | null) => {
     void onShare(s);
@@ -1153,10 +1061,8 @@ function TraceDrawer({
       <aside class="drawer" role="dialog" onClick={(e) => e.stopPropagation()}>
         <header class="drawer__header">
           <div style="min-width:0">
-            <div class="muted" style="font-size:var(--fs-xs);margin-bottom:2px">
-              {group.episodeId
-                ? t("memories.detail.fromTask", { id: group.episodeId.slice(0, 10) })
-                : t("memories.detail.oneMemory")}
+            <div class="muted mono" style="font-size:var(--fs-xs);margin-bottom:2px;overflow-wrap:anywhere">
+              {displayMemoryId(head.id)}
             </div>
             <h2 class="drawer__title truncate">{title}</h2>
           </div>
@@ -1191,10 +1097,14 @@ function TraceDrawer({
                   )}
                   <dt class="muted">{t("memories.field.priority")}</dt>
                   <dd>{head.priority.toFixed(3)}</dd>
-                  <dt class="muted">{t("memories.field.share")}</dt>
-                  <dd>
-                    <ShareScopePill scope={group.scope} />
-                  </dd>
+                  {TEAM_SHARING_UI_ENABLED && (
+                    <>
+                      <dt class="muted">{t("memories.field.share")}</dt>
+                      <dd>
+                        <ShareScopePill scope={group.scope} />
+                      </dd>
+                    </>
+                  )}
                   {head.tags && head.tags.length > 0 && (
                     <>
                       <dt class="muted">tags</dt>
@@ -1232,56 +1142,7 @@ function TraceDrawer({
             </>
           )}
 
-          {mode === "edit" && (
-            <>
-              <section class="card card--flat">
-                <div class="modal__field">
-                  <label>{t("memories.edit.summary")}</label>
-                  <input
-                    class="input"
-                    value={summary}
-                    onInput={(e) => setSummary((e.target as HTMLInputElement).value)}
-                    placeholder="Short memory line…"
-                  />
-                </div>
-              </section>
-              <section class="card card--flat">
-                <div class="modal__field">
-                  <label>{t("memories.edit.user")}</label>
-                  <textarea
-                    class="textarea"
-                    rows={3}
-                    value={userText}
-                    onInput={(e) => setUserText((e.target as HTMLTextAreaElement).value)}
-                  />
-                </div>
-              </section>
-              <section class="card card--flat">
-                <div class="modal__field">
-                  <label>{t("memories.edit.assistant")}</label>
-                  <textarea
-                    class="textarea"
-                    rows={4}
-                    value={agentText}
-                    onInput={(e) => setAgentText((e.target as HTMLTextAreaElement).value)}
-                  />
-                </div>
-              </section>
-              <section class="card card--flat">
-                <div class="modal__field">
-                  <label>{t("memories.edit.tags")}</label>
-                  <input
-                    class="input"
-                    value={tags}
-                    onInput={(e) => setTags((e.target as HTMLInputElement).value)}
-                    placeholder="docker, debug"
-                  />
-                </div>
-              </section>
-            </>
-          )}
-
-          {mode === "share" && (
+          {TEAM_SHARING_UI_ENABLED && mode === "share" && (
             <section class="card card--flat">
               <div class="modal__field">
                 <label>{t("memories.share.scope")}</label>
@@ -1315,29 +1176,15 @@ function TraceDrawer({
                 {t("memories.act.delete")}
               </button>
               <div class="batch-bar__spacer" />
-              <button class="btn btn--sm" onClick={() => setMode("share")}>
-                <Icon name="share" size={14} />
-                {group.shared ? t("memories.act.unshare") : t("memories.act.share")}
-              </button>
-              <button class="btn btn--primary btn--sm" onClick={() => setMode("edit")}>
-                <Icon name="pencil" size={14} />
-                {t("memories.act.edit")}
-              </button>
+              {TEAM_SHARING_UI_ENABLED && (
+                <button class="btn btn--sm" onClick={() => setMode("share")}>
+                  <Icon name="share" size={14} />
+                  {group.shared ? t("memories.act.unshare") : t("memories.act.share")}
+                </button>
+              )}
             </>
           )}
-          {mode === "edit" && (
-            <>
-              <button class="btn btn--ghost btn--sm" onClick={() => setMode("view")}>
-                {t("common.cancel")}
-              </button>
-              <div class="batch-bar__spacer" />
-              <button class="btn btn--primary btn--sm" onClick={submitEdit}>
-                <Icon name="check" size={14} />
-                {t("common.save")}
-              </button>
-            </>
-          )}
-          {mode === "share" && (
+          {TEAM_SHARING_UI_ENABLED && mode === "share" && (
             <>
               {group.shared && (
                 <button

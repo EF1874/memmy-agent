@@ -1,9 +1,9 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import YAML from "yaml";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createMemoryHttpServer,
   DEFAULT_MEMMY_CONFIG,
@@ -12,6 +12,8 @@ import {
   type Embedder,
   type LlmClient
 } from "../src/index.js";
+import type { AgentSourceExecutor } from "../src/agent-source/runtime.js";
+import type { ViewerCliOptions } from "../src/server/viewer-cli.js";
 
 const cleanup: Array<() => Promise<void> | void> = [];
 
@@ -35,8 +37,6 @@ describe("local Viewer API", () => {
     expect(configText).not.toContain("hub-secret");
     expect(JSON.parse(configText)).toMatchObject({
       config: {
-        algorithm: { lightweightMemory: { enabled: false } },
-        logging: { detailedView: false },
         agentAccess: {
           autoScanKnownAgents: true,
           watchFileChanges: true,
@@ -78,6 +78,16 @@ describe("local Viewer API", () => {
     expect(readFileSync(fixture.configPath, "utf8")).toContain("+08:00");
     expect(readFileSync(fixture.configPath, "utf8")).toContain("hub-secret");
     expect(readFileSync(fixture.configPath, "utf8")).not.toContain("********");
+
+    const agentSources = await viewerFetch(fixture.baseUrl, "/api/v1/agent-sources");
+    expect(await agentSources.json()).toMatchObject({
+      executorAvailable: true,
+      sources: expect.arrayContaining([
+        expect.objectContaining({ sourceId: "codex" }),
+        expect.objectContaining({ sourceId: "openclaw" }),
+        expect.objectContaining({ sourceId: "hermes" })
+      ])
+    });
   });
 
   it("writes Viewer model settings to memmyMemory and keeps the Desktop catalog in sync", async () => {
@@ -176,6 +186,92 @@ describe("local Viewer API", () => {
       watchFileChanges: true,
       autoInjectSkill: true
     });
+  });
+
+  it("exposes standalone scan pause and cancel controls to the Viewer", async () => {
+    const pauseScan = vi.fn(async () => ({ ok: true as const }));
+    const cancelScan = vi.fn(async () => ({ ok: true as const }));
+    const agentSourceExecutor: AgentSourceExecutor = {
+      list: async () => ({ executorAvailable: true, sources: [] }),
+      startScan: async () => ({ accepted: true, jobId: "scan-1" }),
+      scanStatus: () => ({
+        running: true,
+        jobId: "scan-1",
+        sourceId: "codex",
+        mode: null,
+        progress: { sourceId: "codex", phase: "scan", current: 3, total: 10 },
+        startedAt: "2026-08-28T00:00:00.000Z",
+        completedAt: null,
+        error: null
+      }),
+      pauseScan,
+      cancelScan,
+      mutateConnection: async () => ({ ok: true }),
+      startAutomation: () => undefined,
+      dispose: () => undefined
+    };
+    const fixture = await startFixture({ agentSourceExecutor });
+
+    const paused = await viewerFetch(fixture.baseUrl, "/api/v1/agent-sources/scan/stop", {
+      method: "POST",
+      body: "{}"
+    });
+    expect(paused.status).toBe(200);
+    expect(await paused.json()).toEqual({ ok: true });
+    expect(pauseScan).toHaveBeenCalledOnce();
+
+    const canceled = await viewerFetch(fixture.baseUrl, "/api/v1/agent-sources/scan/cancel", {
+      method: "POST",
+      body: "{}"
+    });
+    expect(canceled.status).toBe(200);
+    expect(await canceled.json()).toEqual({ ok: true });
+    expect(cancelScan).toHaveBeenCalledOnce();
+  });
+
+  it("reports and installs the memmy-memory CLI through the local Viewer boundary", async () => {
+    const home = mkdtempSync(join(tmpdir(), "memmy-viewer-cli-api-"));
+    const cliEntrypoint = join(home, "runtime", "dist", "src", "cli", "index.js");
+    mkdirSync(join(cliEntrypoint, ".."), { recursive: true });
+    writeFileSync(cliEntrypoint, "// cli fixture\n");
+    cleanup.push(() => rmSync(home, { recursive: true, force: true }));
+    const viewerCli = {
+      home,
+      cliEntrypoint,
+      executable: "/opt/memmy/node",
+      platform: "darwin" as const,
+    };
+    const fixture = await startFixture({ viewerCli });
+
+    const before = await viewerFetch(fixture.baseUrl, "/api/v1/system/cli");
+    expect(await before.json()).toMatchObject({ installed: false });
+
+    const installed = await viewerFetch(fixture.baseUrl, "/api/v1/system/cli/install", {
+      method: "POST",
+      body: "{}",
+    });
+    expect(installed.status).toBe(200);
+    expect(await installed.json()).toMatchObject({
+      installed: true,
+      path: "~/.local/bin/memmy-memory",
+    });
+  });
+
+  it("restarts the installed user service after returning the Viewer response", async () => {
+    let restartRequested = false;
+    const fixture = await startFixture({
+      onRestartRequested: () => {
+        restartRequested = true;
+      },
+    });
+
+    const response = await viewerFetch(fixture.baseUrl, "/api/v1/system/restart", {
+      method: "POST",
+      body: "{}",
+    });
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({ accepted: true });
+    await expect.poll(() => restartRequested).toBe(true);
   });
 
   it("resumes SSE changes from Last-Event-ID and exposes migrated Hub rows", async () => {
@@ -287,6 +383,52 @@ describe("local Viewer API", () => {
     expect(fixture.service.getMemory(worldModel.id).status).toBe("archived");
   });
 
+  it("filters Viewer memories by agent source without a profile namespace", async () => {
+    const fixture = await startFixture();
+    const hermes = fixture.service.addMemory({ content: "Hermes memory", source: "hermes", layer: "L1" });
+    fixture.service.addMemory({ content: "Codex memory", source: "codex", layer: "L1" });
+
+    const response = await viewerFetch(fixture.baseUrl, "/api/v1/traces?sourceAgent=hermes&limit=20&page=1");
+    expect(await response.json()).toMatchObject({
+      total: 1,
+      items: [expect.objectContaining({
+        id: hermes.id,
+        metadata: { source: "hermes" }
+      })]
+    });
+
+    const overview = await viewerFetch(fixture.baseUrl, "/api/v1/overview");
+    expect(await overview.json()).toMatchObject({
+      summary: {
+        sourceDistribution: expect.arrayContaining([
+          expect.objectContaining({ source: "hermes", count: 1 }),
+          expect.objectContaining({ source: "codex", count: 1 })
+        ])
+      }
+    });
+  });
+
+  it("filters Viewer API logs by tool and Agent source", async () => {
+    const fixture = await startFixture();
+    const insert = fixture.db.db.prepare(`
+      INSERT INTO api_logs (
+        tool_name, source_agent, input_json, output_json, duration_ms, success, called_at
+      ) VALUES (?, ?, '{}', '{}', 1, 1, ?)
+    `);
+    insert.run("memory_add", "hermes", "2026-08-31T10:00:00.000Z");
+    insert.run("memory_search", "hermes", "2026-08-31T10:01:00.000Z");
+    insert.run("memory_search", "codex", "2026-08-31T10:02:00.000Z");
+
+    const response = await viewerFetch(
+      fixture.baseUrl,
+      "/api/v1/api-logs?tools=memory_search&sourceAgent=hermes&limit=20&offset=0",
+    );
+    expect(await response.json()).toMatchObject({
+      total: 1,
+      logs: [expect.objectContaining({ toolName: "memory_search", sourceAgent: "hermes" })],
+    });
+  });
+
   it("lists Memmy user memories for the configured local user", async () => {
     const fixture = await startFixture();
     const session = fixture.service.openSession({
@@ -326,9 +468,55 @@ describe("local Viewer API", () => {
     expect(stats.totalSlots).toBe(2);
     expect(stats.ready + stats.missing + stats.dimMismatch).toBe(stats.totalSlots);
   });
+
+  it("filters Viewer user memories and tasks by Agent source", async () => {
+    const fixture = await startFixture();
+    const hermesSession = fixture.service.openSession({
+      namespace: { source: "hermes", profileId: "default", userId: "local-user" }
+    });
+    const hermesTurn = fixture.service.completeTurn("turn-viewer-hermes-source", {
+      sessionId: hermesSession.sessionId,
+      query: "我喜欢简洁代码",
+      answer: "好的。"
+    });
+    const codexSession = fixture.service.openSession({
+      namespace: { source: "codex", profileId: "default", userId: "local-user" }
+    });
+    const codexTurn = fixture.service.completeTurn("turn-viewer-codex-source", {
+      sessionId: codexSession.sessionId,
+      query: "我叫张三",
+      answer: "你好，张三。"
+    });
+    expect(hermesTurn.userMemoryIds).toHaveLength(1);
+    expect(codexTurn.userMemoryIds).toHaveLength(1);
+
+    const userMemories = await viewerFetch(
+      fixture.baseUrl,
+      "/api/v1/memories?sourceAgent=hermes&limit=20&page=1",
+    );
+    expect(await userMemories.json()).toMatchObject({
+      total: 1,
+      items: [expect.objectContaining({ id: hermesTurn.userMemoryIds[0] })],
+    });
+
+    const tasks = await viewerFetch(
+      fixture.baseUrl,
+      "/api/v1/episodes?sourceAgent=codex&limit=20&page=1",
+    );
+    expect(await tasks.json()).toMatchObject({
+      total: 1,
+      tasks: [expect.objectContaining({ id: codexTurn.episodeId })],
+    });
+  });
 });
 
-async function startFixture(options: { llm?: LlmClient; skillLlm?: LlmClient } = {}): Promise<{
+async function startFixture(options: {
+  llm?: LlmClient;
+  skillLlm?: LlmClient;
+  viewerCli?: ViewerCliOptions;
+  onRestartRequested?: () => void | Promise<void>;
+  agentSourceExecutor?: AgentSourceExecutor;
+} = {}): Promise<{
   baseUrl: string;
   configPath: string;
   db: MemoryDb;
@@ -352,7 +540,13 @@ async function startFixture(options: { llm?: LlmClient; skillLlm?: LlmClient } =
     skillLlm: options.skillLlm,
     embedder: testEmbedder()
   });
-  const server = createMemoryHttpServer({ service, configPath });
+  const server = createMemoryHttpServer({
+    service,
+    configPath,
+    viewerCli: options.viewerCli,
+    onRestartRequested: options.onRestartRequested,
+    agentSourceExecutor: options.agentSourceExecutor,
+  });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("expected TCP address");
