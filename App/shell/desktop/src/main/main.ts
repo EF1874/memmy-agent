@@ -106,6 +106,16 @@ import {
   type WindowsDataLayout
 } from "./windows-data-layout.js";
 import { createWindowsUpdateLauncherFile } from "./windows-update-launcher.js";
+import {
+  installPackagedWindowsCliTools,
+  resolveCliInstallStrategy,
+  type CliInstallResult
+} from "./windows-cli-path.js";
+import {
+  getWindowsLaunchAtLogin,
+  setWindowsLaunchAtLogin,
+  type WindowsLaunchAtLoginEnvironment
+} from "./windows-launch-at-login.js";
 
 let mainWindow: BrowserWindow | null = null;
 let petWindow: BrowserWindow | null = null;
@@ -242,18 +252,6 @@ interface MemoryDatabaseExportResult {
   canceled: boolean;
   exportPath?: string;
   bytes?: number;
-}
-
-interface CliInstallResult {
-  ok: true;
-  binDirectory: string;
-  installed: Array<{
-    name: string;
-    source: string;
-    target: string;
-  }>;
-  pathUpdated: boolean;
-  profilePaths: string[];
 }
 
 /**
@@ -519,6 +517,14 @@ async function installBundledCliIfNeeded(): Promise<void> {
 }
 
 async function installCliTools(): Promise<CliInstallResult> {
+  if (resolveCliInstallStrategy(
+    process.platform,
+    app.isPackaged,
+    Boolean((process as NodeJS.Process & { windowsStore?: boolean }).windowsStore)
+  ) === "packaged-windows") {
+    return installPackagedWindowsCliTools(process.resourcesPath);
+  }
+
   const binDirectory = join(homedir(), ".local", "bin");
   const entries = resolveCliToolEntries();
   await mkdir(binDirectory, { recursive: true });
@@ -929,6 +935,14 @@ function registerIpcHandlers(): void {
     applyAndPersistLogLevel(level);
   });
 
+  ipcMain.handle("memmy:get-launch-at-login", () => (
+    getWindowsLaunchAtLogin(app, currentWindowsLaunchAtLoginEnvironment())
+  ));
+
+  ipcMain.handle("memmy:set-launch-at-login", (_event, enabled: boolean) => (
+    setWindowsLaunchAtLogin(app, currentWindowsLaunchAtLoginEnvironment(), Boolean(enabled))
+  ));
+
   ipcMain.handle("memmy:get-microphone-access-status", () => getMicrophoneAccessStatus());
 
   ipcMain.handle("memmy:request-microphone-access", async () => requestMicrophoneAccess());
@@ -1002,6 +1016,8 @@ function getDesktopAppInfo(): DesktopAppInfo {
     version: resolveDesktopAppVersion(),
     platform: process.platform,
     arch: process.arch,
+    isPackaged: app.isPackaged,
+    isWindowsStore: Boolean((process as NodeJS.Process & { windowsStore?: boolean }).windowsStore),
     ...(updateManifestUrl ? { updateManifestUrl } : {})
   };
 }
@@ -4979,6 +4995,8 @@ async function cleanupBeforeQuit(): Promise<void> {
   ipcMain.removeHandler("memmy:restart-memory-service");
   ipcMain.removeHandler("memmy:open-logs-directory");
   ipcMain.removeHandler("memmy:export-diagnostics-report");
+  ipcMain.removeHandler("memmy:get-launch-at-login");
+  ipcMain.removeHandler("memmy:set-launch-at-login");
   ipcMain.removeHandler("memmy:get-microphone-access-status");
   ipcMain.removeHandler("memmy:request-microphone-access");
   ipcMain.removeHandler("memmy:select-project-directory");
@@ -5013,6 +5031,17 @@ function readStopMemoryServiceOnExitSetting(): boolean {
   } catch {
     return false;
   }
+}
+
+/** Resolves the runtime paths used by the Windows login item adapter. */
+function currentWindowsLaunchAtLoginEnvironment(): WindowsLaunchAtLoginEnvironment {
+  return {
+    platform: process.platform,
+    isPackaged: app.isPackaged,
+    executablePath: process.execPath,
+    localAppDataPath: process.env.LOCALAPPDATA,
+    systemRootPath: process.env.SystemRoot ?? process.env.WINDIR
+  };
 }
 
 async function copyDesktopImageToClipboard(request: DesktopImageActionRequest, senderUrl: string): Promise<void> {

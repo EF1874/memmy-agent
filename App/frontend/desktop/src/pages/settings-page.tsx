@@ -351,6 +351,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const { t, language } = useTranslation();
   const bootstrap = state.bootstrap;
   const [launchAtLogin, setLaunchAtLogin] = useState(false);
+  const launchAtLoginRequestVersion = useRef(0);
   const [closeAction, setCloseAction] = useState<CloseMainWindowAction>(() => {
     return readCloseMainWindowAction(typeof window === "undefined" ? undefined : window.localStorage);
   });
@@ -770,6 +771,30 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     }
   }, [persistedMenuBarIconEnabled]);
 
+  useEffect(() => {
+    if (platform !== "win32" || typeof window === "undefined") {
+      return;
+    }
+
+    const getLaunchAtLogin = window.memmy?.getLaunchAtLogin;
+    if (!getLaunchAtLogin) {
+      return;
+    }
+
+    let cancelled = false;
+    const requestVersion = ++launchAtLoginRequestVersion.current;
+    void getLaunchAtLogin().then((enabled) => {
+      if (!cancelled && launchAtLoginRequestVersion.current === requestVersion) {
+        setLaunchAtLogin(enabled);
+      }
+    }).catch((error) => {
+      console.warn("read Windows launch-at-login state failed", error);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [platform]);
+
   // On mount, treat the log level persisted by the main process as authoritative, to avoid the local localStorage diverging from the main process.
   useEffect(() => {
     let cancelled = false;
@@ -845,6 +870,30 @@ export function SettingsPageView(props: SettingsPageViewProps) {
       typeof window === "undefined" ? undefined : window.localStorage,
       normalizedAction
     );
+  }
+
+  /**
+   * Updates the Windows login item while preserving the existing local interaction on other platforms.
+   */
+  function handleLaunchAtLoginChange(enabled: boolean) {
+    if (platform !== "win32" || typeof window === "undefined" || !window.memmy?.setLaunchAtLogin) {
+      setLaunchAtLogin(enabled);
+      return;
+    }
+
+    const previous = launchAtLogin;
+    const requestVersion = ++launchAtLoginRequestVersion.current;
+    setLaunchAtLogin(enabled);
+    void window.memmy.setLaunchAtLogin(enabled).then((effectiveEnabled) => {
+      if (launchAtLoginRequestVersion.current === requestVersion) {
+        setLaunchAtLogin(effectiveEnabled);
+      }
+    }).catch((error) => {
+      console.warn("update Windows launch-at-login state failed", error);
+      if (launchAtLoginRequestVersion.current === requestVersion) {
+        setLaunchAtLogin(previous);
+      }
+    });
   }
 
   /**
@@ -1529,7 +1578,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
 
         <Section icon={<Rocket size={16} className="text-text-ink/60" />} title={t("settings.window")} sectionId="pet-avatar">
           <div className="space-y-1">
-            <ToggleRow label={t("settings.window.launchAtLogin")} description={t("settings.window.launchAtLoginDesc")} checked={launchAtLogin} onChange={setLaunchAtLogin} />
+            <ToggleRow label={t("settings.window.launchAtLogin")} description={t("settings.window.launchAtLoginDesc")} checked={launchAtLogin} onChange={handleLaunchAtLoginChange} />
             <Divider />
             <SelectRow
               label={t("settings.preferredMode")}
