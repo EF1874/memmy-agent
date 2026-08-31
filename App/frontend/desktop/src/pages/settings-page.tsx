@@ -74,6 +74,7 @@ import {
   createTestModelConnectionMessages,
   createMemmyMemoryProviderConfig,
   createModelFormValues,
+  modelFormValuesAsPrimary,
   createModelProtocolPatch,
   hydrateModelConfigForm,
   fromProtocol,
@@ -461,6 +462,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const registeredAtText = formatRegisteredAt(state.account.registeredAt, t);
   const defaultLaunchMode = appSettings?.defaultLaunchMode ?? state.navigation.preferredMode ?? "last";
   const autoUpdateEnabled = appSettings?.autoUpdateEnabled ?? true;
+  const stopMemoryServiceOnExit = appSettings?.stopMemoryServiceOnExit ?? false;
   const taskDoneNotificationEnabled = appSettings?.taskDoneNotificationEnabled ?? true;
   const notificationSoundEnabled = appSettings?.notificationSoundEnabled ?? true;
   const improvementPlan = privacySettings?.allowMemoryImprovementUpload ?? false;
@@ -513,8 +515,11 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     apiKeyMasked,
     configured: Boolean(apiKey.trim() || apiKeyMasked)
   };
-  const memoryModelFormValues = createModelFormValues(memoryModel, primaryModelValues);
   const skillModelFormValues = createModelFormValues(skillModel, primaryModelValues);
+  const memoryModelFormValues = createModelFormValues(
+    memoryModel,
+    modelFormValuesAsPrimary(skillModelFormValues)
+  );
   const embTestKey = createModelConfigValidationKey(embFormValues);
   const isEmbeddingTestStale = Boolean(embValidation.testedKey && embValidation.testedKey !== embTestKey);
   const asrFormValues = createAsrModelFormValues(asrModelId, asrEndpoint, asrApiKey, asrApiKeyMasked);
@@ -917,7 +922,10 @@ export function SettingsPageView(props: SettingsPageViewProps) {
    * @param patch The model-state patch function.
    */
   function testModelConfigConnection(config: ModelConfig, patch: (patch: Partial<ModelConfig>) => void, secretTarget: "memory" | "skill") {
-    const values = createModelFormValues(config, primaryModelValues);
+    const inheritedModel = secretTarget === "memory"
+      ? modelFormValuesAsPrimary(skillModelFormValues)
+      : primaryModelValues;
+    const values = createModelFormValues(config, inheritedModel);
     testModelConnection({
       configClient,
       values,
@@ -1552,6 +1560,13 @@ export function SettingsPageView(props: SettingsPageViewProps) {
               description={t(platform === "win32" ? "settings.window.menuBarIconDescWindows" : "settings.window.menuBarIconDesc")}
               checked={menuBarIcon}
               onChange={handleMenuBarIconChange}
+            />
+            <Divider />
+            <ToggleRow
+              label={t("settings.window.stopMemoryOnExit")}
+              description={t("settings.window.stopMemoryOnExitDesc")}
+              checked={stopMemoryServiceOnExit}
+              onChange={(checked) => persistSettings({ stopMemoryServiceOnExit: checked })}
             />
           </div>
         </Section>

@@ -23,6 +23,7 @@ import {
   startAgentGatewayWithRecovery,
   startPackagedBrowserPreparation,
   stopManagedChild,
+  stopManagedChildrenForDesktopExit,
   syncBundledAgentSkills,
   type ManagedChild,
   type PackagedRuntimeConfig,
@@ -358,7 +359,7 @@ describe("packaged desktop runtime config", () => {
 
     const server = createServer((_request, response) => {
       response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ ok: true }));
+      response.end(JSON.stringify({ ok: true, protocolVersion: 1 }));
     });
     testServers.push(server);
     setTimeout(() => server.listen(port, "127.0.0.1"), 100);
@@ -1129,6 +1130,62 @@ describe("AgentGatewaySupervisor", () => {
 });
 
 describe("spawnNodeService 落盘与 env 注入", () => {
+  it("keeps persistent Memory alive on Desktop exit unless the setting requests a stop", async () => {
+    const root = await makeTempRoot();
+    const entry = join(root, "persistent-service.js");
+    await writeFile(entry, "setInterval(() => {}, 1000);\n");
+    const memory = spawnNodeService("memory", entry, [], {}, {
+      logFilePath: join(root, "memory.log"),
+      logLevel: "info",
+      persistOnDesktopExit: true
+    });
+    const gateway = spawnNodeService("agent-gateway", entry, [], {}, {
+      logFilePath: join(root, "agent-gateway.log"),
+      logLevel: "info"
+    });
+
+    try {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+      await stopManagedChildrenForDesktopExit([memory, gateway], false);
+
+      expect(gateway.process.exitCode !== null || gateway.process.signalCode !== null).toBe(true);
+      expect(memory.process.exitCode).toBeNull();
+      expect(memory.process.signalCode).toBeNull();
+
+      await stopManagedChildrenForDesktopExit([memory], true);
+      expect(memory.process.exitCode !== null || memory.process.signalCode !== null).toBe(true);
+    } finally {
+      await stopManagedChild(memory);
+      await stopManagedChild(gateway);
+    }
+  });
+
+  it("keeps the restart IPC channel available for persistent Memory", async () => {
+    const root = await makeTempRoot();
+    const entry = join(root, "persistent-memory-ipc.js");
+    await writeFile(entry, [
+      "process.send?.({ type: 'memmy-memory:restart' });",
+      "setInterval(() => {}, 1000);",
+    ].join("\n"));
+    const memory = spawnNodeService("memory", entry, [], {
+      MEMMY_DESKTOP_MANAGED_MEMORY: "1",
+    }, {
+      logFilePath: join(root, "memory-ipc.log"),
+      logLevel: "info",
+      ipc: true,
+      persistOnDesktopExit: true,
+    });
+
+    try {
+      await expect(new Promise((resolveMessage) => {
+        memory.process.once("message", resolveMessage);
+      })).resolves.toEqual({ type: "memmy-memory:restart" });
+      expect(memory.process.connected).toBe(true);
+    } finally {
+      await stopManagedChild(memory);
+    }
+  });
+
   it("把子进程 stdout 落盘到指定日志文件", async () => {
     const root = await makeTempRoot();
     const entry = join(root, "entry.js");

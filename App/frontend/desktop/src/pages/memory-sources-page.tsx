@@ -140,6 +140,24 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
   }, [clients, dispatch]);
 
   useEffect(() => {
+    if (!clients) return;
+    let active = true;
+    const refresh = () => {
+      void clients.config.getScanPreferences()
+        .then((preferences) => {
+          if (active) dispatch(appActions.scanPreferencesUpdated(preferences));
+        })
+        .catch(() => undefined);
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 5_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [clients, dispatch]);
+
+  useEffect(() => {
     if (!clients) {
       return;
     }
@@ -550,7 +568,7 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
   }
 
   /**
-   * Lets the user pick a path via the desktop bridge and creates a consistent memory.sqlite snapshot.
+   * Lets the user pick a path and exports Memory through the standalone HTTP service.
    */
   function exportLocalData() {
     if (localDataBusy) {
@@ -928,15 +946,17 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
         </div>
         <div className="space-y-1">
           <ToggleRow
-            label={t("memory.autoScan")}
-            description={t("memory.autoScanDescription")}
-            checked={
-              state.agentSources.scanPreferences.autoScanKnownAgents
-              || state.agentSources.scanPreferences.watchFileChanges
-            }
-            onChange={(checked) =>
-              updateScanPreferences({ autoScanKnownAgents: checked, watchFileChanges: checked })
-            }
+            label={t("memory.startupScan")}
+            description={t("memory.startupScanDescription")}
+            checked={state.agentSources.scanPreferences.autoScanKnownAgents}
+            onChange={(checked) => updateScanPreferences({ autoScanKnownAgents: checked })}
+          />
+          <Divider />
+          <ToggleRow
+            label={t("memory.scheduledScan")}
+            description={t("memory.scheduledScanDescription")}
+            checked={state.agentSources.scanPreferences.watchFileChanges}
+            onChange={(checked) => updateScanPreferences({ watchFileChanges: checked })}
           />
           <Divider />
           <ToggleRow
