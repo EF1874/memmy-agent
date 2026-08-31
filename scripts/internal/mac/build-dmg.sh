@@ -652,7 +652,9 @@ verify_packaged_runtime_config_boundary() {
   fi
   node "$ROOT_DIR/scripts/internal/shared/verify-packaged-asar.mjs" \
     --asar "$asar_file" \
-    --expected "$DESKTOP_VERSION"
+    --expected "$DESKTOP_VERSION" \
+    --platform darwin \
+    --arch "$target_cpu"
 }
 
 prune_mac_runtime_artifacts() {
