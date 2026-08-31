@@ -578,6 +578,7 @@ async function routeRequest(
       sessionId: request.sessionId,
       query: request.query,
       turnId: request.turnId,
+      layers: normalizeLayerSelection(request.layers),
       contextHints: request.contextHints,
       contextBudget: request.contextBudget
     };
@@ -1277,7 +1278,7 @@ function envelopeWithPrincipal<T extends Record<string, unknown>>(
   principal: AuthPrincipal
 ): T & RequestEnvelope {
   const existing = isRecord(body.namespace) ? body.namespace as unknown as RuntimeNamespace : undefined;
-  const namespace = mergeNamespaces(mergeNamespaces(existing, namespaceFromSource(body.source)), principal.namespace);
+  const namespace = mergeNamespaces(mergeNamespaces(namespaceFromSource(body.source), existing), principal.namespace);
   assertNamespaceScope(existing, principal.namespace);
   return {
     ...body,
@@ -1311,7 +1312,7 @@ function strictEnvelopeWithPrincipal(
     }
   }
   const namespace = mergeNamespaces(
-    mergeNamespaces(requestNamespace, namespaceFromSource(body.source)),
+    mergeNamespaces(namespaceFromSource(body.source), requestNamespace),
     principalNamespace
   );
   if (!namespace) {
@@ -1474,6 +1475,23 @@ function normalizeLayers(value: unknown): MemoryLayer[] | undefined {
     .map(parseLayerValue)
     .filter((layer): layer is MemoryLayer => Boolean(layer));
   return layers.length > 0 ? layers : undefined;
+}
+
+function normalizeLayerSelection(value: unknown): MemoryLayer[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const layers = value.map((item) => {
+    const layer = parseLayerValue(item);
+    if (!layer) {
+      throw new MemoryServiceError(
+        "invalid_argument",
+        "turn.start layers must contain only L1, L2, L3, or Skill"
+      );
+    }
+    return layer;
+  });
+  return [...new Set(layers)];
 }
 
 function parseStatus(value: string | null): "activated" | "resolving" | "archived" | "deleted" | undefined {

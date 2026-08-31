@@ -3,6 +3,20 @@ import { deriveEpisodeStatus } from "../agent-contract/episode-status.js";
 import { adaptViewerResponse } from "../viewer/src/api/memmy-adapter.js";
 
 describe("Memmy Viewer response adapter", () => {
+  it("uses the Memory service version for the Viewer version", () => {
+    const result = adaptViewerResponse("GET", "/api/v1/health", undefined, {
+      ok: true,
+      serviceVersion: "2.1.0",
+      version: "1.1.1",
+      models: {},
+    });
+
+    expect(result).toMatchObject({
+      instanceId: "memmy-memory-2.1.0",
+      version: "2.1.0",
+    });
+  });
+
   it("keeps trace and user-memory counts separate and exposes daily activity", () => {
     const result = adaptViewerResponse("GET", "/api/v1/overview", undefined, {
       stats: {

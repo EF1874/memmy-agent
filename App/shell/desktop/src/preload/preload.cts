@@ -23,6 +23,7 @@ type DiagnosticsReportExportResult = { canceled: true } | DiagnosticsReportExpor
 
 interface MemmyPreloadApi {
   platform: string;
+  notifyRendererReady(): void;
   getRuntimeConfig(): Promise<unknown>;
   getAppInfo(): Promise<DesktopAppInfo>;
   getInstallationId(): Promise<string>;
@@ -110,6 +111,10 @@ ipcRenderer.on("memmy:main-window-action-requested", (_event: IpcRendererEvent, 
 
 const memmyPreloadApi: MemmyPreloadApi = {
   platform: process.platform,
+
+  notifyRendererReady(): void {
+    ipcRenderer.send("memmy:renderer-ready");
+  },
 
   async getRuntimeConfig(): Promise<unknown> {
     return ipcRenderer.invoke("memmy:get-runtime-config");

@@ -69,6 +69,7 @@ function RuntimeApp() {
   const { t } = useTranslation();
   const translationRef = useRef(t);
   const agentStateRef = useRef(state.agent);
+  const rendererReadyReportedRef = useRef(false);
   const [bootKey, setBootKey] = useState(0);
   translationRef.current = t;
   agentStateRef.current = state.agent;
@@ -91,6 +92,18 @@ function RuntimeApp() {
   useEffect(() => {
     setAnalyticsUserId(state.account.userId);
   }, [state.account.userId]);
+
+  useEffect(() => {
+    if (
+      rendererReadyReportedRef.current
+      || !clients
+      || !state.bootstrap
+      || typeof window === "undefined"
+      || !window.memmy?.notifyRendererReady
+    ) return;
+    rendererReadyReportedRef.current = true;
+    window.memmy.notifyRendererReady();
+  }, [clients, state.bootstrap]);
 
   useEffect(() => () => taskStateCoordinator?.dispose(), [taskStateCoordinator]);
 

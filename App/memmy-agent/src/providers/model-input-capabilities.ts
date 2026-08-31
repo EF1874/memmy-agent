@@ -4,7 +4,7 @@ const TEXT = Object.freeze(["text"] as const);
 const TEXT_IMAGE = Object.freeze(["text", "image"] as const);
 const TEXT_IMAGE_VIDEO = Object.freeze(["text", "image", "video"] as const);
 
-export const MODEL_INPUT_CAPABILITIES_REVIEWED_AT = "2026-08-13";
+export const MODEL_INPUT_CAPABILITIES_REVIEWED_AT = "2026-08-24";
 
 export function defineModelInputCapabilities(
   entries: ReadonlyArray<readonly [string, readonly ModelInputModality[]]>,
@@ -103,8 +103,9 @@ export const MODEL_INPUT_CAPABILITIES = defineModelInputCapabilities([
   ["jp.anthropic.claude-haiku-4-5-20251001-v1:0", TEXT_IMAGE],
   ["global.anthropic.claude-haiku-4-5-20251001-v1:0", TEXT_IMAGE],
 
-  // Google Gemini. Reviewed 2026-08-13.
+  // Google Gemini. Reviewed 2026-08-19.
   // Source: https://ai.google.dev/gemini-api/docs/models
+  ["gemini-3.7-flash", TEXT_IMAGE_VIDEO],
   ["gemini-3.6-flash", TEXT_IMAGE_VIDEO],
   ["gemini-3.5-flash", TEXT_IMAGE_VIDEO],
   ["gemini-3.5-flash-lite", TEXT_IMAGE_VIDEO],
@@ -166,14 +167,16 @@ export const MODEL_INPUT_CAPABILITIES = defineModelInputCapabilities([
   ["groq/compound-mini", TEXT],
   ["qwen/qwen3.6-27b", TEXT_IMAGE],
 
-  // DeepSeek. Reviewed 2026-08-13.
+  // DeepSeek. Reviewed 2026-08-24.
   // Source: https://api-docs.deepseek.com/updates/
   ["deepseek-v4-pro", TEXT],
   ["deepseek-v4-flash", TEXT],
   ["deepseek-v4-flash-0731", TEXT],
+  // Internal experimental route; it is not part of the public DeepSeek model list.
+  ["deepseek-v4-flash-vision-exp", TEXT_IMAGE],
   ["deepseek-v3.2", TEXT],
 
-  // Qwen / 百炼. Reviewed 2026-08-13.
+  // Qwen / 百炼. Reviewed 2026-08-19.
   // Source: https://help.aliyun.com/zh/model-studio/token-plan-team-overview
   // Source: https://help.aliyun.com/zh/model-studio/vision-model/
   ["qwen3.7-max", TEXT],
@@ -181,6 +184,7 @@ export const MODEL_INPUT_CAPABILITIES = defineModelInputCapabilities([
   ["qwen3.7-max-2026-05-20", TEXT],
   ["qwen3.7-max-2026-05-17", TEXT],
   ["qwen3.6-max-preview", TEXT],
+  ["qwen3.8-max", TEXT_IMAGE],
   ["qwen3-coder-next", TEXT],
   ["qwen3-coder-plus", TEXT],
   ["qwen3-coder-flash", TEXT],

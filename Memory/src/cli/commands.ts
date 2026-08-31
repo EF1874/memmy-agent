@@ -504,6 +504,7 @@ function setupOptions(parsed: ParsedArgs): MemoryCliSetupOptions {
     agentRoot: optionString(parsed.options, "agent-root"),
     assetRoot: optionString(parsed.options, "asset-root"),
     skipAgentSkills: optionBoolean(parsed.options, "skip-agent-skills"),
+    generateTokenIfMissing: optionBoolean(parsed.options, "generate-token-if-missing"),
     serviceOnly: optionBoolean(parsed.options, "service-only"),
     version: optionString(parsed.options, "version"),
     latest: optionBoolean(parsed.options, "latest"),

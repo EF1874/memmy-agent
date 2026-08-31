@@ -573,6 +573,10 @@ describe("AccountService", () => {
         },
         clear() {
           calls.push("clear");
+        },
+        clearIfCloudUuid(cloudUuid) {
+          calls.push(`clear-if:${cloudUuid}`);
+          return true;
         }
       },
       memmyConfigWriter: {
@@ -580,8 +584,10 @@ describe("AccountService", () => {
           calls.push("write-account");
           return projectionResult();
         },
-        async clearAccountModelProjection() {
-          calls.push("clear-account-config");
+        async clearAccountModelProjection(input) {
+          calls.push(
+            `clear-account-config:${input.syncSelectedByokToLocal ?? false}:${input.expectedCloudUuid ?? "none"}`
+          );
           return projectionResult();
         },
         async writeByokModelProjection() {
@@ -599,7 +605,72 @@ describe("AccountService", () => {
     });
 
     await expect(service.logout()).resolves.toEqual({ ok: true });
-    expect(calls).toEqual(["cloud-logout:cloud.login.uuid", "clear-account-config", "clear"]);
+    expect(calls).toEqual([
+      "cloud-logout:cloud.login.uuid",
+      "clear-account-config:true:cloud.login.uuid",
+      "clear-if:cloud.login.uuid"
+    ]);
+  });
+
+  it("does not clear a newer account session when an older manual logout finishes late", async () => {
+    const calls: string[] = [];
+    let activeCloudUuid: string | null = "cloud.login.uuid";
+    let releaseLogout: () => void = () => undefined;
+    const logoutGate = new Promise<void>((resolve) => {
+      releaseLogout = resolve;
+    });
+    const service = createAccountService({
+      cloudClient: {
+        ...createCloudClientStub(),
+        async logout() {
+          calls.push("cloud-logout");
+          await logoutGate;
+        }
+      },
+      accountSessionRepository: {
+        ...createAccountSessionRepositoryStub(),
+        getCloudUuid() {
+          return activeCloudUuid;
+        },
+        clearIfCloudUuid(cloudUuid) {
+          calls.push(`clear-if:${cloudUuid}`);
+          if (activeCloudUuid !== cloudUuid) return false;
+          activeCloudUuid = null;
+          return true;
+        }
+      },
+      memmyConfigWriter: {
+        async writeAccountModelProjection() {
+          return projectionResult();
+        },
+        async clearAccountModelProjection(input) {
+          calls.push(`clear-account-config:${input.expectedCloudUuid ?? "none"}`);
+          return projectionResult();
+        },
+        async writeByokModelProjection() {
+          return projectionResult();
+        },
+        async writeActiveMemoryProfile() {
+          return projectionResult();
+        },
+        async patchChannelConfig() {
+          return undefined;
+        }
+      }
+    });
+
+    const logout = service.logout();
+    await new Promise((resolve) => setImmediate(resolve));
+    activeCloudUuid = "cloud.new.uuid";
+    releaseLogout();
+    await expect(logout).resolves.toEqual({ ok: true });
+
+    expect(activeCloudUuid).toBe("cloud.new.uuid");
+    expect(calls).toEqual([
+      "cloud-logout",
+      "clear-account-config:cloud.login.uuid",
+      "clear-if:cloud.login.uuid"
+    ]);
   });
 
   it("clears the owner-scoped account projection when cloud authentication expires", async () => {
@@ -635,6 +706,10 @@ describe("AccountService", () => {
         },
         clear() {
           calls.push("clear-session");
+        },
+        clearIfCloudUuid(cloudUuid) {
+          calls.push(`clear-session-if:${cloudUuid}`);
+          return true;
         }
       },
       memmyConfigWriter: {
@@ -642,7 +717,10 @@ describe("AccountService", () => {
           return projectionResult();
         },
         async clearAccountModelProjection(input) {
-          calls.push(`clear-account-config:${input.ownerAccountId ?? "none"}`);
+          calls.push(
+            `clear-account-config:${input.ownerAccountId ?? "none"}:${input.syncSelectedByokToLocal ?? false}`
+            + `:${input.expectedCloudUuid ?? "none"}`
+          );
           return projectionResult();
         },
         async writeByokModelProjection() {
@@ -661,7 +739,10 @@ describe("AccountService", () => {
       message: "session expired",
       code: "unauthorized"
     });
-    expect(calls).toEqual(["clear-account-config:user-1", "clear-session"]);
+    expect(calls).toEqual([
+      "clear-account-config:user-1:false:cloud.login.uuid",
+      "clear-session-if:cloud.login.uuid"
+    ]);
   });
 });
 
@@ -726,6 +807,9 @@ function createAccountSessionRepositoryStub() {
     },
     clear() {
       return undefined;
+    },
+    clearIfCloudUuid() {
+      return true;
     },
     getLastCodeSentAt() {
       return null;

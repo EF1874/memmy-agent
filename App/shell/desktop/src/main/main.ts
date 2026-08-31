@@ -1,4 +1,4 @@
-import { createLocalBackend, loadCloudServiceEnv, syncRuntimeConfigForStartup, trackAnalyticsEvent, type BootstrapScenario, type LocalBackend } from "@memmy/backend";
+import { createHttpMemmyAgentAdminClient, createLocalBackend, loadCloudServiceEnv, syncRuntimeConfigForStartup, trackAnalyticsEvent, type BootstrapScenario, type LocalBackend } from "@memmy/backend";
 import { resolveCloudServiceBaseUrl, type AccountChannel } from "@memmy/local-api-contracts";
 import type {
   DesktopAppInfo,
@@ -16,7 +16,7 @@ import type {
 } from "@memmy/desktop-interface";
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, shell, systemPreferences, Tray, type Event as ElectronEvent, type FileFilter, type IpcMainEvent, type MenuItemConstructorOptions, type Rectangle, type WebContents } from "electron";
 import { spawn } from "node:child_process";
-import { constants as fsConstants, cpSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { constants as fsConstants, existsSync, readFileSync } from "node:fs";
 import { access, appendFile, chmod, copyFile, lstat, mkdir, open, readFile, readdir, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
@@ -96,6 +96,16 @@ import {
   resolveUpdateSplashHtml,
   type StartupSplashLanguage
 } from "./startup-splash.js";
+import {
+  advanceWindowsDataMigrationAfterBoot,
+  readWindowsDataMigrationConsistency,
+  recoverWindowsDataMigrationForStartup,
+  recordWindowsDataLayoutAfterBoot,
+  resolveWindowsDataLayout,
+  type WindowsDataMigrationConsistency,
+  type WindowsDataLayout
+} from "./windows-data-layout.js";
+import { createWindowsUpdateLauncherFile } from "./windows-update-launcher.js";
 
 let mainWindow: BrowserWindow | null = null;
 let petWindow: BrowserWindow | null = null;
@@ -108,6 +118,9 @@ let memoryServiceControl: { baseUrl: string; token: string } | null = null;
 let memoryServiceRestart: Promise<DesktopMemoryServiceRestartResult> | null = null;
 let packagedRendererServer: PackagedRendererStaticServer | null = null;
 let packagedRendererBaseUrl: string | null = null;
+let windowsDataLayout: WindowsDataLayout | null = null;
+const rendererReadyWebContentsIds = new Set<number>();
+const rendererReadyWaiters = new Map<number, (verified: boolean) => void>();
 let queuedPetWindowClose: ReturnType<typeof setTimeout> | null = null;
 let petWindowCloseActivateSuppressionTimer: ReturnType<typeof setTimeout> | null = null;
 let latestPetWindowLayout: PetWindowLayout | null = null;
@@ -311,6 +324,18 @@ async function boot(): Promise<void> {
     registerIpcHandlers();
     await installBundledCliIfNeeded();
     await startPackagedRendererServerIfNeeded();
+    let windowsMigrationConsistency: WindowsDataMigrationConsistency | undefined;
+    if (windowsDataLayout) {
+      try {
+        windowsMigrationConsistency = await readWindowsDataMigrationConsistency(windowsDataLayout);
+      } catch (error) {
+        const recovery = await recoverWindowsDataMigrationForStartup(
+          windowsDataLayout,
+          `migration state could not be read: ${formatStartupError(error)}`
+        );
+        await writePackagedStartupLog(`boot:data-migration-state-failed-open:${JSON.stringify(recovery)}`);
+      }
+    }
     const appDatabaseFile = join(app.getPath("userData"), "app.sqlite");
     runtimeServices = await startManagedRuntimeServices({
       appPath: app.getAppPath(),
@@ -319,11 +344,26 @@ async function boot(): Promise<void> {
       logDirectory: app.getPath("logs"),
       logLevel: getCurrentLogLevel(),
       beforeStartServices: async ({ databasePath, configPath }) => {
-        await syncRuntimeConfigForStartup({
+        const syncOptions = {
           databasePath,
           memmyConfigPath: configPath,
           accountChannel: resolveCurrentDesktopAccountChannel()
-        });
+        };
+        try {
+          await syncRuntimeConfigForStartup({
+            ...syncOptions,
+            ...(windowsMigrationConsistency ? { migrationConsistency: windowsMigrationConsistency } : {})
+          });
+        } catch (error) {
+          if (!windowsDataLayout || !isWindowsDataMigrationConsistencyError(error)) throw error;
+          const recovery = await recoverWindowsDataMigrationForStartup(
+            windowsDataLayout,
+            formatStartupError(error)
+          );
+          windowsMigrationConsistency = undefined;
+          await writePackagedStartupLog(`boot:data-migration-consistency-failed-open:${JSON.stringify(recovery)}`);
+          await syncRuntimeConfigForStartup(syncOptions);
+        }
       },
       runtimeEntries: app.isPackaged
         ? undefined
@@ -337,17 +377,37 @@ async function boot(): Promise<void> {
     });
     runtimeConfig = await startLocalApi(runtimeServices);
     isBootReady = true;
-    createInitialWindow();
+    const initialWindow = createInitialWindow();
     triggerAgentSourceAutoInject("boot");
     if (process.platform === "darwin") {
       syncMenuBarTray(resolveMenuBarIconEnabled());
     }
     setDevelopmentDockIcon();
-    await writePackagedStartupLog("boot:ready");
+    const rendererVerified = !windowsDataLayout || await waitForInitialRendererVerification(initialWindow);
+    await writePackagedStartupLog(rendererVerified ? "boot:ready" : "boot:ready-data-migration-verification-deferred");
+    if (windowsDataLayout && rendererVerified) {
+      await recordWindowsDataLayoutAfterBoot(
+        windowsDataLayout,
+        resolveDesktopAppVersion()
+      ).catch(async (error: unknown) => {
+        console.warn("Windows data layout record deferred:", error);
+        await writePackagedStartupLog(`boot:data-layout-record-deferred\n${formatStartupError(error)}`);
+      });
+      await advanceWindowsDataMigrationAfterBoot(
+        windowsDataLayout,
+        [join(homedir(), ".memmy")]
+      ).catch(async (error: unknown) => {
+        console.warn("Windows data migration cleanup deferred:", error);
+        await writePackagedStartupLog(`boot:data-migration-cleanup-deferred\n${formatStartupError(error)}`);
+      });
+    }
     startRequiredUpdateBackgroundChecks();
     // Fallback cleanup of leftover packages in the updates directory: deferred and async, to avoid
     // the startup peak and not block the window from showing.
-    setTimeout(() => void pruneUpdatesDirectory(), UPDATES_PRUNE_STARTUP_DELAY_MS);
+    setTimeout(() => {
+      void pruneUpdatesDirectory();
+      void pruneWindowsLegacyUpdateCaches();
+    }, UPDATES_PRUNE_STARTUP_DELAY_MS);
   } catch (error) {
     await runtimeServices?.close();
     runtimeServices = null;
@@ -361,9 +421,17 @@ async function boot(): Promise<void> {
  */
 function configureAppIdentity(): void {
   const edition = resolveCurrentDesktopEdition();
-  const userDataPath = resolveDesktopUserDataPath(edition);
-  const memmyHome = resolveDesktopRuntimeHomePath(edition);
-  migratePackagedWindowsDataIfNeeded(edition, userDataPath, memmyHome);
+  windowsDataLayout = resolveWindowsDataLayout({
+    platform: process.platform,
+    isPackaged: app.isPackaged,
+    isWindowsStore: Boolean((process as NodeJS.Process & { windowsStore?: boolean }).windowsStore),
+    executablePath: process.execPath,
+    appDataPath: app.getPath("appData"),
+    localAppDataPath: process.env.LOCALAPPDATA?.trim() ?? "",
+    homeDirectory: homedir()
+  });
+  const userDataPath = windowsDataLayout?.userDataPath ?? resolveDesktopUserDataPath(edition);
+  const memmyHome = windowsDataLayout?.runtimeHomePath ?? resolveDesktopRuntimeHomePath(edition);
   app.setName("Memmy");
   if (process.platform === "win32") {
     app.setAppUserModelId(WINDOWS_APP_USER_MODEL_ID);
@@ -383,64 +451,12 @@ function configureAppIdentity(): void {
   }
 }
 
-function resolvePackagedWindowsDataRoot(): string | null {
-  if (process.platform !== "win32" || !app.isPackaged) {
-    return null;
-  }
-
-  return join(dirname(process.execPath), "data");
-}
-
 function resolveDesktopUserDataPath(edition: DesktopEdition): string {
-  return join(
-    resolvePackagedWindowsDataRoot() ?? app.getPath("appData"),
-    desktopUserDataDirectoryName(edition)
-  );
+  return join(app.getPath("appData"), desktopUserDataDirectoryName(edition));
 }
 
 function resolveDesktopRuntimeHomePath(edition: DesktopEdition): string {
-  return join(
-    resolvePackagedWindowsDataRoot() ?? homedir(),
-    desktopRuntimeHomeDirectoryName(edition)
-  );
-}
-
-function migratePackagedWindowsDataIfNeeded(
-  edition: DesktopEdition,
-  userDataPath: string,
-  memmyHome: string
-): void {
-  if (!resolvePackagedWindowsDataRoot()) {
-    return;
-  }
-
-  copyDirectoryIfMissing(join(app.getPath("appData"), desktopUserDataDirectoryName(edition)), userDataPath);
-  copyDirectoryIfMissing(join(homedir(), desktopRuntimeHomeDirectoryName(edition)), memmyHome);
-}
-
-function copyDirectoryIfMissing(sourcePath: string, targetPath: string): void {
-  if (
-    pathsEqual(sourcePath, targetPath) ||
-    !existsSync(sourcePath) ||
-    existsSync(targetPath)
-  ) {
-    return;
-  }
-
-  try {
-    mkdirSync(dirname(targetPath), { recursive: true });
-    cpSync(sourcePath, targetPath, { recursive: true });
-  } catch (error) {
-    console.warn(`Failed to migrate Memmy data from ${sourcePath} to ${targetPath}:`, error);
-  }
-}
-
-function pathsEqual(left: string, right: string): boolean {
-  const normalizedLeft = resolve(left);
-  const normalizedRight = resolve(right);
-  return process.platform === "win32"
-    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
-    : normalizedLeft === normalizedRight;
+  return join(homedir(), desktopRuntimeHomeDirectoryName(edition));
 }
 
 /**
@@ -774,6 +790,12 @@ async function startLocalApi(services: ManagedRuntimeServices | null): Promise<D
     bootstrapScenario: getBootstrapScenario(),
     desktopInstallFingerprint,
     accountChannel: resolveCurrentDesktopAccountChannel(),
+    memmyAgentAdminClient: services
+      ? createHttpMemmyAgentAdminClient({
+          baseUrl: services.agentGateway.baseUrl,
+          bootstrapSecret: services.agentGateway.bootstrapSecret
+        })
+      : undefined,
     memmyConfigPath: process.env.MEMMY_CONFIG,
     memoryBaseUrl: memoryControl.baseUrl,
     memoryReady: services?.memory.ready,
@@ -841,6 +863,12 @@ function registerIpcHandlers(): void {
   }
 
   areIpcHandlersRegistered = true;
+
+  ipcMain.on("memmy:renderer-ready", (event) => {
+    const senderId = event.sender.id;
+    rendererReadyWebContentsIds.add(senderId);
+    rendererReadyWaiters.get(senderId)?.(true);
+  });
 
   ipcMain.handle("memmy:get-runtime-config", () => {
     if (!runtimeConfig) {
@@ -2641,7 +2669,7 @@ async function installWindowsUpdateInBackground(
     await clearWindowsUpdatePromptMarker().catch(() => undefined);
   }
   await writeFile(helperPath, createWindowsUpdateInstallScript(), { mode: 0o700 });
-  await writeFile(launcherPath, createWindowsUpdateLauncherScript([
+  await writeFile(launcherPath, createWindowsUpdateLauncherFile([
     "powershell.exe",
     "-NoProfile",
     "-ExecutionPolicy",
@@ -2657,7 +2685,7 @@ async function installWindowsUpdateInBackground(
     options.openAfterInstall ? "1" : "0",
     resolvePreparedRequiredUpdatePath(),
     options.expectedVersion ?? ""
-  ]), "utf8");
+  ]));
   await appendFile(logPath, `[${new Date().toISOString()}] queued Memmy Windows update helper "${helperPath}"\n`).catch(() => undefined);
 
   const helper = spawn("wscript.exe", [launcherPath], {
@@ -2674,36 +2702,6 @@ async function installWindowsUpdateInBackground(
     scheduleQuitForManualUpdateInstall();
   }
   return { filePath, opened: false, willQuit: options.quitCurrentApp, background: true };
-}
-
-/**
- * Creates the VBS script that launches the Windows update helper hidden.
- *
- * @param command The PowerShell helper launch command and arguments.
- * @returns The VBS script content.
- */
-function createWindowsUpdateLauncherScript(command: string[]): string {
-  const shellCommand = command.map(quoteWindowsShellArgument).join(" ");
-  return `Set shell = CreateObject("WScript.Shell")
-shell.Run "${escapeVbsString(shellCommand)}", 0, False
-Set fso = CreateObject("Scripting.FileSystemObject")
-On Error Resume Next
-fso.DeleteFile WScript.ScriptFullName, True
-`;
-}
-
-/**
- * Quotes a Windows shell command argument.
- *
- * @param value The argument value.
- * @returns The argument ready to be spliced into the command line.
- */
-function quoteWindowsShellArgument(value: string): string {
-  return `"${value.replace(/"/g, "\\\"")}"`;
-}
-
-function escapeVbsString(value: string): string {
-  return value.replace(/"/g, "\"\"");
 }
 
 function createWindowsUpdateInstallScript(): string {
@@ -2936,7 +2934,7 @@ function scheduleQuitForManualUpdateInstall(): void {
  * @returns The local update package directory.
  */
 function resolveUpdatesDirectory(): string {
-  return join(app.getPath("userData"), "updates");
+  return windowsDataLayout?.updatesPath ?? join(app.getPath("userData"), "updates");
 }
 
 /**
@@ -3026,6 +3024,33 @@ async function pruneUpdatesDirectory(): Promise<void> {
     }
   } catch (error) {
     console.warn("prune updates directory skipped:", error);
+  }
+}
+
+/**
+ * Removes obsolete Windows installer caches after a successful boot. These paths contain copied
+ * installers and relay helpers, not account or memory data. An active unified update lock always
+ * suppresses cleanup so recovery still has every file it needs.
+ */
+async function pruneWindowsLegacyUpdateCaches(): Promise<void> {
+  if (process.platform !== "win32" || !app.isPackaged || !windowsDataLayout) return;
+  const relayLockPath = resolveWindowsUpgradeRelayLockPath();
+  if (!relayLockPath || existsSync(relayLockPath)) return;
+
+  const legacyUserDataUpdatesPath = join(app.getPath("userData"), "updates");
+  if (resolve(legacyUserDataUpdatesPath).toLowerCase() !== resolve(windowsDataLayout.updatesPath).toLowerCase()) {
+    await rm(legacyUserDataUpdatesPath, { recursive: true, force: true }).catch(() => undefined);
+  }
+
+  const stagingRoot = dirname(relayLockPath);
+  const stagingEntries = await readdir(stagingRoot).catch(() => []);
+  await Promise.all(stagingEntries
+    .filter((entry) => entry.toLowerCase() !== "active.lock")
+    .map((entry) => rm(join(stagingRoot, entry), { recursive: true, force: true }).catch(() => undefined)));
+
+  const localAppData = process.env.LOCALAPPDATA?.trim();
+  if (localAppData) {
+    await rm(join(localAppData, "@memmydesktop-updater"), { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
@@ -3364,14 +3389,50 @@ function closeSplashWindow(): void {
   }
 }
 
-function createInitialWindow(): void {
+function createInitialWindow(): BrowserWindow | null {
   if (resolveInitialWindowMode() === "pet") {
     setPetWindowMode(true);
     closeSplashWindow(); // Pet mode starts fast; no splash needed
-    return;
+    return petWindow;
   }
 
-  createMainWindow();
+  return createMainWindow();
+}
+
+function waitForInitialRendererVerification(targetWindow: BrowserWindow | null): Promise<boolean> {
+  if (!targetWindow || targetWindow.isDestroyed()) return Promise.resolve(false);
+  const webContentsId = targetWindow.webContents.id;
+  if (rendererReadyWebContentsIds.has(webContentsId)) return Promise.resolve(true);
+  return new Promise((resolveVerification) => {
+    let settled = false;
+    const finish = (verified: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      targetWindow.webContents.removeListener("did-fail-load", handleFailed);
+      targetWindow.removeListener("closed", handleClosed);
+      if (rendererReadyWaiters.get(webContentsId) === finish) {
+        rendererReadyWaiters.delete(webContentsId);
+      }
+      resolveVerification(verified);
+    };
+    const handleFailed = (_event: ElectronEvent, _errorCode: number, _errorDescription: string, _validatedUrl: string, isMainFrame: boolean) => {
+      if (isMainFrame) finish(false);
+    };
+    const handleClosed = () => finish(false);
+    const timeout = setTimeout(() => finish(false), 30_000);
+    timeout.unref?.();
+    rendererReadyWaiters.set(webContentsId, finish);
+    targetWindow.webContents.on("did-fail-load", handleFailed);
+    targetWindow.once("closed", handleClosed);
+    if (rendererReadyWebContentsIds.has(webContentsId)) finish(true);
+  });
+}
+
+function isWindowsDataMigrationConsistencyError(error: unknown): boolean {
+  return error instanceof Error
+    && "code" in error
+    && error.code === "windows_data_migration_inconsistent";
 }
 
 /**
@@ -4757,6 +4818,12 @@ app.whenReady().then(async () => {
     // An instance is already running: this instance exits directly, to avoid a second instance
     // contending for the fixed ports (memory 18960 / agent gateway) and causing a startup failure.
     app.quit();
+    return;
+  }
+
+  const windowsUpgradeLockPath = resolveWindowsUpgradeRelayLockPath();
+  if (windowsUpgradeLockPath && existsSync(windowsUpgradeLockPath)) {
+    app.exit(0);
     return;
   }
 

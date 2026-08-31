@@ -200,10 +200,6 @@ export function resolveFileEditPaths(toolName: string, tool: any, workspace: str
   return filePath ? [filePath] : [];
 }
 
-function resolveRawFileEditPath(tool: any, workspace: string | null | undefined, raw: string): string | null {
-  return resolveWithTool(tool, workspace, raw);
-}
-
 function resolveApplyPatchPaths(tool: any, _workspace: string | null | undefined, params?: Record<string, any> | null): string[] {
   if (!params || typeof params.input !== "string" || typeof tool?.resolve !== "function") return [];
   const out: string[] = [];

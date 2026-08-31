@@ -137,8 +137,27 @@ Compared with "personal AI Agents" like Hermes and OpenClaw, what sets
 
 ### Option 2: `memmy` CLI (Agent Runtime)
 
+On Linux x64 or arm64 with Node.js 22 or newer and an available systemd user session:
+
 ```bash
-memmy onboard                              # Initialize ~/.memmy/config.yaml and the workspace
+curl -fsSL https://raw.githubusercontent.com/MemTensor/memmy-agent/main/scripts/install.sh | bash
+memmy
+```
+
+The installer enables the local Memory Service immediately as `memmy-memory.service`. The first bare `memmy` invocation opens the model setup wizard when needed, then enables `memmy-gateway.service`, waits for it to become ready, and enters the TUI. Both are `systemd --user` services bound to localhost and remain available after the TUI or terminal exits. They start again on later logins; the installer does not enable linger. Only the installer launcher activates this service management, so source-built Linux CLIs keep their existing behavior.
+
+Before starting or reconnecting to the Gateway, `memmy` refreshes a private `~/.memmy/systemd/gateway.env` file (mode `0600`) with configuration-referenced environment variables, common Provider credentials, and the terminal `PATH`. If those values change, the next bare `memmy` invocation restarts the user service with the new environment.
+
+```bash
+systemctl --user status memmy-memory.service
+systemctl --user status memmy-gateway.service
+```
+
+The installer initializes Memory without changing Codex, Claude Code, Cursor, or other agents. Run `memmy-memory init` (all detected agents) or `memmy-memory init --agent <agent>` when you explicitly want to install the Memory Skill and the supported Hook/plugin for an agent.
+
+```bash
+memmy onboard                              # Configure models, providers, gateway, memory, and tools interactively
+memmy onboard --defaults                   # Initialize ~/.memmy/config.yaml and the workspace with defaults
 memmy status                               # Check config, workspace, model, and provider status
 memmy agent --message "Hi, introduce the current workspace"  # Single-turn message
 memmy                                      # Run without a subcommand to enter interactive chat (TUI)

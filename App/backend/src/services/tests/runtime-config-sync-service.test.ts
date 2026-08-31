@@ -3,20 +3,30 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import YAML from "yaml";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createAppStateStore, type AppStateStore } from "../../infrastructure/app-state-store/index.js";
-import { createMemmyConfigWriter } from "../../infrastructure/memmy-config/index.js";
+import {
+  createMemmyConfigWriter,
+  writeAccountModelProjectionToMemmyConfig
+} from "../../infrastructure/memmy-config/index.js";
 import { createAppConfigService } from "../app-config-service.js";
 import { syncRuntimeConfigWithAppState } from "../runtime-config-sync-service.js";
 
 let tempDir: string | undefined;
 let store: AppStateStore | undefined;
+const originalCloudService = process.env.MEMMY_CLOUD_SERVICE;
+
+beforeEach(() => {
+  process.env.MEMMY_CLOUD_SERVICE = "https://cloud.example.test";
+});
 
 afterEach(() => {
   store?.close();
   store = undefined;
   if (tempDir) rmSync(tempDir, { recursive: true, force: true });
   tempDir = undefined;
+  if (originalCloudService === undefined) delete process.env.MEMMY_CLOUD_SERVICE;
+  else process.env.MEMMY_CLOUD_SERVICE = originalCloudService;
 });
 
 describe("syncRuntimeConfigWithAppState", () => {
@@ -69,7 +79,7 @@ describe("syncRuntimeConfigWithAppState", () => {
       ...context,
       accountChannel: "email"
     })).resolves.toMatchObject({
-      source: "runtime_config", mode: "account", hydratedAppState: true, wroteConfig: false
+      source: "runtime_config", mode: "account", hydratedAppState: true, wroteConfig: true
     });
     expect(context.store.repositories.bootstrap.getAppSettings().userMode).toBe("account");
     expect(context.store.repositories.accountSession.get()).toMatchObject({
@@ -77,6 +87,42 @@ describe("syncRuntimeConfigWithAppState", () => {
       profile: { userId: "owner-a" }
     });
     expect(context.store.db.prepare("SELECT uuid FROM cloud_accounts WHERE uuid = ?").get("cloud-token-a")).toBeUndefined();
+  });
+
+  it("refreshes local BYOK Agent candidates into an already authenticated account during startup", async () => {
+    const context = createContext();
+    seedAccountSession(context);
+    context.writeConfig(currentByokCatalog());
+    await writeAccountModelProjectionToMemmyConfig({
+      cloudUuid: "cloud-token-a",
+      userId: "owner-a"
+    }, context.memmyConfigPath);
+
+    const stale = YAML.parse(readFileSync(context.memmyConfigPath, "utf8"));
+    stale.app.userMode = "account";
+    stale.app.accountByokLocalSelectionBaseline = {
+      ownerAccountId: "owner-a",
+      candidates: ["agent"]
+    };
+    stale.modelAssignments.account.agent.candidates = stale.modelAssignments.account.agent.candidates
+      .filter((presetId: string) => stale.modelPresets[presetId]?.source === "account");
+    stale.modelAssignments.account.agent.default = stale.modelAssignments.account.agent.candidates[0];
+    context.writeConfig(stale);
+
+    await expect(syncRuntimeConfigWithAppState({
+      ...context,
+      accountChannel: "email"
+    })).resolves.toMatchObject({
+      source: "runtime_config",
+      mode: "account",
+      hydratedAppState: true,
+      wroteConfig: true,
+      reason: "refreshed_account_projection_and_hydrated_account"
+    });
+
+    const saved = YAML.parse(readFileSync(context.memmyConfigPath, "utf8"));
+    expect(saved.modelAssignments.account.agent.candidates).toContain("agent");
+    expect(saved.app.accountByokLocalSelectionBaseline).toBeUndefined();
   });
 
   it("keeps an unmarked legacy email session when the INTL package starts", async () => {
@@ -96,7 +142,7 @@ describe("syncRuntimeConfigWithAppState", () => {
       ...context,
       accountChannel: "email"
     })).resolves.toMatchObject({
-      source: "runtime_config", mode: "account", hydratedAppState: true, wroteConfig: false
+      source: "runtime_config", mode: "account", hydratedAppState: true, wroteConfig: true
     });
     expect(context.store.repositories.accountSession.get()).toMatchObject({
       authenticated: true,
@@ -348,6 +394,153 @@ describe("syncRuntimeConfigWithAppState", () => {
     expect(context.store.repositories.bootstrap.getAppSettings().userMode).toBe("account");
   });
 
+  it("restores the account model projection from an authoritative migrated session without losing BYOK", async () => {
+    const context = createContext();
+    seedAccountSession(context);
+    const byok = currentByokCatalog() as any;
+    context.writeConfig({
+      ...byok,
+      app: { ...byok.app, userMode: "account" }
+    });
+
+    await expect(syncRuntimeConfigWithAppState({
+      ...context,
+      accountChannel: "email",
+      migrationConsistency: {
+        accountSourceIsAuthoritative: true,
+        runtimeSourceWasMigrated: false,
+        categorySourcesShareGeneration: false
+      }
+    })).resolves.toMatchObject({
+      source: "runtime_config",
+      mode: "account",
+      provider: "memmy_account",
+      hydratedAppState: true
+    });
+
+    const saved = YAML.parse(readFileSync(context.memmyConfigPath, "utf8"));
+    expect(saved.providers.openai).toEqual(byok.providers.openai);
+    expect(saved.modelAssignments.byok).toEqual(byok.modelAssignments.byok);
+    expect(saved.providers.memmy_account).toMatchObject({
+      ownerAccountId: "owner-a",
+      apiKey: "cloud-token-a"
+    });
+    expect(saved.modelAssignments.account.ownerAccountId).toBe("owner-a");
+  });
+
+  it("uses an authoritative migrated account database to replace only a stale account projection", async () => {
+    const context = createContext();
+    seedAccountSession(context);
+    const byok = currentByokCatalog() as any;
+    const staleAccount = currentAccountCatalog() as any;
+    staleAccount.app.cloudUuid = "stale-cloud-token";
+    staleAccount.app.userId = "stale-owner";
+    staleAccount.providers.memmy_account.apiKey = "stale-cloud-token";
+    staleAccount.providers.memmy_account.ownerAccountId = "stale-owner";
+    staleAccount.modelPresets.platform.ownerAccountId = "stale-owner";
+    staleAccount.modelAssignments.account.ownerAccountId = "stale-owner";
+    context.writeConfig({
+      ...byok,
+      app: { ...staleAccount.app, userMode: "account" },
+      providers: { ...byok.providers, ...staleAccount.providers },
+      modelPresets: { ...byok.modelPresets, ...staleAccount.modelPresets },
+      modelAssignments: {
+        byok: byok.modelAssignments.byok,
+        account: staleAccount.modelAssignments.account
+      }
+    });
+
+    await expect(syncRuntimeConfigWithAppState({
+      ...context,
+      accountChannel: "email",
+      migrationConsistency: {
+        accountSourceIsAuthoritative: true,
+        runtimeSourceWasMigrated: false,
+        categorySourcesShareGeneration: false
+      }
+    })).resolves.toMatchObject({ mode: "account", hydratedAppState: true });
+
+    const saved = YAML.parse(readFileSync(context.memmyConfigPath, "utf8"));
+    expect(saved.providers.openai).toEqual(byok.providers.openai);
+    expect(saved.modelAssignments.byok).toEqual(byok.modelAssignments.byok);
+    expect(saved.providers.memmy_account.ownerAccountId).toBe("owner-a");
+    expect(saved.modelAssignments.account.ownerAccountId).toBe("owner-a");
+    expect(JSON.stringify(saved)).not.toContain("stale-owner");
+  });
+
+  it("fills a missing migrated account owner from the authoritative account database", async () => {
+    const context = createContext();
+    seedAccountSession(context);
+    const config = currentAccountCatalog() as any;
+    delete config.app.userId;
+    delete config.providers.memmy_account.ownerAccountId;
+    delete config.modelPresets.platform.ownerAccountId;
+    delete config.modelAssignments.account.ownerAccountId;
+    context.writeConfig(config);
+
+    await expect(syncRuntimeConfigWithAppState({
+      ...context,
+      accountChannel: "email",
+      migrationConsistency: {
+        accountSourceIsAuthoritative: true,
+        runtimeSourceWasMigrated: false,
+        categorySourcesShareGeneration: false
+      }
+    })).resolves.toMatchObject({ mode: "account", hydratedAppState: true });
+
+    const saved = YAML.parse(readFileSync(context.memmyConfigPath, "utf8"));
+    expect(saved.app.userId).toBe("owner-a");
+    expect(saved.providers.memmy_account.ownerAccountId).toBe("owner-a");
+    expect(saved.modelAssignments.account.ownerAccountId).toBe("owner-a");
+  });
+
+  it("rejects a same-generation migrated account owner mismatch without clearing either side", async () => {
+    const context = createContext();
+    seedAccountSession(context);
+    const config = currentAccountCatalog() as any;
+    config.app.cloudUuid = "foreign-token";
+    config.app.userId = "foreign-owner";
+    config.providers.memmy_account.apiKey = "foreign-token";
+    config.providers.memmy_account.ownerAccountId = "foreign-owner";
+    config.modelPresets.platform.ownerAccountId = "foreign-owner";
+    config.modelAssignments.account.ownerAccountId = "foreign-owner";
+    context.writeConfig(config);
+
+    await expect(syncRuntimeConfigWithAppState({
+      ...context,
+      accountChannel: "email",
+      migrationConsistency: {
+        accountSourceIsAuthoritative: true,
+        runtimeSourceWasMigrated: true,
+        categorySourcesShareGeneration: true
+      }
+    })).rejects.toMatchObject({ code: "windows_data_migration_inconsistent" });
+
+    expect(context.store.repositories.accountSession.get()).toMatchObject({
+      authenticated: true,
+      profile: { userId: "owner-a" }
+    });
+    const saved = YAML.parse(readFileSync(context.memmyConfigPath, "utf8"));
+    expect(saved.providers.memmy_account.ownerAccountId).toBe("foreign-owner");
+  });
+
+  it("rejects a migrated authentication-channel mismatch without logging the user out", async () => {
+    const context = createContext();
+    seedAccountSession(context, "phone");
+    context.writeConfig(currentAccountCatalog());
+
+    await expect(syncRuntimeConfigWithAppState({
+      ...context,
+      accountChannel: "email",
+      migrationConsistency: {
+        accountSourceIsAuthoritative: true,
+        runtimeSourceWasMigrated: true,
+        categorySourcesShareGeneration: true
+      }
+    })).rejects.toMatchObject({ code: "windows_data_migration_inconsistent" });
+    expect(context.store.repositories.accountSession.get()).toMatchObject({ authenticated: true });
+  });
+
   it("never recreates missing YAML from legacy SQLite app-state", async () => {
     const context = createContext();
     context.store.repositories.bootstrap.updateAppSettings({ userMode: "byok" });
@@ -425,6 +618,30 @@ function currentAccountCatalog(): Record<string, unknown> {
       account: { ownerAccountId: "owner-a", agent: { candidates: ["platform"], default: "platform" } }
     }
   };
+}
+
+function seedAccountSession(
+  context: ReturnType<typeof createContext>,
+  authChannel: "email" | "phone" = "email"
+): void {
+  context.store.repositories.accountSession.upsert({
+    profile: {
+      userId: "owner-a",
+      email: authChannel === "email" ? "a@example.test" : null,
+      phoneNumber: authChannel === "phone" ? "13800138000" : null,
+      nickname: "a",
+      avatarUrl: null,
+      planType: "free",
+      hasFinishedGuide: false,
+      region: null,
+      registeredAt: "2026-06-02T10:00:00.000Z",
+      rawProfile: { id: "owner-a", userName: "a" }
+    },
+    uuid: "account-a",
+    cloudUuid: "cloud-token-a",
+    authChannel
+  });
+  context.store.repositories.bootstrap.updateAppSettings({ userMode: "account" });
 }
 
 function createContext(): {

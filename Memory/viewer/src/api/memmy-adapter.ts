@@ -106,10 +106,11 @@ function health(value: JsonRecord): JsonRecord {
   const summary = record(models.summary);
   const evolution = record(models.evolution);
   const embedding = record(models.embedding);
+  const serviceVersion = string(value.serviceVersion) || string(value.version);
   return {
     ...value,
-    instanceId: `memmy-memory-${string(value.serviceVersion) || string(value.version) || "2.1.0"}`,
-    version: string(value.serviceVersion) || string(value.version),
+    instanceId: string(value.instanceId) || (serviceVersion ? `memmy-memory-${serviceVersion}` : "memmy-memory"),
+    version: serviceVersion,
     agent: "memmy",
     llm: modelInfo(summary),
     skillEvolver: {
@@ -132,7 +133,7 @@ function overview(value: JsonRecord): JsonRecord {
   const policyTotal = number(layers.L2);
   return {
     ok: true,
-    version: "2.1.0",
+    version: string(value.serviceVersion) || string(value.version),
     traces: number(layers.L1),
     userMemories,
     episodes: Object.values(episodeStats).reduce<number>((sum, item) => sum + number(item), 0),

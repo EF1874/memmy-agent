@@ -30,11 +30,13 @@ import {
   syncRuntimeConfigWithAppState
 } from "./services/runtime-config-sync-service.js";
 import { loadCloudServiceEnv } from "./load-env.js";
+import type { MemmyAgentAdminClient } from "./adapters/outbound/memmy-agent-admin-client/index.js";
 
 export type { BootstrapScenario };
 export { loadCloudServiceEnv };
 export { syncRuntimeConfigForStartup };
 export { trackAnalyticsEvent } from "./analytics/analytics-transport.js";
+export { createHttpMemmyAgentAdminClient } from "./adapters/outbound/memmy-agent-admin-client/http-memmy-agent-admin-client.js";
 
 const DEFAULT_MEMORY_LAYER_TIMEOUT_MS = 20_000;
 
@@ -58,6 +60,8 @@ export interface CreateLocalBackendOptions {
   desktopInstallFingerprint?: string;
   /** Login channel supported by the current desktop package. */
   accountChannel?: AccountChannel;
+  /** Running Agent Gateway client; when present, refreshes MCP after startup config writes. */
+  memmyAgentAdminClient?: MemmyAgentAdminClient;
 }
 
 export interface LocalBackend {
@@ -135,6 +139,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       memmyConfigPath,
       scanPreferencesStore,
       accountChannel: options.accountChannel,
+      memmyAgentAdminClient: options.memmyAgentAdminClient,
       memmyAgentAdminBootstrapSecret: await readAgentGatewayBootstrapSecret(memmyConfigPath)
     });
     const localToken = await permissionManager.getRuntimeToken();
@@ -161,6 +166,14 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       headers: { "x-memmy-mcp-token": composioMcpToken },
       toolTimeout: 60
     });
+    if (options.memmyAgentAdminClient) {
+      try {
+        const result = await options.memmyAgentAdminClient.reloadMcpConfig();
+        if (!result.ok) console.warn(`Agent MCP reload did not complete: ${result.message}`);
+      } catch (error) {
+        console.warn(`Agent MCP reload unavailable during backend startup: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
 
     const runtimeConfig = RuntimeConfigSchema.parse({
       baseUrl: `http://127.0.0.1:${(address as AddressInfo).port}`,

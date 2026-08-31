@@ -856,14 +856,52 @@ function resolveMemoryEmbedding(
     : mode === "account" && hasCatalog
       ? "cloud"
       : DEFAULT_MEMMY_CONFIG.embedding.mode;
-  if (embeddingMode === "local") {
+  const rawAssignedPreset = mode
+    ? asRecord(asRecord(rootConfig.modelAssignments)[mode]).embedding
+    : undefined;
+  const hasExplicitAssignment = rawAssignedPreset !== undefined && rawAssignedPreset !== null;
+  const resolved = resolveMemoryAssignment(rootConfig, mode, "embedding");
+
+  if (mode === "byok" && hasCatalog && !hasExplicitAssignment) {
     return {
       ...embedding,
       mode: "local",
       provider: "local",
-      sourceProvider: "local"
+      sourceProvider: "local",
+      endpoint: undefined,
+      model: DEFAULT_MEMMY_CONFIG.embedding.model,
+      apiKey: undefined,
+      extraHeaders: undefined,
+      extraBody: undefined,
+      actualModelContext: undefined,
+      selectionError: undefined
     };
   }
+
+  if (embeddingMode === "local") {
+    if (hasExplicitAssignment && !resolved.ok) {
+      return {
+        ...embedding,
+        provider: "openai_compatible",
+        model: "",
+        selectionError: "model_selection_unavailable"
+      };
+    }
+    return {
+      ...embedding,
+      mode: "local",
+      provider: "local",
+      sourceProvider: "local",
+      endpoint: undefined,
+      model: DEFAULT_MEMMY_CONFIG.embedding.model,
+      apiKey: undefined,
+      extraHeaders: undefined,
+      extraBody: undefined,
+      actualModelContext: undefined,
+      selectionError: undefined
+    };
+  }
+
   if (embeddingMode === "custom") {
     const custom = asRecord(embedding.custom);
     return {
@@ -884,7 +922,6 @@ function resolveMemoryEmbedding(
       selectionError: "model_selection_unavailable"
     };
   }
-  const resolved = resolveMemoryAssignment(rootConfig, mode, "embedding");
   if (!resolved.ok) {
     return {
       ...embedding,
@@ -904,7 +941,7 @@ function resolveMemoryEmbedding(
   }
   return {
     ...embedding,
-    mode: "cloud",
+    mode: resolved.context.source === "account" ? "cloud" : "custom",
     sourceProvider: resolved.context.provider,
     provider: "openai_compatible",
     endpoint: resolved.provider.apiBase,
