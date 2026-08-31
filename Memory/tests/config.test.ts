@@ -3,6 +3,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import YAML from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
+import { BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID } from "@memmy/local-api-contracts";
 import { defaultConfigPaths, loadMemmyConfig } from "../src/config/index.js";
 
 const roots: string[] = [];
@@ -329,6 +330,133 @@ describe("memmy memory config", () => {
       provider: "openai_compatible",
       sourceProvider: "memmy_account",
       model: "embedding"
+    });
+  });
+
+  it("resolves the explicit built-in local Embedding assignment in account mode", () => {
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, YAML.stringify({
+      modelAssignments: {
+        byok: {},
+        account: {
+          ownerAccountId: "user_account",
+          embedding: BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID
+        }
+      },
+      app: {
+        userMode: "account",
+        userId: "user_account"
+      },
+      memmyMemory: {
+        embedding: { mode: "cloud" }
+      }
+    }));
+
+    const { config } = loadMemmyConfig(configPath);
+
+    expect(config.embedding).toMatchObject({
+      mode: "local",
+      provider: "local",
+      sourceProvider: "local",
+      model: "Xenova/all-MiniLM-L6-v2"
+    });
+    expect(config.embedding.endpoint).toBeUndefined();
+    expect(config.embedding.apiKey).toBeUndefined();
+    expect(config.embedding.selectionError).toBeUndefined();
+  });
+
+  it("rejects a built-in local Embedding assignment owned by another account", () => {
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, YAML.stringify({
+      modelAssignments: {
+        byok: {},
+        account: {
+          ownerAccountId: "other_account",
+          embedding: BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID
+        }
+      },
+      app: {
+        userMode: "account",
+        userId: "user_account"
+      },
+      memmyMemory: {
+        embedding: { mode: "local" }
+      }
+    }));
+
+    const { config } = loadMemmyConfig(configPath);
+
+    expect(config.embedding).toMatchObject({
+      mode: "cloud",
+      provider: "openai_compatible",
+      model: "",
+      selectionError: "model_selection_unavailable"
+    });
+  });
+
+  it("does not treat an unconfigured account Embedding assignment as local", () => {
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, YAML.stringify({
+      modelAssignments: {
+        byok: {},
+        account: {
+          ownerAccountId: "user_account",
+          embedding: null
+        }
+      },
+      app: {
+        userMode: "account",
+        userId: "user_account"
+      },
+      memmyMemory: {
+        embedding: { mode: "local" }
+      }
+    }));
+
+    const { config } = loadMemmyConfig(configPath);
+
+    expect(config.embedding).toMatchObject({
+      mode: "cloud",
+      provider: "openai_compatible",
+      model: "",
+      selectionError: "model_selection_unavailable"
+    });
+  });
+
+  it.each([
+    ["assignment owner", undefined, "user_account"],
+    ["active account", "user_account", undefined],
+    ["both account identities", undefined, undefined]
+  ])("rejects a built-in local Embedding assignment missing %s", (_label, ownerAccountId, userId) => {
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, YAML.stringify({
+      modelAssignments: {
+        byok: {},
+        account: {
+          ...(ownerAccountId ? { ownerAccountId } : {}),
+          embedding: BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID
+        }
+      },
+      app: {
+        userMode: "account",
+        ...(userId ? { userId } : {})
+      },
+      memmyMemory: {
+        embedding: { mode: "local" }
+      }
+    }));
+
+    const { config } = loadMemmyConfig(configPath);
+
+    expect(config.embedding).toMatchObject({
+      mode: "cloud",
+      provider: "openai_compatible",
+      model: "",
+      selectionError: "model_selection_unavailable"
     });
   });
 
