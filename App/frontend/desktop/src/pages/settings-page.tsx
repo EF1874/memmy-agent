@@ -699,26 +699,40 @@ export function SettingsPageView(props: SettingsPageViewProps) {
       };
     }
 
-    setByokUsageStatus("loading");
-    void byokTokenUsageClient.getSummary().then((summary) => {
-      if (cancelled) {
-        return;
-      }
-      setByokUsage(summary);
-      setByokUsageStatus("ready");
-    }).catch((error) => {
-      console.warn("load byok token usage failed", error);
-      if (cancelled) {
-        return;
-      }
-      setByokUsage(EMPTY_BYOK_TOKEN_USAGE);
-      setByokUsageStatus("error");
-    });
+    if (activeTab !== "tokens") {
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    let requestVersion = 0;
+    const refreshByokUsage = () => {
+      const currentRequestVersion = ++requestVersion;
+      setByokUsageStatus("loading");
+      void byokTokenUsageClient.getSummary().then((summary) => {
+        if (cancelled || currentRequestVersion !== requestVersion) {
+          return;
+        }
+        setByokUsage(summary);
+        setByokUsageStatus("ready");
+      }).catch((error) => {
+        console.warn("load byok token usage failed", error);
+        if (cancelled || currentRequestVersion !== requestVersion) {
+          return;
+        }
+        setByokUsage(EMPTY_BYOK_TOKEN_USAGE);
+        setByokUsageStatus("error");
+      });
+    };
+
+    refreshByokUsage();
+    window.addEventListener("focus", refreshByokUsage);
 
     return () => {
       cancelled = true;
+      window.removeEventListener("focus", refreshByokUsage);
     };
-  }, [byokTokenUsageClient]);
+  }, [activeTab, byokTokenUsageClient]);
 
   useEffect(() => {
     if (typeof window === "undefined") {

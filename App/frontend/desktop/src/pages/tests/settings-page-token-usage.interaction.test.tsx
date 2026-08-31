@@ -251,6 +251,7 @@ describe("SettingsPage platform scene quota details", () => {
           <SettingsPageView
             state={createInitialAppState()}
             dispatch={vi.fn()}
+            activeTab="tokens"
             byokTokenUsageClient={{ getSummary: vi.fn(async () => byokUsage) }}
             update={{
               appVersion: "1.0.4",
@@ -272,6 +273,62 @@ describe("SettingsPage platform scene quota details", () => {
     const tokenUsageHeader = tokenUsageHeading?.parentElement?.parentElement;
     expect(tokenUsageHeader?.textContent).toContain("更新于");
     expect(tokenUsageHeader?.className).toContain("justify-between");
+  });
+
+  it("refreshes BYOK usage when entering the Token tab and when the focused Token tab regains focus", async () => {
+    const getSummary = vi.fn(async () => ({
+      inputTokens: 1,
+      outputTokens: 1,
+      totalTokens: 2,
+      cachedInputTokens: 0,
+      cacheCreationInputTokens: 0,
+      updatedAt: "2026-08-31T02:00:00.000Z",
+      byKind: [],
+      byProvider: [],
+      byModel: []
+    } satisfies ByokTokenUsageSummary));
+    const byokTokenUsageClient = { getSummary };
+    const update = {
+      appVersion: "1.0.4",
+      phase: "idle" as const,
+      preparedUpdatePath: null,
+      downloadProgress: null,
+      feedback: null,
+      requestInlineAction: vi.fn(async () => undefined),
+      requestPrimaryAction: vi.fn(async () => undefined)
+    };
+    const renderTab = async (activeTab: "account" | "tokens") => {
+      await act(async () => {
+        root.render(
+          <I18nProvider language="zh-CN">
+            <SettingsPageView
+              state={createInitialAppState()}
+              dispatch={vi.fn()}
+              activeTab={activeTab}
+              byokTokenUsageClient={byokTokenUsageClient}
+              update={update}
+            />
+          </I18nProvider>
+        );
+        await Promise.resolve();
+      });
+    };
+
+    await renderTab("account");
+    expect(getSummary).not.toHaveBeenCalled();
+
+    await renderTab("tokens");
+    expect(getSummary).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+      await Promise.resolve();
+    });
+    expect(getSummary).toHaveBeenCalledTimes(2);
+
+    await renderTab("account");
+    window.dispatchEvent(new Event("focus"));
+    expect(getSummary).toHaveBeenCalledTimes(2);
   });
 });
 
