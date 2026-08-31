@@ -384,7 +384,7 @@ export function resolveTerminalTarget(
     key = standalone || project ? `cli:${crypto.randomUUID()}` : "cli:direct";
     const existing = reload(key);
     if (!existing && !dependencies.hasUsableDefaultModel()) {
-      throw new Error("No usable default model is configured. Run `memmy onboard --wizard` first.");
+      throw new Error("No usable default model is configured. Run `memmy onboard` first.");
     }
     if (existing) {
       binding = readWebuiSessionBinding(existing);
@@ -552,7 +552,7 @@ export async function main(argv: string[] = process.argv): Promise<void> {
     }
     await runLinuxRootTerminal({
       loadConfig: () => loadRuntimeConfig(null, null),
-      onboardWizard: () => onboard({ wizard: true }),
+      onboardWizard: () => onboard(),
       runInteractive: (config) => runRootInteractiveAgent(rootTarget, config),
     });
     return;
@@ -585,7 +585,7 @@ export async function main(argv: string[] = process.argv): Promise<void> {
     .description("Initialize memmy configuration and workspace.")
     .option("-w, --workspace <dir>", "Workspace directory")
     .option("-c, --config <path>", "Path to config file")
-    .option("--wizard", "Use interactive wizard", false)
+    .option("--defaults", "Use default configuration", false)
     .action(async (opts) => {
       await onboard(opts);
     });
@@ -748,15 +748,15 @@ export async function main(argv: string[] = process.argv): Promise<void> {
 export async function onboard({
   workspace = null,
   config = null,
-  wizard = false,
-}: { workspace?: string | null; config?: string | null; wizard?: boolean } = {}): Promise<Config> {
+  defaults = false,
+}: { workspace?: string | null; config?: string | null; defaults?: boolean } = {}): Promise<Config> {
   const configPath = config
     ? path.resolve(config.replace(/^~(?=$|\/)/, process.env.HOME ?? "~"))
     : getConfigPath();
   if (config) setConfigPath(configPath);
   let loaded: Config;
   if (fs.existsSync(configPath)) {
-    if (wizard) {
+    if (!defaults) {
       loaded = loadConfig(configPath);
     } else if (
       process.stdin.isTTY &&
@@ -779,13 +779,13 @@ export async function onboard({
   } else {
     loaded = new Config();
     if (workspace) loaded.agents.defaults.workspace = workspace;
-    if (!wizard) {
+    if (defaults) {
       saveConfig(loaded, configPath);
       console.log(`Created config at ${configPath}`);
     }
   }
   if (workspace) loaded.agents.defaults.workspace = workspace;
-  if (wizard) {
+  if (!defaults) {
     const result = await runOnboard(loaded);
     loaded = result.config;
     if (!result.shouldSave) {
