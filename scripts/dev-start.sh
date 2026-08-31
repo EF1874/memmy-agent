@@ -674,7 +674,7 @@ NODE
   log "memmy command is ready in $MEMMY_BIN_DIR"
 
   log "refreshing non-interactive memmy-agent onboard state"
-  node dist/main.js onboard </dev/null
+  node dist/main.js onboard --defaults </dev/null
 
   log "starting agent API, frontend, and desktop backend; Electron manages Memory and supervises gateway"
   cd "$ROOT_DIR"

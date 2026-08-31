@@ -156,7 +156,8 @@ systemctl --user status memmy-gateway.service
 The installer initializes Memory without changing Codex, Claude Code, Cursor, or other agents. Run `memmy-memory init` (all detected agents) or `memmy-memory init --agent <agent>` when you explicitly want to install the Memory Skill and the supported Hook/plugin for an agent.
 
 ```bash
-memmy onboard                              # Initialize ~/.memmy/config.yaml and the workspace
+memmy onboard                              # Configure models, providers, gateway, memory, and tools interactively
+memmy onboard --defaults                   # Initialize ~/.memmy/config.yaml and the workspace with defaults
 memmy status                               # Check config, workspace, model, and provider status
 memmy agent --message "Hi, introduce the current workspace"  # Single-turn message
 memmy                                      # Run without a subcommand to enter interactive chat (TUI)

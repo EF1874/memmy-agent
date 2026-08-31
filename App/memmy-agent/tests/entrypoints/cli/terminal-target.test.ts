@@ -107,7 +107,7 @@ describe("terminal target resolution", () => {
     dependencies.hasUsableDefaultModel = () => false;
 
     expect(() => resolveTerminalTarget(dependencies, { standalone: true })).toThrow(
-      "No usable default model is configured. Run `memmy onboard --wizard` first.",
+      "No usable default model is configured. Run `memmy onboard` first.",
     );
   });
 
