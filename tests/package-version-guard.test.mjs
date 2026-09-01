@@ -45,7 +45,14 @@ describe("package version guard", () => {
       .toContain('MEMMY_VERSION = "1.1.2"');
     expect(readJson(join(root, "Memory/package.json")).version).toBe("2.1.0");
     expect(readJson(join(root, "Memory/src/cli/npm/package.json")).version).toBe("2.1.0");
-    expect(readJson(join(root, "package-lock.json")).packages.Memory.version).toBe("2.1.0");
+    const rootLock = readJson(join(root, "package-lock.json"));
+    expect(rootLock.version).toBe("1.1.2");
+    expect(rootLock.packages[""].version).toBe("1.1.2");
+    expect(rootLock.packages["App/shell/desktop"].version).toBe("1.1.2");
+    expect(rootLock.packages.Memory.version).toBe("2.1.0");
+    const agentLock = readJson(join(root, "App/memmy-agent/package-lock.json"));
+    expect(agentLock.version).toBe("1.1.2");
+    expect(agentLock.packages[""].version).toBe("1.1.2");
   });
 
   it("rejects a requested version that differs from source metadata", () => {

@@ -2,7 +2,7 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "noEmit": true,
-    "types": ["node", "vitest"]
+    "types": ["node"]
   },
-  "include": ["memory-layer-smoke.ts"]
+  "include": ["local-agent-memory-smoke.ts"]
 }
