@@ -99,6 +99,26 @@ describe("memmy memory config", () => {
     expect(loadMemmyConfig(configPath).config.summary.timeoutMs).toBe(240_000);
   });
 
+  it("preserves an explicit embedding token budget and allows an environment override", () => {
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, YAML.stringify({
+      memmyMemory: {
+        embedding: {
+          mode: "custom",
+          provider: "openai_compatible",
+          endpoint: "https://embedding.example/v1",
+          model: "deployment-alias",
+          maxInputTokens: 1_200
+        }
+      }
+    }));
+
+    expect(loadMemmyConfig(configPath).config.embedding.maxInputTokens).toBe(1_200);
+    setEnv("MEMMY_EMBEDDING_MAX_INPUT_TOKENS", "640");
+    expect(loadMemmyConfig(configPath).config.embedding.maxInputTokens).toBe(640);
+  });
+
   it("expands home-relative sqlite paths from config files", () => {
     const root = tempRoot();
     const configPath = join(root, "config.yaml");

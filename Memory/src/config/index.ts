@@ -88,6 +88,7 @@ export interface EmbeddingConfig {
   extraBody?: Record<string, unknown>;
   actualModelContext?: ActualModelContext;
   selectionError?: "model_selection_unavailable";
+  maxInputTokens?: number;
   batchSize: number;
   timeoutMs: number;
   maxRetries: number;
@@ -571,6 +572,7 @@ function configFromEnv(): Record<string, unknown> {
       endpoint: process.env.MEMMY_EMBEDDING_ENDPOINT,
       model: process.env.MEMMY_EMBEDDING_MODEL,
       apiKey: process.env.MEMMY_EMBEDDING_API_KEY,
+      maxInputTokens: numberEnv("MEMMY_EMBEDDING_MAX_INPUT_TOKENS"),
       batchSize: numberEnv("MEMMY_EMBEDDING_BATCH_SIZE"),
       timeoutMs: numberEnv("MEMMY_EMBEDDING_TIMEOUT_MS"),
       maxRetries: numberEnv("MEMMY_EMBEDDING_MAX_RETRIES")
@@ -703,6 +705,7 @@ function normalizeEmbedding(input: Record<string, unknown>): EmbeddingConfig {
     selectionError: input.selectionError === "model_selection_unavailable"
       ? input.selectionError
       : undefined,
+    maxInputTokens: positiveInteger(input.maxInputTokens),
     batchSize: numberValue(input.batchSize, DEFAULT_MEMMY_CONFIG.embedding.batchSize),
     timeoutMs: numberValue(input.timeoutMs, DEFAULT_MEMMY_CONFIG.embedding.timeoutMs),
     maxRetries: numberValue(input.maxRetries, DEFAULT_MEMMY_CONFIG.embedding.maxRetries),
@@ -1417,6 +1420,12 @@ function expandEnvString(value: string): string {
 
 function numberValue(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function positiveInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : undefined;
 }
 
 function booleanValue(value: unknown, fallback: boolean): boolean {

@@ -112,6 +112,32 @@ describe("embedder", () => {
     expect(vectors[1]).toEqual([0, 2]);
   });
 
+  it("uses an explicit token budget for an OpenAI-compatible deployment alias", async () => {
+    const sentInputs: number[][] = [];
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as { input: number[][] };
+      sentInputs.push(...body.input);
+      return new Response(JSON.stringify({
+        data: body.input.map(() => ({ embedding: [1, 0] }))
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }));
+    const embedder = createEmbedder({
+      ...DEFAULT_MEMMY_CONFIG.embedding,
+      provider: "openai_compatible",
+      endpoint: "https://api.example.test/v1",
+      model: "production-embedding-deployment",
+      apiKey: "sk-test",
+      maxInputTokens: 512,
+      cache: false,
+      maxRetries: 0
+    });
+
+    await expect(embedder.embedOne(" memory".repeat(600))).resolves.toEqual([1, 0]);
+
+    expect(sentInputs.length).toBeGreaterThan(1);
+    expect(sentInputs.every((input) => input.length <= 512)).toBe(true);
+  });
+
   it("keeps chunked OpenAI embedding request batches below the aggregate token budget", async () => {
     const requestTokenCounts: number[] = [];
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (_url, init) => {

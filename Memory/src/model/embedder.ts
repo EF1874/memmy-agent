@@ -221,7 +221,7 @@ class HttpEmbedder implements Embedder {
       throw new Error(`${provider} embedding provider requires apiKey or endpoint`);
     }
     const plan = provider === "openai_compatible"
-      ? planOpenAiEmbeddingInputs(texts, this.config.model)
+      ? planOpenAiEmbeddingInputs(texts, this.config.model, this.config.maxInputTokens)
       : null;
     if (!plan) return this.requestOpenAiShape(texts, provider, url, role);
 
