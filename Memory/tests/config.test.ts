@@ -84,9 +84,19 @@ describe("memmy memory config", () => {
     const { config } = loadMemmyConfig(configPath);
 
     expect(config.summary.enableThinking).toBe(false);
+    expect(config.summary.timeoutMs).toBe(180_000);
     expect(config.evolution.enableThinking).toBe(true);
     expect(config.evolution.thinkingBudget).toBeUndefined();
     expect(config.evolution.timeoutMs).toBe(180_000);
+  });
+
+  it("allows the summary timeout default to be overridden by environment", () => {
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, YAML.stringify({ memmyMemory: {} }));
+    setEnv("MEMMY_SUMMARY_TIMEOUT_MS", "240000");
+
+    expect(loadMemmyConfig(configPath).config.summary.timeoutMs).toBe(240_000);
   });
 
   it("expands home-relative sqlite paths from config files", () => {

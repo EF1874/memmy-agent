@@ -228,6 +228,19 @@ describe("HttpMemoryClient", () => {
     });
   });
 
+  it("does not replay a worker request after a server failure", async () => {
+    let calls = 0;
+    const baseUrl = await startServer(async (_request, response) => {
+      calls += 1;
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end("{}");
+    });
+    const client = createHttpMemoryClient({ baseUrl, token: "", timeoutMs: 500, maxRetries: 3 });
+
+    await expect(client.runWorker({ limit: 20 })).rejects.toThrow("memory layer 5xx");
+    expect(calls).toBe(1);
+  });
+
   it("retries 5xx responses and succeeds before max retries is exhausted", async () => {
     let calls = 0;
     const baseUrl = await startServer(async (_request, response) => {

@@ -302,7 +302,7 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
     enableThinking: false,
     temperature: 0,
     maxTokens: MEMORY_SUMMARY_MAX_TOKENS,
-    timeoutMs: 45_000,
+    timeoutMs: 180_000,
     maxRetries: 3,
     malformedRetries: 1
   },
