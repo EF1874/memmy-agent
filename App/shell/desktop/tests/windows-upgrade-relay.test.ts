@@ -409,6 +409,40 @@ describeOnWindows("Windows upgrade relay", () => {
     expect(log).toContain("target installDir crosses a reparse point");
   }, 15_000);
 
+  it("rejects a relocation source that crosses a directory junction before moving data", async () => {
+    const fixture = await createRelayFixture(0, { relocate: true });
+    const realSource = join(fixture.root, "real-source");
+    await rename(fixture.installDir, realSource);
+    await symlink(realSource, fixture.installDir, "junction");
+
+    await expect(runRelay(fixture)).rejects.toMatchObject({ code: 1 });
+
+    expect(existsSync(join(realSource, "data", "Memmy", "sentinel.txt"))).toBe(true);
+    expect(existsSync(fixture.backupRoot)).toBe(false);
+    expect(existsSync(join(fixture.targetInstallDir, "Memmy.exe"))).toBe(false);
+    const log = await readFile(fixture.logPath, "utf8");
+    expect(log).toContain("source installDir crosses a reparse point");
+  }, 15_000);
+
+  it("waits for the running source installation before relocating", async () => {
+    const fixture = await createRelayFixture(0, { relocate: true });
+    const pingPath = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "PING.EXE");
+    await copyFile(pingPath, join(fixture.installDir, "Memmy.exe"));
+    const sourceProcess = spawn(join(fixture.installDir, "Memmy.exe"), ["127.0.0.1", "-n", "8"], {
+      windowsHide: true,
+      stdio: "ignore"
+    });
+    helperProcesses.push(sourceProcess);
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
+    expect(sourceProcess.exitCode).toBeNull();
+
+    await runRelay(fixture);
+
+    expect(sourceProcess.exitCode).not.toBeNull();
+    const log = await readFile(fixture.logPath, "utf8");
+    expect(log).not.toContain("forcing remaining installed app processes to exit");
+  }, 20_000);
+
   it("keeps interactive relay children visible while silent updates stay hidden", async () => {
     const source = await readFile(relayScriptPath, "utf8");
 
@@ -476,7 +510,7 @@ describeOnWindows("Windows upgrade relay", () => {
 
   it("relocates a completed external-v1 runtime from the source drive to the selected target drive", async () => {
     const fixture = await createRelayFixture(0, { relocate: true });
-    const sourceRuntimeHomePath = join(fixture.root, "source-drive", "MemmyData", ".memmy");
+    const sourceRuntimeHomePath = fixture.legacyRuntimeHomePath;
     const sourceWorkspacePath = join(sourceRuntimeHomePath, "workspace");
     const targetWorkspacePath = join(fixture.targetRuntimeHomePath, "workspace");
     const sessionPath = join(sourceWorkspacePath, "sessions", "websocket_relocation.jsonl");
@@ -533,7 +567,7 @@ describeOnWindows("Windows upgrade relay", () => {
 
   it("rolls an external-v1 relocation back to the source runtime when the child installer fails", async () => {
     const fixture = await createRelayFixture(2, { relocate: true });
-    const sourceRuntimeHomePath = join(fixture.root, "source-drive", "MemmyData", ".memmy");
+    const sourceRuntimeHomePath = fixture.legacyRuntimeHomePath;
     await rm(join(fixture.installDir, "data"), { recursive: true, force: true });
     await Promise.all([
       mkdir(dirname(fixture.installationRecordPath), { recursive: true }),
@@ -566,6 +600,40 @@ describeOnWindows("Windows upgrade relay", () => {
     const pointerBytes = await readFile(join(fixture.targetUserDataPath, "data-root.txt"));
     expect(pointerBytes.subarray(2).toString("utf16le").trim()).toBe(sourceRuntimeHomePath);
     expect(existsSync(fixture.migrationStatePath)).toBe(false);
+  }, 15_000);
+
+  it("does not accept an unrelated existing runtime as persisted external authority", async () => {
+    const fixture = await createRelayFixture(0, { relocate: true });
+    const unrelatedRuntimeHomePath = join(fixture.root, "unrelated-existing-runtime");
+    await rm(join(fixture.installDir, "data"), { recursive: true, force: true });
+    await Promise.all([
+      mkdir(dirname(fixture.installationRecordPath), { recursive: true }),
+      mkdir(fixture.targetUserDataPath, { recursive: true }),
+      mkdir(unrelatedRuntimeHomePath, { recursive: true })
+    ]);
+    await Promise.all([
+      writeFile(join(fixture.targetUserDataPath, "app.sqlite"), "external-account", "utf8"),
+      writeFile(join(unrelatedRuntimeHomePath, "config.yaml"), "unrelated-runtime", "utf8"),
+      writeFile(fixture.installationRecordPath, JSON.stringify({
+        schemaVersion: 1,
+        dataLayoutGeneration: "external-v1",
+        installDir: fixture.installDir,
+        userDataPath: fixture.targetUserDataPath,
+        runtimeHomePath: unrelatedRuntimeHomePath,
+        appVersion: "1.1.0"
+      }), "utf8"),
+      writeFile(
+        join(fixture.targetUserDataPath, "data-root.txt"),
+        Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(`${unrelatedRuntimeHomePath}\r\n`, "utf16le")])
+      )
+    ]);
+
+    await runRelay(fixture, { installedVersion: "1.1.0" });
+
+    expect(existsSync(join(fixture.targetRuntimeHomePath, "config.yaml"))).toBe(false);
+    const migrationLog = await readFile(fixture.migrationLogPath, "utf8");
+    expect(migrationLog).toContain("Ignoring an invalid external-v1 runtime source");
+    expect(migrationLog).not.toContain("authority=persisted-external-authority");
   }, 15_000);
 
   it("recovers a persisted install-local backup when the executable and install data are gone", async () => {

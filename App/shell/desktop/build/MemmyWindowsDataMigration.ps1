@@ -132,6 +132,24 @@ function Test-SameOrDescendantPath {
   )
 }
 
+function Get-CanonicalExternalRuntimeHomePath {
+  param([Parameter(Mandatory = $true)][string]$InstallDir)
+
+  $installRoot = [System.IO.Path]::GetPathRoot((Get-NormalizedPath -Path $InstallDir))
+  if (-not $installRoot) {
+    throw "The source installation has no canonical runtime drive."
+  }
+  if (Test-SamePath -Left $installRoot -Right 'C:\') {
+    $legacyHome = if ($LegacyRuntimeHomePath) {
+      $LegacyRuntimeHomePath
+    } else {
+      Join-Path $env:USERPROFILE '.memmy'
+    }
+    return Get-NormalizedPath -Path $legacyHome
+  }
+  return Get-NormalizedPath -Path (Join-Path $installRoot 'MemmyData\.memmy')
+}
+
 function Assert-NoReparsePath {
   param(
     [Parameter(Mandatory = $true)][string]$Path,
@@ -455,11 +473,14 @@ function Resolve-EffectiveInstallSource {
         }
         $recordedExternalUserDataPath = Get-NormalizedPath -Path ([string]$record.userDataPath)
         $recordedExternalRuntimeHomePath = Get-NormalizedPath -Path ([string]$record.runtimeHomePath)
+        $expectedExternalRuntimeHomePath = Get-CanonicalExternalRuntimeHomePath -InstallDir $effectiveSourceInstallDir
         if (-not (Test-SamePath -Left $recordedExternalUserDataPath -Right $TargetUserDataPath) -or
+            -not (Test-SamePath -Left $recordedExternalRuntimeHomePath -Right $expectedExternalRuntimeHomePath) -or
             (Test-SameOrDescendantPath -Candidate $recordedExternalRuntimeHomePath -Parent $effectiveSourceInstallDir) -or
             -not (Test-Path -LiteralPath $recordedExternalRuntimeHomePath -PathType Container)) {
           throw "The external-v1 record does not identify the trusted current data layout."
         }
+        Assert-NoReparsePath -Path $recordedExternalRuntimeHomePath -Description 'recorded external runtimeHomePath'
         $script:verifiedExternalRuntimeHomePath = $recordedExternalRuntimeHomePath
         Write-MigrationLog -Message "Using the verified external-v1 runtime source for relocation: $verifiedExternalRuntimeHomePath"
       }

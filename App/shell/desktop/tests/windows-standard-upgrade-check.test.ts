@@ -127,6 +127,30 @@ describeOnWindows("Windows standard upgrade safety check", () => {
     expect(runCheck(fixture).status).toBe(1);
   });
 
+  it("requires the recorded runtime path to match the canonical target", () => {
+    const fixture = createFixture();
+    const unrelatedPath = join(fixture.root, "unrelated-runtimeHomePath");
+    mkdirSync(unrelatedPath, { recursive: true });
+    updateRecord(fixture, { runtimeHomePath: unrelatedPath });
+
+    const result = runCheck(fixture);
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("recorded runtimeHomePath does not match the expected data layout");
+  });
+
+  it("requires the recorded user-data path to match the canonical target", () => {
+    const fixture = createFixture();
+    const unrelatedPath = join(fixture.root, "unrelated-userDataPath");
+    mkdirSync(unrelatedPath, { recursive: true });
+    updateRecord(fixture, { userDataPath: unrelatedPath });
+
+    const result = runCheck(fixture);
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("recorded userDataPath does not match the expected data layout");
+  });
+
   it("rejects an external path that crosses a junction", () => {
     const fixture = createFixture();
     const target = join(fixture.installDir, "aliased-user-data");
@@ -182,6 +206,7 @@ interface Fixture {
   installationRecordPath: string;
   migrationStatePath: string;
   targetInstallDir: string;
+  targetUserDataPath: string;
   targetRuntimeHomePath: string;
   record: Record<string, unknown>;
 }
@@ -210,6 +235,7 @@ function createFixture(): Fixture {
     installationRecordPath,
     migrationStatePath,
     targetInstallDir: installDir,
+    targetUserDataPath: userDataPath,
     targetRuntimeHomePath: runtimeHomePath,
     record: {
       schemaVersion: 1,
@@ -237,6 +263,7 @@ function runCheck(fixture: Fixture, allowMissingExecutable = false) {
     "-File", scriptPath,
     "-InstallDir", fixture.installDir,
     "-TargetInstallDir", fixture.targetInstallDir,
+    "-TargetUserDataPath", fixture.targetUserDataPath,
     "-TargetRuntimeHomePath", fixture.targetRuntimeHomePath,
     "-InstalledExePath", fixture.installedExePath,
     "-InstallerPath", fixture.installerPath,

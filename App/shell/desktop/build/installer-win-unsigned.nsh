@@ -407,7 +407,7 @@ Function MemmyEvaluateStandardUpgradeSafety
     StrCpy $R4 "-AllowMissingExecutable"
 
   memmy_standard_check_run:
-    nsExec::ExecToStack '$\"$R5$\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $\"$MemmyStandardUpgradeCheckScriptPath$\" -InstallDir $\"$MemmyInstalledInstallDir$\" -TargetInstallDir $\"$MemmySelectedInstallDir$\" -TargetRuntimeHomePath $\"$MemmyTargetRuntimeHomePath$\" -InstalledExePath $\"$MemmyInstalledExePath$\" -InstallerPath $\"$EXEPATH$\" -InstallationRecordPath $\"$MemmyInstallationRecordPath$\" -MigrationStatePath $\"$MemmyMigrationStatePath$\" $R4'
+    nsExec::ExecToStack '$\"$R5$\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $\"$MemmyStandardUpgradeCheckScriptPath$\" -InstallDir $\"$MemmyInstalledInstallDir$\" -TargetInstallDir $\"$MemmySelectedInstallDir$\" -TargetUserDataPath $\"$MemmyTargetUserDataPath$\" -TargetRuntimeHomePath $\"$MemmyTargetRuntimeHomePath$\" -InstalledExePath $\"$MemmyInstalledExePath$\" -InstallerPath $\"$EXEPATH$\" -InstallationRecordPath $\"$MemmyInstallationRecordPath$\" -MigrationStatePath $\"$MemmyMigrationStatePath$\" $R4'
     Pop $0
     Pop $1
     DetailPrint "$1"

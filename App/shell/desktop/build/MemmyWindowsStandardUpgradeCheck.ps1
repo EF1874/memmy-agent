@@ -1,6 +1,7 @@
 param(
   [Parameter(Mandatory = $true)][string]$InstallDir,
   [Parameter(Mandatory = $true)][string]$TargetInstallDir,
+  [Parameter(Mandatory = $true)][string]$TargetUserDataPath,
   [Parameter(Mandatory = $true)][string]$TargetRuntimeHomePath,
   [Parameter(Mandatory = $true)][string]$InstalledExePath,
   [Parameter(Mandatory = $true)][string]$InstallerPath,
@@ -97,6 +98,7 @@ function ConvertTo-ComparableVersion([string]$Version, [bool]$AllowMetadata) {
 try {
   $normalizedInstallDir = Get-NormalizedAbsolutePath $InstallDir 'installDir'
   $normalizedTargetInstallDir = Get-NormalizedAbsolutePath $TargetInstallDir 'target installDir'
+  $normalizedTargetUserDataPath = Get-NormalizedAbsolutePath $TargetUserDataPath 'target userDataPath'
   $normalizedTargetRuntimeHomePath = Get-NormalizedAbsolutePath $TargetRuntimeHomePath 'target runtimeHomePath'
   $normalizedInstalledExePath = Get-NormalizedAbsolutePath $InstalledExePath 'installed executable path'
   $normalizedInstallerPath = Get-NormalizedAbsolutePath $InstallerPath 'installer path'
@@ -106,6 +108,7 @@ try {
 
   Assert-NoReparsePath $normalizedInstallDir 'installDir'
   Assert-NoReparsePath $normalizedTargetInstallDir 'target installDir'
+  Assert-NoReparsePath $normalizedTargetUserDataPath 'target userDataPath'
   Assert-NoReparsePath $normalizedTargetRuntimeHomePath 'target runtimeHomePath'
   Assert-NoReparsePath $normalizedInstalledExePath 'installed executable path'
   Assert-NoReparsePath $normalizedInstallerPath 'installer path'
@@ -222,6 +225,12 @@ try {
       throw "recorded external data path is missing"
     }
     Assert-NoReparsePath $externalPath 'recorded external data path'
+  }
+  if (-not (Test-SamePath $recordedUserDataPath $normalizedTargetUserDataPath)) {
+    throw "recorded userDataPath does not match the expected data layout"
+  }
+  if (-not (Test-SamePath $recordedRuntimeHomePath $normalizedTargetRuntimeHomePath)) {
+    throw "recorded runtimeHomePath does not match the expected data layout"
   }
 
   if (-not $installedExeExists -and $AllowMissingExecutable) {

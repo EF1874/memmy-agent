@@ -184,6 +184,16 @@ function Assert-MemmyRelocationTargetIsSafe([switch]$AllowPreparedMigrationTarge
   }
 }
 
+function Assert-MemmyRelaySourceIsSafe {
+  Assert-MemmyNoReparsePath $normalizedSourceInstallDir 'source installDir'
+  Assert-MemmyNoReparsePath $dataPath 'source data path'
+  Assert-MemmyNoReparsePath $backupParent 'upgrade backup parent'
+  Assert-MemmyNoReparsePath $backupRoot 'upgrade backup root'
+  Assert-MemmyNoReparsePath $stagingRoot 'upgrade staging root'
+  Assert-MemmyNoReparsePath $WorkDir 'upgrade workDir'
+  Assert-MemmyNoReparsePath $normalizedInstallerPath 'staged installer path'
+}
+
 function Invoke-MemmyDataMigration([ValidateSet('Prepare', 'Complete', 'Rollback', 'RequireRecovery')][string]$Mode) {
   if (-not (Test-Path -LiteralPath $migrationScriptPath -PathType Leaf)) {
     throw "data migration helper is missing: $migrationScriptPath"
@@ -265,14 +275,15 @@ function Wait-MemmyProcessExit([int]$ProcessId, [int]$TimeoutSeconds) {
 }
 
 function Get-MemmyInstallProcesses {
-  $expectedPath = [System.IO.Path]::GetFullPath($appExe)
+  $expectedPaths = @($sourceAppExe, $appExe) |
+    ForEach-Object { [System.IO.Path]::GetFullPath($_) } |
+    Select-Object -Unique
   foreach ($process in @(Get-Process -Name 'Memmy' -ErrorAction SilentlyContinue)) {
     try {
-      if ([string]::Equals(
-          [System.IO.Path]::GetFullPath($process.Path),
-          $expectedPath,
-          [System.StringComparison]::OrdinalIgnoreCase
-        )) {
+      $processPath = [System.IO.Path]::GetFullPath($process.Path)
+      if ($expectedPaths | Where-Object {
+          [string]::Equals($_, $processPath, [System.StringComparison]::OrdinalIgnoreCase)
+        }) {
         $process
       }
     } catch {
@@ -317,9 +328,13 @@ function Assert-MemmySameVolume([string]$Source, [string]$Destination) {
 
 function Move-MemmyDirectory([string]$Source, [string]$Destination) {
   Assert-MemmySameVolume -Source $Source -Destination $Destination
+  Assert-MemmyNoReparsePath $Source 'directory move source'
+  Assert-MemmyNoReparsePath $Destination 'directory move destination'
   New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Destination) | Out-Null
   for ($attempt = 1; $attempt -le 120; $attempt++) {
     try {
+      Assert-MemmyNoReparsePath $Source 'directory move source'
+      Assert-MemmyNoReparsePath $Destination 'directory move destination'
       [System.IO.Directory]::Move($Source, $Destination)
       return
     } catch {
@@ -469,6 +484,7 @@ function Schedule-MemmyStagingCleanup {
 try {
   New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
   Write-MemmyUpgradeLog "relay starting installer=$InstallerPath sourceInstallDir=$SourceInstallDir targetInstallDir=$TargetInstallDir mode=$InstallerMode expected=$ExpectedVersion reopenFallback=$ReopenAfterInstall"
+  Assert-MemmyRelaySourceIsSafe
   Assert-MemmyRelocationTargetIsSafe
   if ((Test-MemmySameOrDescendantPath $normalizedInstallerPath $normalizedSourceInstallDir) -or
       (Test-MemmySameOrDescendantPath $normalizedInstallerPath $normalizedTargetInstallDir)) {
@@ -485,6 +501,7 @@ try {
   Write-MemmyUpgradeLog "relay ready reopen=$resolvedReopenAfterInstall"
   Wait-MemmyProcessExit -ProcessId $OriginalInstallerPid -TimeoutSeconds 120
   Wait-MemmyInstallProcessesExit -TimeoutSeconds 20
+  Assert-MemmyRelaySourceIsSafe
 
   if (Test-Path -LiteralPath $dataPath -PathType Container) {
     if (Test-Path -LiteralPath $backupRoot) {
