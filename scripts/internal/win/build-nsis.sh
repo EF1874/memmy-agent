@@ -600,6 +600,8 @@ verify_packaged_windows_unpacked_artifacts() {
   local packaged_embedding_model="$DESKTOP_DIR/release/win-unpacked/resources/embedding-models/$EMBEDDING_MODEL_ID"
 
   require_packaged_runtime_file "$DESKTOP_DIR/release/win-unpacked/resources/app.asar"
+  require_packaged_runtime_file "$DESKTOP_DIR/release/win-unpacked/resources/cli/memmy-memory.cmd"
+  require_packaged_runtime_file "$DESKTOP_DIR/release/win-unpacked/resources/cli/memmy.cmd"
   verify_packaged_runtime_config_boundary "$DESKTOP_DIR/release/win-unpacked/resources"
   verify_windows_x64_native_module \
     "$unpacked_runtime/memory/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \

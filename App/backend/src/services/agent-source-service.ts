@@ -47,9 +47,12 @@ import {
 export type { ScanProgress } from "../adapters/outbound/agent-source/types.js";
 
 const SCAN_MESSAGE_YIELD_INTERVAL = 100;
-const IMPORT_WORKER_BATCH_SIZE = 20;
+const IMPORT_WORKER_BATCH_SIZE = 1;
 const IMPORT_PROCESSING_COHORT_SIZE = 100;
-const IMPORT_WORKER_TIMEOUT_MS = 600_000;
+// A targeted run leases one job so the timeout never depends on queue ordering.
+// One summary can make three content attempts, each with four 180s HTTP attempts
+// and backoff; keep a safety margin without replaying the worker request.
+const IMPORT_WORKER_TIMEOUT_MS = 2_400_000;
 const IMPORT_PROGRESS_POLL_INTERVAL_MS = 250;
 const INITIAL_GLOBAL_MEMORY_LIMIT = 1_000;
 const INITIAL_ABSENT_SOURCE_MEMORY_LIMIT = 200;
@@ -1077,44 +1080,36 @@ async function processPendingImportSummaries(
     while (pendingMemoryIds.size > 0) {
       scanOptions.signal?.throwIfAborted();
       const targets = [...pendingMemoryIds];
-      const result = await options.memoryClient.runWorker({
+      const workerOutcome = options.memoryClient.runWorker({
         limit: IMPORT_WORKER_BATCH_SIZE,
         targetMemoryIds: targets,
         priorityCohortOnly: true,
         signal: scanOptions.signal,
         timeoutMs: IMPORT_WORKER_TIMEOUT_MS
-      });
+      }).then((result) => ({ kind: "worker" as const, result }));
+      let result: Awaited<ReturnType<MemoryClient["runWorker"]>> | undefined;
 
-      const refreshed = await options.memoryClient.getMemoryProcessingStatus(targets);
-      const processingByMemoryId = new Map(refreshed.items.map((item) => [item.memoryId, item]));
-      const activeMemoryIds = new Set(refreshed.items
-        .filter((item) => item.state === "summary_pending" || item.state === "summarizing" ||
-          item.state === "embedding_pending" || item.state === "embedding")
-        .map((item) => item.memoryId));
-      const previousPending = pendingMemoryIds.size;
-      for (const memoryId of pendingMemoryIds) {
-        if (activeMemoryIds.has(memoryId)) continue;
-        const processing = processingByMemoryId.get(memoryId);
-        if (!processing) {
-          failures.push({ memoryId, reason: "Memory processing state is missing" });
-        } else if (processing.state === "failed") {
-          failures.push({
-            memoryId,
-            reason: processing.errorMessage || "Memory processing failed"
-          });
+      while (!result) {
+        const outcome = await Promise.race([
+          workerOutcome,
+          waitForWorkerProgress(IMPORT_PROGRESS_POLL_INTERVAL_MS, undefined, { signal: scanOptions.signal })
+            .then(() => ({ kind: "poll" as const }))
+        ]);
+        if (outcome.kind === "worker") result = outcome.result;
+        const previousPending = pendingMemoryIds.size;
+        await reconcileImportProcessing(options.memoryClient, pendingMemoryIds, failures);
+        if (pendingMemoryIds.size < previousPending) lastProgressAt = Date.now();
+        emitProgress(scanOptions, {
+          sourceId: progressSourceId,
+          phase: "summarize",
+          current: completedMemoryCount + cohort.length - pendingMemoryIds.size,
+          total: ownedMemoryIds.length,
+          message: "Summarizing and indexing latest memories"
+        });
+        if (pendingMemoryIds.size === 0 && !result) {
+          result = (await workerOutcome).result;
         }
-        pendingMemoryIds.delete(memoryId);
       }
-      if (pendingMemoryIds.size < previousPending) {
-        lastProgressAt = Date.now();
-      }
-      emitProgress(scanOptions, {
-        sourceId: progressSourceId,
-        phase: "summarize",
-        current: completedMemoryCount + cohort.length - pendingMemoryIds.size,
-        total: ownedMemoryIds.length,
-        message: "Summarizing and indexing latest memories"
-      });
 
       if (pendingMemoryIds.size === 0) break;
       if (Date.now() - lastProgressAt >= IMPORT_WORKER_TIMEOUT_MS) {
@@ -1128,6 +1123,29 @@ async function processPendingImportSummaries(
     completedMemoryCount += cohort.length;
   }
   return failures;
+}
+
+async function reconcileImportProcessing(
+  memoryClient: Pick<MemoryClient, "getMemoryProcessingStatus">,
+  pendingMemoryIds: Set<string>,
+  failures: ProcessingFailure[]
+): Promise<void> {
+  const refreshed = await memoryClient.getMemoryProcessingStatus([...pendingMemoryIds]);
+  const processingByMemoryId = new Map(refreshed.items.map((item) => [item.memoryId, item]));
+  const activeMemoryIds = new Set(refreshed.items
+    .filter((item) => item.state === "summary_pending" || item.state === "summarizing" ||
+      item.state === "embedding_pending" || item.state === "embedding")
+    .map((item) => item.memoryId));
+  for (const memoryId of pendingMemoryIds) {
+    if (activeMemoryIds.has(memoryId)) continue;
+    const processing = processingByMemoryId.get(memoryId);
+    if (!processing) {
+      failures.push({ memoryId, reason: "Memory processing state is missing" });
+    } else if (processing.state === "failed") {
+      failures.push({ memoryId, reason: processing.errorMessage || "Memory processing failed" });
+    }
+    pendingMemoryIds.delete(memoryId);
+  }
 }
 
 function appendProcessingFailures(result: ScanResult, failures: readonly ProcessingFailure[]): void {

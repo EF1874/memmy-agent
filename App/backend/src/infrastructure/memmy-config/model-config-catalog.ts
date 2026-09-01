@@ -1,4 +1,5 @@
 import {
+  BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID,
   type CatalogEndpointInput,
   type CatalogProviderId,
   type ModelAssignment,
@@ -490,6 +491,9 @@ function resolvePresetId(
 function validateUniqueModels(presets: ConfigRecord): void {
   const combinations = new Set<string>();
   for (const [presetId, value] of Object.entries(presets)) {
+    if (presetId === BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID) {
+      throw new InvalidModelConfigError(`Preset ID is reserved: ${presetId}`);
+    }
     const preset = record(value);
     const provider = stringValue(preset.provider);
     const endpoint = stringValue(preset.endpoint);
@@ -546,6 +550,15 @@ function validateAssignmentReference(
   presets: ConfigRecord,
   previous: ModelAssignment
 ): void {
+  if (presetId === BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID) {
+    if (capability !== "embedding") {
+      throw new InvalidModelConfigError("The built-in local Embedding assignment is only valid for embedding");
+    }
+    if (namespace === "account" && !assignment.ownerAccountId) {
+      throw new InvalidModelConfigError("The account built-in local Embedding assignment requires an account owner");
+    }
+    return;
+  }
   const preset = record(presets[presetId]);
   if (!Object.keys(preset).length) {
     if (namespace === "account" && stableJson(assignment) === stableJson(previous)) return;
