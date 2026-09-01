@@ -301,27 +301,28 @@ install_better_sqlite3_prebuild_with_download_fallback() {
 }
 
 create_memory_runtime_manifest() {
-  node - "$ROOT_DIR/package.json" "$MEMORY_DIR/package.json" "$ROOT_DIR/App/backend/local-api-contracts/package.json" "$MIGRATIONS_DIR/package.json" "$RUNTIME_DIR/memory/package.json" <<'NODE'
+  node - "$MEMORY_DIR/package.json" "$RUNTIME_DIR/memory/package.json" "$RUNTIME_DIR/memory/memory-runtime.json" <<'NODE'
 const { readFileSync, writeFileSync } = require("node:fs");
 
-const [projectPackagePath, sourcePackagePath, contractsPackagePath, migrationsPackagePath, runtimePackagePath] = process.argv.slice(2);
-const projectPackage = JSON.parse(readFileSync(projectPackagePath, "utf8"));
+const [sourcePackagePath, runtimePackagePath, runtimeMetadataPath] = process.argv.slice(2);
 const sourcePackage = JSON.parse(readFileSync(sourcePackagePath, "utf8"));
-const contractsPackage = JSON.parse(readFileSync(contractsPackagePath, "utf8"));
-const migrationsPackage = JSON.parse(readFileSync(migrationsPackagePath, "utf8"));
 const dependencies = { ...(sourcePackage.dependencies ?? {}) };
-delete dependencies["@memmy/local-api-contracts"];
-delete dependencies["@memmy/migrations"];
-Object.assign(dependencies, contractsPackage.dependencies, migrationsPackage.dependencies);
 const runtimePackage = {
   name: "@memmy/packaged-memory-runtime",
-  version: projectPackage.version,
+  version: sourcePackage.version,
   private: true,
   type: "module",
   dependencies
 };
 
 writeFileSync(runtimePackagePath, `${JSON.stringify(runtimePackage, null, 2)}\n`);
+writeFileSync(runtimeMetadataPath, `${JSON.stringify({
+  version: sourcePackage.version,
+  protocolVersion: 1,
+  target: "windows-x64",
+  entrypoint: "dist/src/server/index.js",
+  viewer: "dist/viewer/index.html"
+}, null, 2)}\n`);
 NODE
 
   create_memory_runtime_lock
@@ -498,8 +499,6 @@ verify_packaged_file_matches_runtime() {
 }
 
 verify_windows_native_module() {
-  require_packaged_runtime_file "$RUNTIME_DIR/memory/node_modules/@memmy/local-api-contracts/dist/index.js"
-  require_packaged_runtime_file "$RUNTIME_DIR/memory/node_modules/@memmy/migrations/dist/index.js"
   verify_windows_x64_native_module \
     "$RUNTIME_DIR/memory/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
     "Memory better-sqlite3"
@@ -715,17 +714,15 @@ mkdir -p "$MIGRATIONS_STAGING_DIR"
 cp "$MIGRATIONS_DIR/package.json" "$MIGRATIONS_STAGING_DIR/package.json"
 cp -R "$MIGRATIONS_DIR/dist" "$MIGRATIONS_STAGING_DIR/dist"
 
-cp -R "$MEMORY_DIR/dist/src" "$RUNTIME_DIR/memory/src"
+mkdir -p "$RUNTIME_DIR/memory/dist"
+cp -R "$MEMORY_DIR/dist/src" "$RUNTIME_DIR/memory/dist/src"
+cp -R "$MEMORY_DIR/dist/viewer" "$RUNTIME_DIR/memory/dist/viewer"
+cp -R "$MEMORY_DIR/adapters" "$RUNTIME_DIR/memory/adapters"
 package_step_start "Create Windows Memory runtime manifest"
 create_memory_runtime_manifest
 
 package_step_start "Install Windows x64 Memory runtime dependencies"
 npm_ci_win_x64 "$RUNTIME_DIR/memory"
-mkdir -p "$RUNTIME_DIR/memory/node_modules/@memmy/local-api-contracts" "$RUNTIME_DIR/memory/node_modules/@memmy/migrations"
-cp "$ROOT_DIR/App/backend/local-api-contracts/package.json" "$RUNTIME_DIR/memory/node_modules/@memmy/local-api-contracts/package.json"
-cp -R "$ROOT_DIR/App/backend/local-api-contracts/dist" "$RUNTIME_DIR/memory/node_modules/@memmy/local-api-contracts/dist"
-cp "$MIGRATIONS_STAGING_DIR/package.json" "$RUNTIME_DIR/memory/node_modules/@memmy/migrations/package.json"
-cp -R "$MIGRATIONS_STAGING_DIR/dist" "$RUNTIME_DIR/memory/node_modules/@memmy/migrations/dist"
 install_better_sqlite3_win_x64 "$RUNTIME_DIR/memory"
 package_step_start "Verify Windows x64 Memory runtime artifacts"
 verify_windows_native_module
@@ -832,9 +829,10 @@ node "$ROOT_DIR/scripts/internal/shared/verify-package-version.mjs" \
   --runtime-root "$RUNTIME_NODE_DIR"
 
 package_step_start "Create Windows CLI launchers and embedding model"
-create_windows_cli_launcher "$CLI_BIN_DIR/memmy-memory.cmd" "dist\\runtime\\memory\\src\\cli\\index.js"
+create_windows_cli_launcher "$CLI_BIN_DIR/memmy-memory.cmd" "dist\\runtime\\memory\\dist\\src\\cli\\index.js"
 create_windows_cli_launcher "$CLI_BIN_DIR/memmy.cmd" "dist\\runtime\\memmy-agent\\dist\\main.js"
 node "$ROOT_DIR/scripts/internal/shared/prepare-embedding-model.mjs" "$EMBEDDING_MODELS_DIR"
+cp -R "$EMBEDDING_MODELS_DIR" "$RUNTIME_DIR/memory/embedding-models"
 
 package_step_start "Patch electron-builder NSIS template"
 patch_electron_builder_nsis_refresh

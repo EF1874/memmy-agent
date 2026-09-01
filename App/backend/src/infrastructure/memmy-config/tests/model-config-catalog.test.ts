@@ -264,6 +264,112 @@ describe("model config catalog", () => {
     expect(accountSaved.modelAssignments.account).not.toEqual(accountBefore);
   });
 
+  it("projects Desktop memory selections into the authoritative memmyMemory section", async () => {
+    const file = fixture({ app: { userMode: "byok" } });
+    const revision = (await readModelConfigCatalog(file)).configRevision;
+    const definitions: ModelConfigInput = {
+      configRevision: revision,
+      providers: [{
+        provider: "openai",
+        apiKey: "sk-memory",
+        endpoints: [
+          {
+            endpointId: "chat",
+            apiBase: "https://models.example/v1",
+            protocol: "openai-chat-completions"
+          },
+          {
+            endpointId: "embedding",
+            apiBase: "https://models.example/v1",
+            protocol: "openai-embeddings"
+          }
+        ],
+        models: [
+          {
+            endpointId: "chat",
+            model: "agent-model",
+            source: "byok",
+            capabilities: ["agent", "memory_summary", "memory_evolution"]
+          },
+          {
+            endpointId: "chat",
+            model: "memory-model",
+            source: "byok",
+            capabilities: ["memory_summary", "memory_evolution"]
+          },
+          {
+            endpointId: "embedding",
+            model: "embedding-model",
+            source: "byok",
+            capabilities: ["embedding"]
+          }
+        ]
+      }],
+      modelAssignments: emptyAssignments()
+    };
+    const created = await writeModelConfigCatalog(file, definitions);
+    const models = created.providers[0]!.models;
+    const agentId = models.find((model) => model.model === "agent-model")!.presetId;
+    const memoryId = models.find((model) => model.model === "memory-model")!.presetId;
+    const embeddingId = models.find((model) => model.model === "embedding-model")!.presetId;
+    const assigned: ModelConfigInput = {
+      ...definitions,
+      configRevision: created.configRevision,
+      providers: [{
+        ...definitions.providers[0]!,
+        models: definitions.providers[0]!.models.map((model) => ({
+          ...model,
+          presetId: model.model === "agent-model"
+            ? agentId
+            : model.model === "memory-model"
+              ? memoryId
+              : embeddingId
+        }))
+      }],
+      modelAssignments: {
+        ...emptyAssignments(),
+        byok: {
+          ...emptyAssignment(),
+          agent: { candidates: [agentId], default: agentId },
+          memorySummary: memoryId,
+          memoryEvolution: memoryId,
+          embedding: embeddingId
+        }
+      }
+    };
+    const saved = await writeModelConfigCatalog(file, assigned);
+    const raw = YAML.parse(readFileSync(file, "utf8")) as any;
+    expect(raw.memmyMemory).toMatchObject({
+      roleRouting: { summary: "follow", evolution: "fixed" },
+      evolution: {
+        provider: "openai_compatible",
+        endpoint: "https://models.example/v1",
+        model: "memory-model",
+        apiKey: "sk-memory"
+      },
+      embedding: {
+        mode: "custom",
+        provider: "openai_compatible",
+        endpoint: "https://models.example/v1",
+        model: "embedding-model",
+        apiKey: "sk-memory"
+      }
+    });
+    expect(saved.memorySettings).toEqual({
+      roleRouting: { summary: "follow", evolution: "fixed" },
+      embeddingMode: "custom"
+    });
+
+    const followInput = structuredClone(assigned);
+    followInput.configRevision = saved.configRevision;
+    followInput.modelAssignments.byok.memorySummary = agentId;
+    followInput.modelAssignments.byok.memoryEvolution = agentId;
+    const followed = await writeModelConfigCatalog(file, followInput);
+    expect(followed.memorySettings?.roleRouting.summary).toBe("follow");
+    expect(followed.memorySettings?.roleRouting.evolution).toBe("follow");
+    expect((YAML.parse(readFileSync(file, "utf8")) as any).memmyMemory.roleRouting.summary).toBe("follow");
+  });
+
   it("rejects duplicate endpoint definitions, invalid protocol capabilities, and duplicate models", async () => {
     const file = fixture();
     const revision = (await readModelConfigCatalog(file)).configRevision;

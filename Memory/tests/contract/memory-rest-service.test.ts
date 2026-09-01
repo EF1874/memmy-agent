@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { canonicalJson, sha256Hex } from "@memmy/local-api-contracts";
+import { canonicalJson, sha256Hex } from "../../src/contracts/index.js";
 import {
   DEFAULT_MEMMY_CONFIG,
   MemoryDb,
@@ -177,7 +177,7 @@ describe("MemoryService / REST contract", () => {
       const client = new MemoryRestClient({ endpoint: `http://127.0.0.1:${address.port}` });
       const namespace = {
         source: "codex",
-        profileId: "default",
+        profileId: "matrix-profile",
         sessionKey: "codex:rest-v2",
         userId: "rest-v2-user"
       } as const;
@@ -192,6 +192,7 @@ describe("MemoryService / REST contract", () => {
         workspaceHostId: "c".repeat(64)
       }) as { sessionId: string; projectId: string };
       expect(opened.projectId).toMatch(/^ws_/u);
+      expect(new Repositories(db.db).runtime.getSession(opened.sessionId)?.profileId).toBe("matrix-profile");
       const envelope = {
         requestId: "91ae733d-25af-4ab0-8cbd-49c447b34d98",
         adapterId: "codex-memory",

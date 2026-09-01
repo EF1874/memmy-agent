@@ -8,7 +8,6 @@ import {
   readFileSync,
   readlinkSync,
   rmSync,
-  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -244,7 +243,7 @@ describe("Linux CLI package boundary", () => {
     expect(builder).not.toContain("App/shell/desktop");
     expect(builder).not.toContain("App/frontend/desktop");
     expect(installer).toContain('(cd "$AGENT_DIR" && npm ci --omit=dev');
-    expect(installer).toContain("npm ci --omit=dev --workspace @memmy/memory");
+    expect(installer).toContain("npm ci --omit=dev --workspaces");
     expect(installer).toContain('--home "$MEMMY_HOME_DIR"');
     expect(installer).toContain("--generate-token-if-missing");
     expect(installer).toContain("systemctl --user enable --now memmy-memory.service");
@@ -259,6 +258,17 @@ describe("Linux CLI package boundary", () => {
     expect(installer).toContain("aarch64|arm64");
     expect(installer).toContain("Node.js 22 or newer is required");
     expect(installer).not.toMatch(/nohup|disown|pkill|killall|enable-linger/);
+  });
+
+  it("installs standalone Agent dependencies before Linux archive contract tests", () => {
+    const linuxWorkflow = readFileSync(linuxWorkflowPath, "utf8");
+    const agentInstall = "run: npm ci --prefix App/memmy-agent";
+    const contractTests = "run: npm run test:linux-cli";
+
+    expect(linuxWorkflow).toContain(agentInstall);
+    expect(linuxWorkflow.indexOf(agentInstall)).toBeLessThan(
+      linuxWorkflow.indexOf(contractTests),
+    );
   });
 
   it("builds an archive with compiled CLI packages and no desktop payload", () => {
@@ -311,13 +321,11 @@ describe("Linux CLI package boundary", () => {
       env: cleanNpmLifecycleEnv(),
     });
     expect(installDryRun.status, installDryRun.stderr).toBe(0);
-    const memoryInstallDryRun = spawnSync("npm", [
+    const runtimeInstall = spawnSync("npm", [
       "ci",
       "--omit=dev",
-      "--workspace",
-      "@memmy/memory",
+      "--workspaces",
       "--include-workspace-root=false",
-      "--dry-run",
       "--ignore-scripts",
       "--no-audit",
       "--no-fund",
@@ -326,10 +334,21 @@ describe("Linux CLI package boundary", () => {
       encoding: "utf8",
       env: cleanNpmLifecycleEnv(),
     });
-    expect(memoryInstallDryRun.status, memoryInstallDryRun.stderr).toBe(0);
+    expect(runtimeInstall.status, runtimeInstall.stderr).toBe(0);
 
-    rmSync(path.join(extracted, "node_modules"), { recursive: true, force: true });
-    symlinkSync(path.join(repoRoot, "node_modules"), path.join(extracted, "node_modules"));
+    const migrationModuleUrl = pathToFileURL(path.join(
+      extracted,
+      "Migrations",
+      "dist",
+      "runner.js",
+    )).href;
+    const migrationImport = spawnSync("node", [
+      "--input-type=module",
+      "--eval",
+      `await import(${JSON.stringify(migrationModuleUrl)});`,
+    ], { cwd: extracted, encoding: "utf8" });
+    expect(migrationImport.status, migrationImport.stderr).toBe(0);
+
     const integrationModuleUrl = pathToFileURL(path.join(
       extracted,
       "App",
@@ -428,7 +447,7 @@ describe("Linux one-line installer transaction", () => {
     const beforeFailure = readlinkSync(current);
     const npmFailed = runInstaller(home, release, tools, { MEMMY_FIXTURE_NPM_FAIL: "1" });
     expect(npmFailed.status).not.toBe(0);
-    expect(npmFailed.stderr).toContain("Memory dependency installation failed");
+    expect(npmFailed.stderr).toContain("Memory runtime dependency installation failed");
     expect(readlinkSync(current)).toBe(beforeFailure);
 
     const configPath = path.join(home, ".memmy", "config.yaml");

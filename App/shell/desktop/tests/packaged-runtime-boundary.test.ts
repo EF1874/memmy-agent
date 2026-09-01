@@ -115,17 +115,16 @@ describe("desktop packaged runtime boundaries", () => {
       bin: { "memmy-memory": "./dist/src/cli/index.js" }
     });
     expect(memoryPackage.dependencies).toMatchObject({
-      "@memmy/local-api-contracts": "0.0.0",
-      "@memmy/migrations": "0.0.0",
       "@huggingface/transformers": expect.any(String),
       "better-sqlite3": expect.any(String),
       "sqlite-vec": "0.1.9",
-      yaml: expect.any(String)
+      yaml: expect.any(String),
+      zod: expect.any(String)
     });
-    expect(memoryPackage.dependencies ?? {}).not.toHaveProperty("zod");
-    expect(memoryPackage.scripts?.prebuild).toBe("npm run version:sync");
-    expect(memoryPackage.scripts?.pretypecheck).toBe("npm run version:sync");
-    expect(memoryPackage.scripts?.pretest).toBe("npm run version:sync");
+    expect(memoryPackage.version).toBe("2.1.0");
+    expect(memoryPackage.dependencies ?? {}).not.toHaveProperty("@memmy/local-api-contracts");
+    expect(memoryPackage.dependencies ?? {}).not.toHaveProperty("@memmy/migrations");
+    expect(memoryPackage.scripts?.prebuild).toBeUndefined();
     expect(backendPackage.dependencies).toHaveProperty("zod");
     expect(backendPackage.dependencies).toHaveProperty("sqlite-vec", "0.1.9");
     expect(frontendPackage.dependencies).toHaveProperty("zod");
@@ -288,20 +287,15 @@ describe("desktop packaged runtime boundaries", () => {
     );
   });
 
-  it("materializes private Memory workspace packages in the Windows runtime", () => {
+  it("keeps the Windows Memory runtime independent from private workspaces", () => {
     const source = readFileSync(packageWinX64Path, "utf8");
 
     expect(source).toContain("run build -w @memmy/local-api-contracts");
-    expect(source).toContain('delete dependencies["@memmy/local-api-contracts"]');
-    expect(source).toContain('delete dependencies["@memmy/migrations"]');
-    expect(source).toContain("Object.assign(dependencies, contractsPackage.dependencies, migrationsPackage.dependencies)");
-    expect(source).toContain('cp -R "$ROOT_DIR/App/backend/local-api-contracts/dist" "$RUNTIME_DIR/memory/node_modules/@memmy/local-api-contracts/dist"');
-    expect(source).toContain('cp -R "$MIGRATIONS_STAGING_DIR/dist" "$RUNTIME_DIR/memory/node_modules/@memmy/migrations/dist"');
-    expect(source).toContain('require_packaged_runtime_file "$RUNTIME_DIR/memory/node_modules/@memmy/local-api-contracts/dist/index.js"');
-    expect(source).toContain('require_packaged_runtime_file "$RUNTIME_DIR/memory/node_modules/@memmy/migrations/dist/index.js"');
-    expect(source.indexOf('cp -R "$ROOT_DIR/App/backend/local-api-contracts/dist"')).toBeGreaterThan(
-      source.indexOf('npm_ci_win_x64 "$RUNTIME_DIR/memory"'),
-    );
+    expect(source).not.toContain('memory/node_modules/@memmy/local-api-contracts');
+    expect(source).not.toContain('memory/node_modules/@memmy/migrations');
+    expect(source).toContain('cp -R "$MEMORY_DIR/dist/viewer" "$RUNTIME_DIR/memory/dist/viewer"');
+    expect(source).toContain('cp -R "$MEMORY_DIR/adapters" "$RUNTIME_DIR/memory/adapters"');
+    expect(source).toContain('protocolVersion: 1');
     expect(source.indexOf("run build -w @memmy/local-api-contracts")).toBeLessThan(
       source.indexOf("run build -w @memmy/memory"),
     );
@@ -943,19 +937,19 @@ describe("desktop packaged runtime boundaries", () => {
     expect(updatePromptSource).not.toContain("CornerRadius");
   });
 
-  it("exports a consistent memory.sqlite snapshot through the desktop save dialog", () => {
+  it("exports Memory through the standalone HTTP service and desktop save dialog", () => {
     const source = readFileSync(mainSourcePath, "utf8");
     const exportSource = extractFunctionSource(source, "async function exportMemoryDatabase");
 
     expect(source).toContain('ipcMain.handle("memmy:export-memory-database"');
     expect(exportSource).toContain("dialog.showSaveDialog");
-    expect(exportSource).toContain("await backupSqliteDatabase(sourcePath, selected.filePath)");
-    expect(exportSource).not.toContain("await copyFile(sourcePath, selected.filePath)");
-    expect(exportSource).toContain("memory-${formatExportTimestamp(new Date())}.sqlite");
-    expect(exportSource).not.toContain("filters:");
-    expect(exportSource).not.toContain("All Files");
-    expect(source).toContain('import { backupSqliteDatabase } from "./sqlite-backup.js"');
-    expect(source).toContain('join(homedir(), ".memmy", "memory-service", "memory.sqlite")');
+    expect(exportSource).toContain("/api/v1/admin/export");
+    expect(exportSource).toContain("authorization: `Bearer ${service.token}`");
+    expect(exportSource).toContain("await response.arrayBuffer()");
+    expect(exportSource).toContain("await writeFile(selected.filePath, payload)");
+    expect(exportSource).toContain("memmy-memory-${formatExportTimestamp(new Date())}.json");
+    expect(exportSource).toContain("filters:");
+    expect(exportSource).not.toContain("backupSqliteDatabase");
   });
 
   it("saves and copies generated images through native desktop APIs", () => {
@@ -1254,7 +1248,8 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain("app.exit(0)");
     expect(mainSource).toContain("async function cleanupBeforeQuit()");
     expect(mainSource).toContain("event.preventDefault()");
-    expect(mainSource).toContain("await services?.close()");
+    expect(mainSource).toContain("readStopMemoryServiceOnExitSetting()");
+    expect(mainSource).toContain("await services?.close({ stopMemory: stopMemoryServiceForCurrentQuit })");
     expect(mainSource).toContain("app.quit()");
     expect(runtimeServicesSource).toContain("STOP_MANAGED_CHILD_GRACE_MS");
     expect(runtimeServicesSource).toContain("waitForManagedChildExit(child, STOP_MANAGED_CHILD_GRACE_MS)");
@@ -1501,30 +1496,15 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).not.toContain('fs.readFileSync("./dist/main.js", "utf8").includes("browser-prepare")');
     expect(source).not.toContain('npm install --prefix "$AGENT_DIR"');
     expect(source).not.toContain('if [ ! -x "$AGENT_DIR/node_modules/.bin/tsc" ]');
-    expect(source).toContain('cp -R "$MEMORY_DIR/dist/src" "$RUNTIME_DIR/memory/src"');
+    expect(source).toContain('cp -R "$MEMORY_DIR/dist/src" "$RUNTIME_DIR/memory/dist/src"');
+    expect(source).toContain('cp -R "$MEMORY_DIR/dist/viewer" "$RUNTIME_DIR/memory/dist/viewer"');
+    expect(source).toContain('cp -R "$MEMORY_DIR/adapters" "$RUNTIME_DIR/memory/adapters"');
     expect(source).toContain(
       'npm install --prefix "$RUNTIME_DIR/memory" --package-lock-only --ignore-scripts --os=darwin --cpu="$TARGET_CPU"'
     );
     expect(source).toContain('npm ci --prefix "$RUNTIME_DIR/memory" --omit=dev --os=darwin --cpu="$TARGET_CPU"');
-    expect(source).toContain('delete dependencies["@memmy/local-api-contracts"]');
-    expect(source).toContain('delete dependencies["@memmy/migrations"]');
-    expect(source).toContain('cp "$LOCAL_API_CONTRACTS_DIR/package.json"');
-    expect(source).toContain('cp -R "$LOCAL_API_CONTRACTS_DIR/dist"');
-    expect(source).toContain(
-      'MEMORY_RUNTIME_CONTRACTS_DIR="$RUNTIME_DIR/memory/node_modules/@memmy/local-api-contracts"',
-    );
-    expect(source).toContain(
-      'MEMORY_RUNTIME_MIGRATIONS_DIR="$RUNTIME_DIR/memory/node_modules/@memmy/migrations"',
-    );
-    expect(source).toContain(
-      'cp "$MIGRATIONS_STAGING_DIR/package.json" "$MEMORY_RUNTIME_MIGRATIONS_DIR/package.json"',
-    );
-    expect(source).toContain(
-      'require_packaged_runtime_file "$MEMORY_RUNTIME_CONTRACTS_DIR/dist/index.js"',
-    );
-    expect(source).toContain(
-      'require_packaged_runtime_file "$MEMORY_RUNTIME_MIGRATIONS_DIR/dist/index.js"',
-    );
+    expect(source).not.toContain('MEMORY_RUNTIME_CONTRACTS_DIR');
+    expect(source).not.toContain('MEMORY_RUNTIME_MIGRATIONS_DIR');
     expect(source).toContain("node_modules/.bin/electron-rebuild");
     expect(source).toContain('-m "$RUNTIME_DIR/memory"');
     expect(source).not.toContain('cp -R "$ROOT_DIR/dist/src" "$RUNTIME_DIR/memory/src"');
@@ -1846,7 +1826,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(writerSource).toContain("cloudService");
     expect(writerSource).not.toContain("JSON.stringify(process.env");
     expect(prunerSource).toContain('name === ".env" || name.startsWith(".env.")');
-    expect(versionGuardSource).toContain('["memory", "memmy-agent"]');
+    expect(versionGuardSource).toContain('[["memory", memoryVersion], ["memmy-agent", expected]]');
     expect(versionGuardSource).toContain("`staged ${component}`");
     expect(asarGuardSource).toContain("Packaged ASAR contains a forbidden environment file");
     expect(asarGuardSource).toContain("dist/main/desktop-edition.json");

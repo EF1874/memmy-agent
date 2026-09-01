@@ -1,5 +1,5 @@
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
-import type { ActualModelContext } from "@memmy/local-api-contracts";
+import type { ActualModelContext } from "../contracts/index.js";
 
 const logger = createMemoryLogger("model-http");
 

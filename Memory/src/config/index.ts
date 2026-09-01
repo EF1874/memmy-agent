@@ -8,7 +8,7 @@ import {
   type ModelCapability,
   type ModelSelectionResolution,
   type RuntimeModelCatalog
-} from "@memmy/local-api-contracts";
+} from "../contracts/index.js";
 import { resolveTimeZone } from "../utils/time.js";
 
 export type LlmProviderName =
@@ -100,6 +100,12 @@ export interface StorageConfig {
   sqlitePath?: string;
   endpoint?: string;
   token?: string;
+}
+
+export interface AgentAccessConfig {
+  autoScanKnownAgents: boolean;
+  watchFileChanges: boolean;
+  autoInjectSkill: boolean;
 }
 
 export interface AlgorithmConfig {
@@ -264,6 +270,7 @@ export interface MemmyConfig {
   summary: LlmConfig;
   evolution: LlmConfig;
   embedding: EmbeddingConfig;
+  agentAccess: AgentAccessConfig;
   algorithm: AlgorithmConfig;
 }
 
@@ -322,6 +329,11 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
     maxRetries: 2,
     cache: true,
     normalize: false
+  },
+  agentAccess: {
+    autoScanKnownAgents: true,
+    watchFileChanges: true,
+    autoInjectSkill: false
   },
   algorithm: {
     enableMemoryAdd: true,
@@ -482,11 +494,12 @@ export function defaultConfigPaths(): string[] {
 
 export function loadMemmyConfig(configPath?: string): {
   config: MemmyConfig;
-  path?: string;
+  path: string;
 } {
   const selectedPath = configPath
     ? resolve(configPath)
-    : defaultConfigPaths().find((candidate) => existsSync(candidate));
+    : defaultConfigPaths().find((candidate) => existsSync(candidate))
+      ?? defaultConfigPaths().at(-1)!;
   const rootConfig = selectedPath && existsSync(selectedPath)
     ? parseConfigFile(selectedPath)
     : {};
@@ -509,17 +522,7 @@ export function loadMemmyConfig(configPath?: string): {
 }
 
 export function resolveEvolutionConfig(config: MemmyConfig): LlmConfig {
-  const evolution = config.evolution;
-  if (evolution.provider || evolution.model || evolution.endpoint || evolution.apiKey) {
-    return evolution;
-  }
-  return {
-    ...config.summary,
-    enableThinking: config.evolution.enableThinking,
-    maxTokens: config.evolution.maxTokens ?? config.summary.maxTokens,
-    timeoutMs: config.evolution.timeoutMs,
-    malformedRetries: config.evolution.malformedRetries ?? config.summary.malformedRetries
-  };
+  return config.evolution;
 }
 
 function parseConfigFile(path: string): Record<string, unknown> {
@@ -599,6 +602,7 @@ function normalizeConfig(input: Record<string, unknown>): MemmyConfig {
       }
     : normalizedEvolution;
   const embedding = normalizeEmbedding(asRecord(input.embedding));
+  const agentAccess = normalizeAgentAccess(asRecord(input.agentAccess));
   const algorithm = normalizeAlgorithm(asRecord(input.algorithm));
   return {
     version: 1,
@@ -609,6 +613,7 @@ function normalizeConfig(input: Record<string, unknown>): MemmyConfig {
     summary,
     evolution,
     embedding,
+    agentAccess,
     algorithm
   };
 }
@@ -625,24 +630,25 @@ function resolveRuntimeMemmyMemoryConfig(
   const routing = normalizeRoleRouting(asRecord(input.roleRouting));
   const assignmentMode = runtimeAssignmentMode(rootConfig);
   const hasCatalog = isRecord(rootConfig.modelAssignments);
-  if (!hasCatalog && hasLegacyMemoryModelConnection(input)) {
-    throw new Error("memmyMemory legacy model config requires the registered runtime config migration");
-  }
-  const summary = hasCatalog
-    ? resolveAssignedLlm(rootConfig, assignmentMode, "memory_summary", DEFAULT_MEMMY_CONFIG.summary)
-    : asRecord(input.summary);
-  const evolution = hasCatalog
-    ? resolveAssignedLlm(rootConfig, assignmentMode, "memory_evolution", DEFAULT_MEMMY_CONFIG.evolution)
+  const evolution = routing.evolution === "follow" && hasCatalog
+    ? resolveAssignedLlm(rootConfig, assignmentMode, "agent", DEFAULT_MEMMY_CONFIG.evolution)
     : asRecord(input.evolution);
+  const summary = routing.summary === "follow"
+    ? inheritLlmConnection(
+        evolution,
+        deepMerge(
+          DEFAULT_MEMMY_CONFIG.summary as unknown as Record<string, unknown>,
+          asRecord(input.summary)
+        )
+      )
+    : asRecord(input.summary);
   return {
     ...input,
     roleRouting: routing,
     summary,
     evolution,
     evolutionSourceProvider: optionalString(evolution.sourceProvider),
-    embedding: hasCatalog
-      ? resolveAssignedEmbedding(input, rootConfig, assignmentMode)
-      : asRecord(input.embedding)
+    embedding: resolveMemoryEmbedding(input, rootConfig, assignmentMode, hasCatalog)
   };
 }
 
@@ -704,6 +710,23 @@ function normalizeEmbedding(input: Record<string, unknown>): EmbeddingConfig {
   };
 }
 
+function normalizeAgentAccess(input: Record<string, unknown>): AgentAccessConfig {
+  return {
+    autoScanKnownAgents: booleanValue(
+      input.autoScanKnownAgents,
+      DEFAULT_MEMMY_CONFIG.agentAccess.autoScanKnownAgents
+    ),
+    watchFileChanges: booleanValue(
+      input.watchFileChanges,
+      DEFAULT_MEMMY_CONFIG.agentAccess.watchFileChanges
+    ),
+    autoInjectSkill: booleanValue(
+      input.autoInjectSkill,
+      DEFAULT_MEMMY_CONFIG.agentAccess.autoInjectSkill
+    )
+  };
+}
+
 function normalizeRoleRouting(
   input: Record<string, unknown>
 ): MemmyConfig["roleRouting"] {
@@ -716,7 +739,7 @@ function normalizeRoleRouting(
 function resolveAssignedLlm(
   rootConfig: Record<string, unknown>,
   mode: "account" | "byok" | null,
-  capability: "memory_summary" | "memory_evolution",
+  capability: "agent" | "memory_summary" | "memory_evolution",
   defaults: LlmConfig
 ): Record<string, unknown> {
   const resolved = resolveMemoryAssignment(rootConfig, mode, capability);
@@ -736,6 +759,28 @@ function resolveAssignedLlm(
     extraBody: resolved.provider.extraBody,
     actualModelContext: resolved.context
   };
+}
+
+function inheritLlmConnection(
+  source: Record<string, unknown>,
+  target: Record<string, unknown>
+): Record<string, unknown> {
+  const inherited = { ...target };
+  for (const key of [
+    "provider",
+    "sourceProvider",
+    "vendor",
+    "endpoint",
+    "model",
+    "apiKey",
+    "extraHeaders",
+    "extraBody",
+    "actualModelContext",
+    "selectionError"
+  ]) {
+    inherited[key] = source[key];
+  }
+  return inherited;
 }
 
 function unavailableLlm(defaults: LlmConfig): Record<string, unknown> {
@@ -796,19 +841,45 @@ function memoryLlmVendor(
   }
 }
 
-function resolveAssignedEmbedding(
+function resolveMemoryEmbedding(
   memory: Record<string, unknown>,
   rootConfig: Record<string, unknown>,
-  mode: "account" | "byok" | null
+  mode: "account" | "byok" | null,
+  hasCatalog: boolean
 ): Record<string, unknown> {
   const embedding = asRecord(memory.embedding);
-  const embeddingMode = memoryEmbeddingMode(
-    embedding.mode,
-    DEFAULT_MEMMY_CONFIG.embedding.mode
-  );
+  const configuredMode = optionalString(embedding.mode);
+  const embeddingMode = configuredMode === "cloud"
+    || configuredMode === "local"
+    || configuredMode === "custom"
+    ? configuredMode
+    : mode === "account" && hasCatalog
+      ? "cloud"
+      : DEFAULT_MEMMY_CONFIG.embedding.mode;
+  const rawAssignedPreset = mode
+    ? asRecord(asRecord(rootConfig.modelAssignments)[mode]).embedding
+    : undefined;
+  const hasExplicitAssignment = rawAssignedPreset !== undefined && rawAssignedPreset !== null;
   const resolved = resolveMemoryAssignment(rootConfig, mode, "embedding");
-  if (!resolved.ok) {
-    if (embeddingMode !== "local") {
+
+  if (mode === "byok" && hasCatalog && !hasExplicitAssignment) {
+    return {
+      ...embedding,
+      mode: "local",
+      provider: "local",
+      sourceProvider: "local",
+      endpoint: undefined,
+      model: DEFAULT_MEMMY_CONFIG.embedding.model,
+      apiKey: undefined,
+      extraHeaders: undefined,
+      extraBody: undefined,
+      actualModelContext: undefined,
+      selectionError: undefined
+    };
+  }
+
+  if (embeddingMode === "local") {
+    if (hasExplicitAssignment && !resolved.ok) {
       return {
         ...embedding,
         provider: "openai_compatible",
@@ -818,9 +889,46 @@ function resolveAssignedEmbedding(
     }
     return {
       ...embedding,
-      mode: embeddingMode,
+      mode: "local",
       provider: "local",
-      sourceProvider: "local"
+      sourceProvider: "local",
+      endpoint: undefined,
+      model: DEFAULT_MEMMY_CONFIG.embedding.model,
+      apiKey: undefined,
+      extraHeaders: undefined,
+      extraBody: undefined,
+      actualModelContext: undefined,
+      selectionError: undefined
+    };
+  }
+
+  if (embeddingMode === "custom") {
+    const custom = asRecord(embedding.custom);
+    return {
+      ...embedding,
+      ...custom,
+      mode: embeddingMode,
+      provider: optionalString(custom.provider)
+        ?? optionalString(embedding.provider)
+        ?? DEFAULT_MEMMY_CONFIG.embedding.provider
+    };
+  }
+  if (!hasCatalog) {
+    return {
+      ...embedding,
+      mode: "cloud",
+      provider: "openai_compatible",
+      model: "",
+      selectionError: "model_selection_unavailable"
+    };
+  }
+  if (!resolved.ok) {
+    return {
+      ...embedding,
+      mode: "cloud",
+      provider: "openai_compatible",
+      model: "",
+      selectionError: "model_selection_unavailable"
     };
   }
   if (!embeddingProtocolSupported(resolved.context.protocol)) {
@@ -875,20 +983,6 @@ function embeddingProtocolSupported(protocol: ActualModelContext["protocol"]): b
   return protocol === "openai-embeddings" || protocol === "memmy-account";
 }
 
-function hasLegacyMemoryModelConnection(memory: Record<string, unknown>): boolean {
-  const connectionFields = ["provider", "endpoint", "apiBase", "baseUrl", "model", "modelId", "apiKey"];
-  if (connectionFields.some((field) => field in asRecord(memory.summary))) return true;
-  if (connectionFields.some((field) => field in asRecord(memory.evolution))) return true;
-  const embedding = asRecord(memory.embedding);
-  const mode = optionalString(embedding.mode);
-  const provider = optionalString(embedding.provider);
-  const remoteEmbeddingFields = ["endpoint", "apiBase", "baseUrl", "model", "modelId", "apiKey"];
-  return mode === "cloud"
-    || mode === "custom"
-    || isRecord(embedding.custom)
-    || (Boolean(provider) && provider !== "local")
-    || remoteEmbeddingFields.some((field) => field in embedding);
-}
 
 function normalizeAlgorithm(input: Record<string, unknown>): AlgorithmConfig {
   const capture = asRecord(input.capture);

@@ -3894,6 +3894,10 @@ code {
   margin-bottom: 20px;
 }
 
+body.memmy-platform-windows .memory-panel__header {
+  padding-top: var(--codex-toolbar-height);
+}
+
 .memory-panel__header--single-line {
   align-items: flex-start;
   flex-wrap: wrap;
@@ -3966,6 +3970,25 @@ code {
 .memory-refresh-button:hover {
   color: var(--color-action-sky-hover);
   transform: translateY(-1px);
+}
+
+.memory-refresh-button--pending .memory-refresh-button__icon {
+  animation: memory-refresh-spin 800ms linear infinite;
+}
+
+.memory-refresh-button--success {
+  border-color: color-mix(in srgb, var(--color-status-success) 38%, var(--border-content-panel));
+  color: var(--color-status-success);
+}
+
+.memory-refresh-button:disabled {
+  cursor: wait;
+}
+
+@keyframes memory-refresh-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .memory-refresh-button:focus-visible {
@@ -5053,6 +5076,10 @@ code {
   animation: memory-drawer-in var(--duration-normal) ease-out;
   pointer-events: auto;
   -webkit-app-region: no-drag;
+}
+
+body.memmy-platform-windows .memory-drawer {
+  padding-top: var(--codex-toolbar-height);
 }
 
 .memory-drawer,

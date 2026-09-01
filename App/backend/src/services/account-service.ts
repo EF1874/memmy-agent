@@ -185,20 +185,26 @@ export function createAccountService(options: CreateAccountServiceOptions): Acco
 
       await clearLocalAccountState(
         options,
-        session.authenticated ? session.profile.userId : undefined
+        session.authenticated ? session.profile.userId : undefined,
+        true,
+        uuid ?? undefined
       );
       return { ok: true };
     },
 
     async getSession() {
       const session = AccountSessionViewSchema.parse(options.accountSessionRepository.get());
+      const cloudUuid = session.authenticated ? options.accountSessionRepository.getCloudUuid() : null;
       return refreshCloudGuideState({
         cloudClient: options.cloudClient,
         accountSessionRepository: options.accountSessionRepository,
         session,
+        cloudUuid: cloudUuid ?? undefined,
         onAuthenticationInvalid: () => clearLocalAccountState(
           options,
-          session.authenticated ? session.profile.userId : undefined
+          session.authenticated ? session.profile.userId : undefined,
+          false,
+          cloudUuid ?? undefined
         )
       });
     }
@@ -232,10 +238,20 @@ async function reloadMemoryConfigIfNeeded(
 
 async function clearLocalAccountState(
   options: CreateAccountServiceOptions,
-  ownerAccountId?: string
+  ownerAccountId?: string,
+  syncSelectedByokToLocal = false,
+  expectedCloudUuid?: string
 ): Promise<void> {
-  const projection = await options.memmyConfigWriter?.clearAccountModelProjection?.({ ownerAccountId });
-  options.accountSessionRepository.clear();
+  const projection = await options.memmyConfigWriter?.clearAccountModelProjection?.({
+    ownerAccountId,
+    syncSelectedByokToLocal,
+    expectedCloudUuid
+  });
+  if (expectedCloudUuid) {
+    options.accountSessionRepository.clearIfCloudUuid(expectedCloudUuid);
+  } else {
+    options.accountSessionRepository.clear();
+  }
   await reloadMemoryConfigIfNeeded(projection, options);
 }
 
