@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  clearTerminalScreen,
   tuiQueuePreview,
   tuiQueueSourceLabel,
 } from "../../../src/entrypoints/cli/tui.js";
@@ -67,6 +68,16 @@ describe("Ink TUI Turn admission", () => {
     const clearIndex = source.indexOf('setDraft("", 0);', sendIndex);
     expect(sendIndex).toBeGreaterThanOrEqual(0);
     expect(clearIndex).toBeGreaterThan(sendIndex);
+  });
+
+  it("clears local messages and terminal scrollback after the Session resets", () => {
+    const write = vi.fn();
+    clearTerminalScreen(write);
+
+    expect(write).toHaveBeenCalledWith("\x1b[2J\x1b[H\x1b[3J");
+    expect(source).toContain("handledSessionResetVersionRef.current === gatewayState.sessionResetVersion");
+    expect(source).toContain("setLocalMessages([]);");
+    expect(source).toContain("clearTerminalScreen(write);");
   });
 
   it("renders fixed queue sources and normalizes only the preview", () => {
