@@ -3,7 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import YAML from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
-import type { ModelAssignments, ModelConfigInput } from "@memmy/local-api-contracts";
+import {
+  BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID,
+  type ModelAssignments,
+  type ModelConfigInput
+} from "@memmy/local-api-contracts";
 import {
   InvalidModelConfigError,
   ModelConfigChangedError,
@@ -65,6 +69,76 @@ function openAiInput(revision: string, presetId?: string): ModelConfigInput {
 }
 
 describe("model config catalog", () => {
+  it("persists the reserved built-in local Embedding assignment without a preset", async () => {
+    const file = fixture({ modelAssignments: emptyAssignments() });
+    const current = await readModelConfigCatalog(file);
+    const assignments = emptyAssignments();
+    assignments.byok.embedding = BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID;
+
+    const saved = await writeModelConfigCatalog(file, {
+      configRevision: current.configRevision,
+      providers: [],
+      modelAssignments: assignments
+    });
+
+    expect(saved.modelAssignments.byok.embedding).toBe(BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID);
+  });
+
+  it("rejects an ownerless account built-in local Embedding assignment", async () => {
+    const file = fixture({ modelAssignments: emptyAssignments() });
+    const current = await readModelConfigCatalog(file);
+    const assignments = emptyAssignments();
+    assignments.account.embedding = BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID;
+
+    await expect(writeModelConfigCatalog(file, {
+      configRevision: current.configRevision,
+      providers: [],
+      modelAssignments: assignments
+    })).rejects.toThrow(/requires an account owner/);
+  });
+
+  it("rejects the built-in local Embedding identifier outside the Embedding assignment", async () => {
+    const file = fixture({ modelAssignments: emptyAssignments() });
+    const current = await readModelConfigCatalog(file);
+    const assignments = emptyAssignments();
+    assignments.byok.memorySummary = BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID;
+
+    await expect(writeModelConfigCatalog(file, {
+      configRevision: current.configRevision,
+      providers: [],
+      modelAssignments: assignments
+    })).rejects.toThrow(/only valid for embedding/);
+  });
+
+  it("reserves the built-in local Embedding identifier against preset collisions", async () => {
+    const file = fixture({
+      providers: {
+        openai: {
+          apiKey: "sk-existing",
+          endpoints: {
+            chat: { apiBase: "https://api.example.test/v1", protocol: "openai-chat-completions" }
+          }
+        }
+      },
+      modelPresets: {
+        [BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID]: {
+          provider: "openai",
+          endpoint: "chat",
+          model: "gpt-5",
+          source: "byok",
+          capabilities: ["agent"]
+        }
+      },
+      modelAssignments: emptyAssignments()
+    });
+    const current = await readModelConfigCatalog(file);
+
+    await expect(writeModelConfigCatalog(
+      file,
+      openAiInput(current.configRevision, BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID)
+    )).rejects.toThrow(/Preset ID is reserved/);
+  });
+
   it("creates unique server preset IDs, masks all credentials, and never persists labels", async () => {
     const file = fixture({ futureSection: { keepMe: true } });
     const current = await readModelConfigCatalog(file);

@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
+  BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID,
   resolveAssignedModel,
   type ActualModelContext,
   type ModelCapability,
@@ -856,26 +857,43 @@ function resolveMemoryEmbedding(
     : mode === "account" && hasCatalog
       ? "cloud"
       : DEFAULT_MEMMY_CONFIG.embedding.mode;
-  const rawAssignedPreset = mode
-    ? asRecord(asRecord(rootConfig.modelAssignments)[mode]).embedding
-    : undefined;
+  const activeAssignment = mode
+    ? asRecord(asRecord(rootConfig.modelAssignments)[mode])
+    : {};
+  const rawAssignedPreset = activeAssignment.embedding;
   const hasExplicitAssignment = rawAssignedPreset !== undefined && rawAssignedPreset !== null;
+  if (rawAssignedPreset === BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID) {
+    const assignmentOwner = optionalString(activeAssignment.ownerAccountId);
+    const activeAccountId = optionalString(asRecord(rootConfig.app).userId);
+    if (
+      mode === "account"
+      && (!assignmentOwner || !activeAccountId || assignmentOwner !== activeAccountId)
+    ) {
+      return {
+        ...embedding,
+        mode: "cloud",
+        provider: "openai_compatible",
+        model: "",
+        selectionError: "model_selection_unavailable"
+      };
+    }
+    return localEmbeddingConfig(embedding);
+  }
+
+  if (mode === "account" && !hasExplicitAssignment) {
+    return {
+      ...embedding,
+      mode: "cloud",
+      provider: "openai_compatible",
+      model: "",
+      selectionError: "model_selection_unavailable"
+    };
+  }
+
   const resolved = resolveMemoryAssignment(rootConfig, mode, "embedding");
 
   if (mode === "byok" && hasCatalog && !hasExplicitAssignment) {
-    return {
-      ...embedding,
-      mode: "local",
-      provider: "local",
-      sourceProvider: "local",
-      endpoint: undefined,
-      model: DEFAULT_MEMMY_CONFIG.embedding.model,
-      apiKey: undefined,
-      extraHeaders: undefined,
-      extraBody: undefined,
-      actualModelContext: undefined,
-      selectionError: undefined
-    };
+    return localEmbeddingConfig(embedding);
   }
 
   if (embeddingMode === "local") {
@@ -887,19 +905,7 @@ function resolveMemoryEmbedding(
         selectionError: "model_selection_unavailable"
       };
     }
-    return {
-      ...embedding,
-      mode: "local",
-      provider: "local",
-      sourceProvider: "local",
-      endpoint: undefined,
-      model: DEFAULT_MEMMY_CONFIG.embedding.model,
-      apiKey: undefined,
-      extraHeaders: undefined,
-      extraBody: undefined,
-      actualModelContext: undefined,
-      selectionError: undefined
-    };
+    return localEmbeddingConfig(embedding);
   }
 
   if (embeddingMode === "custom") {
@@ -950,6 +956,22 @@ function resolveMemoryEmbedding(
     extraHeaders: resolved.provider.extraHeaders,
     extraBody: resolved.provider.extraBody,
     actualModelContext: resolved.context
+  };
+}
+
+function localEmbeddingConfig(embedding: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...embedding,
+    mode: "local",
+    provider: "local",
+    sourceProvider: "local",
+    endpoint: undefined,
+    model: DEFAULT_MEMMY_CONFIG.embedding.model,
+    apiKey: undefined,
+    extraHeaders: undefined,
+    extraBody: undefined,
+    actualModelContext: undefined,
+    selectionError: undefined
   };
 }
 
