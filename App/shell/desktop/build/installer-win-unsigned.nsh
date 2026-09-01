@@ -848,6 +848,10 @@ Function un.MemmyRemoveLaunchProxy
     Pop $R2
     Pop $R1
     Pop $R0
+    ; Electron registers app.setLoginItemSettings under this per-user Run value.
+    ; The keep-shortcuts upgrade branch returns above so the user's preference survives updates.
+    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${APP_ID}"
+    ClearErrors
     ReadRegStr $0 SHELL_CONTEXT "Software\${APP_GUID}" "ShortcutName"
     StrCmp $0 "" 0 un_memmy_delete_old_desktop_shortcut
     StrCpy $0 "${PRODUCT_FILENAME}"

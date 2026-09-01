@@ -874,6 +874,20 @@ describe("desktop packaged runtime boundaries", () => {
     expect(updatePromptSource).not.toContain("CornerRadius");
   });
 
+  it("removes the Windows login item only during a full uninstall", () => {
+    const includeSource = readFileSync(winUnsignedInstallerIncludePath, "utf8");
+    const keepLaunchProxyIndex = includeSource.indexOf("un_memmy_keep_launch_proxy:");
+    const removeLaunchProxyIndex = includeSource.indexOf("un_memmy_remove_launch_proxy:");
+    const removeLoginItemIndex = includeSource.indexOf(
+      'DeleteRegValue HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Run" "${APP_ID}"'
+    );
+
+    expect(keepLaunchProxyIndex).toBeGreaterThan(-1);
+    expect(removeLaunchProxyIndex).toBeGreaterThan(keepLaunchProxyIndex);
+    expect(includeSource.slice(keepLaunchProxyIndex, removeLaunchProxyIndex)).toContain("Return");
+    expect(removeLoginItemIndex).toBeGreaterThan(removeLaunchProxyIndex);
+  });
+
   it("exports Memory through the standalone HTTP service and desktop save dialog", () => {
     const source = readFileSync(mainSourcePath, "utf8");
     const exportSource = extractFunctionSource(source, "async function exportMemoryDatabase");
@@ -925,7 +939,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain("if (response.status === 401)");
   });
 
-  it("installs memmy-memory into ~/.local/bin through the desktop bridge", () => {
+  it("uses packaged .cmd launchers on Windows and keeps the macOS profile flow", () => {
     const mainSource = readFileSync(mainSourcePath, "utf8");
     const preloadSource = readFileSync(preloadSourcePath, "utf8");
     const packageSource = normalizeLineEndings(readFileSync(packageMacDmgPath, "utf8"));
@@ -935,6 +949,10 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain('ipcMain.handle("memmy:install-cli-tools"');
     expect(mainSource).toContain('ipcMain.removeHandler("memmy:install-cli-tools")');
     expect(mainSource).toContain("async function installCliTools");
+    expect(mainSource).toContain("installPackagedWindowsCliTools");
+    expect(mainSource).toContain("resolveCliInstallStrategy(");
+    expect(mainSource).toContain('Boolean((process as NodeJS.Process & { windowsStore?: boolean }).windowsStore)');
+    expect(mainSource).toContain(') === "packaged-windows"');
     expect(mainSource).toContain('join(homedir(), ".local", "bin")');
     expect(mainSource).toContain('{ name: "memmy-memory", source: join(cliDirectory, "memmy-memory") }');
     expect(mainSource).toContain('export PATH="$HOME/.local/bin:$PATH"');
@@ -975,6 +993,8 @@ describe("desktop packaged runtime boundaries", () => {
     expect(packageSource).not.toContain(['create_cli_launcher "$CLI_BIN_DIR/', 'memmy-agent', '"'].join(""));
     expect(packageSource).not.toContain(['ln -sf "$SCRIPT_DIR/', 'memmy-agent', '"'].join(""));
     expect(windowsPackageSource).toContain('create_windows_cli_launcher "$CLI_BIN_DIR/memmy.cmd"');
+    expect(windowsPackageSource).toContain('require_packaged_runtime_file "$DESKTOP_DIR/release/win-unpacked/resources/cli/memmy-memory.cmd"');
+    expect(windowsPackageSource).toContain('require_packaged_runtime_file "$DESKTOP_DIR/release/win-unpacked/resources/cli/memmy.cmd"');
     expect(windowsPackageSource).toContain('for %%I in ("%RESOURCES_DIR%\\..") do set "APP_DIR=%%~fI"');
     expect(windowsPackageSource).toContain('set "APP_EXEC=%APP_DIR%\\Memmy.exe"');
     expect(windowsPackageSource).not.toContain('set "APP_EXEC=%RESOURCES_DIR%\\Memmy.exe"');
@@ -1008,6 +1028,8 @@ describe("desktop packaged runtime boundaries", () => {
     const windowsPreparedUpdateSource = extractFunctionSource(mainSource, "async function waitForWindowsPreparedRequiredUpdateBeforeBoot");
 
     expect(interfaceSource).toContain("export interface DesktopAppInfo");
+    expect(interfaceSource).toContain("isPackaged: boolean;");
+    expect(interfaceSource).toContain("isWindowsStore: boolean;");
     expect(interfaceSource).toContain("export interface DesktopUpdateCheckResult");
     expect(interfaceSource).toContain("export interface DesktopUpdateInstallResult");
     expect(mainSource).toContain("resolveCloudServiceBaseUrl(process.env.MEMMY_CLOUD_SERVICE)");
@@ -1020,6 +1042,8 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain("async function installPreparedRequiredUpdateBeforeBoot()");
     expect(mainSource).toContain("async function prepareRequiredUpdateAfterBoot()");
     expect(mainSource).toContain('url.searchParams.set("platformType", resolveCurrentDesktopPlatformType())');
+    expect(mainSource).toContain("isPackaged: app.isPackaged");
+    expect(mainSource).toContain('isWindowsStore: Boolean((process as NodeJS.Process & { windowsStore?: boolean }).windowsStore)');
     expect(mainSource).toContain("REQUIRED_UPDATE_BACKGROUND_FIRST_CHECK_DELAY_MS");
     expect(mainSource).toContain("REQUIRED_UPDATE_BACKGROUND_CHECK_INTERVAL_MS");
     expect(mainSource).toContain("requiredUpdateBackgroundFirstCheckTimer");

@@ -91,6 +91,11 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
   const [cliInstallBusy, setCliInstallBusy] = useState(false);
   const [cliInstallMessage, setCliInstallMessage] = useState("");
   const [cliInstallError, setCliInstallError] = useState("");
+  const [cliAppInfo, setCliAppInfo] = useState<{
+    platform: string;
+    isPackaged: boolean;
+    isWindowsStore: boolean;
+  } | null>(null);
   const [managedSyncingSourceId, setManagedSyncingSourceId] = useState<string | null>(null);
   const [managedSyncCompletedSourceId, setManagedSyncCompletedSourceId] = useState<string | null>(null);
   const scanProgress = state.agentSources.scanProgress;
@@ -106,6 +111,28 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
   const scanPercent = scanProgress && hasDeterminateScanProgress ? formatActiveScanPercent(scanProgress.current, scanProgress.total) : 0;
   const scannableSources = state.agentSources.items.filter((source) => source.available);
   const memoryServiceAddress = formatMemoryServiceAddress(clients?.runtimeConfig.memory?.baseUrl);
+  const cliPathMessageKey = resolveMemoryCliPathMessageKey(
+    cliAppInfo?.platform,
+    cliAppInfo?.isPackaged,
+    cliAppInfo?.isWindowsStore
+  );
+
+  useEffect(() => {
+    const bridge = typeof window === "undefined" ? undefined : window.memmy;
+    if (!bridge) {
+      return;
+    }
+
+    let active = true;
+    void bridge.getAppInfo().then((appInfo) => {
+      if (active) {
+        setCliAppInfo(appInfo);
+      }
+    }).catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     setMemoryServiceStatus((current) => current === "checking" ? memoryServiceStatusFromBootstrap(state.bootstrap?.health.memory) : current);
@@ -639,7 +666,7 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
             title={t("memory.cli")}
             okLabel={t("memory.cliInstalled")}
             errLabel={t("memory.cliNotInstalled")}
-            value={t("memory.cliPath")}
+            value={t(cliPathMessageKey)}
             description={t("memory.cliDescription")}
             actionLabel={t(cliInstallBusy ? "memory.cliInstalling" : "memory.reinstallPath")}
             onAction={reinstallCliTools}
@@ -1172,6 +1199,16 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
       )}
     </div>
   );
+}
+
+export function resolveMemoryCliPathMessageKey(
+  platform: string | undefined,
+  isPackaged: boolean | undefined,
+  isWindowsStore: boolean | undefined
+): MessageKey {
+  return platform === "win32" && isPackaged === true && isWindowsStore !== true
+    ? "memory.cliPathWindows"
+    : "memory.cliPath";
 }
 
 function FullScanTargetOption(props: {
