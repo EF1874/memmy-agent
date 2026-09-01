@@ -163,7 +163,7 @@ function modelSelectionLabel(selection: TuiModelSelection): string {
   return `${selection.provider} / ${model}`;
 }
 
-function modelLabel(_config: Config): string {
+function modelLabel(): string {
   const resolved = resolveModelSelection({});
   return resolved ? modelSelectionLabel(resolved) : "(none configured)";
 }
@@ -1310,7 +1310,7 @@ function MemmyTui({ config, gateway, registerCleanup, target, toolsets, version 
     ? modelSelectionLabel(gatewayState.modelSelection)
     : gatewayState.modelName
       ? displayModelName(gatewayState.modelName)
-    : modelLabel(config);
+    : modelLabel();
 
   return (
     <Box flexDirection="column" paddingX={1}>

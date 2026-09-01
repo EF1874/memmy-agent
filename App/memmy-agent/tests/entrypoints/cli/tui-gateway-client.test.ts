@@ -120,7 +120,8 @@ async function connectClient({
 } = {}) {
   const sockets: FakeSocket[] = [];
   let bootstrapCount = 0;
-  const fetchImpl = vi.fn(async (input: string | URL, _init?: RequestInit) => {
+  const fetchImpl = vi.fn(async (input: string | URL, init?: RequestInit) => {
+    void init;
     const url = String(input);
     if (url.endsWith("/webui/bootstrap")) {
       bootstrapCount += 1;

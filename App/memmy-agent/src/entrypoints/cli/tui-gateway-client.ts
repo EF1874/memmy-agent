@@ -152,13 +152,6 @@ type BootstrapResponse = {
   tool_names: string[];
 };
 
-type QueueWireItem = {
-  client_request_id: string;
-  text: string;
-  queued_at: string;
-  source: TurnSource;
-};
-
 type GatewayEvent = Record<string, unknown> & {
   event: string;
   chat_id?: string;
