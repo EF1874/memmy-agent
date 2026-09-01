@@ -440,7 +440,7 @@ export class WorkerRunner {
         }
       } catch (error) {
         const classification = classifyProcessingError(error);
-        if (classification.code === "model_input_too_long" || classification.code === "invalid_model_request") {
+        if (classification.code === "model_input_too_long" && batch.length > 1) {
           for (const item of batch) results.push(await this.runLeasedEmbeddingItem(item));
           continue;
         }
@@ -626,7 +626,7 @@ export class WorkerRunner {
         }
       } catch (error) {
         const classification = classifyProcessingError(error);
-        if (classification.code === "model_input_too_long" || classification.code === "invalid_model_request") {
+        if (classification.code === "model_input_too_long" && batch.length > 1) {
           for (const item of batch) {
             results.push(await this.runClaimedEmbeddingRetryItem(item.retry, item.claim, item.attemptNo));
           }

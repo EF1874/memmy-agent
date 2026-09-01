@@ -16,21 +16,26 @@ export interface OpenAiEmbeddingPlan {
 
 let encoder: ReturnType<typeof get_encoding> | undefined;
 
-export function planOpenAiEmbeddingInputs(texts: string[], model?: string): OpenAiEmbeddingPlan | null {
-  if (!isKnownOpenAiEmbeddingModel(model)) return null;
+export function planOpenAiEmbeddingInputs(
+  texts: string[],
+  model?: string,
+  configuredMaxInputTokens?: number
+): OpenAiEmbeddingPlan | null {
+  const inputTokenBudget = resolveInputTokenBudget(model, configuredMaxInputTokens);
+  if (!inputTokenBudget) return null;
   encoder ??= get_encoding("cl100k_base");
   const encoded = texts.map((text) => Array.from(encoder!.encode(text, [], [])));
   const totalTokens = encoded.reduce((sum, tokens) => sum + tokens.length, 0);
   if (totalTokens <= OPENAI_EMBEDDING_BATCH_TOKEN_BUDGET &&
-    encoded.every((tokens) => tokens.length <= OPENAI_EMBEDDING_INPUT_TOKEN_BUDGET)) return null;
+    encoded.every((tokens) => tokens.length <= inputTokenBudget)) return null;
 
   const chunks = encoded.flatMap((tokens, originalIndex) => {
     if (tokens.length === 0) return [{ originalIndex, tokens }];
     const items: OpenAiEmbeddingChunk[] = [];
-    for (let offset = 0; offset < tokens.length; offset += OPENAI_EMBEDDING_INPUT_TOKEN_BUDGET) {
+    for (let offset = 0; offset < tokens.length; offset += inputTokenBudget) {
       items.push({
         originalIndex,
-        tokens: tokens.slice(offset, offset + OPENAI_EMBEDDING_INPUT_TOKEN_BUDGET)
+        tokens: tokens.slice(offset, offset + inputTokenBudget)
       });
     }
     return items;
@@ -67,6 +72,14 @@ export function aggregateOpenAiEmbeddingVectors(plan: OpenAiEmbeddingPlan, vecto
 
 function isKnownOpenAiEmbeddingModel(model?: string): boolean {
   return /(?:^|[/.:])text-embedding-(?:3-(?:small|large)|ada-002)(?:$|[/.:])/i.test(model?.trim() ?? "");
+}
+
+function resolveInputTokenBudget(model?: string, configured?: number): number | null {
+  const explicit = typeof configured === "number" && Number.isFinite(configured) && configured > 0
+    ? Math.floor(configured)
+    : undefined;
+  if (!isKnownOpenAiEmbeddingModel(model) && !explicit) return null;
+  return Math.min(explicit ?? OPENAI_EMBEDDING_INPUT_TOKEN_BUDGET, OPENAI_EMBEDDING_INPUT_TOKEN_BUDGET);
 }
 
 function batchChunks(chunks: OpenAiEmbeddingChunk[]): OpenAiEmbeddingChunk[][] {

@@ -898,7 +898,7 @@ const en = {
     "Configure an embedding provider before repairing or rebuilding vectors.",
   "settings.embedding.maxInputTokens.label": "Maximum input tokens",
   "settings.embedding.maxInputTokens.hint":
-    "Defaults to 1024; use 0 for no client-side limit. Longer inputs are sampled into chunks and pooled; rebuild vectors after changing it.",
+    "Known OpenAI embedding models use a safe 7,500-token budget automatically. Set a lower budget for custom deployment aliases; rebuild vectors after changing it.",
   "settings.embedding.providerBatchSize.label": "Embedding API batch size",
   "settings.embedding.providerBatchSize.hint":
     "Maximum texts per provider request. Rejected oversized batches are split automatically.",
@@ -1854,7 +1854,7 @@ const zh: Record<TranslationKey, string> = {
     "可用 {ready}/{total}；缺失 {missing}；维度不匹配 {mismatch}；当前维度 {dim}。",
   "settings.embedding.maintenance.unavailable": "请先配置嵌入模型，再修复或重建向量。",
   "settings.embedding.maxInputTokens.label": "单条输入最大 Token 数",
-  "settings.embedding.maxInputTokens.hint": "默认 1024；设为 0 表示不启用客户端限制。超长输入会分块采样并聚合向量，修改后请重建向量。",
+  "settings.embedding.maxInputTokens.hint": "已知 OpenAI Embedding 模型自动使用安全的 7500 Token 预算；自定义部署别名可设置更低预算，修改后请重建向量。",
   "settings.embedding.providerBatchSize.label": "Embedding API 批量大小",
   "settings.embedding.providerBatchSize.hint": "单次模型请求最多发送的文本数；超限失败时会自动拆批。",
   "settings.embedding.repair": "修复缺失/错维",

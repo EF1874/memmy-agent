@@ -243,7 +243,8 @@ describe("MemoryService / embedding / processing", () => {
   });
 
   it("does not enqueue a legacy retry for a processing-less deterministic worker failure", async () => {
-    const { db, service } = createTestService({ embedder: createSelectiveFailureEmbedder() });
+    const calls = { batch: 0, single: 0 };
+    const { db, service } = createTestService({ embedder: createSelectiveFailureEmbedder(calls) });
     const repositories = new Repositories(db.db);
     const memory = skillMemory(undefined, {
       id: "skill_deterministic_worker_failure",
@@ -275,6 +276,35 @@ describe("MemoryService / embedding / processing", () => {
     expect(db.db.prepare(
       `SELECT id FROM embedding_retry_queue WHERE target_id = ?`
     ).all(memory.id)).toEqual([]);
+    expect(calls).toEqual({ batch: 1, single: 0 });
+    db.close();
+  });
+
+  it("does not re-request a single legacy retry after a token-limit failure", async () => {
+    const calls = { batch: 0, single: 0 };
+    const { db, service } = createTestService({ embedder: createSelectiveFailureEmbedder(calls) });
+    const repositories = new Repositories(db.db);
+    const memory = skillMemory(undefined, {
+      id: "skill_legacy_token_limit",
+      content: "BAD_EMBEDDING_ITEM"
+    });
+    repositories.memories.insert(memory);
+    const retry = repositories.runtime.enqueueEmbeddingRetry({
+      targetKind: "skill",
+      targetId: memory.id,
+      vectorField: "vec",
+      sourceText: embeddingTextForMemory(memory),
+      embedRole: "query",
+      now: Date.now() - 1
+    });
+
+    await service.runWorkerOnce(10);
+
+    expect(repositories.runtime.getEmbeddingRetry(retry.id)).toMatchObject({
+      status: "failed",
+      attempts: 1
+    });
+    expect(calls).toEqual({ batch: 1, single: 0 });
     db.close();
   });
 
@@ -594,7 +624,7 @@ function createFlakyEmbedder(): Embedder {
   };
 }
 
-function createSelectiveFailureEmbedder(): Embedder {
+function createSelectiveFailureEmbedder(calls?: { batch: number; single: number }): Embedder {
   const inputTooLong = () => new ModelHttpError(
     "openai_compatible HTTP 400: maximum context length exceeded",
     "openai_compatible",
@@ -612,11 +642,13 @@ function createSelectiveFailureEmbedder(): Embedder {
       return true;
     },
     async embed(texts: string[]) {
+      if (calls) calls.batch += 1;
       if (texts.length > 1) throw inputTooLong();
       if (texts[0]?.includes("BAD_EMBEDDING_ITEM")) throw inputTooLong();
       return texts.map((text) => stableTestVector(text));
     },
     async embedOne(text: string) {
+      if (calls) calls.single += 1;
       if (text.includes("BAD_EMBEDDING_ITEM")) throw inputTooLong();
       return stableTestVector(text);
     },
