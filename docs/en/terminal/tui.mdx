@@ -1,11 +1,11 @@
 ---
 title: TUI User Guide
-icon: Terminal
+icon: PanelsTopLeft
 ---
 
 Memmy TUI is Memmy's full-screen terminal interface. Whether you install the desktop app or just the CLI, you can run `memmy` in your terminal to use it.
 
-![image.png](https://alidocs.oss-cn-zhangjiakou.aliyuncs.com/res/3BMqYy5xagvDGqwZ/img/ed3cfb80-ad6a-4403-afa4-03e6ea01ee68.png)
+![image.png](../../assets/tui.png)
 
 ## Installing Memmy TUI
 
@@ -184,7 +184,7 @@ If the task is being executed by another channel, `Ctrl + C` only exits the curr
 
 ## Slash Commands
 
-![Slash command menu](https://alidocs.oss-cn-zhangjiakou.aliyuncs.com/res/3BMqYy5xagvDGqwZ/img/62ea1bed-2894-42ef-826c-18b68447798e.png)
+![Slash command menu](../../assets/tui-slash-command-menu.png)
 
 The TUI has a slash-command suggestion menu. Type `/` in the input area to open it, and keep typing a command name (for example `/go`) to filter the suggestions. The menu closes once you type a space to enter an argument or subcommand.
 
@@ -208,7 +208,7 @@ If `Enter` only completed the command, press `Enter` again to run it.
 
 - `exit`, `quit`, `/exit`, `/quit`, and `:q` all exit, but only `/quit` appears in the menu.
 
-- Whether `/history-dag`  appears depends on whether the corresponding features are enabled.
+- Whether `/history-dag` appears depends on whether the corresponding feature is enabled.
 
 - Up to 8 suggestions are shown initially; keep typing a command prefix to filter down to others.
 
@@ -237,13 +237,13 @@ If `Enter` only completed the command, press `Enter` again to run it.
 | `/goal edit <objective>` | new goal text | Edit the goal |
 | `/goal budget <n\|none>` | a number or `none` | Set or clear the goal budget |
 | `/goal clear` | none | Clear the goal |
-| `/pairing`                  | none               | View or manage channel pairings                              |
-| `/pairing list`             | none               | List channel pairing requests                                |
-| `/pairing approve <code>`   | pairing code       | Approve a pairing request                                    |
-| `/pairing deny <code>`      | pairing code       | Deny a pairing request                                       |
-| `/pairing revoke <user_id>` | user ID            | Revoke a user's pairing                                      |
+| `/pairing` | none | View or manage channel pairings |
+| `/pairing list` | none | List channel pairing requests |
+| `/pairing approve <code>` | pairing code | Approve a pairing request |
+| `/pairing deny <code>` | pairing code | Deny a pairing request |
+| `/pairing revoke <user_id>` | user ID | Revoke a user's pairing |
 
-Whether commands such as `/history-dag`  are available depends on whether the corresponding features are enabled in your configuration.
+Whether `/history-dag` is available depends on whether the corresponding feature is enabled in your configuration.
 
 ## FAQ
 
