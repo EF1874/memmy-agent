@@ -327,11 +327,13 @@ export function resolveTerminalTarget(
     sessionId = null,
     standalone = false,
     project = null,
+    fresh = false,
     invocationCwd = process.cwd(),
   }: {
     sessionId?: string | null;
     standalone?: boolean;
     project?: string | null;
+    fresh?: boolean;
     invocationCwd?: string;
   } = {},
 ): TerminalTarget {
@@ -343,7 +345,7 @@ export function resolveTerminalTarget(
     || typeof sessions?.save !== "function"
   ) {
     const fallbackId = sessionId
-      ?? (standalone || project ? `cli:${crypto.randomUUID()}` : "cli:direct");
+      ?? (standalone || project || fresh ? `cli:${crypto.randomUUID()}` : "cli:direct");
     return {
       sessionId: fallbackId,
       target: project ? "project" : "standalone",
@@ -381,7 +383,7 @@ export function resolveTerminalTarget(
       projectName = registered.name;
     }
   } else {
-    key = standalone || project ? `cli:${crypto.randomUUID()}` : "cli:direct";
+    key = standalone || project || fresh ? `cli:${crypto.randomUUID()}` : "cli:direct";
     const existing = reload(key);
     if (!existing && !dependencies.hasUsableDefaultModel()) {
       throw new Error("No usable default model is configured. Run `memmy onboard` first.");
@@ -508,7 +510,7 @@ export async function runRootInteractiveAgent({
         return false;
       }
     },
-  }, { sessionId, standalone, project });
+  }, { sessionId, standalone, project, fresh: true });
   printCliRestartNoticeIfNeeded(target.sessionId, true);
   const { runInkInteractiveAgent } = await import("./tui.js");
   return runInkInteractiveAgent(loaded, target.sessionId, target);

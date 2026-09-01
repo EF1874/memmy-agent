@@ -76,6 +76,7 @@ export type TuiGatewayState = {
   activeTurnId: string | null;
   startedAt: number | null;
   messages: TuiGatewayMessage[];
+  sessionResetVersion: number;
   goalState: Record<string, unknown> | null;
   modelName: string | null;
   modelSelection: TuiModelSelection | null;
@@ -85,6 +86,10 @@ export type TuiGatewayState = {
   slashCommandsError: string | null;
   notice: string;
 };
+
+function isNewSessionCommand(content: string): boolean {
+  return content.trim().toLowerCase() === "/new";
+}
 
 export type TuiGatewaySubmissionResult = {
   clientRequestId: string;
@@ -422,6 +427,7 @@ export class TuiGatewayClient {
   private readonly listeners = new Set<(state: TuiGatewayState) => void>();
   private readonly pendingSubmissions = new Map<string, PendingSubmission>();
   private readonly acceptedModelUpdateRequests = new Set<string>();
+  private readonly sessionResetRequestIds = new Set<string>();
   private readonly queuedContents = new Map<string, string>();
   private readonly historyBuffers = new Map<number, GatewayEvent[]>();
   private socket: TuiWebSocket | null = null;
@@ -446,6 +452,7 @@ export class TuiGatewayClient {
     activeTurnId: null,
     startedAt: null,
     messages: [],
+    sessionResetVersion: 0,
     goalState: null,
     modelName: null,
     modelSelection: null,
@@ -506,6 +513,7 @@ export class TuiGatewayClient {
     }
     this.pendingSubmissions.clear();
     this.acceptedModelUpdateRequests.clear();
+    this.sessionResetRequestIds.clear();
     this.patch({
       connection: "closed",
       attached: false,
@@ -554,6 +562,7 @@ export class TuiGatewayClient {
       sentGeneration: null,
       waiters: new Set<SubmissionWaiter>(),
     };
+    if (isNewSessionCommand(text)) this.sessionResetRequestIds.add(clientRequestId);
     this.pendingSubmissions.set(clientRequestId, attempt);
     const result = this.waitForSubmission(attempt);
     this.sendSubmission(attempt);
@@ -772,12 +781,16 @@ export class TuiGatewayClient {
     if (event.event === "message_queue_removed") {
       const id = stringValue(event.client_request_id);
       this.applyQueueIncrement(event, (items) => items.filter((candidate) => candidate.clientRequestId !== id));
-      if (id) this.queuedContents.delete(id);
+      if (id) {
+        this.queuedContents.delete(id);
+        this.sessionResetRequestIds.delete(id);
+      }
       return;
     }
     if (event.event === "message_steered") {
       const id = stringValue(event.client_request_id);
       if (id) this.promoteSubmission(id, stringValue(event.turn_id));
+      if (id) this.sessionResetRequestIds.delete(id);
       this.resolveSubmission(id, "steered");
       return;
     }
@@ -789,7 +802,13 @@ export class TuiGatewayClient {
       if (id && attempt?.content.trim().match(/^\/model\s+\S+$/i)) {
         this.acceptedModelUpdateRequests.add(id);
       }
-      if (id && !this.state.queueItems.some((item) => item.clientRequestId === id)) {
+      const resetSession = id ? this.sessionResetRequestIds.delete(id) : false;
+      if (resetSession) {
+        this.patch({
+          messages: [],
+          sessionResetVersion: this.state.sessionResetVersion + 1,
+        });
+      } else if (id && !this.state.queueItems.some((item) => item.clientRequestId === id)) {
         this.promoteSubmission(id, stringValue(event.turn_id));
       }
       this.resolveSubmission(id, "accepted");
@@ -836,7 +855,10 @@ export class TuiGatewayClient {
     }
     if (event.event === "error") {
       const id = stringValue(event.client_request_id);
-      if (id) this.rejectSubmission(id, new Error(stringValue(event.reason) ?? stringValue(event.detail) ?? "Gateway rejected message"));
+      if (id) {
+        this.sessionResetRequestIds.delete(id);
+        this.rejectSubmission(id, new Error(stringValue(event.reason) ?? stringValue(event.detail) ?? "Gateway rejected message"));
+      }
       if (this.stopRequest && event.detail === "stop_failed") {
         const pending = this.stopRequest;
         this.stopRequest = null;

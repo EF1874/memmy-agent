@@ -71,6 +71,7 @@ type YogaLayoutNode = {
 const PROMPT = "❯";
 const MAX_MESSAGES = 24;
 const MAX_TOOLSET_ROWS = 5;
+const CLEAR_TERMINAL_SEQUENCE = "\x1b[2J\x1b[H\x1b[3J";
 const THINK_FRAMES = ["planning", "working", "calling tools", "reading", "writing"];
 const PALETTE = {
   accent: "#F59E6B",
@@ -85,6 +86,10 @@ const PALETTE = {
   primaryStrong: "#3AA893",
   success: "#2DC999",
 };
+
+export function clearTerminalScreen(write: (data: string) => unknown = (data) => process.stdout.write(data)): void {
+  write(CLEAR_TERMINAL_SEQUENCE);
+}
 
 const WORDMARK_ROWS = [
   "███╗   ███╗ ███████╗ ███╗   ███╗ ███╗   ███╗ ██╗   ██╗",
@@ -962,6 +967,7 @@ function QueuePanel({
 
 function MemmyTui({ config, gateway, registerCleanup, target, toolsets, version }: TuiProps) {
   const { exit } = useApp();
+  const { write } = useStdout();
   const { columns, rows } = useTerminalSize();
   const idRef = useRef(1);
   const [input, setInput] = useState("");
@@ -978,6 +984,7 @@ function MemmyTui({ config, gateway, registerCleanup, target, toolsets, version 
   >(null);
   const [localMessages, setLocalMessages] = useState<TuiMessage[]>(() => []);
   const [gatewayState, setGatewayState] = useState<TuiGatewayState>(() => gateway.snapshot());
+  const handledSessionResetVersionRef = useRef(gatewayState.sessionResetVersion);
   const gatewayStateRef = useRef(gatewayState);
   const [notice, setNotice] = useState("");
   const [now, setNow] = useState(() => Date.now());
@@ -1024,6 +1031,13 @@ function MemmyTui({ config, gateway, registerCleanup, target, toolsets, version 
       void cleanup();
     };
   }, [gateway, registerCleanup]);
+
+  useEffect(() => {
+    if (handledSessionResetVersionRef.current === gatewayState.sessionResetVersion) return;
+    handledSessionResetVersionRef.current = gatewayState.sessionResetVersion;
+    setLocalMessages([]);
+    clearTerminalScreen(write);
+  }, [gatewayState.sessionResetVersion, write]);
 
   useEffect(() => {
     if (!gatewayState.busy) return;
@@ -1378,7 +1392,7 @@ export async function runInkInteractiveAgent(
     cleanup = next;
   };
 
-  process.stdout.write("\x1b[2J\x1b[H\x1b[3J");
+  clearTerminalScreen();
   const instance = render(
     <MemmyTui
       config={config}
