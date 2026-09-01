@@ -36,6 +36,9 @@ const winUnsignedInstallerIncludePath = fileURLToPath(new URL("../build/installe
 const winUpgradeRelayScriptPath = fileURLToPath(new URL("../build/MemmyWindowsUpgradeRelay.ps1", import.meta.url));
 const winUpgradeRecoveryScriptPath = fileURLToPath(new URL("../build/MemmyWindowsUpgradeRecovery.ps1", import.meta.url));
 const winDataMigrationScriptPath = fileURLToPath(new URL("../build/MemmyWindowsDataMigration.ps1", import.meta.url));
+const electronBuilderInstallSectionPath = fileURLToPath(
+  new URL("../../../../node_modules/app-builder-lib/templates/nsis/installSection.nsh", import.meta.url)
+);
 const desktopInterfacePath = fileURLToPath(new URL("../interface/src/index.ts", import.meta.url));
 const localApiContractsPath = fileURLToPath(new URL("../../../../App/backend/local-api-contracts/src/index.ts", import.meta.url));
 const rootPackagePath = fileURLToPath(new URL("../../../../package.json", import.meta.url));
@@ -645,8 +648,22 @@ describe("desktop packaged runtime boundaries", () => {
     expect(includeSource).toContain('GetFullPathName $4 "$MemmyUpgradeWorkDir"');
     expect(includeSource).not.toContain('GetFullPathName $5 "$MemmyUpgradeBackupRoot"');
     expect(includeSource).toContain('${GetFileName} "$MemmyUpgradeWorkDir" $5');
-    expect(includeSource).toContain('StrCpy $0 "$INSTDIR.memmy-upgrade-backup\\$4"');
+    expect(includeSource).toContain('StrCpy $0 "$MemmyUpgradeSourceInstallDir.memmy-upgrade-backup\\$4"');
     expect(includeSource).toContain('StrCmp $MemmyUpgradeBackupRoot $0 0 memmy_relay_context_failed');
+    expect(includeSource).toContain("MEMMY_UPGRADE_SOURCE_INSTALL_DIR");
+    expect(includeSource).toContain("MEMMY_UPGRADE_TARGET_INSTALL_DIR");
+    const finishPageMacroStart = includeSource.indexOf("!macro customFinishPage");
+    const finishPageMacroEnd = includeSource.indexOf("!macroend", finishPageMacroStart);
+    const finishPageMacroSource = includeSource.slice(finishPageMacroStart, finishPageMacroEnd);
+    expect(finishPageMacroStart).toBeGreaterThan(-1);
+    expect(finishPageMacroSource).toContain("Function MemmySkipRelayedFinishPage");
+    expect(finishPageMacroSource).toContain('StrCmp $MemmyIsRelayedUpgrade "1"');
+    expect(finishPageMacroSource).toContain("Abort");
+    expect(finishPageMacroSource).toContain("Function MemmyStartAppAfterInstall");
+    expect(finishPageMacroSource).toContain('${StdUtils.ExecShellAsUser} $0 "$launchLink" "open" "$1"');
+    expect(finishPageMacroSource).toContain("!define MUI_PAGE_CUSTOMFUNCTION_PRE MemmySkipRelayedFinishPage");
+    expect(finishPageMacroSource).toContain("!define MUI_FINISHPAGE_RUN_FUNCTION MemmyStartAppAfterInstall");
+    expect(finishPageMacroSource).toContain("!insertmacro MUI_PAGE_FINISH");
     const relayInitIndex = includeSource.indexOf("Function MemmyRelayLegacyUpgrade");
     const earlyLaunchProxyIndex = includeSource.indexOf("Call MemmyInstallLaunchProxy", relayInitIndex);
     const relayStartIndex = includeSource.indexOf('ExecShell "open" "$R5"', relayInitIndex);
@@ -685,6 +702,52 @@ describe("desktop packaged runtime boundaries", () => {
     expect(recoverySource).toContain("completed migration lock cleared without restoring install-local data");
     expect(recoverySource).toContain("Remove-Item -LiteralPath $LockPath");
     expect(mainSource).toContain('spawn("/bin/zsh", [helperPath, filePath, destinationAppPath, logPath, String(process.pid), options.openAfterInstall ? "1" : "0"');
+  });
+
+  it("bridges electron-builder shortcut retention across relayed install-directory changes", () => {
+    const includeSource = readFileSync(winUnsignedInstallerIncludePath, "utf8");
+    const installSectionSource = readFileSync(electronBuilderInstallSectionPath, "utf8");
+    const customCheckStart = includeSource.indexOf("!macro customCheckAppRunning");
+    const customCheckEnd = includeSource.indexOf("!macroend", customCheckStart);
+    const customCheckSource = includeSource.slice(customCheckStart, customCheckEnd);
+    const uninstallCheckStart = includeSource.indexOf("!macro customUnInstallCheck");
+    const uninstallCheckEnd = includeSource.indexOf("!macroend", uninstallCheckStart);
+    const uninstallCheckSource = includeSource.slice(uninstallCheckStart, uninstallCheckEnd);
+
+    const targetAssignment = installSectionSource.indexOf('StrCpy $appExe "$INSTDIR\\${APP_EXECUTABLE_FILENAME}"');
+    const runningCheck = installSectionSource.indexOf("!insertmacro CHECK_APP_RUNNING");
+    const shortcutProbe = installSectionSource.indexOf('${FileExists} "$appExe"');
+    const oldUninstall = installSectionSource.indexOf("!insertmacro uninstallOldVersion SHELL_CONTEXT");
+    const newFiles = installSectionSource.indexOf("!insertmacro installApplicationFiles");
+    expect(targetAssignment).toBeGreaterThan(-1);
+    expect(targetAssignment).toBeLessThan(runningCheck);
+    expect(runningCheck).toBeLessThan(shortcutProbe);
+    expect(shortcutProbe).toBeLessThan(oldUninstall);
+    expect(oldUninstall).toBeLessThan(newFiles);
+
+    const sourceBridge = 'StrCpy $appExe "$MemmyUpgradeSourceInstallDir\\${PRODUCT_FILENAME}.exe"';
+    const targetRestore = 'StrCpy $appExe "$MemmyUpgradeTargetInstallDir\\${PRODUCT_FILENAME}.exe"';
+    expect(customCheckSource).toContain(sourceBridge);
+    expect(customCheckSource.indexOf("!insertmacro _CHECK_APP_RUNNING")).toBeLessThan(
+      customCheckSource.indexOf(sourceBridge)
+    );
+    expect(uninstallCheckSource.match(new RegExp(targetRestore.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"))).toHaveLength(2);
+    expect(uninstallCheckSource.indexOf(targetRestore)).toBeLessThan(
+      uninstallCheckSource.indexOf("${If} $R0 != 0")
+    );
+  });
+
+  it("records the final Windows install directory in uninstall metadata", () => {
+    const includeSource = readFileSync(winUnsignedInstallerIncludePath, "utf8");
+    const installSectionSource = readFileSync(electronBuilderInstallSectionPath, "utf8");
+    const registryInfo = installSectionSource.indexOf("!insertmacro registryAddInstallInfo");
+    const customInstall = installSectionSource.indexOf("!insertmacro customInstall");
+
+    expect(registryInfo).toBeGreaterThan(-1);
+    expect(customInstall).toBeGreaterThan(registryInfo);
+    expect(includeSource).toContain(
+      'WriteRegStr SHELL_CONTEXT "${UNINSTALL_REGISTRY_KEY}" "InstallLocation" "$INSTDIR"'
+    );
   });
 
   it("validates Windows install and external data permissions before uninstalling the old version", () => {
@@ -1802,6 +1865,35 @@ describe("desktop packaged runtime boundaries", () => {
     const source = readFileSync(runtimeServicesPath, "utf8");
 
     expect(source).toContain('MEMMY_EMBEDDING_MODEL_ROOT: join(options.resourcesPath, "embedding-models")');
+  });
+
+  it("prunes and verifies only proven Windows x64 packaged runtime waste", () => {
+    const source = readFileSync(packageWinX64Path, "utf8");
+
+    expect(source).toContain("verify_windows_agent_html_lint_runtime");
+    expect(source).toContain([
+      'prune-packaged-runtime.mjs" \\',
+      "  --platform win32 \\",
+      '  --arch "$PACKAGE_ARCH" \\',
+      '  --runtime-root "$RUNTIME_DIR"',
+    ].join("\n"));
+    expect(source).toContain("verify_pruned_windows_runtime");
+    expect(source).toContain('require_packaged_runtime_absent "$RUNTIME_DIR/memory/node_modules/onnxruntime-node/bin/napi-v3/darwin"');
+    expect(source).toContain('require_packaged_runtime_absent "$RUNTIME_DIR/memory/node_modules/onnxruntime-node/bin/napi-v3/linux"');
+    expect(source).toContain('require_packaged_runtime_absent "$RUNTIME_DIR/memory/node_modules/onnxruntime-node/bin/napi-v3/win32/arm64"');
+    expect(source).toContain('require_packaged_runtime_absent "$RUNTIME_DIR/memmy-agent/node_modules/vitest"');
+    expect(source).toContain('require_packaged_runtime_absent "$RUNTIME_DIR/memmy-agent/node_modules/@vitest"');
+    expect(source).toContain('require_no_packaged_runtime_glob "$RUNTIME_DIR/memmy-agent/node_modules/@rolldown/binding-*"');
+    expect(source).toContain("Packaged runtime contains a third-party production source map");
+    expect(source.indexOf("verify_windows_agent_html_lint_runtime")).toBeLessThan(
+      source.indexOf("prune-packaged-runtime.mjs"),
+    );
+    expect(source.indexOf("prune-packaged-runtime.mjs")).toBeLessThan(
+      source.lastIndexOf("verify_windows_agent_html_lint_runtime"),
+    );
+    expect(source.lastIndexOf("verify_pruned_windows_runtime")).toBeLessThan(
+      source.indexOf("npx electron-builder"),
+    );
   });
 });
 

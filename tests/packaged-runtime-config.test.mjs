@@ -154,36 +154,83 @@ describe("packaged desktop runtime configuration", () => {
       "verify-packaged-asar.mjs",
     );
     const goodAsar = await createAsarFixture(root, "good", "1.0.8");
-    const good = spawnSync(process.execPath, [verifier, "--asar", goodAsar, "--expected", "1.0.8"], {
+    const good = spawnSync(process.execPath, [verifier, ...verifierArgs(goodAsar, "1.0.8")], {
       encoding: "utf8",
     });
     expect(good.status, good.stderr).toBe(0);
 
+    const darwinAsar = await createAsarFixture(root, "darwin", "1.0.8", false, true, [], "darwin");
+    const darwin = spawnSync(process.execPath, [verifier, ...verifierArgs(darwinAsar, "1.0.8", "darwin", "arm64")], {
+      encoding: "utf8",
+    });
+    expect(darwin.status, darwin.stderr).toBe(0);
+
     const noLocksAsar = await createAsarFixture(root, "without-locks", "1.0.8", false, false);
     const withoutLocks = spawnSync(
       process.execPath,
-      [verifier, "--asar", noLocksAsar, "--expected", "1.0.8"],
+      [verifier, ...verifierArgs(noLocksAsar, "1.0.8")],
       { encoding: "utf8" },
     );
     expect(withoutLocks.status, withoutLocks.stderr).toBe(0);
 
     const staleAsar = await createAsarFixture(root, "stale", "1.0.7");
-    const stale = spawnSync(process.execPath, [verifier, "--asar", staleAsar, "--expected", "1.0.8"], {
+    const stale = spawnSync(process.execPath, [verifier, ...verifierArgs(staleAsar, "1.0.8")], {
       encoding: "utf8",
     });
     expect(stale.status).not.toBe(0);
     expect(stale.stderr).toContain("does not match the requested version");
 
     const envAsar = await createAsarFixture(root, "with-env", "1.0.8", true);
-    const withEnv = spawnSync(process.execPath, [verifier, "--asar", envAsar, "--expected", "1.0.8"], {
+    const withEnv = spawnSync(process.execPath, [verifier, ...verifierArgs(envAsar, "1.0.8")], {
       encoding: "utf8",
     });
     expect(withEnv.status).not.toBe(0);
     expect(withEnv.stderr).toContain("forbidden environment file");
+
+    const foreignNativeAsar = await createAsarFixture(root, "foreign-native", "1.0.8", false, true, [
+      ["dist/runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/linux/x64/libonnxruntime.so", "foreign"],
+    ]);
+    const foreignNative = spawnSync(process.execPath, [verifier, ...verifierArgs(foreignNativeAsar, "1.0.8")], {
+      encoding: "utf8",
+    });
+    expect(foreignNative.status).not.toBe(0);
+    expect(foreignNative.stderr).toContain("incompatible onnxruntime-node platform");
+
+    const toolchainAsar = await createAsarFixture(root, "toolchain", "1.0.8", false, true, [
+      ["dist/runtime/memmy-agent/node_modules/vitest/index.js", "test-only"],
+    ]);
+    const toolchain = spawnSync(process.execPath, [verifier, ...verifierArgs(toolchainAsar, "1.0.8")], {
+      encoding: "utf8",
+    });
+    expect(toolchain.status).not.toBe(0);
+    expect(toolchain.stderr).toContain("optional-peer test toolchain");
+
+    const thirdPartyMapAsar = await createAsarFixture(root, "third-party-map", "1.0.8", false, true, [
+      ["dist/runtime/memory/node_modules/dependency/dist/index.js.map", "third-party-map"],
+    ]);
+    const thirdPartyMap = spawnSync(process.execPath, [verifier, ...verifierArgs(thirdPartyMapAsar, "1.0.8")], {
+      encoding: "utf8",
+    });
+    expect(thirdPartyMap.status).not.toBe(0);
+    expect(thirdPartyMap.stderr).toContain("third-party production source map");
+  });
+
+  it("passes the defined Windows package architecture to the shared ASAR verifier", () => {
+    const buildScript = readFileSync(join(
+      dirname(fileURLToPath(import.meta.url)),
+      "..", "scripts", "internal", "win", "build-nsis.sh",
+    ), "utf8");
+    const verifierCall = buildScript.slice(
+      buildScript.indexOf('node "$ROOT_DIR/scripts/internal/shared/verify-packaged-asar.mjs"'),
+      buildScript.indexOf("\n}", buildScript.indexOf('node "$ROOT_DIR/scripts/internal/shared/verify-packaged-asar.mjs"')),
+    );
+
+    expect(verifierCall).toContain('--arch "$PACKAGE_ARCH"');
+    expect(verifierCall).not.toContain("TARGET_ARCH");
   });
 });
 
-async function createAsarFixture(root, name, version, includeEnv = false, includeLocks = true) {
+async function createAsarFixture(root, name, version, includeEnv = false, includeLocks = true, extraFiles = [], platform = "win32") {
   const source = join(root, `${name}-source`);
   const asar = join(root, `${name}.asar`);
   const manifest = { version };
@@ -202,15 +249,34 @@ async function createAsarFixture(root, name, version, includeEnv = false, includ
   );
   mkdirSync(dirname(contracts), { recursive: true });
   writeFileSync(contracts, "export {};\n");
+  if (platform === "win32") {
+    const ownSourceMap = join(source, "dist/runtime/memmy-agent/dist/main.js.map");
+    mkdirSync(dirname(ownSourceMap), { recursive: true });
+    writeFileSync(ownSourceMap, "own-production-map\n");
+  }
+  const targetArch = platform === "darwin" ? "arm64" : "x64";
+  const onnxRuntimeRoot = join(source, `dist/runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/${platform}/${targetArch}`);
+  mkdirSync(onnxRuntimeRoot, { recursive: true });
+  writeFileSync(join(onnxRuntimeRoot, "onnxruntime_binding.node"), `${platform}-${targetArch}-node`);
+  if (platform === "win32") writeFileSync(join(onnxRuntimeRoot, "onnxruntime.dll"), "win-x64-dll");
   const lifecycleSidecar = join(
     source,
     "node_modules/@memmy/backend/dist/src/adapters/outbound/skill-writer/workspace-bridge/memmy-workspace-bridge.mjs",
   );
   mkdirSync(dirname(lifecycleSidecar), { recursive: true });
   writeFileSync(lifecycleSidecar, "export {};\n");
+  for (const [relativePath, contents] of extraFiles) {
+    const targetPath = join(source, relativePath);
+    mkdirSync(dirname(targetPath), { recursive: true });
+    writeFileSync(targetPath, contents);
+  }
   if (includeEnv) writeFileSync(join(source, ".env.production"), "TOKEN=decoy\n");
   await createPackage(source, asar);
   return asar;
+}
+
+function verifierArgs(asar, expected, platform = "win32", arch = "x64") {
+  return ["--asar", asar, "--expected", expected, "--platform", platform, "--arch", arch];
 }
 
 function writeFixtureJson(path, value) {

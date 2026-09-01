@@ -2,7 +2,7 @@
 
 import { extractFile, listPackage } from "@electron/asar";
 
-const { asarPath, expected } = parseArgs(process.argv.slice(2));
+const { asarPath, expected, platform, arch } = parseArgs(process.argv.slice(2));
 if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(expected)) {
   throw new Error("Expected packaged version must use semantic version syntax");
 }
@@ -20,9 +20,39 @@ const requiredFiles = [
   "dist/runtime/memmy-agent/node_modules/@memmy/local-api-contracts/dist/index.js",
   "node_modules/@memmy/backend/dist/src/adapters/outbound/skill-writer/workspace-bridge/memmy-workspace-bridge.mjs",
 ];
+if (platform === "win32") {
+  requiredFiles.push(
+    `dist/runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/${platform}/${arch}/onnxruntime_binding.node`,
+    `dist/runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/${platform}/${arch}/onnxruntime.dll`,
+    "dist/runtime/memmy-agent/dist/main.js.map",
+  );
+}
 const entrySet = new Set(entries);
 for (const file of requiredFiles) {
   if (!entrySet.has(file)) throw new Error(`Packaged ASAR is missing required runtime file: ${file}`);
+}
+
+if (platform === "win32") {
+  const onnxRuntimePrefix = "dist/runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/";
+  const targetOnnxRuntimePrefix = `${onnxRuntimePrefix}${platform}/${arch}/`;
+  if (entries.some((entry) => entry.startsWith(onnxRuntimePrefix)
+    && !entry.startsWith(targetOnnxRuntimePrefix)
+    && !targetOnnxRuntimePrefix.startsWith(`${entry.replace(/\/+$/u, "")}/`))) {
+    throw new Error("Packaged ASAR contains an incompatible onnxruntime-node platform");
+  }
+
+  const optionalPeerToolchainPattern = /^dist\/runtime\/memmy-agent\/node_modules\/(?:vitest|vite|rolldown)(?:\/|$)|^dist\/runtime\/memmy-agent\/node_modules\/@vitest(?:\/|$)|^dist\/runtime\/memmy-agent\/node_modules\/@rolldown\/binding-[^/]+(?:\/|$)/u;
+  if (entries.some((entry) => optionalPeerToolchainPattern.test(entry))) {
+    throw new Error("Packaged ASAR contains the html-validate optional-peer test toolchain");
+  }
+
+  const thirdPartySourceMap = entries.find((entry) =>
+    /^dist\/runtime\/(?:memory|memmy-agent)\/node_modules\//u.test(entry)
+    && entry.endsWith(".map")
+    && !isFirstPartyPackageFile(entry));
+  if (thirdPartySourceMap) {
+    throw new Error(`Packaged ASAR contains a third-party production source map: ${thirdPartySourceMap}`);
+  }
 }
 
 for (const [file, lock] of [
@@ -55,22 +85,34 @@ function readAsarJson(path, file) {
   }
 }
 
+function isFirstPartyPackageFile(entry) {
+  const marker = "/node_modules/";
+  const owner = entry.slice(entry.lastIndexOf(marker) + marker.length);
+  return owner.startsWith("@memmy/");
+}
+
 function parseArgs(args) {
   const parsed = {};
   for (let index = 0; index < args.length; index += 2) {
     const flag = args[index];
     const value = args[index + 1];
     if (!flag?.startsWith("--") || value === undefined) {
-      throw new Error("Usage: verify-packaged-asar.mjs --asar <path> --expected <version>");
+      throw new Error("Usage: verify-packaged-asar.mjs --asar <path> --expected <version> --platform <platform> --arch <arch>");
     }
     const key = flag.slice(2);
-    if (!new Set(["asar", "expected"]).has(key) || parsed[key]) {
+    if (!new Set(["asar", "expected", "platform", "arch"]).has(key) || parsed[key]) {
       throw new Error(`Unknown or duplicate option: ${flag}`);
     }
     parsed[key] = value;
   }
-  if (!parsed.asar || !parsed.expected) {
-    throw new Error("--asar and --expected are required");
+  if (!parsed.asar || !parsed.expected || !parsed.platform || !parsed.arch) {
+    throw new Error("--asar, --expected, --platform, and --arch are required");
   }
-  return { asarPath: parsed.asar, expected: parsed.expected };
+  if (!new Set(["darwin", "linux", "win32"]).has(parsed.platform)) {
+    throw new Error(`Unsupported packaged platform: ${parsed.platform}`);
+  }
+  if (!new Set(["arm64", "x64"]).has(parsed.arch)) {
+    throw new Error(`Unsupported packaged architecture: ${parsed.arch}`);
+  }
+  return { asarPath: parsed.asar, expected: parsed.expected, platform: parsed.platform, arch: parsed.arch };
 }

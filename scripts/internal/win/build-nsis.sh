@@ -169,6 +169,24 @@ require_packaged_runtime_glob() {
   fi
 }
 
+require_packaged_runtime_absent() {
+  local forbidden_path="$1"
+
+  if [ -e "$forbidden_path" ] || [ -L "$forbidden_path" ]; then
+    echo "Packaged runtime contains a forbidden path: $forbidden_path" >&2
+    exit 1
+  fi
+}
+
+require_no_packaged_runtime_glob() {
+  local forbidden_pattern="$1"
+
+  if compgen -G "$forbidden_pattern" >/dev/null; then
+    echo "Packaged runtime contains a forbidden path matching: $forbidden_pattern" >&2
+    exit 1
+  fi
+}
+
 verify_migration_state_compatibility_module() {
   local module_path
   module_path="$(to_node_readable_path "$1")"
@@ -537,6 +555,46 @@ verify_windows_agent_native_artifacts() {
   require_packaged_runtime_glob "$RUNTIME_DIR/memmy-agent/node_modules/openclaw/node_modules/sqlite-vec-windows-x64/vec0.*"
 }
 
+verify_windows_agent_html_lint_runtime() {
+  (
+    cd "$RUNTIME_DIR/memmy-agent"
+    node --input-type=module --eval '
+      import { HtmlValidate } from "html-validate";
+      const validator = new HtmlValidate({ extends: ["html-validate:recommended"] });
+      const valid = await validator.validateString("<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Memmy</title></head><body><main>ready</main></body></html>");
+      const invalid = await validator.validateString("<main><span></main>");
+      if (!valid.valid || invalid.valid) throw new Error("html-validate packaged runtime smoke failed");
+    '
+  )
+}
+
+verify_pruned_windows_runtime() {
+  local forbidden_source_map
+
+  verify_windows_onnxruntime_module
+  require_packaged_runtime_file "$RUNTIME_DIR/memmy-agent/dist/main.js.map"
+  require_packaged_runtime_absent "$RUNTIME_DIR/memory/node_modules/onnxruntime-node/bin/napi-v3/darwin"
+  require_packaged_runtime_absent "$RUNTIME_DIR/memory/node_modules/onnxruntime-node/bin/napi-v3/linux"
+  require_packaged_runtime_absent "$RUNTIME_DIR/memory/node_modules/onnxruntime-node/bin/napi-v3/win32/arm64"
+  require_packaged_runtime_absent "$RUNTIME_DIR/memmy-agent/node_modules/vitest"
+  require_packaged_runtime_absent "$RUNTIME_DIR/memmy-agent/node_modules/vite"
+  require_packaged_runtime_absent "$RUNTIME_DIR/memmy-agent/node_modules/rolldown"
+  require_packaged_runtime_absent "$RUNTIME_DIR/memmy-agent/node_modules/@vitest"
+  require_no_packaged_runtime_glob "$RUNTIME_DIR/memmy-agent/node_modules/@rolldown/binding-*"
+
+  forbidden_source_map="$(find \
+    "$RUNTIME_DIR/memory/node_modules" \
+    "$RUNTIME_DIR/memmy-agent/node_modules" \
+    -type f -name '*.map' \
+    ! -path "$RUNTIME_DIR/memory/node_modules/@memmy/*" \
+    ! -path "$RUNTIME_DIR/memmy-agent/node_modules/@memmy/*" \
+    -print -quit)"
+  if [ -n "$forbidden_source_map" ]; then
+    echo "Packaged runtime contains a third-party production source map: $forbidden_source_map" >&2
+    exit 1
+  fi
+}
+
 verify_packaged_windows_unpacked_artifacts() {
   local unpacked_runtime="$DESKTOP_DIR/release/win-unpacked/resources/app.asar.unpacked/dist/runtime"
   local packaged_embedding_model="$DESKTOP_DIR/release/win-unpacked/resources/embedding-models/$EMBEDDING_MODEL_ID"
@@ -589,7 +647,9 @@ verify_packaged_runtime_config_boundary() {
   fi
   node "$ROOT_DIR/scripts/internal/shared/verify-packaged-asar.mjs" \
     --asar "$(to_node_readable_path "$asar_file")" \
-    --expected "$DESKTOP_VERSION"
+    --expected "$DESKTOP_VERSION" \
+    --platform win32 \
+    --arch "$PACKAGE_ARCH"
 }
 
 npm_ci_win_x64() {
@@ -749,6 +809,19 @@ package_step_start "Verify Windows memmy-agent runtime exports"
     if (!fs.readFileSync(commandEntrypoint, "utf8").includes("browser-prepare")) throw new Error("browser-prepare command is missing");
 	  '
 )
+
+package_step_start "Smoke test packaged HTML lint before optional-peer pruning"
+verify_windows_agent_html_lint_runtime
+
+package_step_start "Prune platform-incompatible and packaging-only Windows runtime files"
+node "$ROOT_DIR/scripts/internal/shared/prune-packaged-runtime.mjs" \
+  --platform win32 \
+  --arch "$PACKAGE_ARCH" \
+  --runtime-root "$RUNTIME_DIR"
+
+package_step_start "Verify pruned Windows runtime boundaries"
+verify_windows_agent_html_lint_runtime
+verify_pruned_windows_runtime
 
 package_step_start "Prune and verify Windows runtime versions"
 node "$ROOT_DIR/scripts/internal/shared/prune-runtime-env-files.mjs" "$RUNTIME_DIR"
