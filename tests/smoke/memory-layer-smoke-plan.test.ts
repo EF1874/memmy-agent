@@ -32,6 +32,8 @@ describe("memory layer smoke plan", () => {
     expect(manifest.scripts["smoke:memory-layer:typecheck"])
       .toBe("tsc -p tests/smoke/tsconfig.json --noEmit");
     expect(manifest.scripts["smoke:memory-layer"])
+      .toContain("npm run smoke:memory-layer:test");
+    expect(manifest.scripts["smoke:memory-layer"])
       .toContain("tsx tests/smoke/memory-layer-smoke.ts");
   });
 

@@ -107,6 +107,8 @@ export interface CreateAgentSourceExecutorOptions {
   scheduledScanIntervalMs?: number;
   scheduleWorker?: () => void;
   integrationRegistry?: SkillTargetRegistry;
+  /** Resolves the Agent root used for optional cross-Agent Skill ingestion. */
+  resolveAgentSkillRoot?: (sourceId: string) => string | null;
 }
 
 export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOptions): AgentSourceExecutor {
@@ -275,7 +277,8 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
       const skillResult = await ingestAgentSkills(
         options.service,
         adapter.descriptor.sourceId,
-        importedRequestIds
+        importedRequestIds,
+        options.resolveAgentSkillRoot
       );
       failures.push(...result.errors, ...skillResult.errors);
       const now = new Date().toISOString();
@@ -562,9 +565,10 @@ function stringMeta(meta: Readonly<Record<string, unknown>>, key: string): strin
 async function ingestAgentSkills(
   service: MemoryService,
   sourceId: string,
-  importedRequestIds: Set<string>
+  importedRequestIds: Set<string>,
+  resolveAgentSkillRoot: (sourceId: string) => string | null = agentRootDirectory
 ): Promise<{ written: number; memoryIds: string[]; errors: string[] }> {
-  const root = agentRootDirectory(sourceId);
+  const root = resolveAgentSkillRoot(sourceId);
   if (!root) return { written: 0, memoryIds: [], errors: [] };
   const skillsRoot = join(root, "skills");
   const files = await findSkillFiles(skillsRoot);

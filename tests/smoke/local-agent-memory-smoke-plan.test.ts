@@ -17,7 +17,11 @@ describe("local agent memory smoke plan", () => {
 
     expect(existsSync(join(repoRoot, "tests/smoke/local-agent-memory-smoke.ts"))).toBe(true);
     expect(manifest.scripts["smoke:local-agent-memory"])
+      .toContain("npm run smoke:local-agent-memory:test");
+    expect(manifest.scripts["smoke:local-agent-memory"])
       .toContain("tsx tests/smoke/local-agent-memory-smoke.ts");
+    expect(manifest.scripts["smoke:local-agent-memory:cursor"])
+      .toContain("npm run smoke:local-agent-memory:test");
     expect(manifest.scripts["smoke:local-agent-memory:cursor"])
       .toContain("tsx tests/smoke/local-agent-memory-smoke.ts --sources=cursor");
   });

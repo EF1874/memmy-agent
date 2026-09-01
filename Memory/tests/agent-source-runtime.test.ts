@@ -116,6 +116,55 @@ describe("standalone Agent source executor", () => {
     });
   });
 
+  it("uses an injected Agent Skill root without reading the developer home", async () => {
+    const root = tempRoot();
+    const skillRoot = join(root, "isolated-agent-root");
+    mkdirSync(join(skillRoot, "skills", "release-check"), { recursive: true });
+    writeFileSync(
+      join(skillRoot, "skills", "release-check", "SKILL.md"),
+      "---\nname: release-check\nversion: 1.0.0\n---\nVerify release evidence.\n",
+      "utf8"
+    );
+    const addMemory = vi.fn(({ layer }: { layer: string }) => ({
+      id: layer === "Skill" ? "skill-memory" : "trace-memory"
+    }));
+    const resolveAgentSkillRoot = vi.fn(() => skillRoot);
+    const adapter: SourceAdapter = {
+      descriptor: {
+        sourceId: "cursor",
+        displayName: "Cursor",
+        builtin: true,
+        dataPath: join(root, "history")
+      },
+      detect: async () => true,
+      async *scan() {
+        yield fixtureMessage("user", "user-isolated", "2026-08-28T01:00:00.000Z");
+        yield fixtureMessage("assistant", "assistant-isolated", "2026-08-28T01:01:00.000Z");
+      }
+    };
+    const executor = createAgentSourceExecutor({
+      service: {
+        addMemory,
+        enqueuePendingImportSummaries: vi.fn()
+      } as unknown as MemoryService,
+      configPath: join(root, "config.yaml"),
+      statePath: join(root, "agent-sources.json"),
+      sourceRegistry: createSourceRegistry([adapter]),
+      resolveAgentSkillRoot
+    });
+
+    await executor.startScan({ sourceId: "cursor", mode: "full" });
+    await waitForScan(executor);
+
+    expect(resolveAgentSkillRoot).toHaveBeenCalledWith("cursor");
+    expect(addMemory).toHaveBeenCalledTimes(2);
+    expect(addMemory).toHaveBeenCalledWith(expect.objectContaining({
+      layer: "Skill",
+      sourceSkillId: "release-check",
+      sourceSkillPath: join(skillRoot, "skills", "release-check", "SKILL.md")
+    }));
+  });
+
   it("pauses and resumes the active standalone scan without creating a second job", async () => {
     const root = tempRoot();
     let releaseSecondMessage: (() => void) | undefined;
