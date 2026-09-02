@@ -368,6 +368,39 @@ describe("desktop packaged runtime boundaries", () => {
     }
   });
 
+  it("ships the standalone Memory runtime with production dependencies on macOS", () => {
+    for (const configPath of [electronBuilderPath, unsignedElectronBuilderPath]) {
+      const config = parseYaml(readFileSync(configPath, "utf8")) as {
+        extraResources?: Array<{ from?: string; to?: string; filter?: string[] }>;
+      };
+      expect(config.extraResources).toContainEqual({
+        from: "dist/runtime/memory",
+        to: "memory-runtime",
+        filter: ["**/*"]
+      });
+      expect(config.extraResources).toContainEqual({
+        from: "dist/runtime/memory/node_modules",
+        to: "memory-runtime/node_modules",
+        filter: ["**/*"]
+      });
+    }
+
+    const macSource = readFileSync(packageMacDmgPath, "utf8");
+    expect(macSource).toContain(
+      'packaged_memory_runtime="$app_path/Contents/Resources/memory-runtime"'
+    );
+    expect(macSource).toContain(
+      '$packaged_memory_runtime/node_modules/onnxruntime-node/bin/napi-v3/darwin/$target_cpu/libonnxruntime*.dylib'
+    );
+    expect(macSource).not.toContain(
+      '$unpacked_runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/darwin/$target_cpu/libonnxruntime*.dylib'
+    );
+    const asarGuardSource = readFileSync(verifyPackagedAsarPath, "utf8");
+    expect(asarGuardSource).toContain(
+      'if (platform === "win32") {\n  requiredFiles.push(\n    "dist/runtime/memory/package.json"'
+    );
+  });
+
   it("excludes dependency root tests and docs from every desktop app archive", () => {
     for (const configPath of [
       electronBuilderPath,

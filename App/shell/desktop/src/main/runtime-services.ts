@@ -1316,7 +1316,9 @@ export function resolveRuntimeEntryPaths(options: StartManagedRuntimeServicesOpt
     return { ...options.runtimeEntries };
   }
   return {
-    memoryEntry: join(options.appPath, "dist/runtime/memory/dist/src/server/index.js"),
+    memoryEntry: options.offlineMemoryRuntimeDirectory
+      ? join(options.offlineMemoryRuntimeDirectory, "dist/src/server/index.js")
+      : join(options.appPath, "dist/runtime/memory/dist/src/server/index.js"),
     agentEntry: join(options.appPath, "dist/runtime/memmy-agent/dist/main.js")
   };
 }
@@ -1547,6 +1549,7 @@ function isPackagedMemoryServiceProcess(pid: number, memoryEntry: string): boole
     const normalizedCommand = command.replaceAll("\\", "/");
     const normalizedEntry = resolve(memoryEntry).replaceAll("\\", "/");
     return normalizedCommand.includes(normalizedEntry)
+      || normalizedCommand.includes("/memory-runtime/dist/src/server/index.js")
       || normalizedCommand.includes("/dist/runtime/memory/src/server/index.js");
   } catch {
     return false;
