@@ -535,6 +535,9 @@ export const ScanResultSchema = z.object({
     emittedMessages: z.number().int().nonnegative(),
     skipped: z.number().int().nonnegative(),
     memoryIds: z.array(z.string().min(1)).optional(),
+    memoryIdCount: z.number().int().nonnegative().optional(),
+    errorCount: z.number().int().nonnegative().optional(),
+    detailsTruncated: z.boolean().optional(),
     errors: z.array(
         z.object({
             conversationId: z.string().min(1),
@@ -543,6 +546,18 @@ export const ScanResultSchema = z.object({
     )
 });
 export type ScanResult = z.infer<typeof ScanResultSchema>;
+
+/** Schema for paged persisted scan details. */
+export const ScanResultPageSchema = z.object({
+    items: z.array(z.object({
+        sourceId: z.string().min(1),
+        conversationId: z.string().min(1),
+        memoryId: z.string().min(1).optional(),
+        error: z.string().min(1).optional()
+    })),
+    nextCursor: z.string().nullable()
+});
+export type ScanResultPage = z.infer<typeof ScanResultPageSchema>;
 
 /** Schema for legal agreement locale urls. */
 export const LegalAgreementLocaleUrlsSchema = z.object({

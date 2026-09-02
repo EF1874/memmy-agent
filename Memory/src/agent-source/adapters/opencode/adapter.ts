@@ -1,10 +1,10 @@
 /** Adapter module. */
 import { access } from "node:fs/promises";
 import { resolveOpencodeDatabasePath } from "../../agent-paths.js";
-import { collectConversationWindow, remainingMessageCapacity } from "../conversation-window.js";
+import { streamConversationWindow, remainingMessageCapacity } from "../conversation-window.js";
 import { redactSecrets } from "../secret-redactor.js";
 import type { ConversationMessage, ScanOptions, SourceAdapter, SourceDescriptor } from "../types.js";
-import { readOpencodeDatabase, type RawOpencodeDatabaseMessage } from "./db-reader.js";
+import { readOpencodeDatabase, streamOpencodeDatabase, type RawOpencodeDatabaseMessage } from "./db-reader.js";
 
 const OPENCODE_SOURCE_ID = "opencode";
 
@@ -58,13 +58,13 @@ export function createOpencodeSourceAdapter(deps: CreateOpencodeSourceAdapterDep
           message: target.databasePath
         });
 
-        const messages = await collectConversationWindow(
-          readOpencodeDatabase(target.databasePath),
+        for await (const rawMessage of streamConversationWindow(
+          options.fullHistory ? streamOpencodeDatabase(target.databasePath) : readOpencodeDatabase(target.databasePath),
           options.since,
           options.signal,
-          remainingMessageCapacity(options.maxMessages, emittedMessages)
-        );
-        for (const rawMessage of messages) {
+          remainingMessageCapacity(options.maxMessages, emittedMessages),
+          options.fullHistory
+        )) {
           throwIfAborted(options.signal);
           options.onProgress?.({
             sourceId: descriptor.sourceId,

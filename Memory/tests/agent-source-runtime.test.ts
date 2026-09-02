@@ -105,12 +105,11 @@ describe("standalone Agent source executor", () => {
     await waitForScan(executor);
     expect(addMemory).toHaveBeenCalledTimes(1);
     expect(JSON.parse(readFileSync(statePath, "utf8"))).toMatchObject({
-      version: 1,
+      version: 2,
       sources: {
         "fixture-agent": {
           messageCount: 2,
           latestSeenAt: "2026-08-28T01:01:00.000Z",
-          importedRequestIds: [expect.any(String)]
         }
       }
     });

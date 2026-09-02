@@ -55,7 +55,7 @@ async function listJsonlFiles(root: string): Promise<Array<{ path: string; mtime
       const path = join(directory, entry.name);
       if (entry.isDirectory()) {
         directories.push(path);
-      } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+      } else if (entry.isFile() && entry.name.endsWith(".jsonl") && !/\.jsonl\.bak-/u.test(entry.name)) {
         files.push({ path, mtimeMs: (await stat(path)).mtimeMs });
       }
     }

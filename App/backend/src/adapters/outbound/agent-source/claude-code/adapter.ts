@@ -1,7 +1,7 @@
 /** Adapter module. */
 import { access } from "node:fs/promises";
 import { resolveClaudeCodeProjectsDirectory } from "../../agent-paths.js";
-import { collectConversationWindow, remainingMessageCapacity } from "../conversation-window.js";
+import { streamConversationWindow, remainingMessageCapacity } from "../conversation-window.js";
 import { redactSecrets } from "../secret-redactor.js";
 import type { ConversationMessage, ScanOptions, SourceAdapter, SourceDescriptor } from "../types.js";
 import { discoverClaudeCodeSessions } from "./project-discovery.js";
@@ -68,13 +68,13 @@ export function createClaudeCodeSourceAdapter(deps: CreateClaudeCodeSourceAdapte
           message: session.sessionFilePath
         });
 
-        const messages = await collectConversationWindow(
+        for await (const rawMessage of streamConversationWindow(
           readClaudeCodeTranscript(session.sessionFilePath, options.signal),
           options.since,
           options.signal,
-          remainingMessageCapacity(options.maxMessages, emittedMessages)
-        );
-        for (const rawMessage of messages) {
+          remainingMessageCapacity(options.maxMessages, emittedMessages),
+          options.fullHistory
+        )) {
           throwIfAborted(options.signal);
           options.onProgress?.({ sourceId: descriptor.sourceId, phase: "redact", current: emittedMessages, total: emittedMessages + 1 });
           emittedMessages += 1;

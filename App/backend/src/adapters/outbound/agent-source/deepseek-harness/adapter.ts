@@ -1,11 +1,11 @@
 import { access } from "node:fs/promises";
 import { join } from "node:path";
 import { resolveDeepseekHarnessHomeDirectory, resolveDeepseekHarnessSessionsDirectory } from "../../agent-paths.js";
-import { collectConversationWindow, remainingMessageCapacity } from "../conversation-window.js";
+import { streamConversationWindow, remainingMessageCapacity } from "../conversation-window.js";
 import { redactSecrets } from "../secret-redactor.js";
 import type { ConversationMessage, ScanOptions, SourceAdapter, SourceDescriptor } from "../types.js";
 import { discoverDeepseekHarnessSessions } from "./session-discovery.js";
-import { readDeepseekHarnessSession, type RawDeepseekHarnessMessage } from "./session-reader.js";
+import { streamDeepseekHarnessSession, type RawDeepseekHarnessMessage } from "./session-reader.js";
 
 const SOURCE_ID = "deepseek_harness";
 
@@ -61,13 +61,13 @@ export function createDeepseekHarnessSourceAdapter(
           total: sessions.length,
           message: session.sessionFilePath
         });
-        const messages = await collectConversationWindow(
-          toAsyncIterable(await readDeepseekHarnessSession(session.sessionFilePath, options.signal)),
+        for await (const rawMessage of streamConversationWindow(
+          streamDeepseekHarnessSession(session.sessionFilePath, options.signal),
           options.since,
           options.signal,
-          remainingMessageCapacity(options.maxMessages, emittedMessages)
-        );
-        for (const rawMessage of messages) {
+          remainingMessageCapacity(options.maxMessages, emittedMessages),
+          options.fullHistory
+        )) {
           options.signal?.throwIfAborted();
           emittedMessages += 1;
           options.onProgress?.({ sourceId: SOURCE_ID, phase: "emit", current: emittedMessages, total: emittedMessages });
@@ -89,10 +89,6 @@ function toConversationMessage(
     content: redactSecrets(message.content),
     gitRoot
   };
-}
-
-async function* toAsyncIterable<T>(values: readonly T[]): AsyncIterable<T> {
-  for (const value of values) yield value;
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {

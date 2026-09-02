@@ -2,6 +2,8 @@
 import { basename } from "node:path";
 import { readJsonlObjects, type JsonObject } from "../jsonl-lines.js";
 
+const MAX_TOOL_NAME_ENTRIES = 4096;
+
 export interface RawCodexMessage {
   /** Message id. */
   messageId: string;
@@ -73,6 +75,10 @@ function toToolMessage(
     const name = getString(payload.name) ?? "tool";
     if (callId) {
       toolNamesByCallId.set(callId, name);
+      if (toolNamesByCallId.size > MAX_TOOL_NAME_ENTRIES) {
+        const oldest = toolNamesByCallId.keys().next().value;
+        if (typeof oldest === "string") toolNamesByCallId.delete(oldest);
+      }
     }
     return {
       messageId: `${rolloutId}:${lineNumber}`,

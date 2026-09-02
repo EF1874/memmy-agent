@@ -1,6 +1,8 @@
+import { createReadStream } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
-import { decompress, ZstdErrorCode } from "fzstd";
+import { decompress, Decompress, ZstdErrorCode } from "fzstd";
+import { readJsonlObjects, type JsonObject } from "../jsonl-lines.js";
 
 const ZSTD_FRAME_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
 
@@ -23,6 +25,108 @@ export async function readDeepseekHarnessSession(
   signal?.throwIfAborted();
   const text = filePath.endsWith(".zstd") ? decompressFrames(bytes) : bytes.toString("utf8");
   return parseSessionRows(text, filePath, signal);
+}
+
+/** Streams uncompressed sessions; compressed legacy files use the existing decoder. */
+export async function* streamDeepseekHarnessSession(
+  filePath: string,
+  signal?: AbortSignal
+): AsyncIterable<RawDeepseekHarnessMessage> {
+  if (filePath.endsWith(".zstd")) {
+    let conversationId = basename(filePath).replace(/\.jsonl\.zstd$/u, "");
+    let workspacePath: string | null = null;
+    for await (const record of streamZstdJsonlObjects(filePath, signal)) {
+      signal?.throwIfAborted();
+      if (record.type === "session") {
+        if (typeof record.id === "string") conversationId = record.id;
+        if (typeof record.cwd === "string") workspacePath = record.cwd;
+        continue;
+      }
+      const message = toMessage(record, conversationId, workspacePath);
+      if (message) yield message;
+    }
+    return;
+  }
+  let conversationId = basename(filePath).replace(/\.jsonl$/u, "");
+  let workspacePath: string | null = null;
+  for await (const record of readJsonlObjects(filePath, signal)) {
+    signal?.throwIfAborted();
+    if (record.type === "session") {
+      if (typeof record.id === "string") conversationId = record.id;
+      if (typeof record.cwd === "string") workspacePath = record.cwd;
+      continue;
+    }
+    const message = toMessage(record, conversationId, workspacePath);
+    if (message) yield message;
+  }
+}
+
+/** Streams zstd frames and parses bounded JSONL records without materializing the file. */
+async function* streamZstdJsonlObjects(filePath: string, signal?: AbortSignal): AsyncIterable<JsonObject> {
+  const input = createReadStream(filePath);
+  const output: Buffer<ArrayBufferLike>[] = [];
+  let outputBytes = 0;
+  let carry: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+  let overLimit = false;
+  const decoder = new Decompress((chunk) => {
+    outputBytes += chunk.byteLength;
+    if (outputBytes > 8 * 1024 * 1024) throw new Error("DeepSeek Harness decompressed chunk exceeds 8 MiB staging limit");
+    output.push(Buffer.from(chunk));
+  });
+  try {
+    for await (const chunk of input) {
+      signal?.throwIfAborted();
+      decoder.push(chunk as Buffer);
+      while (output.length > 0) {
+        const data = output.shift()!;
+        outputBytes -= data.byteLength;
+        carry = carry.length === 0 ? data : Buffer.concat([carry, data]);
+        let newline = carry.indexOf(0x0a);
+        while (newline >= 0) {
+          const line = carry.subarray(0, newline);
+          carry = carry.subarray(newline + 1);
+          newline = carry.indexOf(0x0a);
+          if (overLimit) { overLimit = false; continue; }
+          if (line.length > 64 * 1024 * 1024) continue;
+          const parsed = parseJsonObject(line);
+          if (parsed) yield parsed;
+        }
+        if (carry.length > 64 * 1024 * 1024) { carry = Buffer.alloc(0); overLimit = true; }
+      }
+    }
+    decoder.push(new Uint8Array(), true);
+    while (output.length > 0) {
+      const data = output.shift()!;
+      outputBytes -= data.byteLength;
+      carry = carry.length === 0 ? data : Buffer.concat([carry, data]);
+      let newline = carry.indexOf(0x0a);
+      while (newline >= 0) {
+        const line = carry.subarray(0, newline);
+        carry = carry.subarray(newline + 1);
+        newline = carry.indexOf(0x0a);
+        if (overLimit) { overLimit = false; continue; }
+        if (line.length <= 64 * 1024 * 1024) {
+          const parsed = parseJsonObject(line);
+          if (parsed) yield parsed;
+        }
+      }
+    }
+    if (!overLimit && carry.length > 0 && carry.length <= 64 * 1024 * 1024) {
+      const parsed = parseJsonObject(carry);
+      if (parsed) yield parsed;
+    }
+  } finally {
+    input.destroy();
+  }
+}
+
+function parseJsonObject(line: Buffer): JsonObject | null {
+  try {
+    const parsed = JSON.parse(line.toString("utf8").trim()) as unknown;
+    return isRecord(parsed) ? parsed as JsonObject : null;
+  } catch {
+    return null;
+  }
 }
 
 function decompressFrames(bytes: Buffer): string {
