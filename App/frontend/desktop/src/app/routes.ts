@@ -63,6 +63,15 @@ export interface ResolveInitialViewInput {
   preferredMode: PreferredMode | null;
   accountSession?: AccountSessionView;
   guidanceCompleted?: boolean;
+  modelConfig?: ByokAgentModelAvailability | null;
+}
+
+export interface ByokAgentModelAvailability {
+  catalog?: {
+    modelAssignments: {
+      byok: { agent: { candidates: readonly string[] } };
+    };
+  } | null;
 }
 
 /** Contract for pet launch guard input. */
@@ -133,6 +142,11 @@ export function resolveInitialView(input: ResolveInitialViewInput): AppRoutePath
   }
 
   if (input.bootstrap.app.userMode === "byok") {
+    if (input.modelConfig !== undefined &&
+      !input.modelConfig?.catalog?.modelAssignments.byok.agent.candidates.length) {
+      return "/api-key";
+    }
+
     if (input.bootstrap.onboarding.completed) {
       return input.preferredMode === "pet" ? "/pet" : "/main";
     }
@@ -215,13 +229,7 @@ export function resolveByokModelCompletion(input: ResolveByokModelCompletionInpu
 /** Contract for resolve byok entry input. */
 export interface ResolveByokEntryInput {
   onboarding: OnboardingStateDto | undefined;
-  modelConfig?: {
-    catalog?: {
-      modelAssignments: {
-        byok: { agent: { candidates: string[] } };
-      };
-    };
-  } | null;
+  modelConfig?: ByokAgentModelAvailability | null;
 }
 
 /** Contract for resolve byok entry result. */
