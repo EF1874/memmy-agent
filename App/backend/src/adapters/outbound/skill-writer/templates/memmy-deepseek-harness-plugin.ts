@@ -527,10 +527,18 @@ export const DEEPSEEK_HARNESS_PLUGIN_CLIENT = String.raw`window.__ModuleLoader__
     const exports = module.exports;
 
     const name = "memmy-memory-client";
-    const inject = ["conversationEvents"];
+    const inject = [];
+
+    function resolveConversationEventRegistry(ctx) {
+      const uiConversation = ctx.get("uiConversation");
+      if (uiConversation && uiConversation.events) return uiConversation.events;
+      const conversationEvents = ctx.get("conversationEvents");
+      if (conversationEvents) return conversationEvents;
+      throw new Error("memmy-memory requires uiConversation.events or conversationEvents");
+    }
 
     function apply(ctx) {
-      ctx.conversationEvents.register({
+      resolveConversationEventRegistry(ctx).register({
         kind: "memmy-optimistic-user",
         target: "chat",
         match(event) {
