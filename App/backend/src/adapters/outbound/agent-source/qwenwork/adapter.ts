@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { access } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { resolveQwenworkHomeDirectory, resolveQwenworkProjectsDirectory } from "../../agent-paths.js";
-import { collectConversationWindow, remainingMessageCapacity } from "../conversation-window.js";
+import { streamConversationWindow, remainingMessageCapacity } from "../conversation-window.js";
 import { discoverJsonlSessionFiles } from "../jsonl-session-files.js";
 import { redactSecrets } from "../secret-redactor.js";
 import type { ConversationMessage, ScanOptions, SourceAdapter, SourceDescriptor } from "../types.js";
@@ -59,13 +59,13 @@ export function createQwenworkSourceAdapter(deps: CreateQwenworkSourceAdapterDep
           total: sessions.length,
           message: session.sessionFilePath
         });
-        const messages = await collectConversationWindow(
+        for await (const rawMessage of streamConversationWindow(
           readQwenworkHistory(session.sessionFilePath, options.signal),
           options.since,
           options.signal,
-          remainingMessageCapacity(options.maxMessages, emittedMessages)
-        );
-        for (const rawMessage of messages) {
+          remainingMessageCapacity(options.maxMessages, emittedMessages),
+          options.fullHistory
+        )) {
           emittedMessages += 1;
           options.onProgress?.({ sourceId: descriptor.sourceId, phase: "emit", current: emittedMessages, total: emittedMessages });
           yield {

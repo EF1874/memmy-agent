@@ -1,6 +1,5 @@
-import { createReadStream } from "node:fs";
 import { basename } from "node:path";
-import { createInterface } from "node:readline";
+import { readJsonlObjects } from "../jsonl-lines.js";
 
 export interface RawWorkbuddyMessage {
   messageId: string;
@@ -18,27 +17,13 @@ export async function* readWorkbuddyHistory(
   signal?: AbortSignal
 ): AsyncIterable<RawWorkbuddyMessage> {
   const fallbackConversationId = basename(filePath, ".jsonl");
-  const stream = createReadStream(filePath, { encoding: "utf8" });
-  const lines = createInterface({ input: stream, crlfDelay: Number.POSITIVE_INFINITY });
   let lineNumber = 0;
-
-  try {
-    for await (const line of lines) {
-      lineNumber += 1;
-      throwIfAborted(signal, filePath);
-      const record = parseRecord(line);
-      if (!record) {
-        continue;
-      }
-
-      const message = toRawWorkbuddyMessage(record, fallbackConversationId, lineNumber);
-      if (message) {
-        yield message;
-      }
+  for await (const record of readJsonlObjects(filePath, signal)) {
+    lineNumber += 1;
+    const message = toRawWorkbuddyMessage(record, fallbackConversationId, lineNumber);
+    if (message) {
+      yield message;
     }
-  } finally {
-    lines.close();
-    stream.destroy();
   }
 }
 
@@ -278,18 +263,6 @@ function formatStructuredValue(value: unknown): string {
   }
 }
 
-function parseRecord(line: string): Record<string, unknown> | null {
-  if (!line.trim()) {
-    return null;
-  }
-  try {
-    const parsed: unknown = JSON.parse(line);
-    return isRecord(parsed) ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
 function isRoleEvent(value: string): boolean {
   return ["user", "human", "assistant", "ai", "tool", "function", "system", "developer"].includes(value);
 }
@@ -324,10 +297,4 @@ function recordValue(value: unknown): Record<string, unknown> | null {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function throwIfAborted(signal: AbortSignal | undefined, filePath: string): void {
-  if (signal?.aborted) {
-    throw new DOMException(`WorkBuddy history read aborted: ${filePath}`, "AbortError");
-  }
 }

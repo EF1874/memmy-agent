@@ -34,7 +34,7 @@ export async function discoverClaudeCodeSessions(
     const projectPath = join(options.root, projectEntry.name);
     const files = await readDirectoryIfExists(projectPath);
     for (const file of files) {
-      if (!file.isFile() || !file.name.endsWith(".jsonl")) {
+      if (!file.isFile() || !file.name.endsWith(".jsonl") || /\.jsonl\.bak-/u.test(file.name)) {
         continue;
       }
 

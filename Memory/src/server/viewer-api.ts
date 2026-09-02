@@ -37,6 +37,7 @@ export const VIEWER_API_ROUTES = [
   "GET /api/v1/agent-sources",
   "POST /api/v1/agent-sources/scan",
   "GET /api/v1/agent-sources/scan/status",
+  "GET /api/v1/agent-sources/scan/jobs/:jobId/results",
   "POST /api/v1/agent-sources/scan/stop",
   "POST /api/v1/agent-sources/scan/cancel",
   "POST /api/v1/agent-sources/:id/plugin",
@@ -222,6 +223,12 @@ export async function routeViewerRequest(
   }
   if (method === "GET" && path === "/api/v1/agent-sources/scan/status") {
     return { body: context.agentSources.scanStatus() };
+  }
+  const scanResults = path.match(/^\/api\/v1\/agent-sources\/scan\/jobs\/([^/]+)\/results$/);
+  if (method === "GET" && scanResults?.[1]) {
+    return { body: context.agentSources.scanResults
+      ? await context.agentSources.scanResults(decodeURIComponent(scanResults[1]), query(url, "cursor") ?? "0", numberQuery(url, "limit") ?? 100)
+      : { items: [], nextCursor: null } };
   }
   if (method === "POST" && path === "/api/v1/agent-sources/scan/stop") {
     return { body: await context.agentSources.pauseScan() };

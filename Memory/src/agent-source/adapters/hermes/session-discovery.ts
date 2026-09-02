@@ -58,7 +58,7 @@ async function listJsonlFiles(root: string, order: "path_asc" | "recent_first", 
       continue;
     }
 
-    if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+    if (entry.isFile() && entry.name.endsWith(".jsonl") && !/\.jsonl\.bak-/u.test(entry.name)) {
       const fileStat = await stat(path);
       files.push({ path, mtimeMs: fileStat.mtimeMs });
     }
