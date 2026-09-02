@@ -825,6 +825,34 @@ function mapAndInsert(
     increment(deduplicated, targetTable);
     return ledger.target_id;
   }
+  if (targetTable === "raw_turns" && typeof row.session_id === "string" && typeof row.turn_id === "string") {
+    const existingRawTurn = target.prepare(
+      `SELECT id, user_text, assistant_text, reasoning_summary,
+              tool_calls_json, tool_results_json, source_memory_ids_json,
+              usage_json, message_payload_json
+       FROM raw_turns
+       WHERE session_id = ? AND turn_id = ?`
+    ).get(row.session_id, row.turn_id) as RawTurnRow | undefined;
+    if (existingRawTurn) {
+      mergeRawTurn(target, existingRawTurn, row);
+      target.prepare(`
+        INSERT INTO legacy_migration_ledger
+          (source_path, source_table, source_id, content_sha256, target_table, target_id, status, migrated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'deduplicated', ?)
+      `).run(
+        source.dbPath,
+        sourceTable,
+        sourceId,
+        contentDigest,
+        targetTable,
+        existingRawTurn.id,
+        new Date().toISOString()
+      );
+      setMap(maps, targetTable, sourceId, existingRawTurn.id);
+      increment(deduplicated, targetTable);
+      return existingRawTurn.id;
+    }
+  }
   let targetId = String(row.id ?? sourceId);
   const idColumn = targetTable === "runtime_kv" ? "key" : "id";
   const sameMemory = targetTable === "memories"
@@ -849,6 +877,74 @@ function mapAndInsert(
     .run(source.dbPath, sourceTable, sourceId, contentDigest, targetTable, targetId, sameMemory ? "deduplicated" : "inserted", new Date().toISOString());
   setMap(maps, targetTable, sourceId, targetId);
   return targetId;
+}
+
+interface RawTurnRow {
+  id: string;
+  user_text: unknown;
+  assistant_text: unknown;
+  reasoning_summary: unknown;
+  tool_calls_json: unknown;
+  tool_results_json: unknown;
+  source_memory_ids_json: unknown;
+  usage_json: unknown;
+  message_payload_json: unknown;
+}
+
+function mergeRawTurn(target: Database.Database, existing: RawTurnRow, incoming: Row): void {
+  const legacyTraceIds = [...new Set([
+    jsonRecord(existing.message_payload_json).legacyTraceId,
+    jsonRecord(incoming.message_payload_json).legacyTraceId
+  ].filter((value): value is string => typeof value === "string" && value.length > 0))];
+  const payload = {
+    ...jsonRecord(existing.message_payload_json),
+    ...jsonRecord(incoming.message_payload_json),
+    ...(legacyTraceIds.length ? { legacyTraceIds } : {})
+  };
+  target.prepare(`
+    UPDATE raw_turns
+    SET user_text = ?,
+        assistant_text = ?,
+        reasoning_summary = ?,
+        tool_calls_json = ?,
+        tool_results_json = ?,
+        source_memory_ids_json = ?,
+        usage_json = ?,
+        message_payload_json = ?
+    WHERE id = ?
+  `).run(
+    mergeText(existing.user_text, incoming.user_text),
+    mergeText(existing.assistant_text, incoming.assistant_text),
+    mergeText(existing.reasoning_summary, incoming.reasoning_summary),
+    json(mergeJsonArrays(existing.tool_calls_json, incoming.tool_calls_json)),
+    json(mergeJsonArrays(existing.tool_results_json, incoming.tool_results_json)),
+    json(mergeJsonArrays(existing.source_memory_ids_json, incoming.source_memory_ids_json)),
+    json({ ...jsonRecord(existing.usage_json), ...jsonRecord(incoming.usage_json) }),
+    json(payload),
+    existing.id
+  );
+}
+
+function mergeText(existing: unknown, incoming: unknown): string | null {
+  const first = typeof existing === "string" && existing.trim() ? existing : undefined;
+  const second = typeof incoming === "string" && incoming.trim() ? incoming : undefined;
+  if (!first) return second ?? null;
+  if (!second || second === first) return first;
+  return `${first}\n\n${second}`;
+}
+
+function mergeJsonArrays(...values: unknown[]): unknown[] {
+  const merged: unknown[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    for (const item of jsonArray(value)) {
+      const key = stableJson(item);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(item);
+    }
+  }
+  return merged;
 }
 
 function insertRow(target: Database.Database, table: string, row: Row): void {

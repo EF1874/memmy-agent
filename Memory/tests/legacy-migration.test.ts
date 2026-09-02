@@ -149,6 +149,85 @@ describe("Local Plugin 2.0 migration", () => {
     merged.close();
   });
 
+  it("merges legacy traces that share a session and turn into one raw turn", async () => {
+    const root = tempRoot();
+    await createLegacyFixture(root, "hermes", "Hermes model", "first user");
+    const legacyPath = join(root, ".hermes", "memos-plugin", "data", "memos.db");
+    const legacy = new Database(legacyPath);
+    const turnId = Number(legacy.prepare("SELECT turn_id FROM traces WHERE id = ?").pluck().get("trace-shared"));
+    const timestamp = Number(legacy.prepare("SELECT ts FROM traces WHERE id = ?").pluck().get("trace-shared")) + 1;
+    legacy.prepare(`
+      INSERT INTO traces (
+        id, episode_id, session_id, owner_agent_kind, owner_profile_id, owner_workspace_id,
+        ts, user_text, agent_text, summary, tool_calls_json, reflection, agent_thinking,
+        value, alpha, r_human, priority, tags_json, error_signatures_json, turn_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      "trace-duplicate",
+      "episode-shared",
+      "session-shared",
+      "hermes",
+      "default",
+      null,
+      timestamp,
+      "second user",
+      "second answer",
+      "second summary",
+      "[]",
+      null,
+      null,
+      1,
+      1,
+      1,
+      1,
+      "[\"duplicate\"]",
+      "[]",
+      turnId
+    );
+    legacy.close();
+
+    const dbPath = join(root, ".memmy", "memory-service", "memory.sqlite");
+    const first = await migrateLegacyLocalPlugins({
+      configPath: join(root, ".memmy", "config.yaml"),
+      dbPath,
+      memmyConfigExisted: true,
+      legacyRoot: root,
+      nonInteractive: true
+    });
+
+    expect(first.sources[0]?.inserted.raw_turns).toBe(1);
+    expect(first.sources[0]?.deduplicated.raw_turns).toBe(1);
+    const db = new Database(dbPath, { readonly: true });
+    expect(db.prepare("SELECT COUNT(*) FROM raw_turns").pluck().get()).toBe(1);
+    const rawTurn = db.prepare("SELECT user_text, assistant_text, message_payload_json FROM raw_turns").get() as {
+      user_text: string;
+      assistant_text: string;
+      message_payload_json: string;
+    };
+    expect(rawTurn.user_text).toContain("first user");
+    expect(rawTurn.user_text).toContain("second user");
+    expect(rawTurn.assistant_text).toContain("hermes answer");
+    expect(rawTurn.assistant_text).toContain("second answer");
+    expect(JSON.parse(rawTurn.message_payload_json).legacyTraceIds).toEqual([
+      "trace-shared",
+      "trace-duplicate"
+    ]);
+    expect(db.prepare("SELECT COUNT(*) FROM memories WHERE memory_layer = 'L1'").pluck().get()).toBe(2);
+    db.close();
+
+    const second = await migrateLegacyLocalPlugins({
+      configPath: join(root, ".memmy", "config.yaml"),
+      dbPath,
+      memmyConfigExisted: true,
+      legacyRoot: root,
+      nonInteractive: true
+    });
+    expect(second.sources[0]?.inserted.raw_turns ?? 0).toBe(0);
+    const verify = new Database(dbPath, { readonly: true });
+    expect(verify.prepare("SELECT COUNT(*) FROM raw_turns").pluck().get()).toBe(1);
+    verify.close();
+  });
+
   it("imports the older chunks/tasks/skills Local Plugin database layout", async () => {
     const root = tempRoot();
     const oldDirectory = join(root, ".openclaw", "memos-local");
