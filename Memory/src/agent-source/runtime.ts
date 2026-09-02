@@ -660,7 +660,8 @@ async function stageStandaloneSource(
     })) {
       await waitIfPaused();
       signal.throwIfAborted();
-      const bytes = Buffer.byteLength(JSON.stringify(message));
+      const normalizedMessage = message.sourceId === sourceId ? message : { ...message, sourceId };
+      const bytes = Buffer.byteLength(JSON.stringify(normalizedMessage));
       if (bytes > 64 * 1024 * 1024) {
         const reason = "record exceeds 64 MiB";
         scanErrorCount += 1;
@@ -675,7 +676,7 @@ async function stageStandaloneSource(
         batch.length = 0;
         batchBytes = 0;
       }
-      batch.push({ ...message, ordinal: emittedOrdinal++ });
+      batch.push({ ...normalizedMessage, ordinal: emittedOrdinal++ });
       batchBytes += bytes;
       if (batch.length >= 500 || batchBytes >= 8 * 1024 * 1024) {
         staged += store.stageBatch(batch);
