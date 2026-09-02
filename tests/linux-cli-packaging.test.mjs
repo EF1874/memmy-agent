@@ -231,6 +231,7 @@ describe("Linux CLI package boundary", () => {
     const installer = readFileSync(installerPath, "utf8");
 
     expect(builder).toContain("App/memmy-agent/dist/main.js");
+    expect(builder).toContain("AgentSourceCore/dist/src/index.js");
     expect(builder).toContain("Memory/dist/src/server/index.js");
     expect(builder).toContain("Memory/dist/src/cli/index.js");
     expect(builder).toContain("builtin-skill-target-registry.js");
@@ -290,6 +291,7 @@ describe("Linux CLI package boundary", () => {
     const listing = spawnSync("tar", ["-tzf", archive], { encoding: "utf8" });
     expect(listing.status, listing.stderr).toBe(0);
     expect(listing.stdout).toContain("App/memmy-agent/dist/main.js");
+    expect(listing.stdout).toContain("AgentSourceCore/dist/src/index.js");
     expect(listing.stdout).toContain("Memory/dist/src/server/index.js");
     expect(listing.stdout).toContain("Memory/dist/src/cli/index.js");
     expect(listing.stdout).toContain("App/backend/dist/src/services/builtin-skill-target-registry.js");
@@ -335,6 +337,8 @@ describe("Linux CLI package boundary", () => {
       env: cleanNpmLifecycleEnv(),
     });
     expect(runtimeInstall.status, runtimeInstall.stderr).toBe(0);
+    expect(existsSync(path.join(extracted, "AgentSourceCore", "dist", "src", "index.js"))).toBe(true);
+    expect(existsSync(path.join(extracted, "node_modules", "@memmy", "agent-source-core"))).toBe(true);
 
     const migrationModuleUrl = pathToFileURL(path.join(
       extracted,
