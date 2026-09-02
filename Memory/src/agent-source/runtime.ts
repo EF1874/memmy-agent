@@ -122,6 +122,8 @@ export interface CreateAgentSourceExecutorOptions {
   scheduledScanIntervalMs?: number;
   scheduleWorker?: () => void;
   integrationRegistry?: SkillTargetRegistry;
+  /** Resolves the Agent root used for optional cross-Agent Skill ingestion. */
+  resolveAgentSkillRoot?: (sourceId: string) => string | null;
   scanStoreDirectory?: string;
 }
 
@@ -302,7 +304,13 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
         const result = await ingestStagedMessages(options.service, store, sourceId, signal, (progress) => {
           if (!scanPaused) { progressBeforePause = progress; scan = { ...scan, progress }; }
         }, options.scheduleWorker);
-        const skillResult = await ingestAgentSkills(options.service, sourceId, store, options.scheduleWorker);
+        const skillResult = await ingestAgentSkills(
+          options.service,
+          sourceId,
+          store,
+          options.resolveAgentSkillRoot,
+          options.scheduleWorker
+        );
         const sourceErrorCount = stage.scanErrorCount + result.errorCount + skillResult.errorCount;
         failureCount += sourceErrorCount;
         for (const detail of [...stage.errors, ...result.errors, ...skillResult.errors]) {
@@ -912,9 +920,10 @@ async function ingestAgentSkills(
   service: MemoryService,
   sourceId: string,
   store: MemoryAgentSourceScanStore,
+  resolveAgentSkillRoot: (sourceId: string) => string | null = agentRootDirectory,
   scheduleWorker?: () => void
 ): Promise<{ written: number; memoryIdCount: number; errorCount: number; errors: string[] }> {
-  const root = agentRootDirectory(sourceId);
+  const root = resolveAgentSkillRoot(sourceId);
   if (!root) return { written: 0, memoryIdCount: 0, errorCount: 0, errors: [] };
   const skillsRoot = join(root, "skills");
   const errors: string[] = [];

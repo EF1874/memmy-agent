@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { API_ROUTES } from "../../Memory/src/index.js";
 import { RequestContext } from "../../App/memmy-agent/src/core/agent-runtime/tools/context.js";
@@ -7,6 +9,28 @@ import { registerMemmyMemoryTools } from "../../App/memmy-agent/src/memmy-memory
 import type { MemmyMemoryToolRuntime } from "../../App/memmy-agent/src/memmy-memory/types.js";
 
 describe("local agent memory smoke plan", () => {
+  it("keeps the executable local-Agent and Cursor smoke entrypoints wired", () => {
+    const repoRoot = resolve(import.meta.dirname, "../..");
+    const manifest = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as {
+      scripts: Record<string, string>;
+    };
+
+    expect(existsSync(join(repoRoot, "tests/smoke/local-agent-memory-smoke.ts"))).toBe(true);
+    expect(existsSync(join(repoRoot, "tests/smoke/tsconfig.local-agent.json"))).toBe(true);
+    expect(manifest.scripts["smoke:local-agent-memory"])
+      .toContain("npm run smoke:local-agent-memory:test");
+    expect(manifest.scripts["smoke:local-agent-memory"])
+      .toContain("npm run smoke:local-agent-memory:typecheck");
+    expect(manifest.scripts["smoke:local-agent-memory"])
+      .toContain("npm --prefix App/memmy-agent run build");
+    expect(manifest.scripts["smoke:local-agent-memory"])
+      .toContain("tsx tests/smoke/local-agent-memory-smoke.ts");
+    expect(manifest.scripts["smoke:local-agent-memory:cursor"])
+      .toContain("npm run smoke:local-agent-memory:test");
+    expect(manifest.scripts["smoke:local-agent-memory:cursor"])
+      .toContain("tsx tests/smoke/local-agent-memory-smoke.ts --sources=cursor");
+  });
+
   it("drives the agent memory lifecycle and recall tools through the public API contract", async () => {
     const requests: CapturedRequest[] = [];
     const client = new MemmyMemoryClient(

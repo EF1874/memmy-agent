@@ -480,7 +480,7 @@ describe("MemoryService / REST contract", () => {
         answer: "embedding jobs should drain after REST turn complete"
       })
     });
-    const complete = await completeResponse.json() as { l1MemoryId: string };
+    const complete = await completeResponse.json() as { episodeId: string; l1MemoryId: string };
     expect(completeResponse.status).toBe(200);
 
     const closeResponse = await fetch(
@@ -492,6 +492,14 @@ describe("MemoryService / REST contract", () => {
       }
     );
     expect(closeResponse.status).toBe(200);
+    await expect(closeResponse.json()).resolves.toMatchObject({
+      ok: true,
+      sessionId: session.sessionId,
+      status: "closed",
+      closedEpisodeIds: [complete.episodeId],
+      changeSeq: expect.any(Number),
+      syncCursor: expect.any(String)
+    });
 
     await waitFor(() => {
       const row = db.db.prepare(
