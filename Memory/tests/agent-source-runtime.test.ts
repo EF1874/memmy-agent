@@ -38,7 +38,9 @@ describe("standalone Agent source executor", () => {
 
   it("scans, imports, persists progress, and deduplicates without Memmy Desktop", async () => {
     const root = tempRoot();
-    const addMemory = vi.fn(() => ({ id: "memory-1" }));
+    const addMemory = vi.fn()
+      .mockReturnValueOnce({ id: "memory-1", duplicate: false })
+      .mockReturnValue({ id: "memory-1", duplicate: true });
     const enqueuePendingImportSummaries = vi.fn();
     const scheduleWorker = vi.fn();
     const service = { addMemory, enqueuePendingImportSummaries } as unknown as MemoryService;
@@ -89,7 +91,7 @@ describe("standalone Agent source executor", () => {
       sources: [{ sourceId: "fixture-agent", available: true, messageCount: 0 }]
     });
 
-    await executor.startScan({ sourceId: "fixture-agent" });
+    await executor.startScan({ sourceId: "fixture-agent", mode: "full" });
     await waitForScan(executor);
     expect(addMemory).toHaveBeenCalledTimes(1);
     expect(addMemory).toHaveBeenCalledWith(expect.objectContaining({
@@ -101,9 +103,9 @@ describe("standalone Agent source executor", () => {
     expect(scheduleWorker).toHaveBeenCalledTimes(1);
     expect((await executor.list()).sources[0]).toMatchObject({ messageCount: 2 });
 
-    await executor.startScan({ sourceId: "fixture-agent" });
+    await executor.startScan({ sourceId: "fixture-agent", mode: "full" });
     await waitForScan(executor);
-    expect(addMemory).toHaveBeenCalledTimes(1);
+    expect(addMemory).toHaveBeenCalledTimes(2);
     expect(JSON.parse(readFileSync(statePath, "utf8"))).toMatchObject({
       version: 2,
       sources: {

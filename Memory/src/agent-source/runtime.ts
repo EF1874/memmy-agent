@@ -320,7 +320,9 @@ export function createAgentSourceExecutor(options: CreateAgentSourceExecutorOpti
         const now = new Date().toISOString();
         state.sources[sourceId] = {
           ...stored,
-          messageCount: stored.messageCount + result.messageCount,
+          messageCount: mode === "incremental"
+            ? stored.messageCount + result.messageCount
+            : result.messageCount,
           lastScannedAt: now,
           ...(stage.scanErrorCount === 0 && result.errorCount === 0 && skillResult.errorCount === 0 && preparedContentHashes.has(sourceId)
             ? { contentHash: preparedContentHashes.get(sourceId) }
