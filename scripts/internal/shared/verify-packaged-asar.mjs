@@ -15,13 +15,13 @@ if (entries.some((entry) => /(^|\/)\.env(?:$|\.)/u.test(entry))) {
 const requiredFiles = [
   "dist/main/desktop-edition.json",
   "package.json",
-  "dist/runtime/memory/package.json",
   "dist/runtime/memmy-agent/package.json",
   "dist/runtime/memmy-agent/node_modules/@memmy/local-api-contracts/dist/index.js",
   "node_modules/@memmy/backend/dist/src/adapters/outbound/skill-writer/workspace-bridge/memmy-workspace-bridge.mjs",
 ];
 if (platform === "win32") {
   requiredFiles.push(
+    "dist/runtime/memory/package.json",
     `dist/runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/${platform}/${arch}/onnxruntime_binding.node`,
     `dist/runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/${platform}/${arch}/onnxruntime.dll`,
     "dist/runtime/memmy-agent/dist/main.js.map",
@@ -55,13 +55,18 @@ if (platform === "win32") {
   }
 }
 
-for (const [file, lock] of [
+const versionedFiles = [
   ["package.json", false],
-  ["dist/runtime/memory/package.json", false],
-  ["dist/runtime/memory/package-lock.json", true],
   ["dist/runtime/memmy-agent/package.json", false],
   ["dist/runtime/memmy-agent/package-lock.json", true],
-]) {
+];
+if (platform === "win32") {
+  versionedFiles.splice(1, 0,
+    ["dist/runtime/memory/package.json", false],
+    ["dist/runtime/memory/package-lock.json", true],
+  );
+}
+for (const [file, lock] of versionedFiles) {
   // electron-builder excludes npm lockfiles by default. The staged-runtime
   // version guard validates them before packaging; re-check any that are kept.
   if (lock && !entrySet.has(file)) continue;
