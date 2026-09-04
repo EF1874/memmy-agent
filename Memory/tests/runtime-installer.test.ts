@@ -127,6 +127,39 @@ describe("standalone Memory runtime installer", () => {
     expect(launcher).not.toContain("/desktop/electron");
   });
 
+  it("replaces equal-version bundled runtime content when Desktop requests it", async () => {
+    const root = tempRoot();
+    const home = join(root, "home");
+    const originalRuntime = createRuntimeDirectory(root, "2.1.0");
+    await installMemoryRuntime({
+      home,
+      runtimeDirectory: originalRuntime,
+      nodeExecutable: "/original/node",
+      skipServiceRegistration: true,
+      skipHealthCheck: true
+    });
+
+    const replacementRuntime = createRuntimeDirectory(root, "2.1.0");
+    writeFileSync(
+      join(replacementRuntime, "dist", "src", "server", "index.js"),
+      "// replacement runtime fixture\n"
+    );
+    const replaced = await installMemoryRuntime({
+      home,
+      runtimeDirectory: replacementRuntime,
+      nodeExecutable: "/desktop/electron",
+      preferInstalledCompatible: true,
+      replaceSameVersion: true,
+      skipServiceRegistration: true,
+      skipHealthCheck: true
+    });
+
+    expect(replaced).not.toMatchObject({ reused: true });
+    const pointer = await currentInstalledRuntime(home);
+    expect(pointer?.runtimeExecutable).toBe("/desktop/electron");
+    expect(readFileSync(pointer!.entrypoint, "utf8")).toContain("replacement runtime fixture");
+  });
+
   it("rejects checksum failures without activating the staged runtime", async () => {
     const root = tempRoot();
     const home = join(root, "home");

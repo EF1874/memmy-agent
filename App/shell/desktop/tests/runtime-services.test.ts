@@ -417,6 +417,43 @@ describe("packaged desktop runtime config", () => {
     expect(runtime.agentWorkspace).toBe(legacyWorkspace);
   });
 
+  it.each([
+    ["missing", null],
+    ["empty", "\r\n"],
+    ["comment-only", "# keep this comment\r\n"],
+    ["an empty object", "{}\r\n"],
+    ["other settings only", "gateway:\n  port: 18970\n"],
+  ] as const)(
+    "uses the MEMMY_HOME workspace when the runtime config is %s",
+    async (_configState, configSource) => {
+      const memmyHome = await makeTempRoot();
+      const configPath = join(memmyHome, "config.yaml");
+      if (configSource !== null) await writeFile(configPath, configSource, "utf8");
+
+      expect(await resolvePackagedRuntimeMigrationTargets({
+        MEMMY_HOME: memmyHome,
+        MEMMY_CONFIG: configPath
+      })).toEqual({
+        configPath,
+        agentWorkspace: join(memmyHome, "workspace")
+      });
+    }
+  );
+
+  it.each([
+    ["invalid YAML", "agents: [broken\n"],
+    ["a scalar root", "standalone-value\n"],
+  ])("leaves %s for the migration CLI to reject", async (_configState, configSource) => {
+    const memmyHome = await makeTempRoot();
+    const configPath = join(memmyHome, "config.yaml");
+    await writeFile(configPath, configSource, "utf8");
+
+    expect(await resolvePackagedRuntimeMigrationTargets({
+      MEMMY_HOME: memmyHome,
+      MEMMY_CONFIG: configPath
+    })).toEqual({ configPath });
+  });
+
   it("preserves existing user model, memory, and websocket settings", async () => {
     const memmyHome = await makeTempRoot();
     const configPath = join(memmyHome, "config.yaml");

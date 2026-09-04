@@ -419,8 +419,30 @@ export async function resolvePackagedRuntimeMigrationTargets(
   const memmyHome = resolvePath(env.MEMMY_HOME ?? "~/.memmy");
   const configPath = resolvePath(env.MEMMY_CONFIG ?? join(memmyHome, "config.yaml"));
   const explicitWorkspace = stringValue(env.MEMMY_AGENT_WORKSPACE);
-  if (!explicitWorkspace) return { configPath };
-  const agentWorkspace = resolvePath(explicitWorkspace);
+  if (!explicitWorkspace) {
+    const configSource = await readFile(configPath, "utf8").catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return "";
+      throw error;
+    });
+    if (configSource.trim()) {
+      let parsed: unknown;
+      try {
+        parsed = YAML.parse(configSource);
+      } catch {
+        return { configPath };
+      }
+      if (parsed !== null && parsed !== undefined && parsed !== "") {
+        if (!isRecord(parsed)) return { configPath };
+        const agents = isRecord(parsed.agents) ? parsed.agents : null;
+        const defaults = agents && isRecord(agents.defaults) ? agents.defaults : null;
+        const legacyAgent = isRecord(parsed.agent) ? parsed.agent : null;
+        if (stringValue(defaults?.workspace) ?? stringValue(legacyAgent?.workspace)) {
+          return { configPath };
+        }
+      }
+    }
+  }
+  const agentWorkspace = resolvePath(explicitWorkspace ?? join(memmyHome, "workspace"));
   await mkdir(agentWorkspace, { recursive: true });
   return { configPath, agentWorkspace: await realpath(agentWorkspace) };
 }
@@ -850,6 +872,7 @@ async function installBundledMemoryRuntime(
     "--memmy-config-preexisting", String(memmyConfigPreexisting),
     "--node-executable", executable,
     "--non-interactive",
+    ...(process.platform === "win32" ? ["--replace-same-version"] : []),
     "--use-compatible-installed"
   ]);
 }

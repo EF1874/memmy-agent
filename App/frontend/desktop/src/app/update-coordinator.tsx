@@ -1,5 +1,10 @@
 /** App-level desktop update coordination. */
-import type { DesktopUpdateCheckResult, DesktopUpdateDownloadProgress, DesktopUpdateInstallResult } from "@memmy/desktop-interface";
+import type {
+  DesktopPreparedUpdateHandle,
+  DesktopUpdateCheckResult,
+  DesktopUpdateDownloadProgress,
+  DesktopUpdateInstallResult
+} from "@memmy/desktop-interface";
 import {
   createContext,
   useCallback,
@@ -52,7 +57,7 @@ interface DownloadUpdateOptions {
 interface UpdateCoordinatorState {
   phase: UpdatePhase;
   result: DesktopUpdateCheckResult | null;
-  preparedUpdatePath: string | null;
+  preparedUpdate: DesktopPreparedUpdateHandle | null;
   downloadProgress: DesktopUpdateDownloadProgress | null;
   feedback: UpdateFeedback | null;
   dialog: UpdateDialogKind;
@@ -71,7 +76,7 @@ const UPDATE_NOTIFICATION_INTERVAL_MS = 60 * 60 * 1000;
 const INITIAL_UPDATE_STATE: UpdateCoordinatorState = {
   phase: "idle",
   result: null,
-  preparedUpdatePath: null,
+  preparedUpdate: null,
   downloadProgress: null,
   feedback: null,
   dialog: null
@@ -93,7 +98,7 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
   const checkInFlightRef = useRef<Promise<DesktopUpdateCheckResult> | null>(null);
   const downloadInFlightRef = useRef<Promise<DesktopUpdateInstallResult> | null>(null);
   const installInFlightRef = useRef<Promise<DesktopUpdateInstallResult> | null>(null);
-  const lastNotifiedUpdateVersionRef = useRef<string | null>(null);
+  const lastNotifiedUpdateKeyRef = useRef<string | null>(null);
   const notificationContextRef = useRef({
     enabled: true,
     soundEnabled: true,
@@ -190,27 +195,29 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
       return;
     }
 
-    const version = update.latestVersion ?? update.currentVersion;
-    if (!update.downloadUrl) {
+    const version = update.latestVersion;
+    if (!canDownloadUpdate(update)) {
       commitUpdateState((current) => ({
         ...current,
         phase: "available",
         dialog: null,
         downloadProgress: null,
-        feedback: { key: "settings.about.updateAvailableNoLink", values: { version } }
+        feedback: { key: "settings.about.updateAvailableNoLink", values: { version: version ?? update.currentVersion } }
       }));
       return;
     }
 
     const bridge = typeof window === "undefined" ? undefined : window.memmy;
     if (!bridge?.downloadUpdate) {
-      openUpdateUrlInBrowser(update.downloadUrl);
+      if (update.downloadUrl) {
+        openUpdateUrlInBrowser(update.downloadUrl);
+      }
       commitUpdateState((current) => ({
         ...current,
         phase: "available",
         dialog: null,
         downloadProgress: null,
-        feedback: { key: "settings.about.openingUpdate", values: { version } }
+        feedback: { key: "settings.about.openingUpdate", values: { version: version ?? update.currentVersion } }
       }));
       return;
     }
@@ -218,30 +225,40 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
     commitUpdateState((current) => ({
       ...current,
       phase: "downloading",
-      preparedUpdatePath: null,
+      preparedUpdate: null,
       downloadProgress: null,
       dialog: null,
-      feedback: { key: "settings.about.downloadingUpdate", values: { version } }
+      feedback: resolveDownloadingUpdateFeedback(update)
     }));
 
-    const request = bridge.downloadUpdate(update, { openInstaller: false });
+    const offerToken = update.offerToken;
+    if (!offerToken) {
+      commitUpdateState((current) => ({
+        ...current,
+        phase: "available",
+        preparedUpdate: null,
+        downloadProgress: null,
+        dialog: null,
+        feedback: { key: "settings.about.updateAvailableNoLink", values: { version: version ?? update.currentVersion } }
+      }));
+      return;
+    }
+
+    const request = bridge.downloadUpdate(offerToken, { openInstaller: false });
     downloadInFlightRef.current = request;
     try {
       const installResult = await request;
       if (!mountedRef.current) {
         return;
       }
-      if (!installResult.filePath.trim()) {
-        throw new Error("downloaded update path is empty");
-      }
-
-      const preparedResult = { ...update, preparedUpdatePath: installResult.filePath };
+      const preparedUpdate = validatePreparedUpdateHandle(installResult.preparedUpdate);
+      const preparedResult = { ...update, preparedUpdate };
       commitUpdateState(() => ({
         phase: "prepared",
         result: preparedResult,
-        preparedUpdatePath: installResult.filePath,
+        preparedUpdate,
         downloadProgress: null,
-        feedback: { key: "settings.about.silentReady", values: { version } },
+        feedback: resolvePreparedUpdateFeedback(update),
         dialog: options.showInstallDialog === false ? null : "install-confirm"
       }));
     } catch (error) {
@@ -252,7 +269,7 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
       commitUpdateState((current) => ({
         ...current,
         phase: "error",
-        preparedUpdatePath: null,
+        preparedUpdate: null,
         downloadProgress: null,
         dialog: null,
         feedback: { key: "settings.about.updateInstallFailed" }
@@ -266,8 +283,8 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
 
   const installPreparedUpdate = useCallback(async (): Promise<void> => {
     const current = updateStateRef.current;
-    const preparedPath = current.preparedUpdatePath;
-    if (!preparedPath || installInFlightRef.current) {
+    const preparedUpdate = current.preparedUpdate;
+    if (!preparedUpdate || installInFlightRef.current) {
       if (installInFlightRef.current) {
         await installInFlightRef.current;
       }
@@ -291,12 +308,12 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
       phase: "installing",
       dialog: null,
       downloadProgress: null,
-      feedback: { key: resolveUpdateInstallStartedMessageKey(appPlatform) }
+      feedback: { key: resolveUpdateInstallStartedMessageKey(preparedUpdate, appPlatform) }
     }));
 
     try {
       await waitForUpdateInstallMessagePaint(appPlatform);
-      const request = bridge.openUpdateInstaller(preparedPath);
+      const request = bridge.openUpdateInstaller(preparedUpdate);
       installInFlightRef.current = request;
       const installResult = await request;
       if (!mountedRef.current) {
@@ -315,6 +332,17 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
         return;
       }
       console.warn("install app update failed", error);
+      if (preparedUpdate.kind === "store-migration") {
+        commitUpdateState(() => ({
+          phase: "error",
+          result: null,
+          preparedUpdate: null,
+          dialog: null,
+          downloadProgress: null,
+          feedback: { key: "settings.about.updateInstallFailed" }
+        }));
+        return;
+      }
       commitUpdateState((state) => ({
         ...state,
         phase: "prepared",
@@ -335,7 +363,7 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
     commitUpdateState(() => ({
       phase: "checking",
       result: null,
-      preparedUpdatePath: null,
+      preparedUpdate: null,
       downloadProgress: null,
       feedback: null,
       dialog: null
@@ -350,7 +378,7 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
         commitUpdateState(() => ({
           phase: "not-configured",
           result,
-          preparedUpdatePath: null,
+          preparedUpdate: null,
           downloadProgress: null,
           feedback: { key: "settings.about.updateNotConfigured" },
           dialog: null
@@ -362,7 +390,7 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
         commitUpdateState(() => ({
           phase: "latest",
           result,
-          preparedUpdatePath: null,
+          preparedUpdate: null,
           downloadProgress: null,
           feedback: { key: "settings.about.upToDate", values: { version: result.currentVersion } },
           dialog: null
@@ -370,14 +398,14 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
         return;
       }
 
-      const version = result.latestVersion ?? result.currentVersion;
-      if (result.preparedUpdatePath) {
+      if (result.preparedUpdate) {
+        const preparedUpdate = validatePreparedUpdateHandle(result.preparedUpdate);
         commitUpdateState(() => ({
           phase: "prepared",
           result,
-          preparedUpdatePath: result.preparedUpdatePath ?? null,
+          preparedUpdate,
           downloadProgress: null,
-          feedback: { key: "settings.about.silentReady", values: { version } },
+          feedback: resolvePreparedUpdateFeedback(result),
           dialog: "install-confirm"
         }));
         return;
@@ -386,12 +414,12 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
       commitUpdateState(() => ({
         phase: "available",
         result,
-        preparedUpdatePath: null,
+        preparedUpdate: null,
         downloadProgress: null,
-        feedback: result.downloadUrl
-          ? { key: "settings.about.updateReady", values: { version } }
-          : { key: "settings.about.updateAvailableNoLink", values: { version } },
-        dialog: result.downloadUrl ? "download-confirm" : null
+        feedback: canDownloadUpdate(result)
+          ? resolveAvailableUpdateFeedback(result)
+          : { key: "settings.about.updateAvailableNoLink", values: { version: result.latestVersion ?? result.currentVersion } },
+        dialog: canDownloadUpdate(result) ? "download-confirm" : null
       }));
     } catch (error) {
       if (!mountedRef.current) {
@@ -401,7 +429,7 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
       commitUpdateState(() => ({
         phase: "error",
         result: null,
-        preparedUpdatePath: null,
+        preparedUpdate: null,
         downloadProgress: null,
         feedback: { key: "settings.about.updateCheckFailed" },
         dialog: null
@@ -414,11 +442,11 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
     if (isUpdateBusy(current.phase)) {
       return;
     }
-    if (current.phase === "prepared" && current.result && current.preparedUpdatePath) {
+    if (current.phase === "prepared" && current.result && current.preparedUpdate) {
       commitUpdateState((state) => ({ ...state, dialog: "install-confirm" }));
       return;
     }
-    if (current.phase === "available" && current.result?.downloadUrl) {
+    if (current.phase === "available" && current.result && canDownloadUpdate(current.result)) {
       commitUpdateState((state) => ({ ...state, dialog: "download-confirm" }));
       return;
     }
@@ -431,11 +459,11 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
     if (isUpdateBusy(current.phase)) {
       return;
     }
-    if (current.phase === "prepared" && current.result && current.preparedUpdatePath) {
+    if (current.phase === "prepared" && current.result && current.preparedUpdate) {
       await installPreparedUpdate();
       return;
     }
-    if (current.phase === "available" && current.result?.downloadUrl) {
+    if (current.phase === "available" && current.result && canDownloadUpdate(current.result)) {
       await downloadUpdate(current.result, { showInstallDialog: false });
       return;
     }
@@ -459,29 +487,28 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
   }, [downloadUpdate, installPreparedUpdate]);
 
   const commitPassiveAvailableUpdate = useCallback((result: DesktopUpdateCheckResult): void => {
-    const version = result.latestVersion ?? result.currentVersion;
     commitUpdateState((current) => {
       if (isForegroundUpdateFlow(current)) {
         return current;
       }
-      if (result.preparedUpdatePath) {
+      if (result.preparedUpdate) {
         return {
           phase: "prepared",
           result,
-          preparedUpdatePath: result.preparedUpdatePath ?? null,
+          preparedUpdate: validatePreparedUpdateHandle(result.preparedUpdate),
           downloadProgress: null,
-          feedback: { key: "settings.about.silentReady", values: { version } },
+          feedback: resolvePreparedUpdateFeedback(result),
           dialog: null
         };
       }
       return {
         phase: "available",
         result,
-        preparedUpdatePath: null,
+        preparedUpdate: null,
         downloadProgress: null,
-        feedback: result.downloadUrl
-          ? { key: "settings.about.updateReady", values: { version } }
-          : { key: "settings.about.updateAvailableNoLink", values: { version } },
+        feedback: canDownloadUpdate(result)
+          ? resolveAvailableUpdateFeedback(result)
+          : { key: "settings.about.updateAvailableNoLink", values: { version: result.latestVersion ?? result.currentVersion } },
         dialog: null
       };
     });
@@ -514,7 +541,8 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
           soundEnabled: notificationContext.soundEnabled,
           status: result.status,
           latestVersion: result.latestVersion,
-          alreadyNotifiedVersion: lastNotifiedUpdateVersionRef.current
+          notificationKey: resolveUpdateNotificationKey(result),
+          alreadyNotifiedKey: lastNotifiedUpdateKeyRef.current
         });
         if (!plan) {
           return;
@@ -523,10 +551,14 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
         if (!bridge.notifyUpdateAvailable) {
           return;
         }
-        lastNotifiedUpdateVersionRef.current = plan.version;
+        lastNotifiedUpdateKeyRef.current = plan.key;
         void bridge.notifyUpdateAvailable({
           title: notificationContext.translate("notification.update.title"),
-          body: notificationContext.translate("notification.update.body", { version: plan.version }),
+          body: plan.version
+            ? notificationContext.translate("notification.update.body", { version: plan.version })
+            : result.provider === "store-migration"
+            ? notificationContext.translate("notification.update.storeMigrationBody")
+            : notificationContext.translate("notification.update.storeBody"),
           silent: plan.silent
         }).catch(() => undefined);
       } catch {
@@ -551,7 +583,9 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
   const value = useMemo<UpdateCoordinatorContextValue>(() => ({
     appVersion,
     phase: updateState.phase,
-    preparedUpdatePath: updateState.preparedUpdatePath,
+    preparedUpdatePath: updateState.preparedUpdate?.kind === "installer-file"
+      ? updateState.preparedUpdate.filePath
+      : null,
     downloadProgress: updateState.downloadProgress,
     feedback: updateState.feedback,
     result: updateState.result,
@@ -589,19 +623,34 @@ export function GlobalUpdateDialog(props: { suspended?: boolean }) {
 
   const installReady = update.dialog === "install-confirm";
   const forced = isForceUpdate(update.result);
-  const version = update.result.latestVersion ?? update.result.currentVersion;
+  const version = update.result.latestVersion;
+  const versionlessStoreUpdate = isVersionlessMicrosoftStoreUpdate(update.result);
+  const storeMigration = isWindowsStoreMigration(update.result);
+  const titleKey: MessageKey = storeMigration
+    ? "settings.about.storeMigrationConfirmTitle"
+    : versionlessStoreUpdate
+    ? "settings.about.storeUpdateConfirmTitle"
+    : "settings.about.updateConfirmTitle";
   return (
     <ConfirmDialog
       open
-      title={t("settings.about.updateConfirmTitle", { version })}
+      title={t(titleKey, version ? { version } : undefined)}
       message={(
         <div className="space-y-2 text-left">
           <p>
-            {installReady
-              ? t("settings.about.preparedUpdateConfirmDesc", { currentVersion: update.result.currentVersion })
+            {storeMigration
+              ? t("settings.about.storeMigrationConfirmDesc", { currentVersion: update.result.currentVersion })
+              : installReady
+              ? t(versionlessStoreUpdate
+                ? "settings.about.storePreparedUpdateConfirmDesc"
+                : "settings.about.preparedUpdateConfirmDesc", { currentVersion: update.result.currentVersion })
               : forced
-              ? t("settings.about.forceUpdateConfirmDesc", { currentVersion: update.result.currentVersion })
-              : t("settings.about.updateConfirmDesc", { currentVersion: update.result.currentVersion })}
+              ? t(versionlessStoreUpdate
+                ? "settings.about.storeForceUpdateConfirmDesc"
+                : "settings.about.forceUpdateConfirmDesc", { currentVersion: update.result.currentVersion })
+              : t(versionlessStoreUpdate
+                ? "settings.about.storeUpdateConfirmDesc"
+                : "settings.about.updateConfirmDesc", { currentVersion: update.result.currentVersion })}
           </p>
           {update.result.releaseNotes && (
             <p className="whitespace-pre-wrap text-text-ink/55">{update.result.releaseNotes}</p>
@@ -610,10 +659,12 @@ export function GlobalUpdateDialog(props: { suspended?: boolean }) {
       )}
       cancelLabel={t("settings.about.updateConfirmCancel")}
       closeLabel={t("common.close")}
-      confirmLabel={installReady
+      confirmLabel={storeMigration
+        ? t("settings.about.storeMigrationConfirmOk")
+        : installReady
         ? t("settings.about.preparedUpdateConfirmOk")
         : t("settings.about.updateConfirmOk")}
-      ariaLabel={t("settings.about.updateConfirmTitle", { version })}
+      ariaLabel={t(titleKey, version ? { version } : undefined)}
       iconPose="think"
       width={420}
       buttonMinWidth={96}
@@ -644,7 +695,13 @@ function isForegroundUpdateFlow(state: UpdateCoordinatorState): boolean {
     || state.dialog !== null;
 }
 
-function resolveUpdateInstallStartedMessageKey(platform: string | null): MessageKey {
+function resolveUpdateInstallStartedMessageKey(
+  preparedUpdate: DesktopPreparedUpdateHandle,
+  platform: string | null
+): MessageKey {
+  if (preparedUpdate.kind === "store-migration") {
+    return "settings.about.storeMigrationOpening";
+  }
   return platform === "win32"
     ? "settings.about.windowsBackgroundInstallStarted"
     : "settings.about.backgroundInstallStarted";
@@ -664,12 +721,100 @@ function resolveUpdateInstallResultMessageKey(
   result: DesktopUpdateInstallResult,
   platform: string | null
 ): MessageKey {
+  if (result.preparedUpdate.kind === "store-migration") {
+    return "settings.about.storeMigrationOpened";
+  }
   if (result.background) {
-    return resolveUpdateInstallStartedMessageKey(platform);
+    return resolveUpdateInstallStartedMessageKey(result.preparedUpdate, platform);
   }
   return result.willQuit ? "settings.about.installerOpenedQuit" : "settings.about.installerOpened";
 }
 
 function isForceUpdate(update: DesktopUpdateCheckResult): boolean {
   return update.force === true || update.updateMode === "force";
+}
+
+function canDownloadUpdate(update: DesktopUpdateCheckResult): boolean {
+  const bridge = typeof window === "undefined" ? undefined : window.memmy;
+  return bridge?.downloadUpdate ? Boolean(update.offerToken) : Boolean(update.downloadUrl);
+}
+
+function isVersionlessMicrosoftStoreUpdate(update: DesktopUpdateCheckResult): boolean {
+  return update.provider === "microsoft-store" && !update.latestVersion;
+}
+
+function isWindowsStoreMigration(update: DesktopUpdateCheckResult): boolean {
+  return update.provider === "store-migration";
+}
+
+function resolveAvailableUpdateFeedback(update: DesktopUpdateCheckResult): UpdateFeedback {
+  if (isVersionlessMicrosoftStoreUpdate(update)) {
+    return {
+      key: isForceUpdate(update)
+        ? "settings.about.storeForceUpdateReady"
+        : "settings.about.storeUpdateReady"
+    };
+  }
+  const version = update.latestVersion ?? update.currentVersion;
+  return {
+    key: isForceUpdate(update) ? "settings.about.forceUpdateReady" : "settings.about.updateReady",
+    values: { version }
+  };
+}
+
+function resolveDownloadingUpdateFeedback(update: DesktopUpdateCheckResult): UpdateFeedback {
+  if (isVersionlessMicrosoftStoreUpdate(update)) {
+    return { key: "settings.about.storeUpdateDownloading" };
+  }
+  return {
+    key: "settings.about.downloadingUpdate",
+    values: { version: update.latestVersion ?? update.currentVersion }
+  };
+}
+
+function resolvePreparedUpdateFeedback(update: DesktopUpdateCheckResult): UpdateFeedback {
+  if (isWindowsStoreMigration(update)) {
+    return { key: "settings.about.storeMigrationReady" };
+  }
+  if (isVersionlessMicrosoftStoreUpdate(update)) {
+    return { key: "settings.about.storeUpdatePrepared" };
+  }
+  return {
+    key: "settings.about.silentReady",
+    values: { version: update.latestVersion ?? update.currentVersion }
+  };
+}
+
+function validatePreparedUpdateHandle(value: DesktopPreparedUpdateHandle): DesktopPreparedUpdateHandle {
+  if (value.kind === "installer-file") {
+    if (!value.filePath.trim()) {
+      throw new Error("downloaded update path is empty");
+    }
+    return value;
+  }
+  if (value.kind === "microsoft-store") {
+    if (!value.baselinePackageVersion.trim() || !value.baselinePackageFullName.trim()) {
+      throw new Error("Microsoft Store prepared update identity is incomplete");
+    }
+    return value;
+  }
+  if (value.kind === "store-migration") {
+    if (!value.offerToken.trim()) {
+      throw new Error("Microsoft Store migration handle is incomplete");
+    }
+    return value;
+  }
+  throw new Error("unknown prepared update provider");
+}
+
+function resolveUpdateNotificationKey(update: DesktopUpdateCheckResult): string | undefined {
+  if (update.latestVersion) {
+    return update.latestVersion;
+  }
+  if (update.provider !== "microsoft-store") {
+    return update.provider === "store-migration" && update.preparedUpdate?.kind === "store-migration"
+      ? `store-migration:${update.currentVersion}`
+      : undefined;
+  }
+  return update.windowsStore?.baselinePackageFullName || `microsoft-store:${update.currentVersion}`;
 }

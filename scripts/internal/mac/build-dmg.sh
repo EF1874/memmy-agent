@@ -692,15 +692,18 @@ verify_packaged_runtime_config_boundary() {
   local resources_root="$1"
   local asar_file="$resources_root/app.asar"
   local forbidden_env
+  local expected_memory_version
 
   forbidden_env="$(find "$resources_root" \( -type f -o -type l \) \( -name ".env" -o -name ".env.*" \) -print -quit)"
   if [ -n "$forbidden_env" ]; then
     echo "Packaged resources contain a forbidden environment file." >&2
     exit 1
   fi
+  expected_memory_version="$(node -p "require('$RUNTIME_DIR/memory/package.json').version")"
   node "$ROOT_DIR/scripts/internal/shared/verify-packaged-asar.mjs" \
     --asar "$asar_file" \
     --expected "$DESKTOP_VERSION" \
+    --expected-memory "$expected_memory_version" \
     --platform darwin \
     --arch "$target_cpu"
 }

@@ -25,6 +25,9 @@ const writeDesktopManifestPath = fileURLToPath(new URL("../../../../scripts/inte
 const pruneRuntimeEnvPath = fileURLToPath(new URL("../../../../scripts/internal/shared/prune-runtime-env-files-lib.mjs", import.meta.url));
 const verifyPackageVersionPath = fileURLToPath(new URL("../../../../scripts/internal/shared/verify-package-version-lib.mjs", import.meta.url));
 const verifyPackagedAsarPath = fileURLToPath(new URL("../../../../scripts/internal/shared/verify-packaged-asar.mjs", import.meta.url));
+const createMemoryRuntimeManifestPath = fileURLToPath(
+  new URL("../../../../scripts/internal/win/create-memory-runtime-manifest.mjs", import.meta.url)
+);
 const syncProjectVersionPath = fileURLToPath(new URL("../../../../scripts/sync-project-version.mjs", import.meta.url));
 const signedMacArm64PackagePath = fileURLToPath(
   new URL("../../../../scripts/internal/mac/signed-arm64.sh", import.meta.url)
@@ -227,13 +230,6 @@ describe("desktop packaged runtime boundaries", () => {
         'if (typeof runMigrations !== "function") throw new Error("Migrations runtime export is unavailable")',
       );
       expect(source).toContain("Migrations runtime state compatibility mismatch");
-      expect(source).toContain(
-        '$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations/dist/index.js',
-      );
-      expect(source).toContain(
-        '[ -L "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations" ]',
-      );
-
       const stageIndex = source.indexOf(
         'cp "$MIGRATIONS_DIR/package.json" "$MIGRATIONS_STAGING_DIR/package.json"',
       );
@@ -252,6 +248,19 @@ describe("desktop packaged runtime boundaries", () => {
       expect(builderIndex).toBeGreaterThan(cleanupIndex);
     }
 
+    expect(macSource).toContain(
+      '$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations/dist/index.js',
+    );
+    expect(macSource).toContain(
+      '[ -L "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations" ]',
+    );
+    expect(winSource).toContain(
+      '"$unpacked_agent_runtime/node_modules/@memmy/migrations/dist/index.js"',
+    );
+    expect(winSource).toContain(
+      '[ -L "$unpacked_agent_runtime/node_modules/@memmy/migrations" ]',
+    );
+
     expect(macSource.indexOf('npm --prefix "$MIGRATIONS_DIR" run build')).toBeLessThan(
       macSource.indexOf('npm ci --prefix "$AGENT_DIR"'),
     );
@@ -260,7 +269,7 @@ describe("desktop packaged runtime boundaries", () => {
     );
     expect(winSource).toContain("verify_migration_state_compatibility_module \\");
     expect(winSource).toContain(
-      '"$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations/dist/state-store.js"',
+      '"$unpacked_agent_runtime/node_modules/@memmy/migrations/dist/state-store.js"',
     );
     expect(winSource).toContain("MEMMY_MIGRATION_STATE_MODULE_PATH");
     expect(winSource).toContain('import { pathToFileURL } from "node:url";');
@@ -289,13 +298,14 @@ describe("desktop packaged runtime boundaries", () => {
 
   it("keeps the Windows Memory runtime independent from private workspaces", () => {
     const source = readFileSync(packageWinX64Path, "utf8");
+    const manifestGeneratorSource = readFileSync(createMemoryRuntimeManifestPath, "utf8");
 
     expect(source).toContain("run build -w @memmy/local-api-contracts");
     expect(source).not.toContain('memory/node_modules/@memmy/local-api-contracts');
     expect(source).not.toContain('memory/node_modules/@memmy/migrations');
     expect(source).toContain('cp -R "$MEMORY_DIR/dist/viewer" "$RUNTIME_DIR/memory/dist/viewer"');
     expect(source).toContain('cp -R "$MEMORY_DIR/adapters" "$RUNTIME_DIR/memory/adapters"');
-    expect(source).toContain('protocolVersion: 1');
+    expect(manifestGeneratorSource).toContain('protocolVersion: 1');
     expect(source.indexOf("run build -w @memmy/local-api-contracts")).toBeLessThan(
       source.indexOf("run build -w @memmy/memory"),
     );
@@ -311,7 +321,7 @@ describe("desktop packaged runtime boundaries", () => {
       '$RUNTIME_DIR/memmy-agent/node_modules/better-sqlite3/build/Release/better_sqlite3.node',
     );
     expect(source).toContain(
-      '$unpacked_runtime/memmy-agent/node_modules/better-sqlite3/build/Release/better_sqlite3.node',
+      '$unpacked_agent_runtime/node_modules/better-sqlite3/build/Release/better_sqlite3.node',
     );
     const agentDependenciesIndex = source.indexOf('npm_ci_win_x64 "$RUNTIME_DIR/memmy-agent"');
     const agentInstallIndex = source.indexOf(
@@ -332,6 +342,13 @@ describe("desktop packaged runtime boundaries", () => {
     expect(builderIndex).toBeGreaterThan(agentSmokeIndex);
     expect(finalVerifyIndex).toBeGreaterThan(builderIndex);
     expect(source).toContain("verify_packaged_file_matches_runtime");
+    expect(source).toContain('if [ "$PACKAGE_SIGNING" = "unsigned" ]; then');
+    expect(source).toContain("verify_signed_packaged_windows_store_helper");
+    expect(source.match(/verify_packaged_windows_store_helper_protocol/g)).toHaveLength(2);
+    expect(source).toContain("Get-AuthenticodeSignature");
+    expect(source).toContain("SignerCertificate.Thumbprint");
+    expect(source).toContain('MEMMY_HELPER_SIGNATURE_PATH="$helper_windows_path"');
+    expect(source).toContain("package-family-registration");
   });
 
   it("unpacks the migrations runtime in every desktop package variant", () => {
@@ -395,10 +412,79 @@ describe("desktop packaged runtime boundaries", () => {
     expect(macSource).not.toContain(
       '$unpacked_runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/darwin/$target_cpu/libonnxruntime*.dylib'
     );
-    const asarGuardSource = readFileSync(verifyPackagedAsarPath, "utf8");
-    expect(asarGuardSource).toContain(
-      'if (platform === "win32") {\n  requiredFiles.push(\n    "dist/runtime/memory/package.json"'
+    expect(macSource).toContain('--expected-memory "$expected_memory_version"');
+  });
+
+  it("packages one complete external Memory runtime on Windows", () => {
+    for (const configPath of [winElectronBuilderPath, winUnsignedBuilderPath]) {
+      const config = parseYaml(readFileSync(configPath, "utf8")) as {
+        files?: string[];
+        extraResources?: Array<{ from?: string; to?: string; filter?: string[] }>;
+      };
+      expect(config.files).toContain("!dist/runtime/memory{,/**/*}");
+      expect(config.files).toContain("!dist/embedding-models{,/**/*}");
+      expect(config.extraResources).toContainEqual({
+        from: "dist/runtime/memory",
+        to: "memory-runtime",
+        filter: ["**/*"]
+      });
+      expect(config.extraResources).toContainEqual({
+        from: "dist/runtime/memory/node_modules",
+        to: "memory-runtime/node_modules",
+        filter: ["**/*"]
+      });
+      expect(config.extraResources).toContainEqual({
+        from: "dist/native",
+        to: "native",
+        filter: ["MemmyStoreUpdate.exe"]
+      });
+    }
+
+    const source = normalizeLineEndings(readFileSync(packageWinX64Path, "utf8"));
+    expect(source).toContain(
+      'create_windows_cli_launcher "$CLI_BIN_DIR/memmy-memory.cmd" "memory-runtime\\\\dist\\\\src\\\\cli\\\\index.js"'
     );
+    expect(source).toContain(
+      'local packaged_memory_runtime="$DESKTOP_DIR/release/win-unpacked/resources/memory-runtime"'
+    );
+    expect(source).toContain(
+      '"$packaged_memory_runtime/node_modules/better-sqlite3/build/Release/better_sqlite3.node"'
+    );
+    expect(source).toContain(
+      '"$packaged_memory_runtime/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/onnxruntime.dll"'
+    );
+    expect(source).toContain('"$RUNTIME_DIR/memory/package.json"');
+    expect(source).toContain('"$packaged_memory_runtime/package.json"');
+    const manifestGeneratorSource = normalizeLineEndings(
+      readFileSync(createMemoryRuntimeManifestPath, "utf8")
+    );
+    expect(manifestGeneratorSource).toContain(
+      'dependencies[agentSourceCorePackage.name] = "file:./workspace-packages/agent-source-core"'
+    );
+    expect(source).toContain(
+      'cp "$AGENT_SOURCE_CORE_DIR/dist/src/index.js" "$RUNTIME_DIR/memory/workspace-packages/agent-source-core/dist/src/index.js"'
+    );
+    expect(source).toContain(
+      'cp "$AGENT_SOURCE_CORE_DIR/dist/src/index.js" "$RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR/dist/src/index.js"'
+    );
+    expect(source).toContain(
+      'if [ -L "$RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR" ]; then'
+    );
+    expect(source).toContain(
+      'require_packaged_runtime_file "$RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR/package.json"'
+    );
+    expect(source).toContain(
+      'require_packaged_runtime_file "$RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR/dist/src/index.js"'
+    );
+    expect(source).not.toContain("RUNTIME_AGENT_SOURCE_CORE_DIR");
+    expect(source).toContain(
+      '"$packaged_memory_runtime/node_modules/@memmy/agent-source-core/dist/src/index.js"'
+    );
+
+    const asarGuardSource = normalizeLineEndings(readFileSync(verifyPackagedAsarPath, "utf8"));
+    expect(asarGuardSource).toContain("Packaged Windows ASAR contains forbidden Memory runtime");
+    expect(asarGuardSource).toContain("Packaged Windows ASAR contains forbidden embedding models");
+    expect(asarGuardSource).toContain("Memory is external");
   });
 
   it("excludes dependency root tests and docs from every desktop app archive", () => {
@@ -897,6 +983,9 @@ describe("desktop packaged runtime boundaries", () => {
     expect(includeSource).toContain('languagePath = userDataRoot & $\\"\\update-prompt-language.txt$\\"');
     expect(includeSource).toContain('markerPath = userDataRoot & $\\"\\prepared-required-update.json$\\"');
     expect(includeSource).toContain('relayLockPath = shell.ExpandEnvironmentStrings($\\"%LOCALAPPDATA%$\\") & $\\"\\Memmy\\upgrade-staging\\active.lock$\\"');
+    expect(includeSource).not.toContain("storeTransitionPath");
+    expect(includeSource).not.toContain("storeTransitionState");
+    expect(includeSource).not.toContain("storeAuthorityPhase");
     expect(includeSource).toContain('recoveryPath = $\\"$0\\MemmyWindowsUpgradeRecovery.ps1$\\"');
     expect(includeSource).toContain("If fso.FolderExists(relayLockPath) And fso.FileExists(recoveryPath) Then");
     expect(includeSource).toContain("If fso.FolderExists(relayLockPath) Then");
@@ -1048,7 +1137,14 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain("installPackagedWindowsCliTools");
     expect(mainSource).toContain("resolveCliInstallStrategy(");
     expect(mainSource).toContain('Boolean((process as NodeJS.Process & { windowsStore?: boolean }).windowsStore)');
-    expect(mainSource).toContain(') === "packaged-windows"');
+    expect(mainSource).toContain('if (strategy === "packaged-windows")');
+    expect(mainSource).toContain('if (strategy === "packaged-windows-store")');
+    expect(mainSource).toContain("installPackagedWindowsStoreCliTools");
+    expect(mainSource).toContain("$appRoot = Join-Path $package.InstallLocation 'app'");
+    expect(mainSource).toContain("$appExecutable = Join-Path $appRoot 'Memmy.exe'");
+    expect(mainSource).toContain("$entry = Join-Path $appRoot 'resources\\\\${resourceEntry}'");
+    expect(mainSource).toContain('resourceEntry: "memory-runtime\\\\dist\\\\src\\\\cli\\\\index.js"');
+    expect(mainSource).toContain('resourceEntry: "app.asar\\\\dist\\\\runtime\\\\memmy-agent\\\\dist\\\\main.js"');
     expect(mainSource).toContain('join(homedir(), ".local", "bin")');
     expect(mainSource).toContain('{ name: "memmy-memory", source: join(cliDirectory, "memmy-memory") }');
     expect(mainSource).toContain('export PATH="$HOME/.local/bin:$PATH"');
@@ -1128,6 +1224,11 @@ describe("desktop packaged runtime boundaries", () => {
     expect(interfaceSource).toContain("isWindowsStore: boolean;");
     expect(interfaceSource).toContain("export interface DesktopUpdateCheckResult");
     expect(interfaceSource).toContain("export interface DesktopUpdateInstallResult");
+    expect(interfaceSource).toContain("export type DesktopUpdateOfferToken");
+    expect(interfaceSource).toContain("export type DesktopStoreMigrationToken");
+    expect(interfaceSource).toContain("offerToken?: DesktopUpdateOfferToken;");
+    expect(preloadSource).toContain("downloadUpdate(offerToken: DesktopUpdateOfferToken");
+    expect(preloadSource).not.toContain("downloadUpdate(update: DesktopUpdateCheckResult");
     expect(mainSource).toContain("resolveCloudServiceBaseUrl(process.env.MEMMY_CLOUD_SERVICE)");
     expect(mainSource).toContain('const UPDATE_MANIFEST_PATH = "/api/memmy/desktop/latest"');
     expect(mainSource).toContain("const DEFAULT_UPDATE_MANIFEST_URL = `${UPDATE_MANIFEST_BASE_URL}${UPDATE_MANIFEST_PATH}`");
@@ -1139,7 +1240,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain("async function prepareRequiredUpdateAfterBoot()");
     expect(mainSource).toContain('url.searchParams.set("platformType", resolveCurrentDesktopPlatformType())');
     expect(mainSource).toContain("isPackaged: app.isPackaged");
-    expect(mainSource).toContain('isWindowsStore: Boolean((process as NodeJS.Process & { windowsStore?: boolean }).windowsStore)');
+    expect(mainSource).toContain("isWindowsStore: isWindowsStoreApp()");
     expect(mainSource).toContain("REQUIRED_UPDATE_BACKGROUND_FIRST_CHECK_DELAY_MS");
     expect(mainSource).toContain("REQUIRED_UPDATE_BACKGROUND_CHECK_INTERVAL_MS");
     expect(mainSource).toContain("requiredUpdateBackgroundFirstCheckTimer");
@@ -1156,10 +1257,11 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain('update.updateMode === "silent" || isRequiredUpdate(update)');
     expect(mainSource).toContain("preparedManagedBackgroundUpdateVersion");
     expect(mainSource).toContain("await hasPreparedRequiredUpdate(update)");
-    expect(mainSource).toContain("const reusablePreparedFilePath = await resolvePreparedUpdatePackagePath(update.downloadUrl, update.latestVersion)");
-    expect(mainSource).toContain("const preparedFilePath = reusablePreparedFilePath ?? (await downloadUpdate(update, { openInstaller: false })).filePath");
+    expect(mainSource).toContain("const reusablePreparedFilePath = await resolvePreparedUpdatePackagePath(downloadUrl, update.latestVersion)");
+    expect(mainSource).toContain("const preparedFilePath = reusablePreparedFilePath ?? resolveInstallerFileUpdatePath(");
+    expect(mainSource).toContain("(await downloadUpdate(update, { openInstaller: false })).preparedUpdate");
     expect(mainSource).toContain("await stageMacDmgUpdatePackageOrDiscard(preparedFilePath)");
-    expect(mainSource).toContain("await writePreparedRequiredUpdate(update, preparedFilePath)");
+    expect(mainSource).toContain("await writePreparedRequiredUpdate(update, createInstallerFileUpdateHandle(preparedFilePath))");
     expect(mainSource).toContain("downloadedPackage.size !== totalBytes");
     expect(mainSource).toContain("update package download incomplete:");
     expect(mainSource).toContain("async function stageMacDmgUpdatePackageOrDiscard");
@@ -1220,6 +1322,9 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain('ipcMain.handle("memmy:get-app-info"');
     expect(mainSource).toContain('ipcMain.handle("memmy:check-for-updates"');
     expect(mainSource).toContain('ipcMain.handle("memmy:download-update"');
+    expect(mainSource).toContain("desktopUpdateOfferRegistry.run(");
+    expect(mainSource).toContain("(trustedUpdate) => downloadUpdate(trustedUpdate, options, event.sender)");
+    expect(mainSource).not.toContain("event, update: DesktopUpdateCheckResult");
     expect(mainSource).toContain('ipcMain.handle("memmy:open-update-installer"');
     expect(mainSource).toContain('ipcMain.handle("memmy:notify-update-available"');
     expect(mainSource).toContain('ipcMain.removeHandler("memmy:get-app-info")');
@@ -1240,7 +1345,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain('value.code !== 0');
     expect(mainSource).toContain('readManifestRecord(value, "data") ?? {}');
     expect(mainSource).toContain("async function downloadUpdate");
-    expect(mainSource).toContain("await writePreparedRequiredUpdate(update, filePath)");
+    expect(mainSource).toContain("await writePreparedRequiredUpdate(update, createInstallerFileUpdateHandle(filePath))");
     expect(mainSource).toContain("function resolveUpdatesDirectory()");
     expect(mainSource).toContain('join(app.getPath("userData"), "updates")');
     expect(mainSource).toContain("function resolveDownloadedUpdatePath");
@@ -1305,28 +1410,46 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain("app.exit(0)");
     expect(mainSource).toContain("async function cleanupBeforeQuit()");
     expect(mainSource).toContain("event.preventDefault()");
-    expect(mainSource).toContain("readStopMemoryServiceOnExitSetting()");
+    expect(mainSource).toContain(
+      'stopMemoryServiceForCurrentQuit = process.platform === "win32" || readStopMemoryServiceOnExitSetting();'
+    );
+    const installPreparedOnQuitSource = extractFunctionSource(
+      mainSource,
+      "async function installPreparedRequiredUpdateOnQuit"
+    );
+    const storeInstallHandoffIndex = installPreparedOnQuitSource.indexOf("await installWindowsStorePreparedUpdate(");
+    const stopMemoryAfterHandoffIndex = installPreparedOnQuitSource.indexOf("stopMemoryServiceForCurrentQuit = true;");
+    expect(storeInstallHandoffIndex).toBeGreaterThanOrEqual(0);
+    expect(stopMemoryAfterHandoffIndex).toBeGreaterThan(storeInstallHandoffIndex);
+    expect(mainSource).toContain(
+      "stopMemoryServiceForCurrentQuit ||= readStopMemoryServiceOnExitSetting();"
+    );
     expect(mainSource).toContain("await services?.close({ stopMemory: stopMemoryServiceForCurrentQuit })");
     expect(mainSource).toContain("app.quit()");
     expect(runtimeServicesSource).toContain("STOP_MANAGED_CHILD_GRACE_MS");
+    expect(runtimeServicesSource).toContain('process.platform === "win32" ? ["--replace-same-version"] : []');
     expect(runtimeServicesSource).toContain("waitForManagedChildExit(child, STOP_MANAGED_CHILD_GRACE_MS)");
     expect(interfaceSource).toContain("export type DesktopUpdateMode");
     expect(interfaceSource).toContain("export interface DesktopUpdateDownloadOptions");
     expect(interfaceSource).toContain("minSupportedVersion?: string");
     expect(interfaceSource).toContain("updateMode?: DesktopUpdateMode");
     expect(interfaceSource).toContain("force?: boolean");
-    expect(interfaceSource).toContain("preparedUpdatePath?: string");
+    expect(interfaceSource).toContain("export type DesktopPreparedUpdateHandle");
+    expect(interfaceSource).toContain('kind: "microsoft-store"');
+    expect(interfaceSource).toContain('kind: "store-migration"');
+    expect(interfaceSource).toContain("offerToken: DesktopStoreMigrationToken;");
+    expect(interfaceSource).not.toContain("transactionId: string;\n      acquisitionUri: string;");
     expect(interfaceSource).toContain("willQuit?: boolean");
     expect(interfaceSource).toContain("background?: boolean");
     expect(preloadSource).toContain("getAppInfo(): Promise<DesktopAppInfo>;");
     expect(preloadSource).toContain("checkForUpdates(): Promise<DesktopUpdateCheckResult>;");
-    expect(preloadSource).toContain("downloadUpdate(update: DesktopUpdateCheckResult, options?: DesktopUpdateDownloadOptions): Promise<DesktopUpdateInstallResult>;");
-    expect(preloadSource).toContain("openUpdateInstaller(filePath: string): Promise<DesktopUpdateInstallResult>;");
+    expect(preloadSource).toContain("downloadUpdate(offerToken: DesktopUpdateOfferToken, options?: DesktopUpdateDownloadOptions): Promise<DesktopUpdateInstallResult>;");
+    expect(preloadSource).toContain("openUpdateInstaller(preparedUpdate: DesktopPreparedUpdateHandle): Promise<DesktopUpdateInstallResult>;");
     expect(preloadSource).toContain("notifyUpdateAvailable(payload: { title: string; body: string; silent: boolean }): Promise<void>;");
     expect(preloadSource).toContain('ipcRenderer.invoke("memmy:get-app-info")');
     expect(preloadSource).toContain('ipcRenderer.invoke("memmy:check-for-updates")');
-    expect(preloadSource).toContain('ipcRenderer.invoke("memmy:download-update", update, options)');
-    expect(preloadSource).toContain('ipcRenderer.invoke("memmy:open-update-installer", filePath)');
+    expect(preloadSource).toContain('ipcRenderer.invoke("memmy:download-update", offerToken, options)');
+    expect(preloadSource).toContain('ipcRenderer.invoke("memmy:open-update-installer", preparedUpdate)');
     expect(preloadSource).toContain('ipcRenderer.invoke("memmy:notify-update-available", payload)');
   });
 
@@ -1369,7 +1492,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(unsignedWinBuilderSource).toContain("from: build/icon.ico");
     expect(unsignedWinBuilderSource).toContain("to: icon.ico");
     expect(mainSource).toContain('const WINDOWS_APP_USER_MODEL_ID = "cn.memtensor.memmy";');
-    expect(mainSource).toContain("app.setAppUserModelId(WINDOWS_APP_USER_MODEL_ID);");
+    expect(mainSource).toContain("app.setAppUserModelId(windowsStoreIdentity?.aumid ?? WINDOWS_APP_USER_MODEL_ID);");
     expect(mainSource).toContain('join(process.resourcesPath, "icon.ico")');
     expect(mainSource).toContain("resolveWindowsTaskbarIconPath()");
     expect(mainSource).toContain("function resolveWindowsTrayImage()");
@@ -1384,7 +1507,17 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).toContain("startPackagedRuntimeServices");
     expect(source).toContain('env.MEMMY_CONFIG ?? join(memmyHome, "config.yaml")');
     expect(source).toContain("const explicitWorkspace = stringValue(env.MEMMY_AGENT_WORKSPACE);");
-    expect(source).toContain("if (!explicitWorkspace) return { configPath };");
+    expect(source).toContain('const configSource = await readFile(configPath, "utf8")');
+    expect(source).toContain(
+      "const defaults = agents && isRecord(agents.defaults) ? agents.defaults : null;"
+    );
+    expect(source).toContain("const legacyAgent = isRecord(parsed.agent) ? parsed.agent : null;");
+    expect(source).toContain(
+      "if (stringValue(defaults?.workspace) ?? stringValue(legacyAgent?.workspace)) {"
+    );
+    expect(source).toContain(
+      'const agentWorkspace = resolvePath(explicitWorkspace ?? join(memmyHome, "workspace"));'
+    );
     expect(source).not.toContain("configuredWorkspace");
     expect(source).toContain("syncBundledAgentSkills");
     expect(source).toContain('join(dirname(options.agentEntry), "skills")');
@@ -1755,9 +1888,9 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).toContain("refresh the desktop after shortcuts were actually removed");
     expect(source).toContain('source.includes(marker)');
     expect(source).toContain('source.replace(original, replacement)');
-    expect(source).toContain('patch_electron_builder_nsis_refresh');
-    expect(source.indexOf("patch_electron_builder_nsis_refresh")).toBeLessThan(
-      source.indexOf('npx electron-builder "${BUILDER_ARGS[@]}" --win nsis --x64')
+    expect(source).toContain('if [ "$PACKAGE_TARGET" = "nsis" ]; then');
+    expect(source.lastIndexOf("patch_electron_builder_nsis_refresh")).toBeLessThan(
+      source.indexOf('npx electron-builder "${BUILDER_ARGS[@]}"')
     );
   });
 
@@ -1799,7 +1932,9 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).toContain('FINAL_EXE="$DESKTOP_DIR/release/Memmy-$DESKTOP_VERSION-win32-$PACKAGE_ARCH-$PACKAGE_EDITION-$PACKAGE_SIGNING.exe"');
     expect(source).toContain('ARTIFACT_NAME="Memmy-$DESKTOP_VERSION-win32-$PACKAGE_ARCH-$PACKAGE_EDITION-$PACKAGE_SIGNING.\\${ext}"');
     expect(source).toContain('BUILDER_ARGS+=(--config.extraMetadata.version="$DESKTOP_VERSION")');
-    expect(source).toContain('npx electron-builder "${BUILDER_ARGS[@]}" --win nsis --x64 "$@" --config.artifactName="$ARTIFACT_NAME"');
+    expect(source).toContain('PACKAGE_TARGET="${MEMMY_WINDOWS_TARGET:-nsis}"');
+    expect(source).toContain('BUILDER_ARGS+=(--config.artifactName="$ARTIFACT_NAME")');
+    expect(source).toContain('npx electron-builder "${BUILDER_ARGS[@]}"');
     expect(source).not.toContain("use_final_artifact_name");
     expect(source).not.toContain("mv -f");
   });

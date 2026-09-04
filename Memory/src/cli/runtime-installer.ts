@@ -37,6 +37,8 @@ export interface MemoryRuntimeInstallOptions {
   agents?: string[];
   /** Desktop uses a newer compatible installation instead of replacing it with its bundled copy. */
   preferInstalledCompatible?: boolean;
+  /** Desktop replaces an equal-version runtime so bundled content fixes are not skipped. */
+  replaceSameVersion?: boolean;
 }
 
 export interface InstalledRuntimePointer {
@@ -63,7 +65,8 @@ export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions 
   const currentPath = join(serviceHome, "current.json");
   const previous = await readJsonFile<InstalledRuntimePointer>(currentPath);
   const versionComparison = previous ? compareVersions(manifest.version, previous.version) : 1;
-  if (previous && options.preferInstalledCompatible && previous.protocolVersion === MEMORY_PROTOCOL_VERSION && versionComparison <= 0) {
+  const replacingSameVersion = Boolean(previous && options.replaceSameVersion && versionComparison === 0);
+  if (previous && options.preferInstalledCompatible && previous.protocolVersion === MEMORY_PROTOCOL_VERSION && versionComparison <= 0 && !replacingSameVersion) {
     return reuseInstalledRuntime(previous, home, serviceHome, options);
   }
   if (previous && versionComparison < 0) {
@@ -88,7 +91,7 @@ export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions 
   const installLock = await acquireInstallLock(join(serviceHome, "install.lock"));
   let stagedPath: string | undefined;
   try {
-    if (!existsSync(pointer.entrypoint)) {
+    if (!existsSync(pointer.entrypoint) || replacingSameVersion) {
       stagedPath = join(runtimeRoot, `.staging-${process.pid}-${Date.now()}`);
       await mkdir(stagedPath, { recursive: true });
       const unpacked = join(stagedPath, "unpacked");
