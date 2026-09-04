@@ -32,6 +32,12 @@ const packageScriptPath = join(
   "internal",
   "package-windows-store.ps1",
 );
+const packageVersionResolverPath = join(
+  repositoryRoot,
+  "scripts",
+  "internal",
+  "windows-store-package-version.ps1",
+);
 const manifestVerifierPath = join(
   repositoryRoot,
   "scripts",
@@ -201,6 +207,7 @@ describe("Windows Store packaging identity", () => {
     expect(source).toContain("MEMMY_WINDOWS_APPX_IDENTITY_NAME");
     expect(source).toContain("MEMMY_WINDOWS_APPX_PUBLISHER_DISPLAY_NAME");
     expect(source).toContain("MEMMY_WINDOWS_APPX_CUSTOM_MANIFEST_PATH");
+    expect(source).toContain("MEMMY_WINDOWS_APPX_PACKAGE_VERSION");
     expect(source).toContain("MEMMY_WINDOWS_APPX_CUSTOM_EXTENSIONS_PATH");
     expect(source).toContain("assert-windows-store-build-profile.ps1");
     expect(source).toContain("run-with-file-lock.mjs");
@@ -259,13 +266,43 @@ describe("Windows Store packaging identity", () => {
     expect(verifyIndex).toBeGreaterThan(builderIndex);
   });
 
-  it("isolates Store upload signing from local-test signing and never persists a certificate secret", () => {
+  it("reuses the NSIS Windows signing configuration for signed MSIX packages", () => {
     const source = readFileSync(packageScriptPath, "utf8");
+    const nsisSource = readFileSync(windowsBuildScriptPath, "utf8");
 
     expect(source).toContain('[ValidateSet("StoreUpload", "LocalTest")]');
-    expect(source).toContain("MEMMY_STORE_LOCAL_CERT_SHA1");
-    expect(source).toContain("MEMMY_STORE_LOCAL_PFX");
-    expect(source).toContain("MEMMY_STORE_LOCAL_PFX_PASSWORD");
+    expect(source).toContain('@("WIN_CSC_LINK", "CSC_LINK")');
+    expect(source).toContain(
+      '@("WIN_CSC_KEY_PASSWORD", "CSC_KEY_PASSWORD")',
+    );
+    expect(source).toContain('@("WIN_CSC_SHA1", "CSC_SHA1")');
+    expect(source).toContain(
+      '@("WIN_CSC_SUBJECT_NAME", "CSC_SUBJECT_NAME")',
+    );
+    expect(source).toContain(
+      '@("WIN_CSC_TIMESTAMP_SERVER", "CSC_TIMESTAMP_SERVER")',
+    );
+    expect(source).toContain(
+      '@("MEMMY_WINDOWS_SIGNING_SOURCE")',
+    );
+    expect(source).toContain(
+      '$requestedSigningSource -notin @("auto", "certificate-store", "pfx")',
+    );
+    expect(source).toContain("if ($hasCertificateStoreConfiguration)");
+    expect(source).toContain('Kind = "CertificateStore"');
+    expect(source).toContain(
+      '$arguments += @("/sha1", $SigningConfiguration.Thumbprint)',
+    );
+    expect(nsisSource).toContain(
+      'local signing_source="${MEMMY_WINDOWS_SIGNING_SOURCE:-auto}"',
+    );
+    expect(nsisSource).toContain(
+      'resolved_signing_source="certificate-store"',
+    );
+    expect(nsisSource).toContain('resolved_signing_source="pfx"');
+    expect(nsisSource).toContain(
+      "MEMMY_WINDOWS_SIGNING_SOURCE=auto|certificate-store|pfx",
+    );
     expect(source).toContain("Assert-SigningCertificatePublisher");
     expect(source).toContain("Get-AuthenticodeSignature");
     expect(source).toContain("X509ChainStatusFlags]::UntrustedRoot");
@@ -288,7 +325,7 @@ describe("Windows Store packaging identity", () => {
     );
     expect(source).toContain('Get-WindowsSdkTool -Name "makeappx.exe"');
     expect(source).toContain("LegacyNsisAumid");
-    expect(source).toContain("store-staging-$stagingId.msix");
+    expect(source).toContain("unsigned-staging-$stagingId.msix");
     expect(source.indexOf("Assert-MemmyWindowsStoreMsixManifest")).toBeLessThan(
       source.indexOf("Move-Item", source.indexOf('if ($Mode -eq "LocalTest")')),
     );
@@ -299,8 +336,10 @@ describe("Windows Store packaging identity", () => {
     expect(source).toContain("electron-builder.store.unsigned.yml");
     expect(source).toContain('$env:MEMMY_SKIP_CODESIGN = "1"');
     expect(source).toContain("CSC_LINK = $null");
+    expect(source).toContain("CSC_SHA1 = $null");
     expect(source).toContain("WIN_CSC_SHA1 = $null");
-    expect(source).toContain("MEMMY_STORE_LOCAL_PFX_PASSWORD = $null");
+    expect(source).toContain("WIN_CSC_KEY_PASSWORD = $null");
+    expect(source).toContain("MEMMY_WINDOWS_SIGNING_SOURCE = $null");
     expect(source).toContain('"app\\Memmy.exe"');
     expect(source).toContain("[IO.FileShare]::None");
     expect(source).toContain(".memmy-store-publication");
@@ -310,6 +349,45 @@ describe("Windows Store packaging identity", () => {
     );
     expect(source).not.toMatch(
       /MEMMY_WINDOWS_(?:SOURCES_PREBUILT|RUNTIME_PREPARED|STOP_BEFORE_AGENT_RUNTIME_INSTALL)/,
+    );
+    const localTestIndex = source.indexOf('if ($Mode -eq "LocalTest")');
+    const copyIndex = source.indexOf("Copy-Item", localTestIndex);
+    const signIndex = source.indexOf("Sign-WindowsMsix", copyIndex);
+    const parityIndex = source.indexOf("Assert-MsixPayloadParity", signIndex);
+    expect(copyIndex).toBeGreaterThan(localTestIndex);
+    expect(signIndex).toBeGreaterThan(copyIndex);
+    expect(parityIndex).toBeGreaterThan(signIndex);
+  });
+
+  it("keeps the displayed app version separate from the generated MSIX package version", () => {
+    const source = readFileSync(packageScriptPath, "utf8");
+
+    expect(source).toContain("[ValidateRange(0, 99)]");
+    expect(source).toContain("[int]$StoreBuild = 0");
+    expect(source).toContain("Resolve-MemmyWindowsStorePackageVersion");
+    expect(source).toContain(
+      "MEMMY_WINDOWS_APPX_CUSTOM_MANIFEST_PATH = $generatedManifestRelativePath",
+    );
+    expect(source).toContain("--version $appVersion");
+    expect(source).not.toContain("--version $storePackageVersion");
+    expect(source).toContain("-ExpectedPackageVersion $storePackageVersion");
+    expect(source).toContain(
+      '$artifactBaseName = "Memmy-$appVersion-$storeBuildLabel-win32-x64-$resolvedChannel"',
+    );
+    expect(source).toContain(
+      '$unsignedArtifactName = "$artifactBaseName-unsigned.msix"',
+    );
+    expect(source).toContain(
+      '$localTestArtifactName = "$artifactBaseName-signed.msix"',
+    );
+    expect(source).toContain("signed-staging-$stagingId.msix");
+    expect(source).not.toContain("$artifactBaseName-local-test.msix");
+    expect(source).not.toContain("app-$appVersion-msix-$storePackageVersion");
+    expect(source).toContain(
+      "Refusing to overwrite an existing Windows Store package",
+    );
+    expect(source).not.toContain(
+      '$expectedMsixPackageVersion = "$resolvedVersion.0"',
     );
   });
 });
@@ -416,6 +494,73 @@ describe.runIf(process.platform === "win32")(
       expect(`${result.stdout}\n${result.stderr}`).toContain(
         "legacyNsisAumid must exactly match",
       );
+    });
+
+    it("defaults StoreBuild to 00 and derives the MSIX version from the app patch version", () => {
+      const result = invokePackageVersionResolver("1.1.2");
+
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({
+        AppVersion: "1.1.2",
+        StoreBuild: 0,
+        StoreBuildLabel: "00",
+        PackageVersion: "1.1.200.0",
+      });
+    });
+
+    it.each([
+      ["1.1.2", 1, "01", "1.1.201.0"],
+      ["1.1.2", 99, "99", "1.1.299.0"],
+      ["1.1.3", 0, "00", "1.1.300.0"],
+      ["1.2.0", 0, "00", "1.2.0.0"],
+    ])(
+      "maps app %s and StoreBuild %i (%s) to MSIX %s",
+      (appVersion, storeBuild, storeBuildLabel, packageVersion) => {
+        const result = invokePackageVersionResolver(appVersion, storeBuild);
+
+        expect(result.status, result.stderr).toBe(0);
+        expect(JSON.parse(result.stdout)).toEqual({
+          AppVersion: appVersion,
+          StoreBuild: storeBuild,
+          StoreBuildLabel: storeBuildLabel,
+          PackageVersion: packageVersion,
+        });
+      },
+    );
+
+    it.each([-1, 100])("rejects StoreBuild %i outside 00-99", (storeBuild) => {
+      const result = invokePackageVersionResolver("1.1.2", storeBuild);
+
+      expect(result.status).not.toBe(0);
+      expect(`${result.stdout}\n${result.stderr}`).toContain("StoreBuild");
+    });
+
+    it("rejects an encoded MSIX build segment above 65535", () => {
+      const result = invokePackageVersionResolver("1.1.656");
+
+      expect(result.status).not.toBe(0);
+      expect(`${result.stdout}\n${result.stderr}`).toContain(
+        "must not exceed 65535",
+      );
+    });
+
+    it("changes only the MSIX Identity version in the generated Store manifest", () => {
+      const result = invokeVersionedManifestGenerator("1.1.201.0");
+
+      expect(result.status, result.stderr).toBe(0);
+      const generatedManifest = JSON.parse(result.stdout) as string;
+      const manifestTemplate = readFileSync(
+        join(desktopDirectory, "build", "appx-manifest.xml"),
+        "utf8",
+      );
+      expect(generatedManifest).toContain('Version="1.1.201.0"');
+      expect(generatedManifest).not.toContain('Version="${version}"');
+      expect(
+        generatedManifest.replace(
+          'Version="1.1.201.0"',
+          'Version="${version}"',
+        ),
+      ).toBe(manifestTemplate);
     });
 
     it("strictly validates Store identity and legacy NSIS migration identity from an unpacked manifest", () => {
@@ -603,10 +748,23 @@ describe.runIf(process.platform === "win32")(
     });
 
     it("makes the AppX build re-resolve the checked-in company profile and reject identity drift", () => {
+      const generatedManifestRelativePath = `build/appx-manifest.generated.${process.pid}.xml`;
+      const generatedManifestPath = join(
+        desktopDirectory,
+        ...generatedManifestRelativePath.split("/"),
+      );
       const generatedExtensionsRelativePath = `build/appx-extensions.generated.${process.pid}.xml`;
       const generatedExtensionsPath = join(
         desktopDirectory,
         ...generatedExtensionsRelativePath.split("/"),
+      );
+      writeFileSync(
+        generatedManifestPath,
+        readFileSync(
+          join(desktopDirectory, "build", "appx-manifest.xml"),
+          "utf8",
+        ).replace('Version="${version}"', 'Version="1.1.201.0"'),
+        "utf8",
       );
       writeFileSync(
         generatedExtensionsPath,
@@ -616,12 +774,14 @@ describe.runIf(process.platform === "win32")(
       try {
         const valid = invokeBuildProfileAssertion(
           "cn",
+          generatedManifestRelativePath,
           generatedExtensionsRelativePath,
         );
         expect(valid.status, valid.stderr).toBe(0);
 
         const drifted = invokeBuildProfileAssertion(
           "cn",
+          generatedManifestRelativePath,
           generatedExtensionsRelativePath,
           { MEMMY_WINDOWS_APPX_IDENTITY_NAME: "Personal.Memmy" },
         );
@@ -629,7 +789,26 @@ describe.runIf(process.platform === "win32")(
         expect(`${drifted.stdout}\n${drifted.stderr}`).toContain(
           "must exactly match company/cn",
         );
+
+        writeFileSync(
+          generatedManifestPath,
+          readFileSync(generatedManifestPath, "utf8").replace(
+            'Version="1.1.201.0"',
+            'Version="1.1.202.0"',
+          ),
+          "utf8",
+        );
+        const versionDrifted = invokeBuildProfileAssertion(
+          "cn",
+          generatedManifestRelativePath,
+          generatedExtensionsRelativePath,
+        );
+        expect(versionDrifted.status).not.toBe(0);
+        expect(`${versionDrifted.stdout}\n${versionDrifted.stderr}`).toContain(
+          "only its package version replaced",
+        );
       } finally {
+        rmSync(generatedManifestPath, { force: true });
         rmSync(generatedExtensionsPath, { force: true });
       }
     });
@@ -727,23 +906,47 @@ describe.runIf(process.platform === "win32")(
       expect(result.status).not.toBe(0);
     });
 
-    it("requires an explicit local signing source before any LocalTest build starts", () => {
+    it("requires the NSIS-compatible signing configuration before any LocalTest build starts", () => {
       const result = invokePackageWrapper("LocalTest", "cn");
 
       expect(result.status).not.toBe(0);
       expect(`${result.stdout}\n${result.stderr}`).toContain(
-        "LocalTest requires MEMMY_STORE_LOCAL_CERT_SHA1 or MEMMY_STORE_LOCAL_PFX",
+        "Windows signed MSIX requires WIN_CSC_LINK/WIN_CSC_KEY_PASSWORD or WIN_CSC_SHA1/WIN_CSC_SUBJECT_NAME",
       );
     });
 
-    it("rejects local signing material in the canonical StoreUpload path", () => {
+    it("rejects obsolete Store-specific signing variables", () => {
       const result = invokePackageWrapper("StoreUpload", "intl", {
         MEMMY_STORE_LOCAL_CERT_SHA1: "A".repeat(40),
       });
 
       expect(result.status).not.toBe(0);
       expect(`${result.stdout}\n${result.stderr}`).toContain(
-        "MEMMY_STORE_LOCAL_CERT_SHA1 is local-test only",
+        "MEMMY_STORE_LOCAL_CERT_SHA1 is no longer supported; use the NSIS-compatible WIN_CSC_* signing variables",
+      );
+    });
+
+    it("prioritizes and validates SimplySign when both signing sources are configured", () => {
+      const result = invokePackageWrapper("LocalTest", "intl", {
+        WIN_CSC_SHA1: "not-a-thumbprint",
+        WIN_CSC_LINK: "C:\\missing\\local-signing.pfx",
+        WIN_CSC_KEY_PASSWORD: "not-used",
+      });
+
+      expect(result.status).not.toBe(0);
+      expect(`${result.stdout}\n${result.stderr}`).toContain(
+        "WIN_CSC_SHA1 must be a 40-character SHA-1 thumbprint",
+      );
+    });
+
+    it("validates an explicit Windows signing-source override before packaging", () => {
+      const result = invokePackageWrapper("LocalTest", "intl", {
+        MEMMY_WINDOWS_SIGNING_SOURCE: "unsupported",
+      });
+
+      expect(result.status).not.toBe(0);
+      expect(`${result.stdout}\n${result.stderr}`).toContain(
+        "MEMMY_WINDOWS_SIGNING_SOURCE must be auto, certificate-store, or pfx",
       );
     });
 
@@ -849,6 +1052,39 @@ function invokeUnpackedManifestVerifier(manifestPath: string, channel: string) {
   );
 }
 
+function invokePackageVersionResolver(
+  appVersion: string,
+  storeBuild?: number,
+) {
+  const command = [
+    `. '${quotePowerShellLiteral(packageVersionResolverPath)}'`,
+    `Resolve-MemmyWindowsStorePackageVersion -AppVersion '${quotePowerShellLiteral(appVersion)}'${storeBuild === undefined ? "" : ` -StoreBuild ${storeBuild}`} | ConvertTo-Json -Compress`,
+  ].join("; ");
+  return spawnSync(
+    "powershell.exe",
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+    { encoding: "utf8" },
+  );
+}
+
+function invokeVersionedManifestGenerator(packageVersion: string) {
+  const manifestTemplatePath = join(
+    desktopDirectory,
+    "build",
+    "appx-manifest.xml",
+  );
+  const command = [
+    `. '${quotePowerShellLiteral(packageVersionResolverPath)}'`,
+    `$template = Get-Content -Raw -LiteralPath '${quotePowerShellLiteral(manifestTemplatePath)}'`,
+    `New-MemmyWindowsStoreVersionedManifestContent -Template $template -PackageVersion '${quotePowerShellLiteral(packageVersion)}' | ConvertTo-Json -Compress`,
+  ].join("; ");
+  return spawnSync(
+    "powershell.exe",
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+    { encoding: "utf8" },
+  );
+}
+
 function invokePackageWrapper(
   mode: "StoreUpload" | "LocalTest",
   channel: "cn" | "intl",
@@ -861,6 +1097,17 @@ function invokePackageWrapper(
     "MEMMY_STORE_LOCAL_PFX",
     "MEMMY_STORE_LOCAL_PFX_PASSWORD",
     "MEMMY_STORE_LOCAL_TIMESTAMP_URL",
+    "WIN_CSC_LINK",
+    "WIN_CSC_KEY_PASSWORD",
+    "WIN_CSC_SHA1",
+    "WIN_CSC_SUBJECT_NAME",
+    "WIN_CSC_TIMESTAMP_SERVER",
+    "CSC_LINK",
+    "CSC_KEY_PASSWORD",
+    "CSC_SHA1",
+    "CSC_SUBJECT_NAME",
+    "CSC_TIMESTAMP_SERVER",
+    "MEMMY_WINDOWS_SIGNING_SOURCE",
     "MEMMY_STORE_PUBLISHING_CONFIG_PATH",
   ]) {
     delete environment[name];
@@ -885,6 +1132,7 @@ function invokePackageWrapper(
 
 function invokeBuildProfileAssertion(
   channel: "cn" | "intl",
+  generatedManifestRelativePath: string,
   generatedExtensionsRelativePath: string,
   overrides: NodeJS.ProcessEnv = {},
 ) {
@@ -898,7 +1146,8 @@ function invokeBuildProfileAssertion(
     MEMMY_WINDOWS_APPX_PUBLISHER: config.publisher,
     MEMMY_WINDOWS_APPX_PUBLISHER_DISPLAY_NAME: config.publisherDisplayName,
     MEMMY_WINDOWS_APPX_DISPLAY_NAME: config.windowsDisplayName,
-    MEMMY_WINDOWS_APPX_CUSTOM_MANIFEST_PATH: "build/appx-manifest.xml",
+    MEMMY_WINDOWS_APPX_CUSTOM_MANIFEST_PATH: generatedManifestRelativePath,
+    MEMMY_WINDOWS_APPX_PACKAGE_VERSION: "1.1.201.0",
     MEMMY_WINDOWS_APPX_CUSTOM_EXTENSIONS_PATH: generatedExtensionsRelativePath,
     MEMMY_WINDOWS_BUILDER_CONFIG: "electron-builder.store.unsigned.yml",
     MEMMY_STORE_PRODUCT_ID: application.storeProductId,

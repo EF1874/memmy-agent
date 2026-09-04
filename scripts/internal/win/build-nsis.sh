@@ -140,6 +140,7 @@ require_windows_appx_env() {
     MEMMY_WINDOWS_APPX_PUBLISHER_DISPLAY_NAME \
     MEMMY_WINDOWS_APPX_DISPLAY_NAME \
     MEMMY_WINDOWS_APPX_CUSTOM_MANIFEST_PATH \
+    MEMMY_WINDOWS_APPX_PACKAGE_VERSION \
     MEMMY_WINDOWS_APPX_CUSTOM_EXTENSIONS_PATH \
     MEMMY_WINDOWS_APPX_ARTIFACT_NAME; do
     if [ -z "${!variable_name:-}" ]; then
@@ -452,12 +453,34 @@ require_windows_signing_env() {
   local csc_sha1="${WIN_CSC_SHA1:-${CSC_SHA1:-}}"
   local csc_subject="${WIN_CSC_SUBJECT_NAME:-${CSC_SUBJECT_NAME:-}}"
   local timestamp_server="${WIN_CSC_TIMESTAMP_SERVER:-${CSC_TIMESTAMP_SERVER:-http://timestamp.digicert.com}}"
+  local signing_source="${MEMMY_WINDOWS_SIGNING_SOURCE:-auto}"
+  local resolved_signing_source
 
-  if [ -n "$csc_link" ] && [ -n "$csc_password" ]; then
-    return
-  fi
+  case "$signing_source" in
+    auto)
+      if [ -n "$csc_sha1" ] || [ -n "$csc_subject" ]; then
+        resolved_signing_source="certificate-store"
+      elif [ -n "$csc_link" ] || [ -n "$csc_password" ]; then
+        resolved_signing_source="pfx"
+      else
+        resolved_signing_source=""
+      fi
+      ;;
+    certificate-store|pfx)
+      resolved_signing_source="$signing_source"
+      ;;
+    *)
+      echo "MEMMY_WINDOWS_SIGNING_SOURCE must be auto, certificate-store, or pfx." >&2
+      exit 1
+      ;;
+  esac
 
-  if [ -n "$csc_sha1" ] || [ -n "$csc_subject" ]; then
+  if [ "$resolved_signing_source" = "certificate-store" ]; then
+    if [ -z "$csc_sha1" ] && [ -z "$csc_subject" ]; then
+      echo "Windows certificate-store signing requires WIN_CSC_SHA1 or WIN_CSC_SUBJECT_NAME." >&2
+      exit 1
+    fi
+    unset WIN_CSC_LINK CSC_LINK WIN_CSC_KEY_PASSWORD CSC_KEY_PASSWORD
     if [ -n "$csc_sha1" ]; then
       WINDOWS_SIGNING_BUILDER_ARGS+=(--config.win.signtoolOptions.certificateSha1="$csc_sha1")
     fi
@@ -468,7 +491,12 @@ require_windows_signing_env() {
     return
   fi
 
-  if [ -n "$csc_link" ] || [ -n "$csc_password" ]; then
+  if [ "$resolved_signing_source" = "pfx" ]; then
+    if [ -n "$csc_link" ] && [ -n "$csc_password" ]; then
+      unset WIN_CSC_SHA1 CSC_SHA1 WIN_CSC_SUBJECT_NAME CSC_SUBJECT_NAME
+      WINDOWS_SIGNING_BUILDER_ARGS+=(--config.win.signtoolOptions.rfc3161TimeStampServer="$timestamp_server")
+      return
+    fi
     cat >&2 <<'EOF'
 Windows PFX signing requires both:
   WIN_CSC_LINK=/absolute/path/to/windows-code-signing.pfx
@@ -482,14 +510,15 @@ Windows signed packaging requires a Windows code-signing certificate.
 
 Use one of these methods:
 
-1. PFX certificate:
+1. SimplySign / Windows certificate store (preferred):
+  WIN_CSC_SHA1=<certificate SHA1 thumbprint>
+
+2. PFX certificate:
   WIN_CSC_LINK=/absolute/path/to/windows-code-signing.pfx
   WIN_CSC_KEY_PASSWORD=...
 
-2. SimplySign / Windows certificate store:
-  WIN_CSC_SHA1=<certificate SHA1 thumbprint>
-
 Optional:
+  MEMMY_WINDOWS_SIGNING_SOURCE=auto|certificate-store|pfx
   WIN_CSC_TIMESTAMP_SERVER=http://timestamp.digicert.com
 
 Electron-builder fallback names are also accepted:

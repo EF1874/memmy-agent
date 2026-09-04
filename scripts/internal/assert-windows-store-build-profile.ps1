@@ -14,6 +14,8 @@ $canonicalConfigPath = Join-Path `
   "App\shell\desktop\build\store-publishing-profiles.json"
 $profileResolverPath = Join-Path $PSScriptRoot "windows-store-publishing-profile.ps1"
 . $profileResolverPath
+$packageVersionResolverPath = Join-Path $PSScriptRoot "windows-store-package-version.ps1"
+. $packageVersionResolverPath
 
 if ($env:MEMMY_STORE_PUBLISHING_CONFIG_PATH) {
   throw "MEMMY_STORE_PUBLISHING_CONFIG_PATH is not supported by the canonical Windows Store build."
@@ -65,9 +67,32 @@ foreach ($entry in $expectedValues.GetEnumerator()) {
 Assert-ExactWindowsStoreBuildEnvironmentValue `
   -Name "MEMMY_WINDOWS_BUILDER_CONFIG" `
   -Expected "electron-builder.store.unsigned.yml"
-Assert-ExactWindowsStoreBuildEnvironmentValue `
-  -Name "MEMMY_WINDOWS_APPX_CUSTOM_MANIFEST_PATH" `
-  -Expected "build/appx-manifest.xml"
+
+$packageVersion = $env:MEMMY_WINDOWS_APPX_PACKAGE_VERSION
+if ([string]::IsNullOrWhiteSpace($packageVersion)) {
+  throw "MEMMY_WINDOWS_APPX_PACKAGE_VERSION is required for Windows AppX packaging."
+}
+$manifestRelativePath = $env:MEMMY_WINDOWS_APPX_CUSTOM_MANIFEST_PATH
+if ($manifestRelativePath -cnotmatch '^build/appx-manifest\.generated\.[0-9]+\.xml$') {
+  throw "MEMMY_WINDOWS_APPX_CUSTOM_MANIFEST_PATH must name the canonical generated Store manifest file."
+}
+$manifestPath = Join-Path $root "App\shell\desktop\$manifestRelativePath"
+if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+  throw "Canonical generated Store manifest file was not found: $manifestPath"
+}
+$manifestTemplatePath = Join-Path $root "App\shell\desktop\build\appx-manifest.xml"
+$manifestTemplate = Get-Content -Raw -LiteralPath $manifestTemplatePath
+$expectedManifest = New-MemmyWindowsStoreVersionedManifestContent `
+  -Template $manifestTemplate `
+  -PackageVersion $packageVersion
+$actualManifest = Get-Content -Raw -LiteralPath $manifestPath
+if (-not [string]::Equals(
+  $actualManifest,
+  $expectedManifest,
+  [StringComparison]::Ordinal
+)) {
+  throw "Generated Store manifest must exactly match the canonical template with only its package version replaced."
+}
 
 $extensionsRelativePath = $env:MEMMY_WINDOWS_APPX_CUSTOM_EXTENSIONS_PATH
 if ($extensionsRelativePath -cnotmatch '^build/appx-extensions\.generated\.[0-9]+\.xml$') {
