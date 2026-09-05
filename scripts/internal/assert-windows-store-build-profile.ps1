@@ -84,14 +84,15 @@ $manifestTemplatePath = Join-Path $root "App\shell\desktop\build\appx-manifest.x
 $manifestTemplate = Get-Content -Raw -LiteralPath $manifestTemplatePath
 $expectedManifest = New-MemmyWindowsStoreVersionedManifestContent `
   -Template $manifestTemplate `
-  -PackageVersion $packageVersion
+  -PackageVersion $packageVersion `
+  -StoreListingDisplayName $profile.StoreListingDisplayName
 $actualManifest = Get-Content -Raw -LiteralPath $manifestPath
 if (-not [string]::Equals(
   $actualManifest,
   $expectedManifest,
   [StringComparison]::Ordinal
 )) {
-  throw "Generated Store manifest must exactly match the canonical template with only its package version replaced."
+  throw "Generated Store manifest must exactly match the canonical template with only its package version and Store listing display name replaced."
 }
 
 $extensionsRelativePath = $env:MEMMY_WINDOWS_APPX_CUSTOM_EXTENSIONS_PATH

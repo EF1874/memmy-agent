@@ -137,14 +137,12 @@ function Assert-MemmyCompanyStorePublishingConfig {
 
   $expectedApplications = [ordered]@{
     cn = [ordered]@{
-      storeListingDisplayName = "Memmy"
       storeProductId = "9MZGLKWMZZV6"
       identityName = "Memtensor.Memmy"
       manifestApplicationId = "Memmy"
       packageFamilyName = "Memtensor.Memmy_eyack96k521x2"
     }
     intl = [ordered]@{
-      storeListingDisplayName = "Memmy Agent"
       storeProductId = "9NFVJC9K7ZK9"
       identityName = "Memtensor.MemmyAgent"
       manifestApplicationId = "Memmy"

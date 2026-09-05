@@ -214,7 +214,7 @@ function Assert-MemmyWindowsStoreUnpackedManifest {
     -Actual $applicationEntryPoint -Expected "Windows.FullTrustApplication" `
     -Context "Application/EntryPoint"
   Assert-OrdinalWindowsStoreManifestValue `
-    -Actual $packageDisplayName.InnerText -Expected $Profile.WindowsDisplayName `
+    -Actual $packageDisplayName.InnerText -Expected $Profile.StoreListingDisplayName `
     -Context "Package/Properties/DisplayName"
   Assert-OrdinalWindowsStoreManifestValue `
     -Actual $publisherDisplayName.InnerText -Expected $Profile.PublisherDisplayName `

@@ -112,19 +112,20 @@ describe("Windows Store packaging identity", () => {
     expect(serialized).not.toMatch(/environments|storeMigration/);
   });
 
-  it("uses Memmy for both package and application display names in the AppX manifest", () => {
+  it("separates Store package and Windows application display names in the AppX manifest", () => {
     const manifest = readFileSync(
       join(desktopDirectory, "build", "appx-manifest.xml"),
       "utf8",
     );
 
-    expect(manifest).toContain("<DisplayName>${displayName}</DisplayName>");
+    expect(manifest).toContain(
+      "<DisplayName>${storeListingDisplayName}</DisplayName>",
+    );
     expect(manifest).toContain('DisplayName="${displayName}"');
-    expect(manifest.match(/\$\{displayName\}/g)).toHaveLength(2);
+    expect(manifest.match(/\$\{displayName\}/g)).toHaveLength(1);
     expect(manifest).toContain('EntryPoint="Windows.FullTrustApplication"');
     expect(manifest).toContain("xmlns:desktop=");
     expect(manifest).toContain("xmlns:rescap=");
-    expect(manifest).not.toContain("storeListingDisplayName");
 
     const extensions = readFileSync(
       join(desktopDirectory, "build", "appx-extensions.xml"),
@@ -445,7 +446,7 @@ describe.runIf(process.platform === "win32")(
       );
     });
 
-    it("pins every canonical packaging field to the two approved Memtensor Store products", () => {
+    it("pins canonical product identities to the two approved Memtensor Store products", () => {
       const config = readPublishingConfig();
       config.applications.intl.storeProductId = "9AAAAAAAAAAA";
       const configPath = writeTemporaryConfig(config);
@@ -456,6 +457,45 @@ describe.runIf(process.platform === "win32")(
       expect(`${result.stdout}\n${result.stderr}`).toContain(
         "Canonical Windows Store company/intl 'storeProductId' must exactly match '9NFVJC9K7ZK9'",
       );
+    });
+
+    it.each([
+      ["cn", "Memmy China"],
+      ["intl", "Memmy Global"],
+    ] as const)("supports renaming the %s Store listing while keeping the Windows app name", (channel, listingName) => {
+      const config = readPublishingConfig();
+      const oldListingName = config.applications[channel].storeListingDisplayName;
+      config.applications[channel].storeListingDisplayName = listingName;
+      const configPath = writeTemporaryConfig(config);
+      const assertion = invokeCompanyConfigAssertion(configPath);
+      expect(assertion.status, assertion.stderr).toBe(0);
+
+      const resolved = invokeResolver(configPath, channel);
+      expect(resolved.status, resolved.stderr).toBe(0);
+      const profile = JSON.parse(resolved.stdout);
+      expect(profile.StoreListingDisplayName).toBe(listingName);
+      expect(profile.WindowsDisplayName).toBe("Memmy");
+
+      const generated = invokeVersionedManifestGenerator(
+        "1.1.201.0",
+        profile.StoreListingDisplayName,
+      );
+      expect(generated.status, generated.stderr).toBe(0);
+      const template = JSON.parse(generated.stdout) as string;
+      expect(template).toContain(`<DisplayName>${listingName}</DisplayName>`);
+      expect(template).toContain('DisplayName="${displayName}"');
+
+      const manifestPath = join(createTemporaryDirectory(), "AppxManifest.xml");
+      writeFileSync(
+        manifestPath,
+        createUnpackedManifest(channel).replace(
+          `<DisplayName>${oldListingName}</DisplayName>`,
+          `<DisplayName>${listingName}</DisplayName>`,
+        ),
+        "utf8",
+      );
+      const verified = invokeUnpackedManifestVerifier(manifestPath, channel, configPath);
+      expect(verified.status, verified.stderr).toBe(0);
     });
 
     it("allows custom publishing configs only through the explicit test-only resolver switch", () => {
@@ -544,8 +584,10 @@ describe.runIf(process.platform === "win32")(
       );
     });
 
-    it("changes only the MSIX Identity version in the generated Store manifest", () => {
-      const result = invokeVersionedManifestGenerator("1.1.201.0");
+    it.each(["cn", "intl"] as const)("generates the %s Store package name and version separately from the Windows app name", (channel) => {
+      const listingName =
+        readPublishingConfig().applications[channel].storeListingDisplayName;
+      const result = invokeVersionedManifestGenerator("1.1.201.0", listingName);
 
       expect(result.status, result.stderr).toBe(0);
       const generatedManifest = JSON.parse(result.stdout) as string;
@@ -555,35 +597,71 @@ describe.runIf(process.platform === "win32")(
       );
       expect(generatedManifest).toContain('Version="1.1.201.0"');
       expect(generatedManifest).not.toContain('Version="${version}"');
+      expect(generatedManifest).toContain(
+        `<DisplayName>${listingName}</DisplayName>`,
+      );
+      expect(generatedManifest).toContain('DisplayName="${displayName}"');
       expect(
         generatedManifest.replace(
           'Version="1.1.201.0"',
           'Version="${version}"',
+        ).replace(
+          `<DisplayName>${listingName}</DisplayName>`,
+          "<DisplayName>${storeListingDisplayName}</DisplayName>",
         ),
       ).toBe(manifestTemplate);
     });
 
-    it("strictly validates Store identity and legacy NSIS migration identity from an unpacked manifest", () => {
+    it.each(["cn", "intl"] as const)("strictly validates %s Store identity and display names from an unpacked manifest", (channel) => {
       const directory = createTemporaryDirectory();
       const manifestPath = join(directory, "AppxManifest.xml");
-      writeFileSync(manifestPath, createUnpackedManifest(), "utf8");
+      writeFileSync(manifestPath, createUnpackedManifest(channel), "utf8");
 
-      const result = invokeUnpackedManifestVerifier(manifestPath, "cn");
+      const result = invokeUnpackedManifestVerifier(manifestPath, channel);
+      const application = readPublishingConfig().applications[channel];
 
       expect(result.status, result.stderr).toBe(0);
       expect(JSON.parse(result.stdout)).toMatchObject({
-        IdentityName: "Memtensor.Memmy",
+        IdentityName: application.identityName,
         Publisher: "CN=2CA03910-614F-4524-BAEC-BAE9D6F10DD0",
         PackageVersion: "1.1.1.0",
         ApplicationId: "Memmy",
         Executable: "app\\Memmy.exe",
         EntryPoint: "Windows.FullTrustApplication",
-        PackageFamilyName: "Memtensor.Memmy_eyack96k521x2",
-        Aumid: "Memtensor.Memmy_eyack96k521x2!Memmy",
+        PackageFamilyName: application.packageFamilyName,
+        Aumid: `${application.packageFamilyName}!Memmy`,
         LegacyNsisAumid: "cn.memtensor.memmy",
         StartupTaskId: "MemmyStartupTask",
         RunFullTrust: "runFullTrust",
       });
+    });
+
+    it.each([
+      [
+        "unreserved package name",
+        "<DisplayName>Memmy Agent</DisplayName>",
+        "<DisplayName>Memmy</DisplayName>",
+        "Package/Properties/DisplayName mismatch",
+      ],
+      [
+        "Store listing name used as the Windows app name",
+        '<uap:VisualElements DisplayName="Memmy"',
+        '<uap:VisualElements DisplayName="Memmy Agent"',
+        "uap:VisualElements/DisplayName mismatch",
+      ],
+    ])("rejects Intl %s", (_name, original, replacement, expectedError) => {
+      const directory = createTemporaryDirectory();
+      const manifestPath = join(directory, "AppxManifest.xml");
+      writeFileSync(
+        manifestPath,
+        createUnpackedManifest("intl").replace(original, replacement),
+        "utf8",
+      );
+
+      const result = invokeUnpackedManifestVerifier(manifestPath, "intl");
+
+      expect(result.status).not.toBe(0);
+      expect(`${result.stdout}\n${result.stderr}`).toContain(expectedError);
     });
 
     it("rejects a Store package Identity version that does not match the requested version", () => {
@@ -747,7 +825,7 @@ describe.runIf(process.platform === "win32")(
       );
     });
 
-    it("makes the AppX build re-resolve the checked-in company profile and reject identity drift", () => {
+    it.each(["cn", "intl"] as const)("makes the AppX build re-resolve the %s company profile and reject identity and name drift", (channel) => {
       const generatedManifestRelativePath = `build/appx-manifest.generated.${process.pid}.xml`;
       const generatedManifestPath = join(
         desktopDirectory,
@@ -758,14 +836,12 @@ describe.runIf(process.platform === "win32")(
         desktopDirectory,
         ...generatedExtensionsRelativePath.split("/"),
       );
-      writeFileSync(
-        generatedManifestPath,
-        readFileSync(
-          join(desktopDirectory, "build", "appx-manifest.xml"),
-          "utf8",
-        ).replace('Version="${version}"', 'Version="1.1.201.0"'),
-        "utf8",
-      );
+      const listingName =
+        readPublishingConfig().applications[channel].storeListingDisplayName;
+      const generated = invokeVersionedManifestGenerator("1.1.201.0", listingName);
+      expect(generated.status, generated.stderr).toBe(0);
+      const generatedManifest = JSON.parse(generated.stdout) as string;
+      writeFileSync(generatedManifestPath, generatedManifest, "utf8");
       writeFileSync(
         generatedExtensionsPath,
         '<rescap3:DesktopApp AumId="cn.memtensor.memmy" />\n',
@@ -773,39 +849,57 @@ describe.runIf(process.platform === "win32")(
       );
       try {
         const valid = invokeBuildProfileAssertion(
-          "cn",
+          channel,
           generatedManifestRelativePath,
           generatedExtensionsRelativePath,
         );
         expect(valid.status, valid.stderr).toBe(0);
 
         const drifted = invokeBuildProfileAssertion(
-          "cn",
+          channel,
           generatedManifestRelativePath,
           generatedExtensionsRelativePath,
           { MEMMY_WINDOWS_APPX_IDENTITY_NAME: "Personal.Memmy" },
         );
         expect(drifted.status).not.toBe(0);
         expect(`${drifted.stdout}\n${drifted.stderr}`).toContain(
-          "must exactly match company/cn",
+          `must exactly match company/${channel}`,
         );
 
         writeFileSync(
           generatedManifestPath,
-          readFileSync(generatedManifestPath, "utf8").replace(
+          generatedManifest.replace(
+            `<DisplayName>${listingName}</DisplayName>`,
+            "<DisplayName>Wrong product name</DisplayName>",
+          ),
+          "utf8",
+        );
+        const nameDrifted = invokeBuildProfileAssertion(
+          channel,
+          generatedManifestRelativePath,
+          generatedExtensionsRelativePath,
+        );
+        expect(nameDrifted.status).not.toBe(0);
+        expect(`${nameDrifted.stdout}\n${nameDrifted.stderr}`).toContain(
+          "Generated Store manifest must exactly match the canonical template",
+        );
+
+        writeFileSync(
+          generatedManifestPath,
+          generatedManifest.replace(
             'Version="1.1.201.0"',
             'Version="1.1.202.0"',
           ),
           "utf8",
         );
         const versionDrifted = invokeBuildProfileAssertion(
-          "cn",
+          channel,
           generatedManifestRelativePath,
           generatedExtensionsRelativePath,
         );
         expect(versionDrifted.status).not.toBe(0);
         expect(`${versionDrifted.stdout}\n${versionDrifted.stderr}`).toContain(
-          "only its package version replaced",
+          "Generated Store manifest must exactly match the canonical template",
         );
       } finally {
         rmSync(generatedManifestPath, { force: true });
@@ -1039,10 +1133,14 @@ function invokeCompanyConfigAssertion(configPath: string) {
   );
 }
 
-function invokeUnpackedManifestVerifier(manifestPath: string, channel: string) {
+function invokeUnpackedManifestVerifier(
+  manifestPath: string,
+  channel: string,
+  configPath = publishingConfigPath,
+) {
   const script = [
     `. '${quotePowerShellLiteral(manifestVerifierPath)}'`,
-    `$profile = Resolve-MemmyStorePublishingProfile -ConfigPath '${quotePowerShellLiteral(publishingConfigPath)}' -Channel '${quotePowerShellLiteral(channel)}'`,
+    `$profile = Resolve-MemmyStorePublishingProfile -ConfigPath '${quotePowerShellLiteral(configPath)}' -Channel '${quotePowerShellLiteral(channel)}'${configPath === publishingConfigPath ? "" : " -TestOnlyAllowCustomConfig"}`,
     `Assert-MemmyWindowsStoreUnpackedManifest -ManifestPath '${quotePowerShellLiteral(manifestPath)}' -Profile $profile -ExpectedPackageVersion '1.1.1.0' -ExpectedExecutable 'app\\Memmy.exe' -ExpectedLegacyNsisAumid 'cn.memtensor.memmy' | ConvertTo-Json -Compress`,
   ].join("; ");
   return spawnSync(
@@ -1067,7 +1165,10 @@ function invokePackageVersionResolver(
   );
 }
 
-function invokeVersionedManifestGenerator(packageVersion: string) {
+function invokeVersionedManifestGenerator(
+  packageVersion: string,
+  listingName: string,
+) {
   const manifestTemplatePath = join(
     desktopDirectory,
     "build",
@@ -1076,7 +1177,7 @@ function invokeVersionedManifestGenerator(packageVersion: string) {
   const command = [
     `. '${quotePowerShellLiteral(packageVersionResolverPath)}'`,
     `$template = Get-Content -Raw -LiteralPath '${quotePowerShellLiteral(manifestTemplatePath)}'`,
-    `New-MemmyWindowsStoreVersionedManifestContent -Template $template -PackageVersion '${quotePowerShellLiteral(packageVersion)}' | ConvertTo-Json -Compress`,
+    `New-MemmyWindowsStoreVersionedManifestContent -Template $template -PackageVersion '${quotePowerShellLiteral(packageVersion)}' -StoreListingDisplayName '${quotePowerShellLiteral(listingName)}' | ConvertTo-Json -Compress`,
   ].join("; ");
   return spawnSync(
     "powershell.exe",
@@ -1203,7 +1304,8 @@ function invokePackageWrapperWithExtraArguments(
   );
 }
 
-function createUnpackedManifest(): string {
+function createUnpackedManifest(channel: "cn" | "intl" = "cn"): string {
+  const application = readPublishingConfig().applications[channel];
   return `<?xml version="1.0" encoding="utf-8"?>
 <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
@@ -1211,9 +1313,9 @@ function createUnpackedManifest(): string {
   xmlns:desktop7="http://schemas.microsoft.com/appx/manifest/desktop/windows10/7"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
   xmlns:rescap3="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities/3">
-  <Identity Name="Memtensor.Memmy" Publisher="CN=2CA03910-614F-4524-BAEC-BAE9D6F10DD0" Version="1.1.1.0" ProcessorArchitecture="x64" />
+  <Identity Name="${application.identityName}" Publisher="CN=2CA03910-614F-4524-BAEC-BAE9D6F10DD0" Version="1.1.1.0" ProcessorArchitecture="x64" />
   <Properties>
-    <DisplayName>Memmy</DisplayName>
+    <DisplayName>${application.storeListingDisplayName}</DisplayName>
     <PublisherDisplayName>Memtensor</PublisherDisplayName>
   </Properties>
   <Capabilities>

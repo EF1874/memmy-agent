@@ -497,7 +497,8 @@ $generatedManifestPath = Join-Path $desktopDirectory $generatedManifestRelativeP
 $manifestTemplate = Get-Content -Raw -LiteralPath $manifestTemplatePath
 $generatedManifest = New-MemmyWindowsStoreVersionedManifestContent `
   -Template $manifestTemplate `
-  -PackageVersion $storePackageVersion
+  -PackageVersion $storePackageVersion `
+  -StoreListingDisplayName $profile.StoreListingDisplayName
 $extensionsTemplatePath = Join-Path $desktopDirectory "build\appx-extensions.xml"
 $generatedExtensionsRelativePath = "build/appx-extensions.generated.$PID.xml"
 $generatedExtensionsPath = Join-Path $desktopDirectory $generatedExtensionsRelativePath

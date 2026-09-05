@@ -39,7 +39,8 @@ function Resolve-MemmyWindowsStorePackageVersion {
 function New-MemmyWindowsStoreVersionedManifestContent {
   param(
     [Parameter(Mandatory = $true)][string]$Template,
-    [Parameter(Mandatory = $true)][string]$PackageVersion
+    [Parameter(Mandatory = $true)][string]$PackageVersion,
+    [Parameter(Mandatory = $true)][string]$StoreListingDisplayName
   )
 
   if ($PackageVersion -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)\.0$') {
@@ -56,19 +57,27 @@ function New-MemmyWindowsStoreVersionedManifestContent {
     throw "Windows Store PackageVersion major segment must be between 1 and 65535: $PackageVersion"
   }
 
-  $placeholder = 'Version="${version}"'
-  $placeholderIndex = $Template.IndexOf($placeholder, [StringComparison]::Ordinal)
-  if ($placeholderIndex -lt 0) {
-    throw "Canonical Store manifest template is missing $placeholder."
+  $replacements = [ordered]@{
+    'Version="${version}"' = "Version=`"$PackageVersion`""
+    '<DisplayName>${storeListingDisplayName}</DisplayName>' = "<DisplayName>$([Security.SecurityElement]::Escape($StoreListingDisplayName))</DisplayName>"
   }
-  $nextPlaceholderIndex = $Template.IndexOf(
-    $placeholder,
-    $placeholderIndex + $placeholder.Length,
-    [StringComparison]::Ordinal
-  )
-  if ($nextPlaceholderIndex -ge 0) {
-    throw "Canonical Store manifest template must contain exactly one $placeholder."
+  $manifest = $Template
+  foreach ($entry in $replacements.GetEnumerator()) {
+    $placeholder = $entry.Key
+    $placeholderIndex = $Template.IndexOf($placeholder, [StringComparison]::Ordinal)
+    if ($placeholderIndex -lt 0) {
+      throw "Canonical Store manifest template is missing $placeholder."
+    }
+    $nextPlaceholderIndex = $Template.IndexOf(
+      $placeholder,
+      $placeholderIndex + $placeholder.Length,
+      [StringComparison]::Ordinal
+    )
+    if ($nextPlaceholderIndex -ge 0) {
+      throw "Canonical Store manifest template must contain exactly one $placeholder."
+    }
+    $manifest = $manifest.Replace($placeholder, $entry.Value)
   }
 
-  return $Template.Replace($placeholder, "Version=`"$PackageVersion`"")
+  return $manifest
 }

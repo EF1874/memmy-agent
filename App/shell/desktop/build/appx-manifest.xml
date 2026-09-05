@@ -9,7 +9,7 @@
   IgnorableNamespaces="uap desktop desktop7 rescap rescap3">
   <Identity Name="${identityName}" ProcessorArchitecture="${arch}" Publisher='${publisher}' Version="${version}" />
   <Properties>
-    <DisplayName>${displayName}</DisplayName>
+    <DisplayName>${storeListingDisplayName}</DisplayName>
     <PublisherDisplayName>${publisherDisplayName}</PublisherDisplayName>
     <Description>${description}</Description>
     <Logo>${logo}</Logo>
