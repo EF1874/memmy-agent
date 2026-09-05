@@ -13,7 +13,10 @@ export const WINDOWS_STORE_TRANSITION_PHASES = [
   "data-prepared",
   "awaiting-app-verification",
   "app-verified",
+  // Historical phase written by the pre-broker cleanup path. It is accepted
+  // for recovery, but is not native-HKCU cleanup proof.
   "legacy-cleanup-complete",
+  "legacy-cleanup-attested",
   "cleanup-eligible",
   "cleaned"
 ] as const;
@@ -121,9 +124,20 @@ export const advanceWindowsStoreTransitionState = (
 ): WindowsStoreTransitionState => {
   const current = parseWindowsStoreTransitionState(JSON.stringify(state));
   if (nextPhase === current.phase) return current;
-  const currentIndex = WINDOWS_STORE_TRANSITION_PHASES.indexOf(current.phase);
-  const nextIndex = WINDOWS_STORE_TRANSITION_PHASES.indexOf(nextPhase);
-  if (nextIndex !== currentIndex + 1) {
+  const allowedNextPhase: Partial<Record<WindowsStoreTransitionPhase, WindowsStoreTransitionPhase>> = {
+    "authority-recorded": "store-install-launched",
+    "store-install-launched": "package-registered",
+    "package-registered": "data-prepared",
+    "data-prepared": "awaiting-app-verification",
+    "awaiting-app-verification": "app-verified",
+    "app-verified": "legacy-cleanup-attested",
+    // Old packages could write this after deleting only the MSIX-private HKCU
+    // view. A new native-broker pass is mandatory before cleanup is eligible.
+    "legacy-cleanup-complete": "legacy-cleanup-attested",
+    "legacy-cleanup-attested": "cleanup-eligible",
+    "cleanup-eligible": "cleaned"
+  };
+  if (allowedNextPhase[current.phase] !== nextPhase) {
     throw new Error(`Invalid Windows Store transition: ${current.phase} -> ${nextPhase}`);
   }
 
@@ -143,9 +157,12 @@ export const advanceWindowsStoreTransitionAfterSuccessfulBoot = (
     return advanceWindowsStoreTransitionState(current, "app-verified", now);
   }
   if (current.phase === "app-verified") {
-    return advanceWindowsStoreTransitionState(current, "legacy-cleanup-complete", now);
+    return advanceWindowsStoreTransitionState(current, "legacy-cleanup-attested", now);
   }
   if (current.phase === "legacy-cleanup-complete") {
+    return advanceWindowsStoreTransitionState(current, "legacy-cleanup-attested", now);
+  }
+  if (current.phase === "legacy-cleanup-attested") {
     return advanceWindowsStoreTransitionState(current, "cleanup-eligible", now);
   }
   if (current.phase === "cleanup-eligible" || current.phase === "cleaned") return current;

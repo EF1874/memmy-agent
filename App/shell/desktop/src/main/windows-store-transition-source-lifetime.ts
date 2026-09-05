@@ -22,6 +22,10 @@ export interface AcquireWindowsStoreTransitionSourceLeaseOptions {
   retryIntervalMs?: number;
 }
 
+interface TryAcquireWindowsStoreTransitionSourceLeaseOptions {
+  retainCleanupGuard?: boolean;
+}
+
 export interface WindowsStoreTransitionSourceLifetimeDependencies {
   tryAcquireLease?: (statePath: string) => Promise<WindowsStoreTransitionSourceLease | null>;
   resolveBarrier?: (
@@ -65,21 +69,55 @@ export class WindowsStoreTransitionSourceLeaseTimeoutError extends Error {
 
 export const resolveWindowsStoreTransitionSourceLeasePipeName = (statePath: string): string => {
   const normalizedStatePath = normalizeStatePath(statePath);
+  // Keep the cross-language digest independent of the process locale. The
+  // native helper applies this exact ASCII-only case fold before hashing; a
+  // locale-sensitive Unicode lowercase operation can otherwise disagree for
+  // non-ASCII Windows profile names.
+  const digestInput = normalizedStatePath.replace(/[A-Z]/gu, (character) =>
+    character.toLowerCase()
+  );
   const digest = createHash("sha256")
-    .update(normalizedStatePath.toLowerCase(), "utf8")
+    .update(digestInput, "utf8")
     .digest("hex");
   // MSIX processes must use the LOCAL named-pipe namespace to communicate
   // with an unpackaged full-trust desktop process in the same user session.
   return `\\\\.\\pipe\\LOCAL\\memmy-store-transition-source-${digest}`;
 };
 
+export const resolveWindowsStoreTransitionCleanupActivePipeName = (statePath: string): string =>
+  `${resolveWindowsStoreTransitionSourceLeasePipeName(statePath)}-cleanup-active`;
+
 export const tryAcquireWindowsStoreTransitionSourceLease = async (
-  statePath: string
+  statePath: string,
+  options: TryAcquireWindowsStoreTransitionSourceLeaseOptions = {}
 ): Promise<WindowsStoreTransitionSourceLease | null> => {
   const pipeName = resolveWindowsStoreTransitionSourceLeasePipeName(statePath);
-  const server = createLeaseServer();
-  const acquired = await listenForExclusiveLease(server, pipeName);
-  return acquired ? createLease(server, pipeName) : null;
+  const cleanupActivePipeName = resolveWindowsStoreTransitionCleanupActivePipeName(statePath);
+  const cleanupGuard = createLeaseServer();
+  const cleanupIdle = await listenForExclusiveLease(cleanupGuard, cleanupActivePipeName);
+  if (!cleanupIdle) return null;
+  const sourceLease = createLeaseServer();
+  try {
+    const acquired = await listenForExclusiveLease(sourceLease, pipeName);
+    if (!acquired) {
+      await closeLeaseServer(cleanupGuard);
+      return null;
+    }
+    if (!options.retainCleanupGuard) {
+      // Store callers need the marker only until they own sourceLease. The
+      // unpackaged broker then owns cleanupActive for the destructive interval.
+      await closeLeaseServer(cleanupGuard);
+      return createLease([sourceLease], pipeName);
+    }
+    // An NSIS process keeps both locks for its entire lifetime. This closes the
+    // Store-crash gap between observing an idle marker and acquiring sourceLease:
+    // a late broker cannot start cleanup after NSIS has already acquired source.
+    return createLease([sourceLease, cleanupGuard], pipeName);
+  } catch (error) {
+    await closeLeaseServer(sourceLease).catch(() => undefined);
+    await closeLeaseServer(cleanupGuard).catch(() => undefined);
+    throw error;
+  }
 };
 
 export const acquireWindowsStoreTransitionSourceLease = async (
@@ -116,7 +154,11 @@ export const establishWindowsStoreTransitionSourceLifetime = async (
   }
 
   const lease = await (
-    dependencies.tryAcquireLease ?? tryAcquireWindowsStoreTransitionSourceLease
+    dependencies.tryAcquireLease
+    ?? ((statePath) => tryAcquireWindowsStoreTransitionSourceLease(
+      statePath,
+      { retainCleanupGuard: true }
+    ))
   )(options.statePath);
   if (!lease) {
     return { action: "block-source", reason: "lease-unavailable" };
@@ -174,12 +216,18 @@ const listenForExclusiveLease = async (server: Server, pipeName: string): Promis
     server.listen(pipeName);
   });
 
-const createLease = (server: Server, pipeName: string): WindowsStoreTransitionSourceLease => {
+const createLease = (servers: Server[], pipeName: string): WindowsStoreTransitionSourceLease => {
   let releasePromise: Promise<void> | null = null;
   return {
     pipeName,
     release: () => {
-      releasePromise ??= closeLeaseServer(server);
+      // Release source first while cleanupActive is still held. A waiting
+      // broker cannot begin destructive work until this process has stopped
+      // advertising itself as an active legacy source.
+      releasePromise ??= servers.reduce(
+        (previous, server) => previous.then(() => closeLeaseServer(server)),
+        Promise.resolve()
+      );
       return releasePromise;
     }
   };

@@ -23,6 +23,17 @@ const sourceBetween = (
   return source.slice(start, end);
 };
 
+const expectSourceOrder = (
+  source: string,
+  earlierMarker: string,
+  laterMarker: string
+): void => {
+  const earlier = source.indexOf(earlierMarker);
+  const later = source.indexOf(laterMarker);
+  expect(earlier).toBeGreaterThanOrEqual(0);
+  expect(later).toBeGreaterThan(earlier);
+};
+
 describe("Windows Store native update helper boundary", () => {
   it("exposes StoreContext commands plus authority-bound legacy takeover and cleanup", async () => {
     const source = await readFile(helperSourcePath, "utf8");
@@ -42,7 +53,12 @@ describe("Windows Store native update helper boundary", () => {
       "startup-enable",
       "startup-disable",
       "prepare-legacy-takeover",
+      "ensure-legacy-cleanup-broker",
+      "legacy-cleanup-broker",
+      "stop-legacy-cleanup-broker",
+      "authorize-nsis-mutation",
       "finalize-legacy-cleanup",
+      "ack-legacy-cleanup",
       "finalize-legacy-cleanup-breakaway-launcher",
       "finalize-legacy-cleanup-unpackaged"
     ]);
@@ -74,27 +90,14 @@ describe("Windows Store native update helper boundary", () => {
     expect(source).not.toContain("--log-path must");
     expect(source).toContain("legacy-cleanup-result-v2");
     expect(source).not.toContain("legacy-cleanup-result-v1");
-    expect(source).toContain("child_result.transition_id == legacy_cleanup_diagnostics->transition_id");
-    expect(source).toContain("child_result.attempt_id == legacy_cleanup_diagnostics->attempt_id");
-    expect(source).toContain("child_result.failure_process_role");
-    expect(source).toContain("child_result.win32_error");
-    expect(source).toContain("legacy_cleanup_diagnostics->current_operation = child_result.operation");
-    expect(source).toContain("legacy_cleanup_diagnostics->current_target = child_result.target");
     expect(source).toContain("write_legacy_cleanup_error_to_stderr");
     expect(source).toContain('<< ",\\\"transitionId\\\":\\\""');
     expect(source).toContain('<< ",\\\"attemptId\\\":\\\""');
-    expect(source).toContain("set_breakaway_policy ? 150000 : 120000");
     expect(source).not.toContain("Unable to append the fixed legacy cleanup diagnostic log");
-    expect(source).toContain("PROCESS_CREATION_DESKTOP_APP_BREAKAWAY_ENABLE_PROCESS_TREE");
-    expect(source).toContain("breakawayLauncherHasPackageIdentity=");
-    expect(source).toContain("breakawayPolicyAppliesToChildCreation=true");
-    expect(source).not.toContain("Legacy cleanup breakaway launcher still has package identity");
     expect(source).toContain("Refusing to mutate the real legacy installation from a packaged process");
     expect(source).toContain("Software\\\\886615f7-a04c-57ec-a2dd-9161dbe1a7c4");
     expect(source).toContain("ProcessIdToSessionId");
     expect(source).toContain("GetCurrentPackageFullName");
-    expect(source).toContain("read_legacy_cleanup_process_result");
-    expect(source).toContain("child_result.hresult");
     expect(source).toContain("struct DeleteTreeResult");
     expect(source).toContain("failed_path");
     expect(source).toContain("KEY_WOW64_32KEY");
@@ -119,17 +122,18 @@ describe("Windows Store native update helper boundary", () => {
     ]) {
       expect(source).toContain(diagnosticEvent);
     }
-    const argumentBuilderStart = source.indexOf("std::vector<std::wstring> build_legacy_cleanup_arguments(");
-    const argumentBuilderEnd = source.indexOf("std::string legacy_cleanup_process_role_for_command", argumentBuilderStart);
-    const argumentBuilder = source.slice(argumentBuilderStart, argumentBuilderEnd);
-    expect(argumentBuilder.match(/L"--transition-id", options\.transition_id/gu)).toHaveLength(1);
-    expect(argumentBuilder.match(/L"--attempt-id", options\.attempt_id/gu)).toHaveLength(1);
-    expect(argumentBuilder).toContain("if (include_external_helper)");
-    expect(source).toMatch(/L"finalize-legacy-cleanup-breakaway-launcher",\s+legacy_options,\s+true\)/u);
-    expect(source).toMatch(/L"finalize-legacy-cleanup-unpackaged",\s+legacy_options,\s+false\)/u);
-    expect(source).toMatch(
-      /Command::FinalizeLegacyCleanupBreakawayLauncher[\s\S]*?run_legacy_cleanup_process\(\s*legacy_options\.external_helper_path,[\s\S]*?L"finalize-legacy-cleanup-unpackaged"/u,
-    );
+    expect(source).toContain('L"cleanup-journal-v1.bin"');
+    expect(source).toContain("LegacyCleanupJournalPhase::Prepared");
+    expect(source).toContain("LegacyCleanupJournalPhase::Complete");
+    expect(source).toContain("LegacyCleanupJournalPhase::Acknowledged");
+    expect(source).toContain("GetNamedPipeClientProcessId");
+    expect(source).toContain("GetNamedPipeServerProcessId");
+    expect(source).toContain("PIPE_REJECT_REMOTE_CLIENTS");
+    expect(source).toContain("FILE_FLAG_FIRST_PIPE_INSTANCE");
+    expect(source).toContain("memmy-store-transition-cleanup-broker-v1-");
+    expect(source).toContain("MemmyStoreTransitionNsisMutation");
+    expect(source).toContain("GetFileInformationByHandle");
+    expect(source).toContain("Legacy executable generation changed after broker authority capture");
     expect(source).not.toContain('L"Programs" / L"Memmy"');
     expect(source).not.toMatch(/WindowsApps[\\/][^"\r\n]*_\d+\.\d+\.\d+\.\d+/iu);
   });
@@ -187,71 +191,408 @@ describe("Windows Store native update helper boundary", () => {
     expect(commandEntry).not.toContain("current_process_has_package_identity");
   });
 
-  it("hands off from the breakaway launcher without weakening the external cleanup identity gate", async () => {
+  it("persists journal v2 source generation and hashes source leases with ASCII-only folding", async () => {
     const source = await readFile(helperSourcePath, "utf8");
-    const validation = sourceBetween(
+    const journalSerialization = sourceBetween(
       source,
-      "void validate_legacy_transition_options(",
-      "std::vector<std::wstring> build_legacy_cleanup_arguments("
+      "std::vector<unsigned char> serialize_cleanup_journal(",
+      "LegacyCleanupJournal deserialize_cleanup_journal("
     );
-    const breakawayLauncher = sourceBetween(
+    const journalDeserialization = sourceBetween(
+      source,
+      "LegacyCleanupJournal deserialize_cleanup_journal(",
+      "void write_cleanup_journal_atomic("
+    );
+    const sourceGeneration = sourceBetween(
+      source,
+      "LegacySourceExecutableIdentity capture_source_executable_identity(",
+      "LegacyAuthorityCapture capture_legacy_cleanup_authority("
+    );
+    const sourceLeaseNormalization = sourceBetween(
+      source,
+      "std::wstring normalize_source_lease_state_path_for_hash(",
+      "std::wstring legacy_transition_source_lease_pipe_name()"
+    );
+    const sourceLeaseName = sourceBetween(
+      source,
+      "std::wstring legacy_transition_source_lease_pipe_name()",
+      "std::wstring legacy_transition_cleanup_active_pipe_name()"
+    );
+
+    expect(journalSerialization).toContain(
+      "constexpr uint32_t journal_version = 2;"
+    );
+    expect(journalDeserialization).toContain(
+      "constexpr uint32_t journal_version = 2;"
+    );
+    expect(journalSerialization).toContain(
+      "journal.authority.source_executable_identity ? 1U : 0U"
+    );
+    for (const field of [
+      "identity.volume_serial_number",
+      "identity.file_index",
+      "identity.file_size",
+      "identity.last_write_time"
+    ]) {
+      expect(journalSerialization).toContain(field);
+    }
+    expect(journalDeserialization).toContain(
+      "Cleanup journal has an invalid executable-generation flag"
+    );
+    expect(journalDeserialization).toContain(
+      "journal.authority.source_executable_identity = LegacySourceExecutableIdentity{"
+    );
+    expect(sourceGeneration).toContain("GetFileInformationByHandle");
+    expect(sourceGeneration).toContain("source_executable_identities_match(");
+    expect(sourceGeneration).toContain(
+      "Legacy executable generation changed after broker authority capture"
+    );
+    for (const field of [
+      "volume_serial_number",
+      "file_index",
+      "file_size",
+      "last_write_time"
+    ]) {
+      expect(sourceGeneration).toContain(`first.${field} == second.${field}`);
+    }
+
+    expect(sourceLeaseNormalization).toContain(
+      "character >= L'A' && character <= L'Z'"
+    );
+    expect(sourceLeaseNormalization).toContain(
+      "character + (L'a' - L'A')"
+    );
+    expect(sourceLeaseNormalization).not.toMatch(
+      /\b(?:towlower|tolower|CharLowerBuffW|LCMapStringW|_wcslwr)\b/u
+    );
+    expect(sourceLeaseName).toContain(
+      "utf8(normalize_source_lease_state_path_for_hash(state_path))"
+    );
+  });
+
+  it("uses an unpackaged, identity-bound broker with durable cleanup and ACK replay", async () => {
+    const source = await readFile(helperSourcePath, "utf8");
+    const broker = sourceBetween(
+      source,
+      "int run_legacy_cleanup_broker(",
+      "void finalize_legacy_cleanup_via_broker("
+    );
+    const acknowledgementClient = sourceBetween(
+      source,
+      "void acknowledge_legacy_cleanup_via_broker(",
+      "void launch_store_update_finalizer_breakaway("
+    );
+    const finalizerClient = sourceBetween(
+      source,
+      "void finalize_legacy_cleanup_via_broker(",
+      "bool matching_acknowledged_cleanup_proof_exists("
+    );
+    const authorization = sourceBetween(
+      source,
+      "void authorize_nsis_mutation(",
+      "LegacyCleanupBrokerResponse cleanup_broker_error_response("
+    );
+    const sourceGeneration = sourceBetween(
+      source,
+      "LegacySourceExecutableIdentity capture_source_executable_identity(",
+      "LegacyAuthorityCapture capture_legacy_cleanup_authority("
+    );
+    const durableIdentity = sourceBetween(
+      source,
+      "bool equivalent_transition_options(",
+      "void validate_persisted_authority_shape("
+    );
+
+    expect(broker).toContain("Native cleanup broker must start without package identity");
+    expect(broker).toContain("validate_cleanup_broker_executable()");
+    expect(broker).toContain("validate_cleanup_broker_client(pipe.get(), options, authority_capture)");
+    expect(broker).toContain("options.package_family_name != broker_bound_package_family_name");
+    expect(broker).toContain("LegacyCleanupBrokerMessage::Cleanup");
+    expect(broker).toContain("LegacyCleanupBrokerMessage::Acknowledge");
+    expect(broker).toContain("write_cleanup_journal_atomic(prepared_journal)");
+    expect(broker).toContain("write_cleanup_journal_atomic(completed_journal)");
+    expect(broker).toContain("write_cleanup_journal_atomic(acknowledged_journal)");
+    expect(broker).toContain("verify_complete_cleanup_postconditions");
+    const cleanupMutationIndex = broker.indexOf(
+      "finalize_legacy_cleanup_unpacked(trusted_options, true)"
+    );
+    const nativePostcheckIndex = broker.indexOf(
+      "verify_complete_cleanup_postconditions(",
+      cleanupMutationIndex
+    );
+    const completedJournalIndex = broker.indexOf(
+      "write_cleanup_journal_atomic(completed_journal)",
+      cleanupMutationIndex
+    );
+    expect(cleanupMutationIndex).toBeGreaterThan(-1);
+    expect(nativePostcheckIndex).toBeGreaterThan(cleanupMutationIndex);
+    expect(completedJournalIndex).toBeGreaterThan(nativePostcheckIndex);
+    expect(broker).toContain("cleanup-complete-awaiting-store-ack");
+    expect(broker).toContain("cleanup-acknowledged-durable");
+    expect(broker).toContain("acknowledgedJournalAndNativePostconditionsMatch=true");
+    expect(broker).toContain('"broker-response-write"');
+    expect(broker).toContain('"durableStatePreserved=true; continueListening="');
+    expect(broker).not.toContain("if (SUCCEEDED(response.hresult))");
+    expect(acknowledgementClient).toContain("matching_acknowledged_cleanup_proof_exists(options)");
+    expect(acknowledgementClient).toContain("durableAcknowledgementMatched=true");
+    expect(finalizerClient).toContain("matching_acknowledged_cleanup_proof_exists(options)");
+    expect(finalizerClient).toContain("durableAcknowledgementMatched=true; finalizeReplay=true");
+    expect(durableIdentity).toContain("attempt_id is intentionally excluded");
+    expect(durableIdentity).not.toContain("first.attempt_id");
+    expect(durableIdentity).not.toContain("second.attempt_id");
+    expect(authorization).toContain("require_parent_held_transition_mutation_mutex()");
+    expect(authorization).toContain("exclusive_pipe_name_is_owned(legacy_transition_cleanup_active_pipe_name())");
+    expect(authorization).toContain("any_allowed_memmy_package_is_registered()");
+    expect(authorization).toContain("validate_persisted_authority_shape");
+    expect(sourceGeneration).toContain("GetFileInformationByHandle");
+    expect(sourceGeneration).toContain("dwVolumeSerialNumber");
+    expect(sourceGeneration).toContain("nFileIndexHigh");
+    expect(sourceGeneration).toContain("nFileIndexLow");
+  });
+
+  it("revalidates the Store cleanup authority after acquiring the mutation mutex", async () => {
+    const source = await readFile(helperSourcePath, "utf8");
+    const authorization = sourceBetween(
+      source,
+      "void require_post_mutex_cleanup_authorization(",
+      "scoped_handle create_transition_mutation_mutex()"
+    );
+    const broker = sourceBetween(
+      source,
+      "int run_legacy_cleanup_broker(",
+      "void finalize_legacy_cleanup_via_broker("
+    );
+
+    expect(authorization).toContain("exclusive_pipe_name_is_owned(legacy_transition_source_lease_pipe_name())");
+    expect(authorization).toContain("registered_package_full_names(options.package_family_name)");
+    expect(authorization).toContain("HRESULT_FROM_WIN32(ERROR_RETRY)");
+    expect(broker.match(/require_post_mutex_cleanup_authorization\(trusted_options\)/gu)).toHaveLength(2);
+
+    const replayMutex = broker.indexOf("transition_mutation_ownership.acquire(transition_mutation_mutex.get())");
+    const replayAuthorization = broker.indexOf(
+      "require_post_mutex_cleanup_authorization(trusted_options)",
+      replayMutex
+    );
+    const replayPostcheck = broker.indexOf(
+      "verify_complete_cleanup_postconditions(",
+      replayAuthorization
+    );
+    expect(replayAuthorization).toBeGreaterThan(replayMutex);
+    expect(replayPostcheck).toBeGreaterThan(replayAuthorization);
+
+    const cleanupMutex = broker.indexOf(
+      "transition_mutation_ownership.acquire(transition_mutation_mutex.get())",
+      replayMutex + 1
+    );
+    const cleanupAuthorization = broker.indexOf(
+      "require_post_mutex_cleanup_authorization(trusted_options)",
+      cleanupMutex
+    );
+    const authorityMutationAttestation = broker.indexOf(
+      '"broker-authority-mutation-attestation"',
+      cleanupAuthorization
+    );
+    expect(cleanupAuthorization).toBeGreaterThan(cleanupMutex);
+    expect(authorityMutationAttestation).toBeGreaterThan(cleanupAuthorization);
+  });
+
+  it("retries an attested partial directory cleanup after the legacy executable is already gone", async () => {
+    const source = await readFile(helperSourcePath, "utf8");
+    const finalize = sourceBetween(
+      source,
+      "void finalize_legacy_cleanup_unpacked(",
+      "DWORD current_process_session_id()"
+    );
+    const processStop = finalize.indexOf("stop_legacy_processes(options.legacy_install_directory)");
+    const destructiveDelete = finalize.indexOf("remove_legacy_install_directory(options)");
+
+    expect(finalize).toContain("if (authority_was_attested)");
+    expect(finalize).toContain("else\n            {\n                prepare_legacy_takeover(options);");
+    expect(processStop).toBeGreaterThan(finalize.indexOf("if (authority_was_attested)"));
+    expect(destructiveDelete).toBeGreaterThan(processStop);
+  });
+
+  it("retires cleanup journals only after both allowed Store PFNs are absent", async () => {
+    const source = await readFile(helperSourcePath, "utf8");
+    const packageRegistration = sourceBetween(
+      source,
+      "bool any_allowed_memmy_package_is_registered()",
+      "void validate_offline_cleanup_broker_stop()"
+    );
+    const nativeInstallRetirement = sourceBetween(
+      source,
+      "void retire_orphaned_cleanup_journal_for_native_install()",
+      "void send_broker_frame("
+    );
+    const offlineStop = sourceBetween(
+      source,
+      "void validate_offline_cleanup_broker_stop()",
+      "void throw_broker_response_failure("
+    );
+    const onlineStop = sourceBetween(
+      source,
+      "else if (message == LegacyCleanupBrokerMessage::Stop)",
+      "else if (message == LegacyCleanupBrokerMessage::Acknowledge)"
+    );
+
+    expect(packageRegistration).toContain(
+      "registered_package_full_names(allowed_memmy_package_family)"
+    );
+    expect(packageRegistration).toContain(
+      "registered_package_full_names(allowed_memmy_agent_package_family)"
+    );
+    expect(packageRegistration).toContain(".empty() ||");
+
+    expect(nativeInstallRetirement).toContain(
+      "Refusing to retire a cleanup journal while a Memmy Store package remains registered"
+    );
+    expectSourceOrder(
+      nativeInstallRetirement,
+      "registered_package_full_names(allowed_memmy_agent_package_family)",
+      "delete_cleanup_journal_file("
+    );
+    expect(offlineStop).toContain(
+      "Refusing offline cleanup broker shutdown while a Memmy Store package is registered"
+    );
+    expectSourceOrder(
+      offlineStop,
+      "if (any_allowed_memmy_package_is_registered())",
+      "delete_cleanup_journal_file("
+    );
+    expect(onlineStop).toContain(
+      "Refusing to stop a cleanup broker while a Memmy Store package is registered"
+    );
+    expectSourceOrder(
+      onlineStop,
+      "if (any_allowed_memmy_package_is_registered())",
+      "delete_cleanup_journal_file("
+    );
+    expect(source.match(/delete_cleanup_journal_file\(/gu)).toHaveLength(5);
+  });
+
+  it("rejects Store handoff and UI options for every legacy CLI and keeps authorize argument-free", async () => {
+    const source = await readFile(helperSourcePath, "utf8");
+    const legacyClassification = sourceBetween(
+      source,
+      "bool is_legacy_transition_command(Command command)",
+      "bool is_legacy_cleanup_diagnostic_command(Command command)"
+    );
+    const argumentParsing = sourceBetween(
+      source,
+      "bool store_only_option_was_provided = false;",
+      "init_apartment(apartment_type::single_threaded);"
+    );
+    const handoffOptions = sourceBetween(
+      source,
+      "bool has_handoff_options(const StoreInstallHandoffOptions& options)",
+      "int run_message_loop()"
+    );
+    const authorizationEntry = sourceBetween(
+      source,
+      "if (command == Command::AuthorizeNsisMutation)",
+      "if (command == Command::PrepareLegacyTakeover)"
+    );
+    const classifiedCommands = [...legacyClassification.matchAll(
+      /command == Command::([A-Za-z]+)/gu
+    )].map((match) => match[1]);
+
+    expect(classifiedCommands).toEqual([
+      "PrepareLegacyTakeover",
+      "EnsureLegacyCleanupBroker",
+      "LegacyCleanupBroker",
+      "StopLegacyCleanupBroker",
+      "AuthorizeNsisMutation",
+      "FinalizeLegacyCleanup",
+      "AckLegacyCleanup",
+      "FinalizeLegacyCleanupBreakawayLauncher",
+      "FinalizeLegacyCleanupUnpackaged"
+    ]);
+    expect(argumentParsing).toContain(
+      "if (is_legacy_transition_command(command) &&"
+    );
+    expect(argumentParsing).toContain(
+      "store_only_option_was_provided || owner != nullptr || has_handoff_options(options)"
+    );
+    expect(argumentParsing).toContain(
+      "Legacy transition commands do not accept Store handoff or UI options"
+    );
+    for (const field of [
+      "external_helper_path",
+      "state_path",
+      "result_path",
+      "log_path",
+      "old_process_id",
+      "baseline_package_version",
+      "baseline_package_full_name",
+      "created_at",
+      "aumid",
+      "package_family_name",
+      "mode"
+    ]) {
+      expect(handoffOptions).toContain(`options.${field}`);
+    }
+    for (const option of [
+      "--hwnd",
+      "--state-path",
+      "--result-path",
+      "--log-path",
+      "--old-pid",
+      "--baseline-package-version",
+      "--baseline-package-full-name",
+      "--created-at",
+      "--mode"
+    ]) {
+      const optionBranch = sourceBetween(
+        argumentParsing,
+        `if (argument == L"${option}")`,
+        "continue;"
+      );
+      expect(optionBranch).toContain("store_only_option_was_provided = true;");
+    }
+
+    expect(source).toContain("void authorize_nsis_mutation()");
+    for (const field of [
+      "external_helper_path",
+      "legacy_install_directory",
+      "legacy_executable_path",
+      "shortcut_path",
+      "aumid",
+      "package_family_name",
+      "transition_id",
+      "attempt_id"
+    ]) {
+      expect(authorizationEntry).toContain(`legacy_options.${field}.empty()`);
+    }
+    expect(authorizationEntry).toContain(
+      "NSIS mutation authorization accepts no options"
+    );
+    expectSourceOrder(
+      authorizationEntry,
+      "NSIS mutation authorization accepts no options",
+      "authorize_nsis_mutation();"
+    );
+  });
+
+  it("keeps deprecated breakaway cleanup entry points fail closed", async () => {
+    const source = await readFile(helperSourcePath, "utf8");
+    const breakawayEntry = sourceBetween(
       source,
       "if (command == Command::FinalizeLegacyCleanupBreakawayLauncher)",
       "if (command == Command::FinalizeLegacyCleanupUnpackaged)"
     );
-    const externalEntry = sourceBetween(
+    const unpackagedEntry = sourceBetween(
       source,
       "if (command == Command::FinalizeLegacyCleanupUnpackaged)",
       "if (command == Command::HandoffInstall)"
     );
-    const destructiveCleanup = sourceBetween(
-      source,
-      "void finalize_legacy_cleanup_unpacked(",
-      "void launch_store_update_finalizer_breakaway("
-    );
 
-    expect(validation).toContain(
-      "normalize_absolute_path(options.external_helper_path) !="
-    );
-    expect(validation).toContain("normalize_absolute_path(expected_helper)");
-    expect(validation).toContain(
-      "is_windows_apps_path(options.external_helper_path)"
-    );
-    expect(validation).toContain(
-      "std::filesystem::is_regular_file(options.external_helper_path, file_error)"
-    );
-
-    const validationCall =
-      "validate_legacy_transition_options(legacy_options, true, true);";
-    expect(breakawayLauncher).toContain(validationCall);
-    expect(breakawayLauncher).toContain(
-      'initialize_legacy_cleanup_diagnostics(legacy_options, "breakaway-launcher")'
-    );
-    expect(breakawayLauncher).not.toMatch(
-      /if\s*\(\s*current_process_has_package_identity\(\)\s*\)\s*\{[\s\S]*?throw\s+hresult_error/u
-    );
-    expect(breakawayLauncher).not.toContain(
-      "Legacy cleanup breakaway launcher still has package identity"
-    );
-    expect(breakawayLauncher).toMatch(
-      /run_legacy_cleanup_process\(\s*legacy_options\.external_helper_path,\s*build_legacy_cleanup_arguments\(\s*legacy_options\.external_helper_path,\s*L"finalize-legacy-cleanup-unpackaged",\s*legacy_options,\s*false\s*\),\s*false\s*\);/u
-    );
-    expect(
-      breakawayLauncher.indexOf("run_legacy_cleanup_process(")
-    ).toBeGreaterThan(breakawayLauncher.indexOf(validationCall));
-
-    expect(externalEntry).toContain(
-      "validate_legacy_transition_options(legacy_options, true, false);"
-    );
-    expect(externalEntry).toContain(
-      "Unpackaged legacy cleanup received an external helper path"
-    );
-    expect(externalEntry).toContain(
-      "finalize_legacy_cleanup_unpacked(legacy_options);"
-    );
-    expect(destructiveCleanup).toMatch(
-      /if\s*\(\s*current_process_has_package_identity\(\)\s*\)\s*\{[\s\S]*?throw\s+hresult_error\(\s*E_ACCESSDENIED,[\s\S]*?L"Refusing to mutate the real legacy installation from a packaged process"/u
-    );
+    for (const entry of [breakawayEntry, unpackagedEntry]) {
+      expect(entry).toContain("ERROR_NOT_SUPPORTED");
+      expect(entry).not.toContain("finalize_legacy_cleanup_unpacked(");
+      expect(entry).not.toContain("run_legacy_cleanup_process(");
+    }
+    expect(breakawayEntry).toContain("use the pre-established native broker");
+    expect(unpackagedEntry).toContain("use the pre-established native broker");
   });
 
   it("fails closed when the fixed diagnostic result channel is unavailable", async () => {

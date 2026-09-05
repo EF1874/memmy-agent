@@ -1,12 +1,14 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { win32 } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   acquireWindowsStoreTransitionSourceLease,
   establishWindowsStoreTransitionSourceLifetime,
+  resolveWindowsStoreTransitionCleanupActivePipeName,
   resolveWindowsStoreTransitionSourceLeasePipeName,
   tryAcquireWindowsStoreTransitionSourceLease,
   type WindowsStoreTransitionSourceLease
@@ -26,12 +28,15 @@ afterEach(async () => {
 });
 
 describe.runIf(process.platform === "win32")("Windows Store transition source lifetime lease", () => {
-  it("wires the NSIS lifetime before Store preparation and releases it only at will-quit", async () => {
+  it("repairs the native broker before holding the NSIS lifetime and releases it only at will-quit", async () => {
     const mainSource = await readFile(new URL("../src/main/main.ts", import.meta.url), "utf8");
     const barrierIndex = mainSource.indexOf("if (await applyWindowsStoreTransitionSourceBarrier())");
+    const brokerIndex = mainSource.indexOf("await ensureCurrentWindowsStoreLegacyCleanupBroker();");
     const storePreparationIndex = mainSource.indexOf("await prepareCurrentWindowsStoreTransitionForBoot();");
 
     expect(barrierIndex).toBeGreaterThan(-1);
+    expect(brokerIndex).toBeGreaterThan(-1);
+    expect(brokerIndex).toBeLessThan(barrierIndex);
     expect(storePreparationIndex).toBeGreaterThan(barrierIndex);
     expect(mainSource).toContain("windowsStoreTransitionSourceLease = result.lease;");
     expect(mainSource).toContain("resourcesPath: process.resourcesPath");
@@ -59,6 +64,15 @@ describe.runIf(process.platform === "win32")("Windows Store transition source li
     await afterRelease?.release();
   });
 
+  it("uses the native helper's locale-independent digest for Unicode profile paths", () => {
+    expect(resolveWindowsStoreTransitionSourceLeasePipeName(
+      "C:\\Users\\ÄLEE\\AppData\\Local\\Memmy\\store-transition\\active.json"
+    )).toBe(
+      "\\\\.\\pipe\\LOCAL\\memmy-store-transition-source-" +
+      "c39d2fad67926a639d12332da49710b64407f8f406a840652485c39905095b46"
+    );
+  });
+
   it("is automatically released by Windows when the holder process exits", async () => {
     const statePath = await createStatePath();
     const child = spawnLeaseHolder(statePath);
@@ -76,6 +90,42 @@ describe.runIf(process.platform === "win32")("Windows Store transition source li
       retryIntervalMs: 20
     });
     await lease.release();
+  });
+
+  it("refuses a source lease while the native broker owns the destructive-cleanup marker", async () => {
+    const statePath = await createStatePath();
+    const activePipe = resolveWindowsStoreTransitionCleanupActivePipeName(statePath);
+    expect(activePipe).toBe(`${resolveWindowsStoreTransitionSourceLeasePipeName(statePath)}-cleanup-active`);
+    const server = createServer((socket) => socket.destroy());
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(activePipe, resolve);
+    });
+    try {
+      await expect(tryAcquireWindowsStoreTransitionSourceLease(statePath)).resolves.toBeNull();
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+    const lease = await tryAcquireWindowsStoreTransitionSourceLease(statePath);
+    expect(lease).not.toBeNull();
+    await lease?.release();
+  });
+
+  it("keeps the cleanup guard for the full NSIS source lifetime", async () => {
+    const statePath = await createStatePath();
+    const result = await establishWindowsStoreTransitionSourceLifetime({
+      ...createBarrierOptions(),
+      statePath
+    }, {
+      resolveBarrier: async () => ({ action: "allow-source" })
+    });
+    expect(result.action).toBe("hold-source");
+    if (result.action !== "hold-source") return;
+
+    const cleanupActivePipe = resolveWindowsStoreTransitionCleanupActivePipeName(statePath);
+    await expect(tryListen(cleanupActivePipe)).resolves.toBe("EADDRINUSE");
+    await result.lease.release();
+    await expect(tryListen(cleanupActivePipe)).resolves.toBe("listening");
   });
 
   it("acquires before reading the barrier and holds only an allowed source", async () => {
@@ -194,6 +244,23 @@ const createStatePath = async (): Promise<string> => {
   const root = await mkdtemp(win32.join(tmpdir(), "memmy-source-lifetime-"));
   temporaryDirectories.push(root);
   return win32.join(root, "LocalAppData", "Memmy", "store-transition", "active.json");
+};
+
+const tryListen = async (pipeName: string): Promise<"listening" | string> => {
+  const server = createServer((socket) => socket.destroy());
+  const result = await new Promise<"listening" | string>((resolve) => {
+    server.once("error", (error: NodeJS.ErrnoException) => resolve(error.code ?? "unknown"));
+    server.once("listening", () => resolve("listening"));
+    server.listen(pipeName);
+  });
+  await new Promise<void>((resolve, reject) => {
+    if (!server.listening) {
+      resolve();
+      return;
+    }
+    server.close((error) => error ? reject(error) : resolve());
+  });
+  return result;
 };
 
 const createBarrierOptions = () => ({

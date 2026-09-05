@@ -3,7 +3,6 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  WINDOWS_STORE_TRANSITION_PHASES,
   advanceWindowsStoreTransitionAfterSuccessfulBoot,
   advanceWindowsStoreTransitionState,
   assertWindowsStoreTransitionBinding,
@@ -47,10 +46,19 @@ describe("Windows Store transition authority journal", () => {
       .toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u);
   });
 
-  it("allows only the exact ordered phase sequence and keeps repeated writes idempotent", () => {
+  it("allows only the broker-attested phase sequence and keeps repeated writes idempotent", () => {
     let state = createWindowsStoreTransitionState({ ...createBinding("cn"), now: createdAt });
-    for (const [index, phase] of WINDOWS_STORE_TRANSITION_PHASES.entries()) {
-      if (index === 0) continue;
+    const canonicalPhases = [
+      "store-install-launched",
+      "package-registered",
+      "data-prepared",
+      "awaiting-app-verification",
+      "app-verified",
+      "legacy-cleanup-attested",
+      "cleanup-eligible",
+      "cleaned"
+    ] as const;
+    for (const [index, phase] of canonicalPhases.entries()) {
       const nextTime = new Date(createdAt.getTime() + index * 1_000);
       state = advanceWindowsStoreTransitionState(state, phase, nextTime);
       expect(state.phase).toBe(phase);
@@ -83,10 +91,22 @@ describe("Windows Store transition authority journal", () => {
     state = advanceWindowsStoreTransitionAfterSuccessfulBoot(state, new Date(Date.parse(state.updatedAt) + 1_000));
     expect(state.phase).toBe("app-verified");
     state = advanceWindowsStoreTransitionAfterSuccessfulBoot(state, new Date(Date.parse(state.updatedAt) + 1_000));
-    expect(state.phase).toBe("legacy-cleanup-complete");
+    expect(state.phase).toBe("legacy-cleanup-attested");
     state = advanceWindowsStoreTransitionAfterSuccessfulBoot(state, new Date(Date.parse(state.updatedAt) + 1_000));
     expect(state.phase).toBe("cleanup-eligible");
     expect(state.phase).not.toBe("cleaned");
+  });
+
+  it("requires a native-broker pass for a historical cleanup-complete journal", () => {
+    const historical = {
+      ...createWindowsStoreTransitionState({ ...createBinding("cn"), now: createdAt }),
+      phase: "legacy-cleanup-complete" as const
+    };
+    const next = advanceWindowsStoreTransitionAfterSuccessfulBoot(
+      historical,
+      new Date(createdAt.getTime() + 1_000)
+    );
+    expect(next.phase).toBe("legacy-cleanup-attested");
   });
 
   it("rejects a mismatched transaction, Store identity, or source authority binding", () => {

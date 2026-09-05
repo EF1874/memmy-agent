@@ -48,7 +48,9 @@ export interface WindowsStoreTransitionCoordinatorDependencies {
   assertPreparedSourcesUnchanged?: typeof assertWindowsStorePreparedDataTransitionSourcesUnchanged;
   prepareDataTransition?: typeof prepareWindowsStoreDataTransition;
   finalizeLegacyInstallation?: (state: WindowsStoreTransitionState) => Promise<void>;
+  acknowledgeLegacyCleanup?: (state: WindowsStoreTransitionState) => Promise<void>;
   retireLegacyInstallAuthority?: (state: WindowsStoreTransitionState) => Promise<void>;
+  writeState?: typeof writeWindowsStoreTransitionState;
   writeRuntimePointer?: (pointerPath: string, runtimeHomePath: string) => Promise<void>;
 }
 
@@ -68,6 +70,7 @@ export const prepareWindowsStoreTransitionForBoot = async (
   options: WindowsStoreTransitionCoordinatorOptions,
   dependencies: WindowsStoreTransitionCoordinatorDependencies = {}
 ): Promise<WindowsStoreTransitionPrepareResult> => {
+  const writeState = dependencies.writeState ?? writeWindowsStoreTransitionState;
   const statePath = resolveWindowsStoreTransitionStatePath(options.localAppDataPath);
   const initialState = await readWindowsStoreTransitionState(statePath);
   if (!initialState) return { status: "none" };
@@ -94,7 +97,7 @@ export const prepareWindowsStoreTransitionForBoot = async (
     const plan = createBoundDataPlan(state, options.layout);
     if (state.phase === "store-install-launched") {
       state = advanceWindowsStoreTransitionState(state, "package-registered");
-      await writeWindowsStoreTransitionState(statePath, state);
+      await writeState(statePath, state);
     }
 
     let prepared = await readWindowsStorePreparedDataTransition(preparedStatePath);
@@ -109,7 +112,7 @@ export const prepareWindowsStoreTransitionForBoot = async (
         preparedStatePath
       });
       state = advanceWindowsStoreTransitionState(state, "data-prepared");
-      await writeWindowsStoreTransitionState(statePath, state);
+      await writeState(statePath, state);
     }
 
     if (!prepared) {
@@ -126,12 +129,13 @@ export const prepareWindowsStoreTransitionForBoot = async (
         options.layout.runtimeHomePath
       );
       state = advanceWindowsStoreTransitionState(state, "awaiting-app-verification");
-      await writeWindowsStoreTransitionState(statePath, state);
+      await writeState(statePath, state);
     }
     if (
       state.phase !== "awaiting-app-verification"
       && state.phase !== "app-verified"
       && state.phase !== "legacy-cleanup-complete"
+      && state.phase !== "legacy-cleanup-attested"
       && state.phase !== "cleanup-eligible"
     ) {
       throw new Error(`Windows Store transition cannot boot from phase ${state.phase}`);
@@ -152,6 +156,7 @@ export const advanceWindowsStoreTransitionForVerifiedBoot = async (
   options: WindowsStoreTransitionCoordinatorOptions,
   dependencies: WindowsStoreTransitionCoordinatorDependencies = {}
 ): Promise<WindowsStoreTransitionBootResult> => {
+  const writeState = dependencies.writeState ?? writeWindowsStoreTransitionState;
   const statePath = resolveWindowsStoreTransitionStatePath(options.localAppDataPath);
   const initialState = await readWindowsStoreTransitionState(statePath);
   if (!initialState) return { status: "none" };
@@ -175,17 +180,31 @@ export const advanceWindowsStoreTransitionForVerifiedBoot = async (
 
     if (state.phase === "awaiting-app-verification") {
       state = advanceWindowsStoreTransitionAfterSuccessfulBoot(state);
-      await writeWindowsStoreTransitionState(statePath, state);
+      await writeState(statePath, state);
     }
-    if (state.phase === "app-verified") {
-      await dependencies.finalizeLegacyInstallation?.(state);
+    if (state.phase === "app-verified" || state.phase === "legacy-cleanup-complete") {
+      if (!dependencies.finalizeLegacyInstallation) {
+        throw new Error("Windows native legacy cleanup broker finalizer is unavailable");
+      }
+      if (!dependencies.acknowledgeLegacyCleanup) {
+        throw new Error("Windows native legacy cleanup broker acknowledgement is unavailable");
+      }
+      await dependencies.finalizeLegacyInstallation(state);
       state = advanceWindowsStoreTransitionAfterSuccessfulBoot(state);
-      await writeWindowsStoreTransitionState(statePath, state);
+      await writeState(statePath, state);
+      await dependencies.acknowledgeLegacyCleanup(state);
+      state = advanceWindowsStoreTransitionAfterSuccessfulBoot(state);
+      await writeState(statePath, state);
       return { status: "verified", transactionId: state.transactionId };
     }
-    if (state.phase === "legacy-cleanup-complete") {
+    if (state.phase === "legacy-cleanup-attested") {
+      if (!dependencies.acknowledgeLegacyCleanup) {
+        throw new Error("Windows native legacy cleanup broker acknowledgement is unavailable");
+      }
+      await dependencies.acknowledgeLegacyCleanup(state);
       state = advanceWindowsStoreTransitionAfterSuccessfulBoot(state);
-      await writeWindowsStoreTransitionState(statePath, state);
+      await writeState(statePath, state);
+      return { status: "verified", transactionId: state.transactionId };
     }
     if (state.phase !== "cleanup-eligible") {
       throw new Error(`Windows Store transition cannot verify a boot from phase ${state.phase}`);
@@ -200,7 +219,7 @@ export const advanceWindowsStoreTransitionForVerifiedBoot = async (
     });
     await dependencies.retireLegacyInstallAuthority?.(state);
     state = advanceWindowsStoreTransitionState(state, "cleaned");
-    await writeWindowsStoreTransitionState(statePath, state);
+    await writeState(statePath, state);
     await rm(preparedStatePath, { force: true });
     return { status: "cleaned", transactionId: state.transactionId };
   } finally {

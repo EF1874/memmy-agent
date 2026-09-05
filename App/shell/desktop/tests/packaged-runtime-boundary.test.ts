@@ -936,9 +936,123 @@ describe("desktop packaged runtime boundaries", () => {
     expect(includeSource).toContain("startup will conservatively recover the remaining prepared state");
     expect(includeSource).toContain("Function .onInstFailed");
     expect(includeSource).toContain("Function MemmyOnUserAbort");
+    expect(includeSource).toContain("Function MemmyRecoverDirectDataMigrationAfterAbort");
+    const abortRecoveryStart = includeSource.indexOf(
+      "Function MemmyRecoverDirectDataMigrationAfterAbort"
+    );
+    const abortRecoveryEnd = includeSource.indexOf("FunctionEnd", abortRecoveryStart);
+    const abortRecoverySource = includeSource.slice(abortRecoveryStart, abortRecoveryEnd);
+    expect(abortRecoverySource).not.toContain("Call MemmyResumeInstallerMutationWindow");
+    expect(abortRecoverySource).not.toContain("Call MemmyRecoverDirectDataMigration");
+    expect(abortRecoverySource).toContain("recovery was deferred to the next protected startup");
     expect(includeSource).toContain('$LOCALAPPDATA\\Memmy\\upgrade-staging\\active.lock');
     expect(customInitIndex).toBeGreaterThan(-1);
     expect(customInstallIndex).toBeGreaterThan(customInitIndex);
+  });
+
+  it("serializes NSIS mutation and safely manages the unpackaged Store cleanup broker", () => {
+    const includeSource = readFileSync(winUnsignedInstallerIncludePath, "utf8");
+    const customInitStart = includeSource.indexOf("!macro customInit");
+    const customInitEnd = includeSource.indexOf("!macroend", customInitStart);
+    const customInitSource = includeSource.slice(customInitStart, customInitEnd);
+    const customUninstallStart = includeSource.indexOf("!macro customUnInstall\n");
+    const customUninstallEnd = includeSource.indexOf("!macroend", customUninstallStart);
+    const customUninstallSource = includeSource.slice(customUninstallStart, customUninstallEnd);
+    const checkRunningStart = includeSource.indexOf("!macro customCheckAppRunning");
+    const checkRunningEnd = includeSource.indexOf("!macroend", checkRunningStart);
+    const checkRunningSource = includeSource.slice(checkRunningStart, checkRunningEnd);
+    const uninstallCheckStart = includeSource.indexOf("!macro customUnInstallCheck\n");
+    const uninstallCheckEnd = includeSource.indexOf("!macroend", uninstallCheckStart);
+    const uninstallCheckSource = includeSource.slice(uninstallCheckStart, uninstallCheckEnd);
+    const resumeWindowStart = includeSource.indexOf("Function MemmyResumeInstallerMutationWindow");
+    const resumeWindowEnd = includeSource.indexOf("FunctionEnd", resumeWindowStart);
+    const resumeWindowSource = includeSource.slice(resumeWindowStart, resumeWindowEnd);
+    const releaseWindowStart = includeSource.indexOf("Function MemmyReleaseTransitionMutationMutex");
+    const releaseWindowEnd = includeSource.indexOf("FunctionEnd", releaseWindowStart);
+    const releaseWindowSource = includeSource.slice(releaseWindowStart, releaseWindowEnd);
+    const unReleaseWindowStart = includeSource.indexOf("Function un.MemmyReleaseTransitionMutationMutex");
+    const unReleaseWindowEnd = includeSource.indexOf("FunctionEnd", unReleaseWindowStart);
+    const unReleaseWindowSource = includeSource.slice(unReleaseWindowStart, unReleaseWindowEnd);
+    const validatePageStart = includeSource.indexOf("Function MemmyValidateInstallPage");
+    const validatePageEnd = includeSource.indexOf("FunctionEnd", validatePageStart);
+    const validatePageSource = includeSource.slice(validatePageStart, validatePageEnd);
+    const brokerRemovalStart = includeSource.indexOf("Function un.MemmyRemoveLegacyCleanupBroker");
+    const brokerRemovalEnd = includeSource.indexOf("FunctionEnd", brokerRemovalStart);
+    const brokerRemovalSource = includeSource.slice(brokerRemovalStart, brokerRemovalEnd);
+    const completeMigrationIndex = includeSource.indexOf("Call MemmyCompleteDirectDataMigration");
+    const ensureBrokerIndex = includeSource.indexOf("Call MemmyEnsureLegacyCleanupBroker");
+
+    expect(customInitSource).toContain("Call MemmyAcquireTransitionMutationMutex");
+    expect(customInitSource).toContain("Call MemmyAuthorizeTransitionMutation");
+    expect(customInitSource).toContain('$installMode == "all"');
+    expect(customInitSource.indexOf('$installMode == "all"'))
+      .toBeLessThan(customInitSource.indexOf("Call MemmyAcquireTransitionMutationMutex"));
+    expect(customInitSource.indexOf("Call MemmyAcquireTransitionMutationMutex"))
+      .toBeLessThan(customInitSource.indexOf("Call MemmyAuthorizeTransitionMutation"));
+    expect(customInitSource).not.toContain("stop-legacy-cleanup-broker");
+    expect(customUninstallSource).toContain("Call un.MemmyAcquireTransitionMutationMutex");
+    expect(customUninstallSource).toContain("Call un.MemmyAuthorizeTransitionMutation");
+    expect(customUninstallSource.indexOf("Call un.MemmyAcquireTransitionMutationMutex"))
+      .toBeLessThan(customUninstallSource.indexOf("Call un.MemmyAuthorizeTransitionMutation"));
+    expect(includeSource).toContain('"Local\\MemmyStoreTransitionNsisMutation"');
+    expect(includeSource).toContain('StrCmp $1 "128"');
+    expect(includeSource).toContain("Var MemmyTransitionMutationMutexHandle");
+    expect(customInitSource).toContain("Call MemmyReleaseTransitionMutationMutex");
+    expect(validatePageSource.match(/Call MemmyReleaseTransitionMutationMutex/gu)).toHaveLength(2);
+    expect(checkRunningSource.indexOf("Call MemmyResumeInstallerMutationWindow"))
+      .toBeLessThan(checkRunningSource.indexOf("!insertmacro _CHECK_APP_RUNNING"));
+    expect(checkRunningSource.indexOf("Call un.MemmyAcquireTransitionMutationMutex"))
+      .toBeLessThan(checkRunningSource.indexOf("Call un.MemmyAuthorizeTransitionMutation"));
+    expect(checkRunningSource.indexOf("Call un.MemmyAuthorizeTransitionMutation"))
+      .toBeLessThan(checkRunningSource.indexOf("!insertmacro _CHECK_APP_RUNNING"));
+    expect(checkRunningSource.indexOf("!insertmacro _CHECK_APP_RUNNING"))
+      .toBeLessThan(checkRunningSource.lastIndexOf("Call un.MemmyReleaseTransitionMutationMutex"));
+    expect(checkRunningSource.indexOf("Call MemmyPrepareDirectDataMigration"))
+      .toBeLessThan(checkRunningSource.indexOf("Call MemmyReleaseTransitionMutationMutex"));
+    expect(uninstallCheckSource.indexOf("Call MemmyResumeInstallerMutationWindow"))
+      .toBeLessThan(uninstallCheckSource.indexOf("Call MemmyRecoverDirectDataMigration"));
+    expect(resumeWindowSource.indexOf("Call MemmyAcquireTransitionMutationMutex"))
+      .toBeLessThan(resumeWindowSource.indexOf("Call MemmyAuthorizeTransitionMutation"));
+    expect(releaseWindowSource).toContain("ReleaseMutex");
+    expect(releaseWindowSource).toContain("CloseHandle");
+    expect(releaseWindowSource).toContain("p $MemmyTransitionMutationMutexHandle");
+    expect(releaseWindowSource).not.toContain("p rMemmyTransitionMutationMutexHandle");
+    expect(unReleaseWindowSource).toContain("ReleaseMutex");
+    expect(unReleaseWindowSource).toContain("CloseHandle");
+    expect(unReleaseWindowSource).toContain("p $MemmyTransitionMutationMutexHandle");
+    expect(includeSource).toContain("!macro customUnInstallCheckCurrentUser");
+    expect(includeSource).toContain("authorize-nsis-mutation");
+    expect(includeSource).toContain(
+      'File /oname=MemmyStoreMutationGate.exe "${PROJECT_DIR}\\dist\\native\\MemmyStoreUpdate.exe"'
+    );
+    expect(includeSource).toContain('$PLUGINSDIR\\MemmyStoreMutationGate.exe');
+    const authorizeStart = includeSource.indexOf("Function MemmyAuthorizeTransitionMutation");
+    const authorizeEnd = includeSource.indexOf("FunctionEnd", authorizeStart);
+    const authorizeSource = includeSource.slice(authorizeStart, authorizeEnd);
+    expect(authorizeSource).not.toContain(
+      'IfFileExists "$LOCALAPPDATA\\Memmy\\store-transition\\broker\\MemmyStoreUpdate.exe"'
+    );
+    expect(completeMigrationIndex).toBeGreaterThan(-1);
+    expect(ensureBrokerIndex).toBeGreaterThan(completeMigrationIndex);
+    expect(includeSource).toContain(
+      'StrCpy $R5 "$INSTDIR\\resources\\native\\MemmyStoreUpdate.exe"'
+    );
+    expect(includeSource).toContain("ensure-legacy-cleanup-broker");
+    expect(includeSource).toContain("Call un.MemmyRemoveLegacyCleanupBroker");
+    expect(includeSource).toContain("stop-legacy-cleanup-broker");
+    expect(includeSource).toContain(
+      '$LOCALAPPDATA\\Memmy\\store-transition\\broker\\MemmyStoreUpdate.exe'
+    );
+    const stopIndex = brokerRemovalSource.indexOf("stop-legacy-cleanup-broker");
+    const stopResultIndex = brokerRemovalSource.indexOf('StrCmp $0 "0"', stopIndex);
+    const runDeletionIndex = brokerRemovalSource.indexOf('DeleteRegValue HKCU', stopResultIndex);
+    expect(stopIndex).toBeGreaterThan(-1);
+    expect(stopResultIndex).toBeGreaterThan(stopIndex);
+    expect(runDeletionIndex).toBeGreaterThan(stopResultIndex);
+    expect(brokerRemovalSource).toContain("!ifdef APP_64");
+    expect(brokerRemovalSource).toContain("!ifdef APP_ARM64");
+    expect(brokerRemovalSource).toContain("SetErrorLevel 6");
+    expect(brokerRemovalSource).toContain("Quit");
   });
 
   it("adds packaged Windows CLI launchers to the user PATH", () => {
@@ -1428,7 +1542,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain("await services?.close({ stopMemory: stopMemoryServiceForCurrentQuit })");
     expect(mainSource).toContain("app.quit()");
     expect(runtimeServicesSource).toContain("STOP_MANAGED_CHILD_GRACE_MS");
-    expect(runtimeServicesSource).toContain('process.platform === "win32" ? ["--replace-same-version"] : []');
+    expect(runtimeServicesSource).toContain('process.platform === "win32" ? ["--replace-same-version-on-executable-change"] : []');
     expect(runtimeServicesSource).toContain("waitForManagedChildExit(child, STOP_MANAGED_CHILD_GRACE_MS)");
     expect(interfaceSource).toContain("export type DesktopUpdateMode");
     expect(interfaceSource).toContain("export interface DesktopUpdateDownloadOptions");

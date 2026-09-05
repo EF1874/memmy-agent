@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -135,7 +136,7 @@ describe("standalone Memory runtime installer", () => {
     await installMemoryRuntime({
       home,
       runtimeDirectory: originalRuntime,
-      nodeExecutable: "/original/node",
+      nodeExecutable: "/desktop/electron",
       skipServiceRegistration: true,
       skipHealthCheck: true
     });
@@ -159,6 +160,215 @@ describe("standalone Memory runtime installer", () => {
     const pointer = await currentInstalledRuntime(home);
     expect(pointer?.runtimeExecutable).toBe("/desktop/electron");
     expect(readFileSync(pointer!.entrypoint, "utf8")).toContain("replacement runtime fixture");
+    expect(readdirSync(join(home, "memory-service", "runtime")).filter((name) => name.startsWith(".replacement-backup-"))).toEqual([]);
+  });
+
+  it("replaces equal-version bundled runtime when content changed but the Desktop executable path did not", async () => {
+    const root = tempRoot();
+    const home = join(root, "home");
+    const originalRuntime = createRuntimeDirectory(root, "2.1.0", "a".repeat(64));
+    await installMemoryRuntime({
+      home,
+      runtimeDirectory: originalRuntime,
+      nodeExecutable: "/desktop/electron",
+      skipServiceRegistration: true,
+      skipHealthCheck: true
+    });
+
+    const replacementRuntime = createRuntimeDirectory(root, "2.1.0", "b".repeat(64));
+    writeFileSync(
+      join(replacementRuntime, "dist", "src", "server", "index.js"),
+      "// replacement runtime fixture\n"
+    );
+    const replaced = await installMemoryRuntime({
+      home,
+      runtimeDirectory: replacementRuntime,
+      nodeExecutable: "/desktop/electron",
+      preferInstalledCompatible: true,
+      replaceSameVersionOnExecutableChange: true,
+      skipServiceRegistration: true,
+      skipHealthCheck: true
+    });
+
+    expect(replaced).not.toMatchObject({ reused: true });
+    const pointer = await currentInstalledRuntime(home);
+    expect(pointer?.runtimeExecutable).toBe("/desktop/electron");
+    expect(readFileSync(pointer!.entrypoint, "utf8")).toContain("replacement runtime fixture");
+  });
+
+  it("rebinds equal-version identical runtime content without copying the installed directory", async () => {
+    const root = tempRoot();
+    const home = join(root, "home");
+    const contentId = "a".repeat(64);
+    const originalRuntime = createRuntimeDirectory(root, "2.1.0", contentId);
+    await installMemoryRuntime({
+      home,
+      runtimeDirectory: originalRuntime,
+      nodeExecutable: "/nsis/Memmy.exe",
+      skipServiceRegistration: true,
+      skipHealthCheck: true
+    });
+    const originalPointer = await currentInstalledRuntime(home);
+    const sentinelPath = join(originalPointer!.runtimeDir, "installed-runtime-sentinel.txt");
+    writeFileSync(sentinelPath, "must survive authority rebinding\n");
+
+    const storeRuntime = createRuntimeDirectory(root, "2.1.0", contentId);
+    const rebound = await installMemoryRuntime({
+      home,
+      runtimeDirectory: storeRuntime,
+      nodeExecutable: "/windowsapps/Memmy.exe",
+      preferInstalledCompatible: true,
+      replaceSameVersionOnExecutableChange: true,
+      skipServiceRegistration: true,
+      skipHealthCheck: true
+    });
+
+    expect(rebound).toMatchObject({
+      rebound: true,
+      runtimeDir: originalPointer!.runtimeDir,
+      runtimeExecutable: "/windowsapps/Memmy.exe"
+    });
+    expect(readFileSync(sentinelPath, "utf8")).toContain("must survive");
+    const launcher = readFileSync(
+      join(home, "bin", process.platform === "win32" ? "memmy-memory-service.cmd" : "memmy-memory-service"),
+      "utf8"
+    );
+    expect(launcher).toContain("/windowsapps/Memmy.exe");
+  });
+
+  it("replaces equal-version runtime bytes when the packaged content identity changed", async () => {
+    const root = tempRoot();
+    const home = join(root, "home");
+    const originalRuntime = createRuntimeDirectory(root, "2.1.0", "a".repeat(64));
+    await installMemoryRuntime({
+      home,
+      runtimeDirectory: originalRuntime,
+      nodeExecutable: "/nsis/Memmy.exe",
+      skipServiceRegistration: true,
+      skipHealthCheck: true
+    });
+    const originalPointer = await currentInstalledRuntime(home);
+    const sentinelPath = join(originalPointer!.runtimeDir, "installed-runtime-sentinel.txt");
+    writeFileSync(sentinelPath, "must be removed by content replacement\n");
+
+    const storeRuntime = createRuntimeDirectory(root, "2.1.0", "b".repeat(64));
+    writeFileSync(
+      join(storeRuntime, "dist", "src", "server", "index.js"),
+      "// replacement runtime fixture\n"
+    );
+    const replaced = await installMemoryRuntime({
+      home,
+      runtimeDirectory: storeRuntime,
+      nodeExecutable: "/windowsapps/Memmy.exe",
+      preferInstalledCompatible: true,
+      replaceSameVersionOnExecutableChange: true,
+      skipServiceRegistration: true,
+      skipHealthCheck: true
+    });
+
+    expect(replaced).not.toMatchObject({ rebound: true });
+    const pointer = await currentInstalledRuntime(home);
+    expect(readFileSync(pointer!.entrypoint, "utf8")).toContain("replacement runtime fixture");
+    expect(existsSync(sentinelPath)).toBe(false);
+  });
+
+  it("stops the old service before moving an equal-version runtime directory", () => {
+    const source = readFileSync(
+      fileURLToPath(new URL("../src/cli/runtime-installer.ts", import.meta.url)),
+      "utf8"
+    );
+    const replacementGuard = source.indexOf("if ((replacingSameVersion || rebindingSameVersion) && previous && !options.skipServiceRegistration)");
+    const stopAttempted = source.indexOf("previousServiceStopAttempted = true;", replacementGuard);
+    const verifiedStop = source.indexOf("await stopInstalledMemoryService(home);", replacementGuard);
+    const backupMove = source.indexOf("await rename(runtimeDir, backupPath);", replacementGuard);
+    const rollbackRestart = source.indexOf("previousServiceStopAttempted || serviceStartAttempted", verifiedStop);
+
+    expect(replacementGuard).toBeGreaterThan(-1);
+    expect(stopAttempted).toBeGreaterThan(replacementGuard);
+    expect(verifiedStop).toBeGreaterThan(stopAttempted);
+    expect(backupMove).toBeGreaterThan(verifiedStop);
+    expect(rollbackRestart).toBeGreaterThan(verifiedStop);
+  });
+
+  it("releases the install lock even when staging cleanup fails", () => {
+    const source = readFileSync(
+      fileURLToPath(new URL("../src/cli/runtime-installer.ts", import.meta.url)),
+      "utf8"
+    );
+    const stagingCleanup = source.indexOf("if (stagedPath) await rm(stagedPath");
+    const cleanupFinally = source.indexOf("} finally {", stagingCleanup);
+    const lockRelease = source.indexOf("await installLock.release();", stagingCleanup);
+
+    expect(stagingCleanup).toBeGreaterThan(-1);
+    expect(cleanupFinally).toBeGreaterThan(stagingCleanup);
+    expect(lockRelease).toBeGreaterThan(cleanupFinally);
+  });
+
+  it("restores equal-version runtime bytes and launch metadata when replacement health fails", async () => {
+    const root = tempRoot();
+    const home = join(root, "home");
+    const originalRuntime = createRuntimeDirectory(root, "2.1.0");
+    await installMemoryRuntime({
+      home,
+      runtimeDirectory: originalRuntime,
+      nodeExecutable: "/original/node",
+      skipServiceRegistration: true,
+      skipHealthCheck: true
+    });
+
+    const pointerBefore = await currentInstalledRuntime(home);
+    const launcherPath = join(
+      home,
+      "bin",
+      process.platform === "win32" ? "memmy-memory-service.cmd" : "memmy-memory-service"
+    );
+    const entrypointBefore = readFileSync(pointerBefore!.entrypoint, "utf8");
+    const launcherBefore = readFileSync(launcherPath, "utf8");
+    const installationBefore = readFileSync(join(home, "memory-service", "installation.json"), "utf8");
+
+    const replacementRuntime = createRuntimeDirectory(root, "2.1.0");
+    writeFileSync(
+      join(replacementRuntime, "dist", "src", "server", "index.js"),
+      "// replacement runtime fixture\n"
+    );
+    vi.useFakeTimers();
+    let resolveStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve;
+    });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      resolveStarted();
+      return {
+        ok: true,
+        json: async () => ({ ok: true, protocolVersion: 1, serviceVersion: "old" })
+      } as Response;
+    });
+
+    try {
+      const install = installMemoryRuntime({
+        home,
+        runtimeDirectory: replacementRuntime,
+        nodeExecutable: "/desktop/electron",
+        preferInstalledCompatible: true,
+        replaceSameVersion: true,
+        endpoint: "http://127.0.0.1:18960",
+        skipServiceRegistration: true,
+        healthCheckTimeoutMs: 1_000
+      });
+      await started;
+      await vi.advanceTimersByTimeAsync(2_000);
+      await expect(install).rejects.toThrow("activation health check");
+
+      expect(await currentInstalledRuntime(home)).toEqual(pointerBefore);
+      expect(readFileSync(pointerBefore!.entrypoint, "utf8")).toBe(entrypointBefore);
+      expect(readFileSync(pointerBefore!.entrypoint, "utf8")).not.toContain("replacement runtime fixture");
+      expect(readFileSync(launcherPath, "utf8")).toBe(launcherBefore);
+      expect(readFileSync(join(home, "memory-service", "installation.json"), "utf8")).toBe(installationBefore);
+      expect(readdirSync(join(home, "memory-service", "runtime")).filter((name) => name.startsWith(".replacement-backup-"))).toEqual([]);
+    } finally {
+      vi.restoreAllMocks();
+      vi.useRealTimers();
+    }
   });
 
   it("rejects checksum failures without activating the staged runtime", async () => {
@@ -400,7 +610,10 @@ describe("standalone Memory runtime installer", () => {
         shutdownRequests += 1;
         response.writeHead(200, { "content-type": "application/json" });
         response.end(JSON.stringify({ ok: true }));
-        response.once("finish", () => server.close());
+        response.once("finish", () => {
+          server.close();
+          server.closeAllConnections();
+        });
         return;
       }
       response.writeHead(404).end();
@@ -414,13 +627,43 @@ describe("standalone Memory runtime installer", () => {
       configPath
     }));
     let managerStops = 0;
+    let processChecks = 0;
 
     await expect(stopInstalledMemoryService(home, {
-      stopUserService: () => { managerStops += 1; }
+      stopUserService: () => { managerStops += 1; },
+      isProcessRunning: () => {
+        processChecks += 1;
+        return processChecks < 3;
+      }
     })).resolves.toMatchObject({ ok: true, action: "stop", pid: 12345 });
 
     expect(managerStops).toBe(1);
     expect(shutdownRequests).toBe(1);
+    expect(processChecks).toBeGreaterThanOrEqual(3);
+  });
+
+  it("waits for the recorded process when the Memory endpoint is not listening yet", async () => {
+    const root = tempRoot();
+    const home = join(root, "home");
+    mkdirSync(join(home, "memory-service"), { recursive: true });
+    writeFileSync(join(home, "memory-service", "runtime.json"), JSON.stringify({
+      pid: 23456,
+      endpoint: "http://127.0.0.1:18960"
+    }));
+    let processChecks = 0;
+    let managerStops = 0;
+
+    await expect(stopInstalledMemoryService(home, {
+      stopUserService: () => { managerStops += 1; },
+      fetch: async () => { throw new Error("not listening"); },
+      isProcessRunning: () => {
+        processChecks += 1;
+        return processChecks < 3;
+      }
+    })).resolves.toMatchObject({ ok: true, action: "stop", pid: 23456 });
+
+    expect(managerStops).toBe(1);
+    expect(processChecks).toBeGreaterThanOrEqual(3);
   });
 });
 
@@ -440,11 +683,14 @@ function createRuntimeArchive(root: string, version: string): { archive: string;
   return { archive, sha256, target };
 }
 
-function createRuntimeDirectory(root: string, version: string): string {
+function createRuntimeDirectory(root: string, version: string, contentId?: string): string {
   const target = runtimeTarget(process.platform, process.arch);
   const stage = join(root, `runtime-${version}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(join(stage, "dist", "src", "server"), { recursive: true });
   writeFileSync(join(stage, "dist", "src", "server", "index.js"), "// runtime fixture\n");
-  writeFileSync(join(stage, "memory-runtime.json"), `${JSON.stringify({ version, protocolVersion: 1, target })}\n`);
+  writeFileSync(
+    join(stage, "memory-runtime.json"),
+    `${JSON.stringify({ version, protocolVersion: 1, target, ...(contentId ? { contentId } : {}) })}\n`
+  );
   return stage;
 }

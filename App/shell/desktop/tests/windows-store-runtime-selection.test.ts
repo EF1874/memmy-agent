@@ -210,7 +210,7 @@ describe("Windows Store runtime selection", () => {
     await expect(readFile(fixture.bindingPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("can recommit the shared runtime at the legacy-cleanup-complete boot boundary", async () => {
+  it("can recommit the shared runtime from a historical untrusted cleanup journal", async () => {
     const fixture = await createFixture();
     const state = await writeState(fixture, "legacy-cleanup-complete");
     await writeStorePointer(fixture, fixture.runtimeHomePath);

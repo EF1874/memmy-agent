@@ -1135,6 +1135,9 @@ create_windows_cli_launcher "$CLI_BIN_DIR/memmy.cmd" "app.asar\\dist\\runtime\\m
 node "$ROOT_DIR/scripts/internal/shared/prepare-embedding-model.mjs" "$EMBEDDING_MODELS_DIR"
 cp -R "$EMBEDDING_MODELS_DIR" "$RUNTIME_DIR/memory/embedding-models"
 
+package_step_start "Stamp Windows Memory runtime content identity"
+node "$ROOT_DIR/scripts/internal/win/stamp-memory-runtime-content-id.mjs" "$RUNTIME_DIR/memory"
+
 if [ "$PACKAGE_TARGET" = "nsis" ]; then
   package_step_start "Patch electron-builder NSIS template"
   patch_electron_builder_nsis_refresh

@@ -1,10 +1,9 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { constants as fsConstants, readFileSync } from "node:fs";
-import { access, readFile, rm } from "node:fs/promises";
+import { readFileSync } from "node:fs";
+import { readFile, rm } from "node:fs/promises";
 import { win32 } from "node:path";
 import { promisify } from "node:util";
-import { stageWindowsStoreUnpackagedHelper } from "./windows-store-helper-staging.js";
 import { resolveExpectedWindowsStoreMigrationIdentity } from "./windows-store-migration-config.js";
 import {
   advanceWindowsStoreTransitionState,
@@ -66,7 +65,6 @@ interface RunLegacyTakeoverOptions {
 }
 
 export interface RunLegacyCleanupOptions extends RunLegacyTakeoverOptions {
-  externalHelperPath: string;
   shortcutPath?: string;
   aumid: string;
   packageFamilyName: string;
@@ -90,10 +88,16 @@ interface FinalizeWindowsStoreLegacyInstallationOptions {
   state: WindowsStoreTransitionState;
 }
 
+export type AcknowledgeWindowsStoreLegacyCleanupOptions =
+  FinalizeWindowsStoreLegacyInstallationOptions;
+
 interface FinalizeWindowsStoreLegacyInstallationDependencies {
-  stageHelper?: (sourcePath: string, destinationPath: string) => Promise<void>;
-  pathExists?: (path: string) => Promise<boolean>;
   runCleanup?: (options: RunLegacyCleanupOptions) => Promise<void>;
+  createAttemptId?: () => string;
+}
+
+interface AcknowledgeWindowsStoreLegacyCleanupDependencies {
+  runAcknowledgement?: (options: RunLegacyCleanupOptions) => Promise<void>;
   createAttemptId?: () => string;
 }
 
@@ -262,30 +266,49 @@ export const finalizeWindowsStoreLegacyInstallation = async (
   dependencies: FinalizeWindowsStoreLegacyInstallationDependencies = {}
 ): Promise<void> => {
   const helperPath = win32.join(options.resourcesPath, "native", EXTERNAL_HELPER_FILE);
-  const externalHelperPath = win32.join(
-    normalizeDirectory(options.localAppDataPath, "LocalAppData"),
-    "Memmy",
-    "store-transition",
-    "native",
-    options.state.packageFamilyName,
-    EXTERNAL_HELPER_FILE
-  );
-  await (
-    dependencies.stageHelper ?? stageWindowsStoreUnpackagedHelper
-  )(helperPath, externalHelperPath);
+  normalizeDirectory(options.localAppDataPath, "LocalAppData");
   const desktopShortcutPath = win32.join(
     normalizeDirectory(options.desktopPath, "desktop"),
     "Memmy.lnk"
   );
-  const hasDesktopShortcut = await (
-    dependencies.pathExists ?? defaultPathExists
-  )(desktopShortcutPath);
   await (dependencies.runCleanup ?? runLegacyCleanup)({
     helperPath,
-    externalHelperPath,
     legacyInstallDirectory: options.state.sourceInstallDirectory,
     legacyExecutablePath: options.state.sourceExecutablePath,
-    ...(hasDesktopShortcut ? { shortcutPath: desktopShortcutPath } : {}),
+    // Always bind cleanup and crash recovery to the same fixed Desktop target.
+    // Deriving this field from whether the old link currently exists makes a
+    // retry diverge after a failure between link removal and recreation.
+    shortcutPath: desktopShortcutPath,
+    aumid: options.state.aumid,
+    packageFamilyName: options.state.packageFamilyName,
+    transitionId: options.state.transactionId,
+    attemptId: (dependencies.createAttemptId ?? randomUUID)()
+  });
+};
+
+/**
+ * Confirms that the Store journal durably records the broker-attested cleanup.
+ * The unpackaged broker retains its recovery entry until this acknowledgement
+ * succeeds, so a crash between cleanup and state persistence remains retryable.
+ */
+export const acknowledgeWindowsStoreLegacyCleanup = async (
+  options: AcknowledgeWindowsStoreLegacyCleanupOptions,
+  dependencies: AcknowledgeWindowsStoreLegacyCleanupDependencies = {}
+): Promise<void> => {
+  if (options.state.phase !== "legacy-cleanup-attested") {
+    throw new Error("Windows legacy cleanup can only be acknowledged after attestation is durable");
+  }
+  const helperPath = win32.join(options.resourcesPath, "native", EXTERNAL_HELPER_FILE);
+  normalizeDirectory(options.localAppDataPath, "LocalAppData");
+  const desktopShortcutPath = win32.join(
+    normalizeDirectory(options.desktopPath, "desktop"),
+    "Memmy.lnk"
+  );
+  await (dependencies.runAcknowledgement ?? runLegacyCleanupAcknowledgement)({
+    helperPath,
+    legacyInstallDirectory: options.state.sourceInstallDirectory,
+    legacyExecutablePath: options.state.sourceExecutablePath,
+    shortcutPath: desktopShortcutPath,
     aumid: options.state.aumid,
     packageFamilyName: options.state.packageFamilyName,
     transitionId: options.state.transactionId,
@@ -311,8 +334,6 @@ export const buildLegacyCleanupArguments = (
 ): string[] => {
   const args = [
     "finalize-legacy-cleanup",
-    "--external-helper-path",
-    options.externalHelperPath,
     "--legacy-install-directory",
     options.legacyInstallDirectory,
     "--legacy-executable-path",
@@ -330,6 +351,13 @@ export const buildLegacyCleanupArguments = (
   return args;
 };
 
+export const buildLegacyCleanupAcknowledgementArguments = (
+  options: RunLegacyCleanupOptions
+): string[] => [
+  "ack-legacy-cleanup",
+  ...buildLegacyCleanupArguments(options).slice(1)
+];
+
 const runLegacyCleanup = async (options: RunLegacyCleanupOptions): Promise<void> => {
   const args = buildLegacyCleanupArguments(options);
   await execFileAsync(options.helperPath, args, {
@@ -338,13 +366,13 @@ const runLegacyCleanup = async (options: RunLegacyCleanupOptions): Promise<void>
   });
 };
 
-const defaultPathExists = async (path: string): Promise<boolean> => {
-  try {
-    await access(path, fsConstants.F_OK);
-    return true;
-  } catch {
-    return false;
-  }
+const runLegacyCleanupAcknowledgement = async (
+  options: RunLegacyCleanupOptions
+): Promise<void> => {
+  await execFileAsync(options.helperPath, buildLegacyCleanupAcknowledgementArguments(options), {
+    timeout: 30_000,
+    windowsHide: true
+  });
 };
 
 const assertCurrentIdentity = (

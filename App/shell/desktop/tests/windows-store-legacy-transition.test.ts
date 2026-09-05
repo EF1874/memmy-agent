@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { win32 } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  acknowledgeWindowsStoreLegacyCleanup,
+  buildLegacyCleanupAcknowledgementArguments,
   buildLegacyCleanupArguments,
   finalizeWindowsStoreLegacyInstallation,
   prepareWindowsStoreLegacyTransitionBeforeLock,
@@ -266,14 +268,13 @@ describe("Windows Store legacy transition", () => {
     })).toThrow("does not match the running package");
   });
 
-  it("copies the packaged helper outside WindowsApps and requests breakaway cleanup for the exact source", async () => {
+  it("requests native-broker cleanup for the exact authoritative source", async () => {
     const fixture = await createFixture("E:\\Applications\\Memmy Custom");
     await prepareWindowsStoreLegacyTransitionBeforeLock(fixture.options, {
       runTakeover: async () => undefined
     });
     const state = await readWindowsStoreTransitionState(fixture.statePath);
     if (!state) throw new Error("test transition state is missing");
-    const stageHelper = vi.fn(async () => undefined);
     const runCleanup = vi.fn(async () => undefined);
 
     await finalizeWindowsStoreLegacyInstallation({
@@ -282,25 +283,10 @@ describe("Windows Store legacy transition", () => {
       desktopPath: fixture.options.desktopPath,
       state
     }, {
-      stageHelper,
-      pathExists: async () => true,
       runCleanup
     });
 
-    const expectedExternalHelper = win32.join(
-      fixture.options.localAppDataPath,
-      "Memmy",
-      "store-transition",
-      "native",
-      identity.packageFamilyName,
-      "MemmyStoreUpdate.exe"
-    );
-    expect(stageHelper).toHaveBeenCalledWith(
-      win32.join(fixture.options.resourcesPath, "native", "MemmyStoreUpdate.exe"),
-      expectedExternalHelper
-    );
     expect(runCleanup).toHaveBeenCalledWith(expect.objectContaining({
-      externalHelperPath: expectedExternalHelper,
       legacyInstallDirectory: "E:\\Applications\\Memmy Custom",
       legacyExecutablePath: "E:\\Applications\\Memmy Custom\\Memmy.exe",
       shortcutPath: win32.join(fixture.options.desktopPath, "Memmy.lnk"),
@@ -310,6 +296,42 @@ describe("Windows Store legacy transition", () => {
       )
     }));
     expect(runCleanup.mock.calls[0]?.[0]).not.toHaveProperty("logPath");
+  });
+
+  it("acknowledges the exact broker cleanup only after attestation is durable", async () => {
+    const fixture = await createFixture("E:\\Applications\\Memmy Custom");
+    const prepared = await prepareWindowsStoreLegacyTransitionBeforeLock(fixture.options, {
+      runTakeover: async () => undefined
+    });
+    if (prepared.status !== "prepared") throw new Error("transition was not prepared");
+    const state = { ...prepared.state, phase: "legacy-cleanup-attested" as const };
+    const runAcknowledgement = vi.fn(async () => undefined);
+
+    await acknowledgeWindowsStoreLegacyCleanup({
+      resourcesPath: fixture.options.resourcesPath,
+      localAppDataPath: fixture.options.localAppDataPath,
+      desktopPath: fixture.options.desktopPath,
+      state
+    }, {
+      runAcknowledgement,
+      createAttemptId: () => "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    });
+
+    expect(runAcknowledgement).toHaveBeenCalledWith(expect.objectContaining({
+      legacyInstallDirectory: state.sourceInstallDirectory,
+      legacyExecutablePath: state.sourceExecutablePath,
+      shortcutPath: win32.join(fixture.options.desktopPath, "Memmy.lnk"),
+      packageFamilyName: state.packageFamilyName,
+      aumid: state.aumid,
+      transitionId: state.transactionId,
+      attemptId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    }));
+    await expect(acknowledgeWindowsStoreLegacyCleanup({
+      resourcesPath: fixture.options.resourcesPath,
+      localAppDataPath: fixture.options.localAppDataPath,
+      desktopPath: fixture.options.desktopPath,
+      state: prepared.state
+    }, { runAcknowledgement })).rejects.toThrow("only be acknowledged after attestation");
   });
 
   it("retires only the consumed NSIS authority and treats a repeated retirement as complete", async () => {
@@ -362,9 +384,8 @@ describe("Windows Store legacy transition", () => {
   });
 
   it("builds the exact packaged-helper cleanup argv without accepting a diagnostic path", () => {
-    expect(buildLegacyCleanupArguments({
+    const options = {
       helperPath: "C:\\Program Files\\WindowsApps\\MemmyStoreUpdate.exe",
-      externalHelperPath: "C:\\Users\\lee\\AppData\\Local\\Memmy\\store-transition\\native\\MemmyStoreUpdate.exe",
       legacyInstallDirectory: "D:\\memmy",
       legacyExecutablePath: "D:\\memmy\\Memmy.exe",
       shortcutPath: "E:\\Users\\lee\\Desktop\\Memmy.lnk",
@@ -372,10 +393,8 @@ describe("Windows Store legacy transition", () => {
       packageFamilyName: identity.packageFamilyName,
       transitionId: "11111111-2222-4333-8444-555555555555",
       attemptId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
-    })).toEqual([
-      "finalize-legacy-cleanup",
-      "--external-helper-path",
-      "C:\\Users\\lee\\AppData\\Local\\Memmy\\store-transition\\native\\MemmyStoreUpdate.exe",
+    };
+    const expectedIdentityArguments = [
       "--legacy-install-directory",
       "D:\\memmy",
       "--legacy-executable-path",
@@ -390,6 +409,14 @@ describe("Windows Store legacy transition", () => {
       "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
       "--shortcut",
       "E:\\Users\\lee\\Desktop\\Memmy.lnk"
+    ];
+    expect(buildLegacyCleanupArguments(options)).toEqual([
+      "finalize-legacy-cleanup",
+      ...expectedIdentityArguments
+    ]);
+    expect(buildLegacyCleanupAcknowledgementArguments(options)).toEqual([
+      "ack-legacy-cleanup",
+      ...expectedIdentityArguments
     ]);
   });
 
@@ -420,8 +447,6 @@ describe("Windows Store legacy transition", () => {
       throw new Error("diagnostic retry");
     });
     const dependencies = {
-      stageHelper: async () => undefined,
-      pathExists: async () => false,
       runCleanup,
       createAttemptId: () => attemptIds.shift() ?? "unexpected"
     };
@@ -441,15 +466,18 @@ describe("Windows Store legacy transition", () => {
 
     expect(runCleanup.mock.calls.map(([options]) => ({
       transitionId: options.transitionId,
-      attemptId: options.attemptId
+      attemptId: options.attemptId,
+      shortcutPath: options.shortcutPath
     }))).toEqual([
       {
         transitionId: state.transactionId,
-        attemptId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        attemptId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        shortcutPath: win32.join(fixture.options.desktopPath, "Memmy.lnk")
       },
       {
         transitionId: state.transactionId,
-        attemptId: "ffffffff-1111-4222-8333-444444444444"
+        attemptId: "ffffffff-1111-4222-8333-444444444444",
+        shortcutPath: win32.join(fixture.options.desktopPath, "Memmy.lnk")
       }
     ]);
     expect(state).not.toHaveProperty("attemptId");

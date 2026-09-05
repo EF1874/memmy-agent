@@ -117,6 +117,7 @@ export const commitWindowsStoreRuntimeSelectionForVerifiedBoot = async (
     "awaiting-app-verification",
     "app-verified",
     "legacy-cleanup-complete",
+    "legacy-cleanup-attested",
     "cleanup-eligible"
   ].includes(state.phase)) {
     throw new Error(`Windows Store runtime selection cannot be committed from phase ${state.phase}`);

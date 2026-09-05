@@ -62,7 +62,7 @@ describe("orphaned Windows Store transition recovery", () => {
 
   it("fails closed if the active journal changed after the package query", async () => {
     const fixture = await createFixture();
-    const changed = advanceWindowsStoreTransitionState(fixture.state, "legacy-cleanup-complete");
+    const changed = advanceWindowsStoreTransitionState(fixture.state, "legacy-cleanup-attested");
     await writeWindowsStoreTransitionState(fixture.statePath, changed);
 
     await expect(archiveOrphanedWindowsStoreTransition({

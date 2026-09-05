@@ -57,7 +57,7 @@ describe("Windows Store transition source barrier", () => {
       "data-prepared",
       "awaiting-app-verification",
       "app-verified",
-      "legacy-cleanup-complete",
+      "legacy-cleanup-attested",
       "cleanup-eligible",
       "cleaned"
     ] as const) {
@@ -82,7 +82,7 @@ describe("Windows Store transition source barrier", () => {
       "data-prepared",
       "awaiting-app-verification",
       "app-verified",
-      "legacy-cleanup-complete",
+      "legacy-cleanup-attested",
       "cleanup-eligible",
       "cleaned"
     ] as const) {

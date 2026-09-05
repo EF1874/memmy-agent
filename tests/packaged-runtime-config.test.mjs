@@ -468,6 +468,37 @@ describe("packaged desktop runtime configuration", () => {
     expect(mismatch.stderr).toContain("workspace versions do not match");
   });
 
+  it("stamps a deterministic content identity after the Windows Memory runtime is assembled", () => {
+    const root = fixtureRoot();
+    const runtime = join(root, "runtime");
+    const metadataPath = join(runtime, "memory-runtime.json");
+    mkdirSync(join(runtime, "dist"), { recursive: true });
+    writeFixtureJson(metadataPath, {
+      version: "2.1.0",
+      protocolVersion: 1,
+      target: "windows-x64",
+    });
+    writeFileSync(join(runtime, "dist", "service.js"), "stable runtime bytes\n");
+    const stamper = join(
+      dirname(fileURLToPath(import.meta.url)),
+      "..", "scripts", "internal", "win", "stamp-memory-runtime-content-id.mjs",
+    );
+
+    const first = spawnSync(process.execPath, [stamper, runtime], { encoding: "utf8" });
+    expect(first.status, first.stderr).toBe(0);
+    const firstId = JSON.parse(readFileSync(metadataPath, "utf8")).contentId;
+    expect(firstId).toMatch(/^[a-f0-9]{64}$/);
+
+    const second = spawnSync(process.execPath, [stamper, runtime], { encoding: "utf8" });
+    expect(second.status, second.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(metadataPath, "utf8")).contentId).toBe(firstId);
+
+    writeFileSync(join(runtime, "dist", "service.js"), "changed runtime bytes\n");
+    const changed = spawnSync(process.execPath, [stamper, runtime], { encoding: "utf8" });
+    expect(changed.status, changed.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(metadataPath, "utf8")).contentId).not.toBe(firstId);
+  });
+
   it("fails closed on ASAR env files, Windows runtime duplication, and stale embedded versions", async () => {
     const root = fixtureRoot();
     const verifier = join(
@@ -698,6 +729,14 @@ describe("packaged desktop runtime configuration", () => {
     );
     expect(buildScript).toContain(
       'cp "$AGENT_SOURCE_CORE_DIR/dist/src/index.js" "$RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR/dist/src/index.js"',
+    );
+    const contentStamp = 'node "$ROOT_DIR/scripts/internal/win/stamp-memory-runtime-content-id.mjs" "$RUNTIME_DIR/memory"';
+    expect(buildScript).toContain(contentStamp);
+    expect(buildScript.indexOf(contentStamp)).toBeGreaterThan(
+      buildScript.indexOf('cp -R "$EMBEDDING_MODELS_DIR" "$RUNTIME_DIR/memory/embedding-models"'),
+    );
+    expect(buildScript.indexOf(contentStamp)).toBeLessThan(
+      buildScript.indexOf('npx electron-builder "${BUILDER_ARGS[@]}"'),
     );
     expect(buildScript.indexOf('npm_ci_win_x64 "$RUNTIME_DIR/memory"')).toBeLessThan(
       buildScript.indexOf('RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR="$RUNTIME_DIR/memory/node_modules/@memmy/agent-source-core"'),

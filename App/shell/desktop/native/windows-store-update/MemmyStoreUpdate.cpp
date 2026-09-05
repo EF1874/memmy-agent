@@ -1,8 +1,10 @@
 #include <windows.h>
 #include <appmodel.h>
+#include <sddl.h>
 #include <shlobj_core.h>
 #include <shobjidl_core.h>
 #include <tlhelp32.h>
+#include <wincrypt.h>
 
 #include <algorithm>
 #include <array>
@@ -16,6 +18,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -54,13 +57,28 @@ namespace
         StartupEnable,
         StartupDisable,
         PrepareLegacyTakeover,
+        EnsureLegacyCleanupBroker,
+        LegacyCleanupBroker,
+        StopLegacyCleanupBroker,
+        AuthorizeNsisMutation,
         FinalizeLegacyCleanup,
+        AckLegacyCleanup,
         FinalizeLegacyCleanupBreakawayLauncher,
         FinalizeLegacyCleanupUnpackaged
     };
 
     constexpr wchar_t store_startup_task_id[] = L"MemmyStartupTask";
     constexpr wchar_t legacy_app_user_model_id[] = L"cn.memtensor.memmy";
+    constexpr wchar_t legacy_cleanup_broker_run_value[] =
+        L"Memmy Store Transition Broker";
+    constexpr wchar_t legacy_cleanup_broker_run_key[] =
+        L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+    constexpr wchar_t legacy_transition_mutation_mutex_name[] =
+        L"Local\\MemmyStoreTransitionNsisMutation";
+    constexpr wchar_t allowed_memmy_package_family[] =
+        L"Memtensor.Memmy_eyack96k521x2";
+    constexpr wchar_t allowed_memmy_agent_package_family[] =
+        L"Memtensor.MemmyAgent_eyack96k521x2";
 
     struct StoreInstallHandoffOptions
     {
@@ -137,6 +155,165 @@ namespace
         std::optional<DWORD> current_win32_error;
     };
 
+    enum class LegacyCleanupBrokerMessage : uint32_t
+    {
+        Ping = 1,
+        Cleanup = 2,
+        Stop = 3,
+        Acknowledge = 4,
+        Response = 5
+    };
+
+    struct LegacyCleanupBrokerResponse
+    {
+        HRESULT hresult = S_OK;
+        std::optional<DWORD> win32_error;
+        std::wstring transition_id;
+        std::wstring attempt_id;
+        std::string operation;
+        std::string target;
+        std::string message;
+    };
+
+    struct LegacySourceExecutableIdentity
+    {
+        DWORD volume_serial_number = 0;
+        uint64_t file_index = 0;
+        uint64_t file_size = 0;
+        uint64_t last_write_time = 0;
+    };
+
+    struct LegacyAuthorityCapture
+    {
+        std::wstring user_sid;
+        DWORD session_id = 0;
+        std::filesystem::path install_directory;
+        std::optional<std::wstring> installer_32;
+        std::optional<std::wstring> installer_64;
+        std::optional<std::wstring> uninstall_32;
+        std::optional<std::wstring> uninstall_64;
+        std::optional<LegacySourceExecutableIdentity> source_executable_identity;
+    };
+
+    enum class LegacyCleanupJournalPhase : uint32_t
+    {
+        Prepared = 1,
+        Complete = 2,
+        Acknowledged = 3
+    };
+
+    struct LegacyCleanupJournal
+    {
+        LegacyCleanupJournalPhase phase = LegacyCleanupJournalPhase::Prepared;
+        LegacyTransitionOptions options;
+        LegacyAuthorityCapture authority;
+    };
+
+    class scoped_handle
+    {
+    public:
+        scoped_handle() noexcept = default;
+        explicit scoped_handle(HANDLE value) noexcept : value_(value) {}
+        scoped_handle(const scoped_handle&) = delete;
+        scoped_handle& operator=(const scoped_handle&) = delete;
+        scoped_handle(scoped_handle&& other) noexcept : value_(other.release()) {}
+        scoped_handle& operator=(scoped_handle&& other) noexcept
+        {
+            if (this != &other)
+            {
+                reset(other.release());
+            }
+            return *this;
+        }
+        ~scoped_handle() noexcept
+        {
+            reset();
+        }
+        HANDLE get() const noexcept { return value_; }
+        explicit operator bool() const noexcept
+        {
+            return value_ != nullptr && value_ != INVALID_HANDLE_VALUE;
+        }
+        HANDLE release() noexcept
+        {
+            const HANDLE result = value_;
+            value_ = INVALID_HANDLE_VALUE;
+            return result;
+        }
+        void reset(HANDLE value = INVALID_HANDLE_VALUE) noexcept
+        {
+            if (*this)
+            {
+                CloseHandle(value_);
+            }
+            value_ = value;
+        }
+
+    private:
+        HANDLE value_ = INVALID_HANDLE_VALUE;
+    };
+
+    class scoped_registry_key
+    {
+    public:
+        scoped_registry_key() noexcept = default;
+        explicit scoped_registry_key(HKEY value) noexcept : value_(value) {}
+        scoped_registry_key(const scoped_registry_key&) = delete;
+        scoped_registry_key& operator=(const scoped_registry_key&) = delete;
+        ~scoped_registry_key() noexcept
+        {
+            if (value_ != nullptr)
+            {
+                RegCloseKey(value_);
+            }
+        }
+        HKEY get() const noexcept { return value_; }
+
+    private:
+        HKEY value_ = nullptr;
+    };
+
+    class scoped_mutex_ownership
+    {
+    public:
+        scoped_mutex_ownership() noexcept = default;
+        scoped_mutex_ownership(const scoped_mutex_ownership&) = delete;
+        scoped_mutex_ownership& operator=(const scoped_mutex_ownership&) = delete;
+        ~scoped_mutex_ownership() noexcept
+        {
+            reset();
+        }
+        void acquire(HANDLE mutex)
+        {
+            reset();
+            handle_ = mutex;
+            const DWORD wait_result = WaitForSingleObject(handle_, 15000);
+            if (wait_result != WAIT_OBJECT_0 && wait_result != WAIT_ABANDONED)
+            {
+                const DWORD error = wait_result == WAIT_TIMEOUT
+                    ? ERROR_TIMEOUT
+                    : GetLastError();
+                handle_ = nullptr;
+                throw hresult_error(
+                    HRESULT_FROM_WIN32(error),
+                    L"Unable to acquire the NSIS and Store transition mutation mutex");
+            }
+            owned_ = true;
+        }
+        void reset() noexcept
+        {
+            if (owned_ && handle_ != nullptr)
+            {
+                ReleaseMutex(handle_);
+            }
+            owned_ = false;
+            handle_ = nullptr;
+        }
+    private:
+        HANDLE handle_ = nullptr;
+        bool owned_ = false;
+    };
+
     std::optional<LegacyCleanupDiagnostics> legacy_cleanup_diagnostics;
 
     std::string utf8(const std::wstring& value);
@@ -162,6 +339,8 @@ namespace
     void write_text_file_atomic(
         const std::filesystem::path& target_path,
         const std::string& contents);
+    void require_allowed_memmy_package_identity(
+        const LegacyTransitionOptions& options);
 
     struct ProcessSnapshotEntry
     {
@@ -3546,7 +3725,9 @@ namespace
         }
     }
 
-    void finalize_legacy_cleanup_unpacked(const LegacyTransitionOptions& options)
+    void finalize_legacy_cleanup_unpacked(
+        const LegacyTransitionOptions& options,
+        bool authority_was_attested = false)
     {
         begin_legacy_cleanup_operation(
             "identity-query",
@@ -3562,9 +3743,39 @@ namespace
         begin_legacy_cleanup_operation(
             "authority-registry",
             registry_target(legacy_installer_key, L"InstallLocation"));
-        const bool install_exists = validate_legacy_install_authority(
-            options.legacy_install_directory,
-            options.legacy_executable_path);
+        bool install_exists = false;
+        if (authority_was_attested)
+        {
+            const DWORD directory_attributes = GetFileAttributesW(
+                options.legacy_install_directory.c_str());
+            if (directory_attributes == INVALID_FILE_ATTRIBUTES)
+            {
+                const DWORD inspect_error = GetLastError();
+                if (inspect_error != ERROR_FILE_NOT_FOUND && inspect_error != ERROR_PATH_NOT_FOUND)
+                {
+                    throw hresult_error(
+                        HRESULT_FROM_WIN32(inspect_error),
+                        L"Unable to inspect the attested legacy installation during cleanup recovery");
+                }
+            }
+            else
+            {
+                if ((directory_attributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+                    (directory_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+                {
+                    throw hresult_error(
+                        E_ACCESSDENIED,
+                        L"Attested legacy installation changed to an unsafe path before cleanup");
+                }
+                install_exists = true;
+            }
+        }
+        else
+        {
+            install_exists = validate_legacy_install_authority(
+                options.legacy_install_directory,
+                options.legacy_executable_path);
+        }
         complete_legacy_cleanup_operation(
             std::string("installExists=") + (install_exists ? "true" : "false"));
         if (install_exists)
@@ -3572,7 +3783,18 @@ namespace
             begin_legacy_cleanup_operation(
                 "legacy-processes-stop",
                 utf8(options.legacy_install_directory.wstring()));
-            prepare_legacy_takeover(options);
+            if (authority_was_attested)
+            {
+                // A Prepared journal proves the original executable generation.
+                // A prior idempotent delete attempt may already have removed
+                // Memmy.exe, so retry only the process-tree stop here instead of
+                // requiring the original executable to still exist.
+                stop_legacy_processes(options.legacy_install_directory);
+            }
+            else
+            {
+                prepare_legacy_takeover(options);
+            }
             complete_legacy_cleanup_operation();
 
             begin_legacy_cleanup_operation(
@@ -3850,6 +4072,3199 @@ namespace
                 "skipped-no-existing-desktop-shortcut");
         }
         append_legacy_cleanup_diagnostic("cleanup-complete", "success");
+    }
+
+    DWORD current_process_session_id()
+    {
+        DWORD session_id = 0;
+        if (!ProcessIdToSessionId(GetCurrentProcessId(), &session_id))
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to resolve the current process session");
+        }
+        return session_id;
+    }
+
+    std::wstring token_user_sid(HANDLE token)
+    {
+        DWORD bytes = 0;
+        GetTokenInformation(token, TokenUser, nullptr, 0, &bytes);
+        const DWORD size_error = GetLastError();
+        if (size_error != ERROR_INSUFFICIENT_BUFFER || bytes == 0)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(size_error),
+                L"Unable to size a process user token");
+        }
+        std::vector<unsigned char> buffer(bytes);
+        if (!GetTokenInformation(token, TokenUser, buffer.data(), bytes, &bytes))
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to read a process user token");
+        }
+        const auto token_user = reinterpret_cast<const TOKEN_USER*>(buffer.data());
+        LPWSTR sid_text = nullptr;
+        if (!ConvertSidToStringSidW(token_user->User.Sid, &sid_text) || sid_text == nullptr)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to format a process user SID");
+        }
+        const std::wstring result(sid_text);
+        LocalFree(sid_text);
+        return result;
+    }
+
+    std::wstring process_user_sid(HANDLE process)
+    {
+        HANDLE raw_token = nullptr;
+        if (!OpenProcessToken(process, TOKEN_QUERY, &raw_token))
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to open a process token for user validation");
+        }
+        scoped_handle token(raw_token);
+        return token_user_sid(token.get());
+    }
+
+    std::wstring current_user_sid()
+    {
+        return process_user_sid(GetCurrentProcess());
+    }
+
+    std::optional<std::wstring> process_package_family(HANDLE process)
+    {
+        HANDLE raw_token = nullptr;
+        if (!OpenProcessToken(process, TOKEN_QUERY, &raw_token))
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to open a process token for package-family validation");
+        }
+        scoped_handle token(raw_token);
+        UINT32 length = 0;
+        LONG result = GetPackageFamilyNameFromToken(token.get(), &length, nullptr);
+        if (result == APPMODEL_ERROR_NO_PACKAGE)
+        {
+            return std::nullopt;
+        }
+        if (result != ERROR_INSUFFICIENT_BUFFER || length == 0)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(result),
+                L"Unable to size a process package-family name");
+        }
+        std::vector<wchar_t> value(length);
+        result = GetPackageFamilyNameFromToken(token.get(), &length, value.data());
+        if (result != ERROR_SUCCESS)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(result),
+                L"Unable to read a process package-family name");
+        }
+        return std::wstring(value.data());
+    }
+
+    std::wstring process_application_user_model_id(HANDLE process)
+    {
+        UINT32 length = 0;
+        LONG result = GetApplicationUserModelId(process, &length, nullptr);
+        if (result != ERROR_INSUFFICIENT_BUFFER || length == 0)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(result),
+                L"Unable to size a process application user model ID");
+        }
+        std::vector<wchar_t> value(length);
+        result = GetApplicationUserModelId(process, &length, value.data());
+        if (result != ERROR_SUCCESS)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(result),
+                L"Unable to read a process application user model ID");
+        }
+        return std::wstring(value.data());
+    }
+
+    std::filesystem::path process_image_path(HANDLE process)
+    {
+        std::vector<wchar_t> value(32768);
+        DWORD length = static_cast<DWORD>(value.size());
+        if (!QueryFullProcessImageNameW(process, 0, value.data(), &length) || length == 0)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to resolve a process image path");
+        }
+        return std::filesystem::path(std::wstring(value.data(), length));
+    }
+
+    DWORD current_parent_process_id()
+    {
+        scoped_handle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
+        if (!snapshot)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to inspect the cleanup broker parent process");
+        }
+        PROCESSENTRY32W entry{};
+        entry.dwSize = sizeof(entry);
+        if (!Process32FirstW(snapshot.get(), &entry))
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to enumerate the cleanup broker parent process");
+        }
+        do
+        {
+            if (entry.th32ProcessID == GetCurrentProcessId())
+            {
+                return entry.th32ParentProcessID;
+            }
+        } while (Process32NextW(snapshot.get(), &entry));
+        throw hresult_error(E_UNEXPECTED, L"Cleanup broker process is absent from the process snapshot");
+    }
+
+    void validate_cleanup_broker_parent_process(
+        const std::wstring& expected_user_sid,
+        DWORD expected_session_id)
+    {
+        const DWORD parent_process_id = current_parent_process_id();
+        scoped_handle parent(OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION,
+            FALSE,
+            parent_process_id));
+        if (!parent)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to open the cleanup broker parent process");
+        }
+        DWORD parent_session_id = 0;
+        if (!ProcessIdToSessionId(parent_process_id, &parent_session_id))
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to resolve the cleanup broker parent session");
+        }
+        if (parent_session_id != expected_session_id ||
+            _wcsicmp(process_user_sid(parent.get()).c_str(), expected_user_sid.c_str()) != 0)
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Cleanup broker parent does not belong to the current user and session");
+        }
+        if (process_package_family(parent.get()))
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Cleanup broker must be created by an unpackaged parent process");
+        }
+    }
+
+    std::filesystem::path legacy_cleanup_broker_directory()
+    {
+        return resolve_known_folder_path(
+            FOLDERID_LocalAppData,
+            L"The current user's Local AppData directory is unavailable for the cleanup broker") /
+            L"Memmy" / L"store-transition" / L"broker";
+    }
+
+    std::filesystem::path legacy_cleanup_broker_executable_path()
+    {
+        return legacy_cleanup_broker_directory() / L"MemmyStoreUpdate.exe";
+    }
+
+    void validate_or_create_plain_directory(
+        const std::filesystem::path& path,
+        bool allow_create)
+    {
+        DWORD attributes = GetFileAttributesW(path.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES && allow_create)
+        {
+            const DWORD inspect_error = GetLastError();
+            if (inspect_error != ERROR_FILE_NOT_FOUND && inspect_error != ERROR_PATH_NOT_FOUND)
+            {
+                throw hresult_error(
+                    HRESULT_FROM_WIN32(inspect_error),
+                    L"Unable to inspect a cleanup broker directory");
+            }
+            if (!CreateDirectoryW(path.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS)
+            {
+                throw hresult_error(
+                    HRESULT_FROM_WIN32(GetLastError()),
+                    L"Unable to create a cleanup broker directory");
+            }
+            attributes = GetFileAttributesW(path.c_str());
+        }
+        if (attributes == INVALID_FILE_ATTRIBUTES ||
+            (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+            (attributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_ENCRYPTED)) != 0)
+        {
+            throw hresult_invalid_argument(
+                L"Cleanup broker directory is missing, unsafe, encrypted, or a reparse point");
+        }
+    }
+
+    void validate_cleanup_broker_directory_chain(bool allow_create)
+    {
+        const std::filesystem::path local_app_data = resolve_known_folder_path(
+            FOLDERID_LocalAppData,
+            L"The current user's Local AppData directory is unavailable for the cleanup broker");
+        if (!local_app_data.is_absolute() ||
+            normalize_absolute_path(local_app_data) == normalize_absolute_path(local_app_data.root_path()))
+        {
+            throw hresult_invalid_argument(L"LOCALAPPDATA is unsafe for the cleanup broker");
+        }
+        validate_or_create_plain_directory(local_app_data, false);
+        validate_or_create_plain_directory(local_app_data / L"Memmy", allow_create);
+        validate_or_create_plain_directory(
+            local_app_data / L"Memmy" / L"store-transition",
+            allow_create);
+        validate_or_create_plain_directory(legacy_cleanup_broker_directory(), allow_create);
+    }
+
+    void validate_cleanup_broker_executable()
+    {
+        validate_cleanup_broker_directory_chain(false);
+        const std::filesystem::path expected_path = legacy_cleanup_broker_executable_path();
+        if (normalize_absolute_path(current_executable_path()) != normalize_absolute_path(expected_path))
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Cleanup broker is not running from its fixed staged path");
+        }
+        const DWORD attributes = GetFileAttributesW(expected_path.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES ||
+            (attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT |
+                FILE_ATTRIBUTE_ENCRYPTED)) != 0)
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Cleanup broker executable is not a plain unencrypted file");
+        }
+    }
+
+    void initialize_cleanup_broker_startup_diagnostics()
+    {
+        LegacyCleanupDiagnostics diagnostics;
+        diagnostics.directory_path = legacy_cleanup_broker_directory();
+        diagnostics.log_path = diagnostics.directory_path /
+            (L"broker-startup-" + std::to_wstring(GetCurrentProcessId()) + L".jsonl");
+        diagnostics.process_role = "native-cleanup-broker-startup";
+        diagnostics.failure_process_role = diagnostics.process_role;
+        diagnostics.transition_id = "broker-startup";
+        diagnostics.attempt_id = "broker-startup";
+        diagnostics.process_id = GetCurrentProcessId();
+        diagnostics.session_id_available = ProcessIdToSessionId(
+            diagnostics.process_id,
+            &diagnostics.session_id) != FALSE;
+        UINT32 package_name_length = 0;
+        diagnostics.package_identity_result = GetCurrentPackageFullName(
+            &package_name_length,
+            nullptr);
+        if (diagnostics.package_identity_result == ERROR_INSUFFICIENT_BUFFER &&
+            package_name_length > 0)
+        {
+            std::vector<wchar_t> package_name(package_name_length);
+            diagnostics.package_identity_result = GetCurrentPackageFullName(
+                &package_name_length,
+                package_name.data());
+            if (diagnostics.package_identity_result == ERROR_SUCCESS)
+            {
+                diagnostics.has_package_identity = true;
+                diagnostics.package_full_name = utf8(std::wstring(package_name.data()));
+            }
+        }
+        diagnostics.current_operation = "broker-startup-attestation";
+        diagnostics.current_target = utf8(current_executable_path().wstring());
+        legacy_cleanup_diagnostics = std::move(diagnostics);
+        if (!append_legacy_cleanup_diagnostic(
+                "process-context",
+                "started",
+                "broker-startup-attestation",
+                utf8(current_executable_path().wstring())))
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(ERROR_WRITE_FAULT),
+                L"Unable to initialize the fixed cleanup broker startup diagnostic log");
+        }
+    }
+
+    std::optional<std::wstring> read_authority_registry_value(
+        HKEY root,
+        const std::wstring& user_sid,
+        const wchar_t* key_path,
+        REGSAM view_access,
+        const std::string& root_name,
+        const std::string& view_name)
+    {
+        const std::wstring resolved_key_path = root == HKEY_USERS
+            ? user_sid + L"\\" + key_path
+            : std::wstring(key_path);
+        HKEY raw_key = nullptr;
+        const LSTATUS open_result = RegOpenKeyExW(
+            root,
+            resolved_key_path.c_str(),
+            0,
+            KEY_QUERY_VALUE | view_access,
+            &raw_key);
+        append_legacy_cleanup_diagnostic(
+            "broker-authority-attestation",
+            open_result == ERROR_SUCCESS
+                ? "opened"
+                : (open_result == ERROR_FILE_NOT_FOUND || open_result == ERROR_PATH_NOT_FOUND
+                    ? "missing"
+                    : "error"),
+            "RegOpenKeyExW(authority-attestation)",
+            root_name + "\\" + utf8(key_path) + "\\InstallLocation",
+            static_cast<DWORD>(open_result),
+            HRESULT_FROM_WIN32(open_result),
+            "view=" + view_name);
+        if (open_result == ERROR_FILE_NOT_FOUND || open_result == ERROR_PATH_NOT_FOUND)
+        {
+            return std::nullopt;
+        }
+        if (open_result != ERROR_SUCCESS)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(open_result),
+                L"Unable to open the cleanup broker installation authority");
+        }
+        scoped_registry_key key(raw_key);
+        DWORD type = 0;
+        DWORD bytes = 0;
+        LSTATUS result = RegQueryValueExW(
+            key.get(),
+            L"InstallLocation",
+            nullptr,
+            &type,
+            nullptr,
+            &bytes);
+        if (result == ERROR_FILE_NOT_FOUND)
+        {
+            return std::nullopt;
+        }
+        if (result != ERROR_SUCCESS ||
+            (type != REG_SZ && type != REG_EXPAND_SZ) ||
+            bytes < sizeof(wchar_t) ||
+            bytes > 65536)
+        {
+            throw hresult_error(
+                result == ERROR_SUCCESS ? E_INVALIDARG : HRESULT_FROM_WIN32(result),
+                L"Cleanup broker installation authority has an invalid value");
+        }
+        std::vector<wchar_t> value((bytes / sizeof(wchar_t)) + 1, L'\0');
+        result = RegQueryValueExW(
+            key.get(),
+            L"InstallLocation",
+            nullptr,
+            &type,
+            reinterpret_cast<BYTE*>(value.data()),
+            &bytes);
+        if (result != ERROR_SUCCESS)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(result),
+                L"Unable to read the cleanup broker installation authority");
+        }
+        if (value[0] == L'\0')
+        {
+            throw hresult_invalid_argument(L"Cleanup broker installation authority is empty");
+        }
+        return std::wstring(value.data());
+    }
+
+    void require_matching_authority_views(
+        const std::optional<std::wstring>& current_user_value,
+        const std::optional<std::wstring>& explicit_user_value)
+    {
+        if (current_user_value.has_value() != explicit_user_value.has_value() ||
+            (current_user_value &&
+             normalize_absolute_path(*current_user_value) !=
+                normalize_absolute_path(*explicit_user_value)))
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"HKCU and explicit HKEY_USERS cleanup authorities do not agree");
+        }
+    }
+
+    LegacySourceExecutableIdentity capture_source_executable_identity(
+        const std::filesystem::path& executable_path)
+    {
+        scoped_handle executable(CreateFileW(
+            executable_path.c_str(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+            nullptr));
+        if (!executable)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to open the legacy executable for generation attestation");
+        }
+        BY_HANDLE_FILE_INFORMATION information{};
+        if (!GetFileInformationByHandle(executable.get(), &information))
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to read the legacy executable generation identity");
+        }
+        if ((information.dwFileAttributes &
+             (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0)
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Legacy executable generation identity resolved to an unsafe object");
+        }
+        return LegacySourceExecutableIdentity{
+            information.dwVolumeSerialNumber,
+            (static_cast<uint64_t>(information.nFileIndexHigh) << 32) |
+                information.nFileIndexLow,
+            (static_cast<uint64_t>(information.nFileSizeHigh) << 32) |
+                information.nFileSizeLow,
+            (static_cast<uint64_t>(information.ftLastWriteTime.dwHighDateTime) << 32) |
+                information.ftLastWriteTime.dwLowDateTime
+        };
+    }
+
+    bool source_executable_identities_match(
+        const LegacySourceExecutableIdentity& first,
+        const LegacySourceExecutableIdentity& second)
+    {
+        return first.volume_serial_number == second.volume_serial_number &&
+            first.file_index == second.file_index &&
+            first.file_size == second.file_size &&
+            first.last_write_time == second.last_write_time;
+    }
+
+    void verify_source_executable_generation(
+        const LegacyAuthorityCapture& capture,
+        bool allow_missing_after_prepared_cleanup)
+    {
+        const std::filesystem::path executable_path =
+            capture.install_directory / L"Memmy.exe";
+        const DWORD attributes = GetFileAttributesW(executable_path.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES)
+        {
+            const DWORD error = GetLastError();
+            if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
+            {
+                if (!capture.source_executable_identity)
+                {
+                    if (path_is_missing(capture.install_directory))
+                    {
+                        return;
+                    }
+                    throw hresult_error(
+                        E_ACCESSDENIED,
+                        L"A legacy install directory appeared after residue-only authority capture");
+                }
+                if (allow_missing_after_prepared_cleanup)
+                {
+                    return;
+                }
+            }
+            throw hresult_error(
+                HRESULT_FROM_WIN32(error),
+                L"Legacy executable generation identity is no longer available");
+        }
+        if (!capture.source_executable_identity)
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"A legacy executable appeared after residue-only authority capture");
+        }
+        const LegacySourceExecutableIdentity current_identity =
+            capture_source_executable_identity(executable_path);
+        if (!source_executable_identities_match(
+                *capture.source_executable_identity,
+                current_identity))
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Legacy executable generation changed after broker authority capture");
+        }
+    }
+
+    LegacyAuthorityCapture capture_legacy_cleanup_authority()
+    {
+        LegacyAuthorityCapture capture;
+        capture.user_sid = current_user_sid();
+        capture.session_id = current_process_session_id();
+        const auto read_pair = [&](const wchar_t* key_path, REGSAM view, const std::string& view_name)
+        {
+            const auto current_user_value = read_authority_registry_value(
+                HKEY_CURRENT_USER,
+                capture.user_sid,
+                key_path,
+                view,
+                "HKCU",
+                view_name);
+            const auto explicit_user_value = read_authority_registry_value(
+                HKEY_USERS,
+                capture.user_sid,
+                key_path,
+                view,
+                "HKU\\" + utf8(capture.user_sid),
+                view_name);
+            require_matching_authority_views(current_user_value, explicit_user_value);
+            return current_user_value;
+        };
+        capture.installer_32 = read_pair(legacy_installer_key, KEY_WOW64_32KEY, "32-bit");
+        capture.installer_64 = read_pair(legacy_installer_key, KEY_WOW64_64KEY, "64-bit");
+        capture.uninstall_32 = read_pair(legacy_uninstall_key, KEY_WOW64_32KEY, "32-bit");
+        capture.uninstall_64 = read_pair(legacy_uninstall_key, KEY_WOW64_64KEY, "64-bit");
+
+        if (!capture.installer_32 && !capture.installer_64)
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Cleanup broker could not capture a fixed legacy installer authority");
+        }
+        const std::optional<std::wstring>* values[] = {
+            &capture.installer_32,
+            &capture.installer_64,
+            &capture.uninstall_32,
+            &capture.uninstall_64
+        };
+        const std::wstring canonical_install_directory = normalize_absolute_path(
+            capture.installer_32 ? *capture.installer_32 : *capture.installer_64);
+        for (const auto* value : values)
+        {
+            if (*value && normalize_absolute_path(**value) != canonical_install_directory)
+            {
+                throw hresult_error(
+                    E_ACCESSDENIED,
+                    L"Legacy cleanup authority views disagree about the install directory");
+            }
+        }
+        capture.install_directory = capture.installer_32
+            ? std::filesystem::path(*capture.installer_32)
+            : std::filesystem::path(*capture.installer_64);
+        LegacyTransitionOptions validation_options;
+        validation_options.legacy_install_directory = capture.install_directory;
+        validation_options.legacy_executable_path = capture.install_directory / L"Memmy.exe";
+        const bool captured_install_exists = validate_legacy_install_authority(
+            validation_options.legacy_install_directory,
+            validation_options.legacy_executable_path);
+        if (!captured_install_exists && !path_is_missing(capture.install_directory))
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Cleanup broker residue authority has an ambiguous installation path");
+        }
+        if (captured_install_exists)
+        {
+            capture.source_executable_identity = capture_source_executable_identity(
+                validation_options.legacy_executable_path);
+        }
+        append_legacy_cleanup_diagnostic(
+            "broker-authority-attestation",
+            captured_install_exists ? "installed-source-captured" : "residue-only-captured",
+            "capture-native-authority",
+            utf8(capture.install_directory.wstring()),
+            std::nullopt,
+            S_OK,
+            std::string("installDirectoryExists=") +
+                (captured_install_exists ? "true" : "false") +
+                "; executableGenerationCaptured=" +
+                (capture.source_executable_identity ? "true" : "false"));
+        return capture;
+    }
+
+    void verify_legacy_cleanup_authority_unchanged(const LegacyAuthorityCapture& capture)
+    {
+        const auto verify_pair = [&](const wchar_t* key_path,
+                                     REGSAM view,
+                                     const std::string& view_name,
+                                     const std::optional<std::wstring>& expected)
+        {
+            const auto current_user_value = read_authority_registry_value(
+                HKEY_CURRENT_USER,
+                capture.user_sid,
+                key_path,
+                view,
+                "HKCU",
+                view_name);
+            const auto explicit_user_value = read_authority_registry_value(
+                HKEY_USERS,
+                capture.user_sid,
+                key_path,
+                view,
+                "HKU\\" + utf8(capture.user_sid),
+                view_name);
+            require_matching_authority_views(current_user_value, explicit_user_value);
+            if (current_user_value.has_value() != expected.has_value() ||
+                (current_user_value &&
+                 normalize_absolute_path(*current_user_value) != normalize_absolute_path(*expected)))
+            {
+                throw hresult_error(
+                    E_ACCESSDENIED,
+                    L"Legacy cleanup authority changed after the broker captured it");
+            }
+        };
+        verify_pair(legacy_installer_key, KEY_WOW64_32KEY, "32-bit", capture.installer_32);
+        verify_pair(legacy_installer_key, KEY_WOW64_64KEY, "64-bit", capture.installer_64);
+        verify_pair(legacy_uninstall_key, KEY_WOW64_32KEY, "32-bit", capture.uninstall_32);
+        verify_pair(legacy_uninstall_key, KEY_WOW64_64KEY, "64-bit", capture.uninstall_64);
+        verify_source_executable_generation(capture, false);
+    }
+
+    std::string sha256_hex(const std::string& value)
+    {
+        HCRYPTPROV provider = 0;
+        if (!CryptAcquireContextW(
+                &provider,
+                nullptr,
+                MS_ENH_RSA_AES_PROV_W,
+                PROV_RSA_AES,
+                CRYPT_VERIFYCONTEXT))
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to initialize cleanup marker hashing");
+        }
+        HCRYPTHASH hash = 0;
+        if (!CryptCreateHash(provider, CALG_SHA_256, 0, 0, &hash))
+        {
+            const DWORD error = GetLastError();
+            CryptReleaseContext(provider, 0);
+            throw hresult_error(
+                HRESULT_FROM_WIN32(error),
+                L"Unable to create a cleanup marker hash");
+        }
+        if (value.size() > (std::numeric_limits<DWORD>::max)() ||
+            !CryptHashData(
+                hash,
+                reinterpret_cast<const BYTE*>(value.data()),
+                static_cast<DWORD>(value.size()),
+                0))
+        {
+            const DWORD error = value.size() > (std::numeric_limits<DWORD>::max)()
+                ? ERROR_BUFFER_OVERFLOW
+                : GetLastError();
+            CryptDestroyHash(hash);
+            CryptReleaseContext(provider, 0);
+            throw hresult_error(
+                HRESULT_FROM_WIN32(error),
+                L"Unable to hash the cleanup marker state path");
+        }
+        std::array<BYTE, 32> digest{};
+        DWORD digest_bytes = static_cast<DWORD>(digest.size());
+        if (!CryptGetHashParam(hash, HP_HASHVAL, digest.data(), &digest_bytes, 0) ||
+            digest_bytes != digest.size())
+        {
+            const DWORD error = GetLastError();
+            CryptDestroyHash(hash);
+            CryptReleaseContext(provider, 0);
+            throw hresult_error(
+                HRESULT_FROM_WIN32(error),
+                L"Unable to read the cleanup marker hash");
+        }
+        CryptDestroyHash(hash);
+        CryptReleaseContext(provider, 0);
+        std::ostringstream output;
+        output << std::hex << std::setfill('0');
+        for (const BYTE byte : digest)
+        {
+            output << std::setw(2) << static_cast<unsigned int>(byte);
+        }
+        return output.str();
+    }
+
+    std::wstring normalize_source_lease_state_path_for_hash(
+        const std::filesystem::path& path)
+    {
+        const DWORD required_length = GetFullPathNameW(path.c_str(), 0, nullptr, nullptr);
+        if (required_length == 0)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to normalize the cleanup coordination state path");
+        }
+        std::vector<wchar_t> value(required_length);
+        if (GetFullPathNameW(
+                path.c_str(),
+                required_length,
+                value.data(),
+                nullptr) == 0)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to normalize the cleanup coordination state path");
+        }
+        std::wstring normalized(value.data());
+        std::replace(normalized.begin(), normalized.end(), L'/', L'\\');
+        while (normalized.size() > 3 && normalized.back() == L'\\')
+        {
+            normalized.pop_back();
+        }
+        for (wchar_t& character : normalized)
+        {
+            if (character >= L'A' && character <= L'Z')
+            {
+                character = static_cast<wchar_t>(character + (L'a' - L'A'));
+            }
+        }
+        return normalized;
+    }
+
+    std::wstring legacy_transition_source_lease_pipe_name()
+    {
+        const std::filesystem::path state_path = resolve_known_folder_path(
+            FOLDERID_LocalAppData,
+            L"The current user's Local AppData directory is unavailable for cleanup coordination") /
+            L"Memmy" / L"store-transition" / L"active.json";
+        const std::string digest = sha256_hex(
+            utf8(normalize_source_lease_state_path_for_hash(state_path)));
+        return L"\\\\.\\pipe\\LOCAL\\memmy-store-transition-source-" +
+            std::wstring(digest.begin(), digest.end());
+    }
+
+    std::wstring legacy_transition_cleanup_active_pipe_name()
+    {
+        return legacy_transition_source_lease_pipe_name() + L"-cleanup-active";
+    }
+
+    std::wstring legacy_cleanup_broker_pipe_name()
+    {
+        return L"\\\\.\\pipe\\LOCAL\\memmy-store-transition-cleanup-broker-v1-" +
+            std::to_wstring(current_process_session_id());
+    }
+
+    HANDLE create_user_restricted_pipe(
+        const std::wstring& pipe_name,
+        DWORD open_mode,
+        DWORD maximum_instances)
+    {
+        const std::wstring sid = current_user_sid();
+        const std::wstring sddl = L"D:P(A;;GA;;;SY)(A;;GA;;;" + sid + L")";
+        PSECURITY_DESCRIPTOR descriptor = nullptr;
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.c_str(),
+                SDDL_REVISION_1,
+                &descriptor,
+                nullptr))
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to create the cleanup broker pipe security descriptor");
+        }
+        SECURITY_ATTRIBUTES security_attributes{};
+        security_attributes.nLength = sizeof(security_attributes);
+        security_attributes.lpSecurityDescriptor = descriptor;
+        security_attributes.bInheritHandle = FALSE;
+        const HANDLE pipe = CreateNamedPipeW(
+            pipe_name.c_str(),
+            open_mode,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+            maximum_instances,
+            262144,
+            262144,
+            5000,
+            &security_attributes);
+        const DWORD error = pipe == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
+        LocalFree(descriptor);
+        if (pipe == INVALID_HANDLE_VALUE)
+        {
+            SetLastError(error);
+        }
+        return pipe;
+    }
+
+    bool exclusive_pipe_name_is_owned(const std::wstring& pipe_name)
+    {
+        scoped_handle probe(create_user_restricted_pipe(
+            pipe_name,
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            1));
+        if (probe)
+        {
+            return false;
+        }
+        const DWORD error = GetLastError();
+        if (error == ERROR_ACCESS_DENIED || error == ERROR_PIPE_BUSY)
+        {
+            return true;
+        }
+        throw hresult_error(
+            HRESULT_FROM_WIN32(error),
+            L"Unable to inspect a Store transition coordination pipe");
+    }
+
+    constexpr uint32_t legacy_cleanup_broker_magic = 0x42434D4D;
+    constexpr uint32_t legacy_cleanup_broker_protocol_version = 1;
+    constexpr uint32_t legacy_cleanup_broker_maximum_payload_bytes = 262144;
+    constexpr uint32_t legacy_cleanup_broker_maximum_string_bytes = 65536;
+
+    void write_handle_exact(HANDLE handle, const void* buffer, size_t bytes)
+    {
+        const auto* cursor = static_cast<const unsigned char*>(buffer);
+        while (bytes > 0)
+        {
+            const DWORD chunk = static_cast<DWORD>(std::min<size_t>(
+                bytes,
+                (std::numeric_limits<DWORD>::max)()));
+            DWORD written = 0;
+            if (!WriteFile(handle, cursor, chunk, &written, nullptr) || written == 0)
+            {
+                throw hresult_error(
+                    HRESULT_FROM_WIN32(GetLastError()),
+                    L"Unable to write a cleanup broker protocol frame");
+            }
+            cursor += written;
+            bytes -= written;
+        }
+    }
+
+    void read_handle_exact(HANDLE handle, void* buffer, size_t bytes)
+    {
+        auto* cursor = static_cast<unsigned char*>(buffer);
+        while (bytes > 0)
+        {
+            const DWORD chunk = static_cast<DWORD>(std::min<size_t>(
+                bytes,
+                (std::numeric_limits<DWORD>::max)()));
+            DWORD read = 0;
+            if (!ReadFile(handle, cursor, chunk, &read, nullptr) || read == 0)
+            {
+                const DWORD error = GetLastError();
+                throw hresult_error(
+                    HRESULT_FROM_WIN32(error == ERROR_SUCCESS ? ERROR_BROKEN_PIPE : error),
+                    L"Unable to read a cleanup broker protocol frame");
+            }
+            cursor += read;
+            bytes -= read;
+        }
+    }
+
+    void append_wire_u32(std::vector<unsigned char>& output, uint32_t value)
+    {
+        output.push_back(static_cast<unsigned char>(value & 0xff));
+        output.push_back(static_cast<unsigned char>((value >> 8) & 0xff));
+        output.push_back(static_cast<unsigned char>((value >> 16) & 0xff));
+        output.push_back(static_cast<unsigned char>((value >> 24) & 0xff));
+    }
+
+    uint32_t read_wire_u32(
+        const std::vector<unsigned char>& input,
+        size_t& offset)
+    {
+        if (offset > input.size() || input.size() - offset < sizeof(uint32_t))
+        {
+            throw hresult_invalid_argument(L"Cleanup broker protocol integer is truncated");
+        }
+        const uint32_t value =
+            static_cast<uint32_t>(input[offset]) |
+            (static_cast<uint32_t>(input[offset + 1]) << 8) |
+            (static_cast<uint32_t>(input[offset + 2]) << 16) |
+            (static_cast<uint32_t>(input[offset + 3]) << 24);
+        offset += sizeof(uint32_t);
+        return value;
+    }
+
+    void append_wire_u64(std::vector<unsigned char>& output, uint64_t value)
+    {
+        append_wire_u32(output, static_cast<uint32_t>(value & 0xffffffffULL));
+        append_wire_u32(output, static_cast<uint32_t>(value >> 32));
+    }
+
+    uint64_t read_wire_u64(
+        const std::vector<unsigned char>& input,
+        size_t& offset)
+    {
+        const uint64_t low = read_wire_u32(input, offset);
+        const uint64_t high = read_wire_u32(input, offset);
+        return low | (high << 32);
+    }
+
+    void append_wire_wstring(
+        std::vector<unsigned char>& output,
+        const std::wstring& value)
+    {
+        if (value.size() > legacy_cleanup_broker_maximum_string_bytes / sizeof(wchar_t))
+        {
+            throw hresult_invalid_argument(L"Cleanup broker protocol string is too long");
+        }
+        const uint32_t bytes = static_cast<uint32_t>(value.size() * sizeof(wchar_t));
+        append_wire_u32(output, bytes);
+        const auto* first = reinterpret_cast<const unsigned char*>(value.data());
+        output.insert(output.end(), first, first + bytes);
+    }
+
+    std::wstring read_wire_wstring(
+        const std::vector<unsigned char>& input,
+        size_t& offset)
+    {
+        const uint32_t bytes = read_wire_u32(input, offset);
+        if (bytes > legacy_cleanup_broker_maximum_string_bytes ||
+            bytes % sizeof(wchar_t) != 0 ||
+            offset > input.size() ||
+            input.size() - offset < bytes)
+        {
+            throw hresult_invalid_argument(L"Cleanup broker protocol string is invalid");
+        }
+        std::wstring value(bytes / sizeof(wchar_t), L'\0');
+        if (bytes != 0)
+        {
+            memcpy(value.data(), input.data() + offset, bytes);
+        }
+        offset += bytes;
+        if (value.find(L'\0') != std::wstring::npos)
+        {
+            throw hresult_invalid_argument(L"Cleanup broker protocol string contains a null character");
+        }
+        return value;
+    }
+
+    void append_wire_string(
+        std::vector<unsigned char>& output,
+        const std::string& value)
+    {
+        if (value.size() > legacy_cleanup_broker_maximum_string_bytes)
+        {
+            throw hresult_invalid_argument(L"Cleanup broker response string is too long");
+        }
+        append_wire_u32(output, static_cast<uint32_t>(value.size()));
+        output.insert(output.end(), value.begin(), value.end());
+    }
+
+    std::string read_wire_string(
+        const std::vector<unsigned char>& input,
+        size_t& offset)
+    {
+        const uint32_t bytes = read_wire_u32(input, offset);
+        if (bytes > legacy_cleanup_broker_maximum_string_bytes ||
+            offset > input.size() ||
+            input.size() - offset < bytes)
+        {
+            throw hresult_invalid_argument(L"Cleanup broker response string is invalid");
+        }
+        const auto* first = reinterpret_cast<const char*>(input.data() + offset);
+        std::string value(first, first + bytes);
+        offset += bytes;
+        if (value.find('\0') != std::string::npos)
+        {
+            throw hresult_invalid_argument(L"Cleanup broker response string contains a null character");
+        }
+        return value;
+    }
+
+    std::vector<unsigned char> serialize_legacy_transition_options(
+        const LegacyTransitionOptions& options)
+    {
+        std::vector<unsigned char> payload;
+        append_wire_wstring(payload, options.external_helper_path.wstring());
+        append_wire_wstring(payload, options.legacy_install_directory.wstring());
+        append_wire_wstring(payload, options.legacy_executable_path.wstring());
+        append_wire_wstring(payload, options.shortcut_path.wstring());
+        append_wire_wstring(payload, options.aumid);
+        append_wire_wstring(payload, options.package_family_name);
+        append_wire_wstring(payload, options.transition_id);
+        append_wire_wstring(payload, options.attempt_id);
+        if (payload.size() > legacy_cleanup_broker_maximum_payload_bytes)
+        {
+            throw hresult_invalid_argument(L"Cleanup broker request exceeds its size limit");
+        }
+        return payload;
+    }
+
+    LegacyTransitionOptions deserialize_legacy_transition_options(
+        const std::vector<unsigned char>& payload)
+    {
+        size_t offset = 0;
+        LegacyTransitionOptions options;
+        options.external_helper_path = read_wire_wstring(payload, offset);
+        options.legacy_install_directory = read_wire_wstring(payload, offset);
+        options.legacy_executable_path = read_wire_wstring(payload, offset);
+        options.shortcut_path = read_wire_wstring(payload, offset);
+        options.aumid = read_wire_wstring(payload, offset);
+        options.package_family_name = read_wire_wstring(payload, offset);
+        options.transition_id = read_wire_wstring(payload, offset);
+        options.attempt_id = read_wire_wstring(payload, offset);
+        if (offset != payload.size())
+        {
+            throw hresult_invalid_argument(L"Cleanup broker request has trailing data");
+        }
+        return options;
+    }
+
+    std::vector<unsigned char> serialize_broker_response(
+        const LegacyCleanupBrokerResponse& response)
+    {
+        std::vector<unsigned char> payload;
+        append_wire_u32(payload, static_cast<uint32_t>(response.hresult));
+        append_wire_u32(payload, response.win32_error ? 1 : 0);
+        append_wire_u32(payload, response.win32_error.value_or(ERROR_SUCCESS));
+        append_wire_wstring(payload, response.transition_id);
+        append_wire_wstring(payload, response.attempt_id);
+        append_wire_string(payload, single_line(response.operation));
+        append_wire_string(payload, single_line(response.target));
+        append_wire_string(payload, single_line(response.message));
+        if (payload.size() > legacy_cleanup_broker_maximum_payload_bytes)
+        {
+            throw hresult_invalid_argument(L"Cleanup broker response exceeds its size limit");
+        }
+        return payload;
+    }
+
+    LegacyCleanupBrokerResponse deserialize_broker_response(
+        const std::vector<unsigned char>& payload)
+    {
+        size_t offset = 0;
+        LegacyCleanupBrokerResponse response;
+        response.hresult = static_cast<HRESULT>(read_wire_u32(payload, offset));
+        const uint32_t has_win32_error = read_wire_u32(payload, offset);
+        const DWORD win32_error = read_wire_u32(payload, offset);
+        if (has_win32_error > 1)
+        {
+            throw hresult_invalid_argument(L"Cleanup broker response has an invalid error flag");
+        }
+        if (has_win32_error != 0)
+        {
+            response.win32_error = win32_error;
+        }
+        response.transition_id = read_wire_wstring(payload, offset);
+        response.attempt_id = read_wire_wstring(payload, offset);
+        response.operation = read_wire_string(payload, offset);
+        response.target = read_wire_string(payload, offset);
+        response.message = read_wire_string(payload, offset);
+        if (offset != payload.size())
+        {
+            throw hresult_invalid_argument(L"Cleanup broker response has trailing data");
+        }
+        return response;
+    }
+
+    std::filesystem::path legacy_cleanup_journal_path()
+    {
+        return legacy_cleanup_broker_directory() / L"cleanup-journal-v1.bin";
+    }
+
+    void append_wire_optional_wstring(
+        std::vector<unsigned char>& output,
+        const std::optional<std::wstring>& value)
+    {
+        append_wire_u32(output, value ? 1 : 0);
+        if (value)
+        {
+            append_wire_wstring(output, *value);
+        }
+    }
+
+    std::optional<std::wstring> read_wire_optional_wstring(
+        const std::vector<unsigned char>& input,
+        size_t& offset)
+    {
+        const uint32_t present = read_wire_u32(input, offset);
+        if (present > 1)
+        {
+            throw hresult_invalid_argument(L"Cleanup journal has an invalid optional-value flag");
+        }
+        return present == 0
+            ? std::nullopt
+            : std::optional<std::wstring>(read_wire_wstring(input, offset));
+    }
+
+    std::vector<unsigned char> serialize_cleanup_journal(
+        const LegacyCleanupJournal& journal)
+    {
+        constexpr uint32_t journal_magic = 0x4A434D4D;
+        constexpr uint32_t journal_version = 2;
+        std::vector<unsigned char> result;
+        append_wire_u32(result, journal_magic);
+        append_wire_u32(result, journal_version);
+        append_wire_u32(result, static_cast<uint32_t>(journal.phase));
+        const std::vector<unsigned char> options = serialize_legacy_transition_options(
+            journal.options);
+        append_wire_u32(result, static_cast<uint32_t>(options.size()));
+        result.insert(result.end(), options.begin(), options.end());
+        append_wire_wstring(result, journal.authority.user_sid);
+        append_wire_u32(result, journal.authority.session_id);
+        append_wire_wstring(result, journal.authority.install_directory.wstring());
+        append_wire_optional_wstring(result, journal.authority.installer_32);
+        append_wire_optional_wstring(result, journal.authority.installer_64);
+        append_wire_optional_wstring(result, journal.authority.uninstall_32);
+        append_wire_optional_wstring(result, journal.authority.uninstall_64);
+        append_wire_u32(
+            result,
+            journal.authority.source_executable_identity ? 1U : 0U);
+        if (journal.authority.source_executable_identity)
+        {
+            const LegacySourceExecutableIdentity& identity =
+                *journal.authority.source_executable_identity;
+            append_wire_u32(result, identity.volume_serial_number);
+            append_wire_u64(result, identity.file_index);
+            append_wire_u64(result, identity.file_size);
+            append_wire_u64(result, identity.last_write_time);
+        }
+        if (result.size() > legacy_cleanup_broker_maximum_payload_bytes)
+        {
+            throw hresult_invalid_argument(L"Cleanup journal exceeds its fixed size limit");
+        }
+        return result;
+    }
+
+    LegacyCleanupJournal deserialize_cleanup_journal(
+        const std::vector<unsigned char>& input)
+    {
+        constexpr uint32_t journal_magic = 0x4A434D4D;
+        constexpr uint32_t journal_version = 2;
+        size_t offset = 0;
+        if (read_wire_u32(input, offset) != journal_magic ||
+            read_wire_u32(input, offset) != journal_version)
+        {
+            throw hresult_invalid_argument(L"Cleanup journal header is invalid");
+        }
+        const uint32_t phase = read_wire_u32(input, offset);
+        if (phase != static_cast<uint32_t>(LegacyCleanupJournalPhase::Prepared) &&
+            phase != static_cast<uint32_t>(LegacyCleanupJournalPhase::Complete) &&
+            phase != static_cast<uint32_t>(LegacyCleanupJournalPhase::Acknowledged))
+        {
+            throw hresult_invalid_argument(L"Cleanup journal phase is invalid");
+        }
+        LegacyCleanupJournal journal;
+        journal.phase = static_cast<LegacyCleanupJournalPhase>(phase);
+        const uint32_t options_bytes = read_wire_u32(input, offset);
+        if (options_bytes > legacy_cleanup_broker_maximum_payload_bytes ||
+            offset > input.size() ||
+            input.size() - offset < options_bytes)
+        {
+            throw hresult_invalid_argument(L"Cleanup journal options are invalid");
+        }
+        std::vector<unsigned char> options(
+            input.begin() + offset,
+            input.begin() + offset + options_bytes);
+        offset += options_bytes;
+        journal.options = deserialize_legacy_transition_options(options);
+        journal.authority.user_sid = read_wire_wstring(input, offset);
+        journal.authority.session_id = read_wire_u32(input, offset);
+        journal.authority.install_directory = read_wire_wstring(input, offset);
+        journal.authority.installer_32 = read_wire_optional_wstring(input, offset);
+        journal.authority.installer_64 = read_wire_optional_wstring(input, offset);
+        journal.authority.uninstall_32 = read_wire_optional_wstring(input, offset);
+        journal.authority.uninstall_64 = read_wire_optional_wstring(input, offset);
+        const uint32_t has_source_executable_identity = read_wire_u32(input, offset);
+        if (has_source_executable_identity > 1)
+        {
+            throw hresult_invalid_argument(
+                L"Cleanup journal has an invalid executable-generation flag");
+        }
+        if (has_source_executable_identity != 0)
+        {
+            journal.authority.source_executable_identity = LegacySourceExecutableIdentity{
+                read_wire_u32(input, offset),
+                read_wire_u64(input, offset),
+                read_wire_u64(input, offset),
+                read_wire_u64(input, offset)
+            };
+        }
+        if (offset != input.size())
+        {
+            throw hresult_invalid_argument(L"Cleanup journal has trailing data");
+        }
+        return journal;
+    }
+
+    void write_cleanup_journal_atomic(const LegacyCleanupJournal& journal)
+    {
+        validate_cleanup_broker_directory_chain(false);
+        const std::filesystem::path target_path = legacy_cleanup_journal_path();
+        const std::vector<unsigned char> contents = serialize_cleanup_journal(journal);
+        const std::filesystem::path temporary_path = target_path.wstring() +
+            L"." + std::to_wstring(GetCurrentProcessId()) +
+            L"." + std::to_wstring(GetTickCount64()) + L".tmp";
+        scoped_handle output(CreateFileW(
+            temporary_path.c_str(),
+            GENERIC_WRITE,
+            0,
+            nullptr,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr));
+        if (!output)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to create the temporary cleanup journal");
+        }
+        try
+        {
+            write_handle_exact(output.get(), contents.data(), contents.size());
+            if (!FlushFileBuffers(output.get()))
+            {
+                throw hresult_error(
+                    HRESULT_FROM_WIN32(GetLastError()),
+                    L"Unable to flush the temporary cleanup journal");
+            }
+            output.reset();
+            const DWORD attributes = GetFileAttributesW(temporary_path.c_str());
+            if (attributes == INVALID_FILE_ATTRIBUTES ||
+                (attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT |
+                    FILE_ATTRIBUTE_ENCRYPTED)) != 0)
+            {
+                throw hresult_error(
+                    HRESULT_FROM_WIN32(ERROR_INVALID_DATA),
+                    L"Temporary cleanup journal is not a plain unencrypted file");
+            }
+            if (!MoveFileExW(
+                    temporary_path.c_str(),
+                    target_path.c_str(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+            {
+                throw hresult_error(
+                    HRESULT_FROM_WIN32(GetLastError()),
+                    L"Unable to atomically publish the cleanup journal");
+            }
+        }
+        catch (...)
+        {
+            output.reset();
+            DeleteFileW(temporary_path.c_str());
+            throw;
+        }
+    }
+
+    std::optional<LegacyCleanupJournal> read_cleanup_journal()
+    {
+        const std::filesystem::path path = legacy_cleanup_journal_path();
+        const DWORD attributes = GetFileAttributesW(path.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES)
+        {
+            const DWORD error = GetLastError();
+            if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
+            {
+                return std::nullopt;
+            }
+            throw hresult_error(
+                HRESULT_FROM_WIN32(error),
+                L"Unable to inspect the fixed cleanup journal");
+        }
+        validate_cleanup_broker_directory_chain(false);
+        if ((attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT |
+            FILE_ATTRIBUTE_ENCRYPTED)) != 0)
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Cleanup journal is not a plain unencrypted file");
+        }
+        scoped_handle input(CreateFileW(
+            path.c_str(),
+            GENERIC_READ,
+            FILE_SHARE_READ,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr));
+        if (!input)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to open the fixed cleanup journal");
+        }
+        LARGE_INTEGER size{};
+        if (!GetFileSizeEx(input.get(), &size) ||
+            size.QuadPart <= 0 ||
+            size.QuadPart > legacy_cleanup_broker_maximum_payload_bytes)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(ERROR_INVALID_DATA),
+                L"Cleanup journal has an invalid size");
+        }
+        std::vector<unsigned char> contents(static_cast<size_t>(size.QuadPart));
+        read_handle_exact(input.get(), contents.data(), contents.size());
+        return deserialize_cleanup_journal(contents);
+    }
+
+    void delete_cleanup_journal_file(const wchar_t* failure_message)
+    {
+        const std::filesystem::path journal_path = legacy_cleanup_journal_path();
+        if (DeleteFileW(journal_path.c_str()))
+        {
+            return;
+        }
+        const DWORD error = GetLastError();
+        if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND)
+        {
+            throw hresult_error(HRESULT_FROM_WIN32(error), failure_message);
+        }
+    }
+
+    bool equivalent_transition_options(
+        const LegacyTransitionOptions& first,
+        const LegacyTransitionOptions& second)
+    {
+        const auto equivalent_optional_path = [](const std::filesystem::path& left,
+                                                 const std::filesystem::path& right)
+        {
+            if (left.empty() || right.empty())
+            {
+                return left.empty() && right.empty();
+            }
+            return normalize_absolute_path(left) == normalize_absolute_path(right);
+        };
+        // attempt_id is intentionally excluded: Store creates a fresh attempt for
+        // each retry. The durable identity is the transaction, package, attested
+        // source, and fixed Desktop shortcut policy; the response echoes the
+        // caller's current attempt_id separately.
+        return equivalent_optional_path(first.external_helper_path, second.external_helper_path) &&
+            equivalent_optional_path(first.legacy_install_directory, second.legacy_install_directory) &&
+            equivalent_optional_path(first.legacy_executable_path, second.legacy_executable_path) &&
+            equivalent_optional_path(first.shortcut_path, second.shortcut_path) &&
+            first.aumid == second.aumid &&
+            first.package_family_name == second.package_family_name &&
+            first.transition_id == second.transition_id;
+    }
+
+    void validate_persisted_authority_shape(
+        const LegacyAuthorityCapture& authority,
+        const LegacyTransitionOptions& options)
+    {
+        if (authority.user_sid.empty() ||
+            _wcsicmp(authority.user_sid.c_str(), current_user_sid().c_str()) != 0 ||
+            !authority.installer_32 && !authority.installer_64)
+        {
+            throw hresult_error(E_ACCESSDENIED, L"Cleanup journal authority identity is invalid");
+        }
+        const std::wstring canonical = normalize_absolute_path(authority.install_directory);
+        if (!authority.install_directory.is_absolute() ||
+            canonical == normalize_absolute_path(authority.install_directory.root_path()) ||
+            is_windows_apps_path(authority.install_directory) ||
+            normalize_absolute_path(options.legacy_install_directory) != canonical ||
+            normalize_absolute_path(options.legacy_executable_path.parent_path()) != canonical ||
+            _wcsicmp(options.legacy_executable_path.filename().c_str(), L"Memmy.exe") != 0)
+        {
+            throw hresult_error(E_ACCESSDENIED, L"Cleanup journal source authority is unsafe");
+        }
+        const std::filesystem::path store_control_directory = resolve_known_folder_path(
+            FOLDERID_LocalAppData,
+            L"The current user's Local AppData directory is unavailable for journal validation") /
+            L"Memmy";
+        if (paths_overlap(authority.install_directory, store_control_directory))
+        {
+            throw hresult_error(E_ACCESSDENIED, L"Cleanup journal source overlaps Store control data");
+        }
+        const std::optional<std::wstring>* values[] = {
+            &authority.installer_32,
+            &authority.installer_64,
+            &authority.uninstall_32,
+            &authority.uninstall_64
+        };
+        for (const auto* value : values)
+        {
+            if (*value && normalize_absolute_path(**value) != canonical)
+            {
+                throw hresult_error(E_ACCESSDENIED, L"Cleanup journal authority views disagree");
+            }
+        }
+    }
+
+    void verify_recoverable_authority_state(
+        const LegacyAuthorityCapture& authority,
+        const LegacyTransitionOptions& options)
+    {
+        validate_persisted_authority_shape(authority, options);
+        const auto verify_pair = [&](const wchar_t* key_path,
+                                     REGSAM view,
+                                     const std::string& view_name,
+                                     const std::optional<std::wstring>& expected)
+        {
+            const auto current_user_value = read_authority_registry_value(
+                HKEY_CURRENT_USER,
+                authority.user_sid,
+                key_path,
+                view,
+                "HKCU",
+                view_name);
+            const auto explicit_user_value = read_authority_registry_value(
+                HKEY_USERS,
+                authority.user_sid,
+                key_path,
+                view,
+                "HKU\\" + utf8(authority.user_sid),
+                view_name);
+            require_matching_authority_views(current_user_value, explicit_user_value);
+            if (current_user_value &&
+                (!expected ||
+                 normalize_absolute_path(*current_user_value) != normalize_absolute_path(*expected)))
+            {
+                throw hresult_error(
+                    E_ACCESSDENIED,
+                    L"Cleanup recovery found a registry authority not present in its prepared journal");
+            }
+        };
+        verify_pair(legacy_installer_key, KEY_WOW64_32KEY, "32-bit", authority.installer_32);
+        verify_pair(legacy_installer_key, KEY_WOW64_64KEY, "64-bit", authority.installer_64);
+        verify_pair(legacy_uninstall_key, KEY_WOW64_32KEY, "32-bit", authority.uninstall_32);
+        verify_pair(legacy_uninstall_key, KEY_WOW64_64KEY, "64-bit", authority.uninstall_64);
+        const DWORD directory_attributes = GetFileAttributesW(authority.install_directory.c_str());
+        if (directory_attributes != INVALID_FILE_ATTRIBUTES &&
+            ((directory_attributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+             (directory_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0))
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Cleanup recovery source changed to an unsafe filesystem object");
+        }
+        if (directory_attributes == INVALID_FILE_ATTRIBUTES)
+        {
+            const DWORD error = GetLastError();
+            if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND)
+            {
+                throw hresult_error(
+                    HRESULT_FROM_WIN32(error),
+                    L"Unable to inspect the cleanup recovery source");
+            }
+        }
+        verify_source_executable_generation(authority, true);
+    }
+
+    void verify_complete_cleanup_postconditions(
+        const LegacyAuthorityCapture& authority,
+        const LegacyTransitionOptions& options)
+    {
+        validate_persisted_authority_shape(authority, options);
+        const auto require_missing_pair = [&](const wchar_t* key_path,
+                                              REGSAM view,
+                                              const std::string& view_name)
+        {
+            const auto current_user_value = read_authority_registry_value(
+                HKEY_CURRENT_USER,
+                authority.user_sid,
+                key_path,
+                view,
+                "HKCU",
+                view_name);
+            const auto explicit_user_value = read_authority_registry_value(
+                HKEY_USERS,
+                authority.user_sid,
+                key_path,
+                view,
+                "HKU\\" + utf8(authority.user_sid),
+                view_name);
+            require_matching_authority_views(current_user_value, explicit_user_value);
+            if (current_user_value)
+            {
+                throw hresult_error(
+                    E_ACCESSDENIED,
+                    L"Completed cleanup proof was invalidated by a native registry authority");
+            }
+        };
+        require_missing_pair(legacy_installer_key, KEY_WOW64_32KEY, "32-bit");
+        require_missing_pair(legacy_installer_key, KEY_WOW64_64KEY, "64-bit");
+        require_missing_pair(legacy_uninstall_key, KEY_WOW64_32KEY, "32-bit");
+        require_missing_pair(legacy_uninstall_key, KEY_WOW64_64KEY, "64-bit");
+        if (!path_is_missing(authority.install_directory))
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Completed cleanup proof was invalidated by a native install directory");
+        }
+    }
+
+    void retire_orphaned_cleanup_journal_for_native_install()
+    {
+        const auto journal = read_cleanup_journal();
+        if (!journal)
+        {
+            return;
+        }
+        if (exclusive_pipe_name_is_owned(legacy_transition_cleanup_active_pipe_name()))
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(ERROR_BUSY),
+                L"Refusing to retire a cleanup journal while native cleanup is active");
+        }
+        validate_legacy_transition_options(journal->options, true, false);
+        if (!journal->options.external_helper_path.empty())
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Cleanup journal contains a deprecated external helper path");
+        }
+        require_allowed_memmy_package_identity(journal->options);
+        validate_persisted_authority_shape(journal->authority, journal->options);
+        if (!registered_package_full_names(allowed_memmy_package_family).empty() ||
+            !registered_package_full_names(allowed_memmy_agent_package_family).empty())
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Refusing to retire a cleanup journal while a Memmy Store package remains registered");
+        }
+        if (journal->phase == LegacyCleanupJournalPhase::Acknowledged)
+        {
+            delete_cleanup_journal_file(
+                L"Unable to retire the acknowledged cleanup journal");
+            return;
+        }
+        // With the Store package unregistered, a currently valid native authority
+        // and regular Memmy.exe are the safe orphan/reinstall boundary. Retiring
+        // either Prepared or Complete prevents an old transaction from binding the
+        // next NSIS-to-Store cycle.
+        const LegacyAuthorityCapture current_authority = capture_legacy_cleanup_authority();
+        const DWORD directory_attributes = GetFileAttributesW(
+            current_authority.install_directory.c_str());
+        const DWORD executable_attributes = GetFileAttributesW(
+            (current_authority.install_directory / L"Memmy.exe").c_str());
+        if (current_authority.install_directory.empty() ||
+            directory_attributes == INVALID_FILE_ATTRIBUTES ||
+            (directory_attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) !=
+                FILE_ATTRIBUTE_DIRECTORY ||
+            executable_attributes == INVALID_FILE_ATTRIBUTES ||
+            (executable_attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0)
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Unable to retire an orphaned cleanup journal without a valid native installation");
+        }
+        delete_cleanup_journal_file(
+            L"Unable to retire the orphaned cleanup journal for a native installation");
+    }
+
+    void send_broker_frame(
+        HANDLE pipe,
+        LegacyCleanupBrokerMessage message,
+        const std::vector<unsigned char>& payload)
+    {
+        if (payload.size() > legacy_cleanup_broker_maximum_payload_bytes)
+        {
+            throw hresult_invalid_argument(L"Cleanup broker frame exceeds its size limit");
+        }
+        std::array<uint32_t, 4> header{
+            legacy_cleanup_broker_magic,
+            legacy_cleanup_broker_protocol_version,
+            static_cast<uint32_t>(message),
+            static_cast<uint32_t>(payload.size())
+        };
+        write_handle_exact(pipe, header.data(), sizeof(header));
+        if (!payload.empty())
+        {
+            write_handle_exact(pipe, payload.data(), payload.size());
+        }
+    }
+
+    std::pair<LegacyCleanupBrokerMessage, std::vector<unsigned char>> receive_broker_frame(
+        HANDLE pipe)
+    {
+        std::array<uint32_t, 4> header{};
+        read_handle_exact(pipe, header.data(), sizeof(header));
+        if (header[0] != legacy_cleanup_broker_magic ||
+            header[1] != legacy_cleanup_broker_protocol_version ||
+            header[3] > legacy_cleanup_broker_maximum_payload_bytes)
+        {
+            throw hresult_invalid_argument(L"Cleanup broker frame header is invalid");
+        }
+        const auto message = static_cast<LegacyCleanupBrokerMessage>(header[2]);
+        if (message != LegacyCleanupBrokerMessage::Ping &&
+            message != LegacyCleanupBrokerMessage::Cleanup &&
+            message != LegacyCleanupBrokerMessage::Stop &&
+            message != LegacyCleanupBrokerMessage::Acknowledge &&
+            message != LegacyCleanupBrokerMessage::Response)
+        {
+            throw hresult_invalid_argument(L"Cleanup broker frame type is invalid");
+        }
+        std::vector<unsigned char> payload(header[3]);
+        if (!payload.empty())
+        {
+            read_handle_exact(pipe, payload.data(), payload.size());
+        }
+        return { message, std::move(payload) };
+    }
+
+    void require_allowed_memmy_package_identity(const LegacyTransitionOptions& options)
+    {
+        if ((options.package_family_name != allowed_memmy_package_family &&
+             options.package_family_name != allowed_memmy_agent_package_family) ||
+            options.aumid != options.package_family_name + L"!Memmy")
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Cleanup broker request does not name an allowed Memmy package identity");
+        }
+    }
+
+    DWORD named_pipe_client_process_id(HANDLE pipe)
+    {
+        ULONG process_id = 0;
+        if (!GetNamedPipeClientProcessId(pipe, &process_id) || process_id == 0)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to identify the cleanup broker client process");
+        }
+        return static_cast<DWORD>(process_id);
+    }
+
+    DWORD named_pipe_server_process_id(HANDLE pipe)
+    {
+        ULONG process_id = 0;
+        if (!GetNamedPipeServerProcessId(pipe, &process_id) || process_id == 0)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to identify the cleanup broker server process");
+        }
+        return static_cast<DWORD>(process_id);
+    }
+
+    scoped_handle open_verified_pipe_peer_process(
+        DWORD process_id,
+        const std::wstring& expected_user_sid,
+        DWORD expected_session_id)
+    {
+        scoped_handle process(OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION,
+            FALSE,
+            process_id));
+        if (!process)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to open a cleanup broker pipe peer process");
+        }
+        DWORD session_id = 0;
+        if (!ProcessIdToSessionId(process_id, &session_id))
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to resolve a cleanup broker pipe peer session");
+        }
+        if (session_id != expected_session_id ||
+            _wcsicmp(process_user_sid(process.get()).c_str(), expected_user_sid.c_str()) != 0)
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Cleanup broker pipe peer does not belong to the current user and session");
+        }
+        return process;
+    }
+
+    void validate_cleanup_broker_client(
+        HANDLE pipe,
+        const LegacyTransitionOptions& options,
+        const LegacyAuthorityCapture& capture)
+    {
+        require_allowed_memmy_package_identity(options);
+        const DWORD client_process_id = named_pipe_client_process_id(pipe);
+        scoped_handle client = open_verified_pipe_peer_process(
+            client_process_id,
+            capture.user_sid,
+            capture.session_id);
+        const auto package_family = process_package_family(client.get());
+        if (!package_family || *package_family != options.package_family_name ||
+            process_application_user_model_id(client.get()) != options.aumid)
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Cleanup broker client package identity does not match its request");
+        }
+    }
+
+    void validate_cleanup_broker_server(HANDLE pipe)
+    {
+        const DWORD server_process_id = named_pipe_server_process_id(pipe);
+        scoped_handle server = open_verified_pipe_peer_process(
+            server_process_id,
+            current_user_sid(),
+            current_process_session_id());
+        if (normalize_absolute_path(process_image_path(server.get())) !=
+                normalize_absolute_path(legacy_cleanup_broker_executable_path()) ||
+            process_package_family(server.get()))
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Cleanup broker server is not the expected staged native process");
+        }
+    }
+
+    scoped_handle connect_to_cleanup_broker(DWORD timeout_milliseconds)
+    {
+        const std::wstring pipe_name = legacy_cleanup_broker_pipe_name();
+        const ULONGLONG deadline = GetTickCount64() + timeout_milliseconds;
+        while (true)
+        {
+            scoped_handle pipe(CreateFileW(
+                pipe_name.c_str(),
+                GENERIC_READ | GENERIC_WRITE,
+                0,
+                nullptr,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                nullptr));
+            if (pipe)
+            {
+                validate_cleanup_broker_server(pipe.get());
+                return pipe;
+            }
+            const DWORD error = GetLastError();
+            const ULONGLONG now = GetTickCount64();
+            if (now >= deadline)
+            {
+                throw hresult_error(
+                    HRESULT_FROM_WIN32(
+                        error == ERROR_FILE_NOT_FOUND || error == ERROR_PIPE_BUSY
+                            ? ERROR_TIMEOUT
+                            : error),
+                    L"Unable to connect to the native legacy cleanup broker");
+            }
+            if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PIPE_BUSY)
+            {
+                throw hresult_error(
+                    HRESULT_FROM_WIN32(error),
+                    L"Unable to open the native legacy cleanup broker pipe");
+            }
+            WaitNamedPipeW(pipe_name.c_str(), 100);
+            Sleep(25);
+        }
+    }
+
+    LegacyCleanupBrokerResponse request_cleanup_broker(
+        LegacyCleanupBrokerMessage message,
+        const LegacyTransitionOptions* options,
+        DWORD timeout_milliseconds = 10000)
+    {
+        scoped_handle pipe = connect_to_cleanup_broker(timeout_milliseconds);
+        const std::vector<unsigned char> payload = options == nullptr
+            ? std::vector<unsigned char>{}
+            : serialize_legacy_transition_options(*options);
+        send_broker_frame(pipe.get(), message, payload);
+        auto [response_message, response_payload] = receive_broker_frame(pipe.get());
+        if (response_message != LegacyCleanupBrokerMessage::Response)
+        {
+            throw hresult_invalid_argument(L"Cleanup broker returned a non-response frame");
+        }
+        LegacyCleanupBrokerResponse response = deserialize_broker_response(response_payload);
+        if (options != nullptr &&
+            (response.transition_id != options->transition_id ||
+             response.attempt_id != options->attempt_id))
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Cleanup broker response does not match the transition request");
+        }
+        return response;
+    }
+
+    bool files_have_equal_bytes(
+        const std::filesystem::path& first_path,
+        const std::filesystem::path& second_path)
+    {
+        scoped_handle first(CreateFileW(
+            first_path.c_str(),
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_DELETE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr));
+        scoped_handle second(CreateFileW(
+            second_path.c_str(),
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_DELETE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr));
+        if (!first || !second)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to open cleanup broker files for byte verification");
+        }
+        LARGE_INTEGER first_size{};
+        LARGE_INTEGER second_size{};
+        if (!GetFileSizeEx(first.get(), &first_size) ||
+            !GetFileSizeEx(second.get(), &second_size))
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to size cleanup broker files for verification");
+        }
+        if (first_size.QuadPart != second_size.QuadPart)
+        {
+            return false;
+        }
+        std::array<unsigned char, 65536> first_buffer{};
+        std::array<unsigned char, 65536> second_buffer{};
+        while (true)
+        {
+            DWORD first_read = 0;
+            DWORD second_read = 0;
+            if (!ReadFile(
+                    first.get(),
+                    first_buffer.data(),
+                    static_cast<DWORD>(first_buffer.size()),
+                    &first_read,
+                    nullptr) ||
+                !ReadFile(
+                    second.get(),
+                    second_buffer.data(),
+                    static_cast<DWORD>(second_buffer.size()),
+                    &second_read,
+                    nullptr))
+            {
+                throw hresult_error(
+                    HRESULT_FROM_WIN32(GetLastError()),
+                    L"Unable to read cleanup broker files for verification");
+            }
+            if (first_read != second_read ||
+                !std::equal(
+                    first_buffer.begin(),
+                    first_buffer.begin() + first_read,
+                    second_buffer.begin()))
+            {
+                return false;
+            }
+            if (first_read == 0)
+            {
+                return true;
+            }
+        }
+    }
+
+    void stage_cleanup_broker_executable()
+    {
+        validate_cleanup_broker_directory_chain(true);
+        const std::filesystem::path source_path = current_executable_path();
+        const std::filesystem::path destination_path = legacy_cleanup_broker_executable_path();
+        if (normalize_absolute_path(source_path) == normalize_absolute_path(destination_path))
+        {
+            throw hresult_invalid_argument(
+                L"Cleanup broker staging source is already the broker destination");
+        }
+        const DWORD source_attributes = GetFileAttributesW(source_path.c_str());
+        if (source_attributes == INVALID_FILE_ATTRIBUTES ||
+            (source_attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0)
+        {
+            throw hresult_invalid_argument(L"Cleanup broker staging source is not a regular file");
+        }
+
+        std::filesystem::path temporary_path;
+        scoped_handle destination;
+        for (unsigned int attempt = 0; attempt < 16; ++attempt)
+        {
+            temporary_path = destination_path.wstring() +
+                L"." + std::to_wstring(GetCurrentProcessId()) +
+                L"." + std::to_wstring(GetTickCount64()) +
+                L"." + std::to_wstring(attempt) + L".tmp";
+            destination.reset(CreateFileW(
+                temporary_path.c_str(),
+                GENERIC_READ | GENERIC_WRITE,
+                0,
+                nullptr,
+                CREATE_NEW,
+                FILE_ATTRIBUTE_NORMAL,
+                nullptr));
+            if (destination)
+            {
+                break;
+            }
+            if (GetLastError() != ERROR_FILE_EXISTS && GetLastError() != ERROR_ALREADY_EXISTS)
+            {
+                throw hresult_error(
+                    HRESULT_FROM_WIN32(GetLastError()),
+                    L"Unable to create a temporary cleanup broker executable");
+            }
+        }
+        if (!destination)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(ERROR_FILE_EXISTS),
+                L"Unable to reserve a temporary cleanup broker executable");
+        }
+
+        try
+        {
+            scoped_handle source(CreateFileW(
+                source_path.c_str(),
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_DELETE,
+                nullptr,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                nullptr));
+            if (!source)
+            {
+                throw hresult_error(
+                    HRESULT_FROM_WIN32(GetLastError()),
+                    L"Unable to open the cleanup broker staging source");
+            }
+            std::array<unsigned char, 65536> buffer{};
+            while (true)
+            {
+                DWORD read = 0;
+                if (!ReadFile(
+                        source.get(),
+                        buffer.data(),
+                        static_cast<DWORD>(buffer.size()),
+                        &read,
+                        nullptr))
+                {
+                    throw hresult_error(
+                        HRESULT_FROM_WIN32(GetLastError()),
+                        L"Unable to read the cleanup broker staging source");
+                }
+                if (read == 0)
+                {
+                    break;
+                }
+                write_handle_exact(destination.get(), buffer.data(), read);
+            }
+            if (!FlushFileBuffers(destination.get()))
+            {
+                throw hresult_error(
+                    HRESULT_FROM_WIN32(GetLastError()),
+                    L"Unable to flush the temporary cleanup broker executable");
+            }
+            source.reset();
+            destination.reset();
+
+            DWORD temporary_attributes = GetFileAttributesW(temporary_path.c_str());
+            if (temporary_attributes == INVALID_FILE_ATTRIBUTES)
+            {
+                throw hresult_error(
+                    HRESULT_FROM_WIN32(GetLastError()),
+                    L"Unable to inspect the temporary cleanup broker executable");
+            }
+            if ((temporary_attributes & FILE_ATTRIBUTE_ENCRYPTED) != 0)
+            {
+                if (!DecryptFileW(temporary_path.c_str(), 0))
+                {
+                    throw hresult_error(
+                        HRESULT_FROM_WIN32(GetLastError()),
+                        L"Unable to remove inherited encryption from the cleanup broker executable");
+                }
+                temporary_attributes = GetFileAttributesW(temporary_path.c_str());
+            }
+            if (temporary_attributes == INVALID_FILE_ATTRIBUTES ||
+                (temporary_attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT |
+                    FILE_ATTRIBUTE_ENCRYPTED)) != 0 ||
+                !files_have_equal_bytes(source_path, temporary_path))
+            {
+                throw hresult_error(
+                    HRESULT_FROM_WIN32(ERROR_CRC),
+                    L"Temporary cleanup broker executable failed content or attribute verification");
+            }
+            if (!MoveFileExW(
+                    temporary_path.c_str(),
+                    destination_path.c_str(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+            {
+                throw hresult_error(
+                    HRESULT_FROM_WIN32(GetLastError()),
+                    L"Unable to atomically publish the cleanup broker executable");
+            }
+            temporary_path.clear();
+            const DWORD destination_attributes = GetFileAttributesW(destination_path.c_str());
+            if (destination_attributes == INVALID_FILE_ATTRIBUTES ||
+                (destination_attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT |
+                    FILE_ATTRIBUTE_ENCRYPTED)) != 0 ||
+                !files_have_equal_bytes(source_path, destination_path))
+            {
+                throw hresult_error(
+                    HRESULT_FROM_WIN32(ERROR_CRC),
+                    L"Published cleanup broker executable failed content or attribute verification");
+            }
+        }
+        catch (...)
+        {
+            destination.reset();
+            if (!temporary_path.empty())
+            {
+                DeleteFileW(temporary_path.c_str());
+            }
+            throw;
+        }
+    }
+
+    std::wstring cleanup_broker_command_line(
+        const std::wstring& optional_package_family_name)
+    {
+        const std::filesystem::path executable_path = legacy_cleanup_broker_executable_path();
+        std::wstring command_line = quote_command_line_argument(executable_path.wstring()) +
+            L" legacy-cleanup-broker";
+        if (!optional_package_family_name.empty())
+        {
+            command_line += L" --package-family-name " +
+                quote_command_line_argument(optional_package_family_name);
+        }
+        return command_line;
+    }
+
+    void register_cleanup_broker_run_value(
+        const std::wstring& optional_package_family_name)
+    {
+        HKEY raw_key = nullptr;
+        DWORD disposition = 0;
+        const LSTATUS create_result = RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            legacy_cleanup_broker_run_key,
+            0,
+            nullptr,
+            REG_OPTION_NON_VOLATILE,
+            KEY_SET_VALUE,
+            nullptr,
+            &raw_key,
+            &disposition);
+        if (create_result != ERROR_SUCCESS)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(create_result),
+                L"Unable to open the cleanup broker Run registration");
+        }
+        scoped_registry_key key(raw_key);
+        const std::wstring command_line = cleanup_broker_command_line(
+            optional_package_family_name);
+        const DWORD bytes = static_cast<DWORD>((command_line.size() + 1) * sizeof(wchar_t));
+        const LSTATUS set_result = RegSetValueExW(
+            key.get(),
+            legacy_cleanup_broker_run_value,
+            0,
+            REG_SZ,
+            reinterpret_cast<const BYTE*>(command_line.c_str()),
+            bytes);
+        if (set_result != ERROR_SUCCESS)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(set_result),
+                L"Unable to register the cleanup broker for user logon");
+        }
+    }
+
+    void remove_cleanup_broker_run_value()
+    {
+        HKEY raw_key = nullptr;
+        const LSTATUS open_result = RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            legacy_cleanup_broker_run_key,
+            0,
+            KEY_SET_VALUE,
+            &raw_key);
+        if (open_result == ERROR_FILE_NOT_FOUND || open_result == ERROR_PATH_NOT_FOUND)
+        {
+            return;
+        }
+        if (open_result != ERROR_SUCCESS)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(open_result),
+                L"Unable to open the cleanup broker Run registration for deletion");
+        }
+        scoped_registry_key key(raw_key);
+        const LSTATUS delete_result = RegDeleteValueW(
+            key.get(),
+            legacy_cleanup_broker_run_value);
+        if (delete_result != ERROR_SUCCESS && delete_result != ERROR_FILE_NOT_FOUND)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(delete_result),
+                L"Unable to remove the cleanup broker Run registration");
+        }
+    }
+
+    std::optional<std::wstring> read_cleanup_broker_run_value()
+    {
+        HKEY raw_key = nullptr;
+        const LSTATUS open_result = RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            legacy_cleanup_broker_run_key,
+            0,
+            KEY_QUERY_VALUE,
+            &raw_key);
+        if (open_result == ERROR_FILE_NOT_FOUND || open_result == ERROR_PATH_NOT_FOUND)
+        {
+            return std::nullopt;
+        }
+        if (open_result != ERROR_SUCCESS)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(open_result),
+                L"Unable to inspect the cleanup broker Run registration");
+        }
+        scoped_registry_key key(raw_key);
+        DWORD type = 0;
+        DWORD bytes = 0;
+        LSTATUS result = RegQueryValueExW(
+            key.get(),
+            legacy_cleanup_broker_run_value,
+            nullptr,
+            &type,
+            nullptr,
+            &bytes);
+        if (result == ERROR_FILE_NOT_FOUND)
+        {
+            return std::nullopt;
+        }
+        if (result != ERROR_SUCCESS || type != REG_SZ ||
+            bytes < sizeof(wchar_t) || bytes > 65536)
+        {
+            throw hresult_error(
+                result == ERROR_SUCCESS ? E_INVALIDARG : HRESULT_FROM_WIN32(result),
+                L"Cleanup broker Run registration is invalid");
+        }
+        std::vector<wchar_t> value((bytes / sizeof(wchar_t)) + 1, L'\0');
+        result = RegQueryValueExW(
+            key.get(),
+            legacy_cleanup_broker_run_value,
+            nullptr,
+            &type,
+            reinterpret_cast<BYTE*>(value.data()),
+            &bytes);
+        if (result != ERROR_SUCCESS)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(result),
+                L"Unable to read the cleanup broker Run registration");
+        }
+        return std::wstring(value.data());
+    }
+
+    bool any_allowed_memmy_package_is_registered()
+    {
+        return !registered_package_full_names(allowed_memmy_package_family).empty() ||
+            !registered_package_full_names(allowed_memmy_agent_package_family).empty();
+    }
+
+    void validate_offline_cleanup_broker_stop()
+    {
+        const auto journal = read_cleanup_journal();
+        if (journal)
+        {
+            validate_legacy_transition_options(journal->options, true, false);
+            if (!journal->options.external_helper_path.empty())
+            {
+                throw hresult_error(
+                    E_ACCESSDENIED,
+                    L"Cleanup journal contains a deprecated external helper path");
+            }
+            require_allowed_memmy_package_identity(journal->options);
+            validate_persisted_authority_shape(journal->authority, journal->options);
+            if (any_allowed_memmy_package_is_registered())
+            {
+                throw hresult_error(
+                    E_ACCESSDENIED,
+                    L"Refusing offline cleanup broker shutdown while a Memmy Store package is registered");
+            }
+            const auto journal_run_value = read_cleanup_broker_run_value();
+            if (journal_run_value &&
+                *journal_run_value != cleanup_broker_command_line(L"") &&
+                *journal_run_value != cleanup_broker_command_line(
+                    journal->options.package_family_name))
+            {
+                throw hresult_error(
+                    E_ACCESSDENIED,
+                    L"Refusing to modify a cleanup broker Run registration that does not match its journal");
+            }
+            if (journal->phase == LegacyCleanupJournalPhase::Acknowledged)
+            {
+                remove_cleanup_broker_run_value();
+                delete_cleanup_journal_file(
+                    L"Unable to retire the acknowledged cleanup journal during offline shutdown");
+                return;
+            }
+        }
+        const auto run_value = read_cleanup_broker_run_value();
+        if (!run_value)
+        {
+            return;
+        }
+        if (any_allowed_memmy_package_is_registered())
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Refusing offline cleanup broker shutdown while a Memmy Store package is registered");
+        }
+        if (*run_value == cleanup_broker_command_line(L""))
+        {
+            return;
+        }
+        const wchar_t* allowed_package_families[] = {
+            allowed_memmy_package_family,
+            allowed_memmy_agent_package_family
+        };
+        for (const wchar_t* package_family : allowed_package_families)
+        {
+            if (*run_value == cleanup_broker_command_line(package_family))
+            {
+                return;
+            }
+        }
+        throw hresult_error(
+            E_ACCESSDENIED,
+            L"Refusing to modify an unrecognized cleanup broker Run registration");
+    }
+
+    DWORD launch_cleanup_broker_process(
+        const std::wstring& optional_package_family_name)
+    {
+        const std::filesystem::path executable_path = legacy_cleanup_broker_executable_path();
+        std::wstring command_line = cleanup_broker_command_line(
+            optional_package_family_name);
+        STARTUPINFOW startup{};
+        startup.cb = sizeof(startup);
+        PROCESS_INFORMATION process{};
+        if (!CreateProcessW(
+                executable_path.c_str(),
+                command_line.data(),
+                nullptr,
+                nullptr,
+                FALSE,
+                CREATE_NO_WINDOW | DETACHED_PROCESS,
+                nullptr,
+                executable_path.parent_path().c_str(),
+                &startup,
+                &process))
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to start the native legacy cleanup broker");
+        }
+        const DWORD process_id = process.dwProcessId;
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+        return process_id;
+    }
+
+    void throw_broker_response_failure(const LegacyCleanupBrokerResponse& response)
+    {
+        if (SUCCEEDED(response.hresult))
+        {
+            return;
+        }
+        if (legacy_cleanup_diagnostics)
+        {
+            legacy_cleanup_diagnostics->failure_process_role = "native-cleanup-broker";
+            set_legacy_cleanup_failure_context(
+                response.operation,
+                response.target,
+                response.win32_error);
+        }
+        throw hresult_error(
+            response.hresult,
+            to_hstring(
+                "Native legacy cleanup broker failed; operation=" + response.operation +
+                "; target=" + response.target +
+                (response.win32_error
+                    ? "; win32Error=" + std::to_string(*response.win32_error)
+                    : "") +
+                "; message=" + response.message));
+    }
+
+    bool try_stop_cleanup_broker(DWORD wait_milliseconds)
+    {
+        scoped_handle pipe(CreateFileW(
+            legacy_cleanup_broker_pipe_name().c_str(),
+            GENERIC_READ | GENERIC_WRITE,
+            0,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr));
+        if (!pipe)
+        {
+            const DWORD error = GetLastError();
+            if (error == ERROR_FILE_NOT_FOUND)
+            {
+                return false;
+            }
+            if (error == ERROR_PIPE_BUSY && wait_milliseconds != 0)
+            {
+                pipe = connect_to_cleanup_broker(wait_milliseconds);
+            }
+            else
+            {
+                throw hresult_error(
+                    HRESULT_FROM_WIN32(error),
+                    L"Unable to connect to the cleanup broker for shutdown");
+            }
+        }
+        validate_cleanup_broker_server(pipe.get());
+        const DWORD server_process_id = named_pipe_server_process_id(pipe.get());
+        scoped_handle server_process(OpenProcess(
+            SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+            FALSE,
+            server_process_id));
+        send_broker_frame(pipe.get(), LegacyCleanupBrokerMessage::Stop, {});
+        auto [message, payload] = receive_broker_frame(pipe.get());
+        if (message != LegacyCleanupBrokerMessage::Response)
+        {
+            throw hresult_invalid_argument(L"Cleanup broker shutdown returned a non-response frame");
+        }
+        throw_broker_response_failure(deserialize_broker_response(payload));
+        pipe.reset();
+        if (server_process &&
+            WaitForSingleObject(server_process.get(), wait_milliseconds) == WAIT_TIMEOUT)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(ERROR_TIMEOUT),
+                L"Cleanup broker did not exit after shutdown");
+        }
+        return true;
+    }
+
+    void ensure_legacy_cleanup_broker(const std::wstring& optional_package_family_name)
+    {
+        if (current_process_has_package_identity())
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Cleanup broker installation must run from an unpackaged process");
+        }
+        if (!optional_package_family_name.empty())
+        {
+            LegacyTransitionOptions identity_options;
+            identity_options.package_family_name = optional_package_family_name;
+            identity_options.aumid = optional_package_family_name + L"!Memmy";
+            require_allowed_memmy_package_identity(identity_options);
+        }
+        retire_orphaned_cleanup_journal_for_native_install();
+        validate_offline_cleanup_broker_stop();
+        try_stop_cleanup_broker(10000);
+        stage_cleanup_broker_executable();
+        register_cleanup_broker_run_value(optional_package_family_name);
+        try
+        {
+            launch_cleanup_broker_process(optional_package_family_name);
+            const LegacyCleanupBrokerResponse response = request_cleanup_broker(
+                LegacyCleanupBrokerMessage::Ping,
+                nullptr,
+                10000);
+            throw_broker_response_failure(response);
+        }
+        catch (...)
+        {
+            try
+            {
+                remove_cleanup_broker_run_value();
+            }
+            catch (...)
+            {
+            }
+            throw;
+        }
+    }
+
+    void stop_legacy_cleanup_broker()
+    {
+        if (current_process_has_package_identity())
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Cleanup broker shutdown must run from an unpackaged process");
+        }
+        const bool stopped = try_stop_cleanup_broker(10000);
+        if (!stopped)
+        {
+            validate_offline_cleanup_broker_stop();
+        }
+        remove_cleanup_broker_run_value();
+    }
+
+    void validate_cleanup_request_against_capture(
+        const LegacyTransitionOptions& options,
+        const LegacyAuthorityCapture& capture)
+    {
+        const std::filesystem::path expected_desktop_shortcut =
+            resolve_known_folder_path(
+                FOLDERID_Desktop,
+                L"The current user's Desktop directory is unavailable for broker validation") /
+            L"Memmy.lnk";
+        if (normalize_absolute_path(options.legacy_install_directory) !=
+                normalize_absolute_path(capture.install_directory) ||
+            normalize_absolute_path(options.legacy_executable_path.parent_path()) !=
+                normalize_absolute_path(capture.install_directory) ||
+            _wcsicmp(options.legacy_executable_path.filename().c_str(), L"Memmy.exe") != 0 ||
+            options.shortcut_path.empty() ||
+            normalize_absolute_path(options.shortcut_path) !=
+                normalize_absolute_path(expected_desktop_shortcut))
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Cleanup request does not match the broker's captured source and fixed shortcut policy");
+        }
+    }
+
+    LegacyTransitionOptions derive_trusted_cleanup_options(
+        const LegacyTransitionOptions& request,
+        const LegacyAuthorityCapture& capture)
+    {
+        LegacyTransitionOptions trusted = request;
+        trusted.external_helper_path.clear();
+        trusted.legacy_install_directory = capture.install_directory;
+        trusted.legacy_executable_path = capture.install_directory / L"Memmy.exe";
+        trusted.shortcut_path = resolve_known_folder_path(
+            FOLDERID_Desktop,
+            L"The current user's Desktop directory is unavailable for broker cleanup") /
+            L"Memmy.lnk";
+        return trusted;
+    }
+
+    scoped_handle acquire_cleanup_active_marker()
+    {
+        const std::wstring source_lease_pipe = legacy_transition_source_lease_pipe_name();
+        if (!exclusive_pipe_name_is_owned(source_lease_pipe))
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(ERROR_RETRY),
+                L"Store transition source lease is not held before cleanup");
+        }
+        scoped_handle marker(create_user_restricted_pipe(
+            legacy_transition_cleanup_active_pipe_name(),
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            1));
+        if (!marker)
+        {
+            const DWORD error = GetLastError();
+            throw hresult_error(
+                HRESULT_FROM_WIN32(
+                    error == ERROR_ACCESS_DENIED || error == ERROR_PIPE_BUSY
+                        ? ERROR_BUSY
+                        : error),
+                L"Unable to acquire the Store transition cleanup-active marker");
+        }
+        if (!exclusive_pipe_name_is_owned(source_lease_pipe))
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(ERROR_RETRY),
+                L"Store transition source lease was released before cleanup began");
+        }
+        return marker;
+    }
+
+    void require_post_mutex_cleanup_authorization(
+        const LegacyTransitionOptions& options)
+    {
+        if (!exclusive_pipe_name_is_owned(legacy_transition_source_lease_pipe_name()))
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(ERROR_RETRY),
+                L"Store transition source lease was released while cleanup waited for the mutation mutex");
+        }
+        if (registered_package_full_names(options.package_family_name).empty())
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(ERROR_RETRY),
+                L"The requesting Store package is no longer registered after cleanup acquired the mutation mutex");
+        }
+    }
+
+    scoped_handle create_transition_mutation_mutex()
+    {
+        scoped_handle mutex(CreateMutexW(
+            nullptr,
+            FALSE,
+            legacy_transition_mutation_mutex_name));
+        if (!mutex)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to create the NSIS and Store transition mutation mutex");
+        }
+        return mutex;
+    }
+
+    void require_parent_held_transition_mutation_mutex()
+    {
+        scoped_handle mutex(OpenMutexW(
+            SYNCHRONIZE | MUTEX_MODIFY_STATE,
+            FALSE,
+            legacy_transition_mutation_mutex_name));
+        if (!mutex)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"NSIS mutation authorization requires the transition mutex");
+        }
+        const DWORD wait_result = WaitForSingleObject(mutex.get(), 0);
+        if (wait_result == WAIT_TIMEOUT)
+        {
+            return;
+        }
+        if (wait_result == WAIT_OBJECT_0 || wait_result == WAIT_ABANDONED)
+        {
+            ReleaseMutex(mutex.get());
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"NSIS mutation authorization requires its parent to hold the transition mutex");
+        }
+        throw hresult_error(
+            HRESULT_FROM_WIN32(GetLastError()),
+            L"Unable to verify NSIS transition mutex ownership");
+    }
+
+    void authorize_nsis_mutation()
+    {
+        if (current_process_has_package_identity())
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"NSIS mutation authorization must run from an unpackaged process");
+        }
+        const std::wstring user_sid = current_user_sid();
+        const DWORD session_id = current_process_session_id();
+        validate_cleanup_broker_parent_process(user_sid, session_id);
+        require_parent_held_transition_mutation_mutex();
+        if (exclusive_pipe_name_is_owned(legacy_transition_cleanup_active_pipe_name()))
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(ERROR_BUSY),
+                L"NSIS mutation is blocked while Store cleanup is active");
+        }
+        if (any_allowed_memmy_package_is_registered())
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"NSIS mutation is blocked while a Memmy Store package is registered");
+        }
+        const auto journal = read_cleanup_journal();
+        if (!journal)
+        {
+            return;
+        }
+        validate_legacy_transition_options(journal->options, true, false);
+        if (!journal->options.external_helper_path.empty())
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Cleanup journal contains a deprecated external helper path");
+        }
+        require_allowed_memmy_package_identity(journal->options);
+        validate_persisted_authority_shape(journal->authority, journal->options);
+    }
+
+    LegacyCleanupBrokerResponse cleanup_broker_error_response(
+        HRESULT hresult,
+        const std::string& message,
+        const std::wstring& transition_id,
+        const std::wstring& attempt_id)
+    {
+        LegacyCleanupBrokerResponse response;
+        response.hresult = hresult;
+        response.transition_id = transition_id;
+        response.attempt_id = attempt_id;
+        response.message = single_line(message);
+        if (legacy_cleanup_diagnostics)
+        {
+            response.operation = legacy_cleanup_diagnostics->current_operation;
+            response.target = legacy_cleanup_diagnostics->current_target;
+            response.win32_error = legacy_cleanup_diagnostics->current_win32_error
+                ? legacy_cleanup_diagnostics->current_win32_error
+                : win32_error_from_hresult(hresult);
+            write_legacy_cleanup_process_failure(hresult, message);
+        }
+        else
+        {
+            response.operation = "cleanup-broker-request";
+            response.win32_error = win32_error_from_hresult(hresult);
+        }
+        return response;
+    }
+
+    int run_legacy_cleanup_broker(const std::wstring& optional_package_family_name)
+    {
+        if (!optional_package_family_name.empty())
+        {
+            LegacyTransitionOptions identity_options;
+            identity_options.package_family_name = optional_package_family_name;
+            identity_options.aumid = optional_package_family_name + L"!Memmy";
+            require_allowed_memmy_package_identity(identity_options);
+        }
+        if (current_process_has_package_identity())
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Native cleanup broker must start without package identity");
+        }
+        validate_cleanup_broker_executable();
+        initialize_cleanup_broker_startup_diagnostics();
+        const std::wstring user_sid = current_user_sid();
+        const DWORD session_id = current_process_session_id();
+        validate_cleanup_broker_parent_process(user_sid, session_id);
+        std::optional<LegacyCleanupJournal> active_journal = read_cleanup_journal();
+        LegacyAuthorityCapture authority_capture;
+        std::wstring broker_bound_package_family_name = optional_package_family_name;
+        if (active_journal)
+        {
+            validate_legacy_transition_options(active_journal->options, true, false);
+            if (!active_journal->options.external_helper_path.empty())
+            {
+                throw hresult_error(
+                    E_ACCESSDENIED,
+                    L"Cleanup journal contains a deprecated external helper path");
+            }
+            require_allowed_memmy_package_identity(active_journal->options);
+            validate_persisted_authority_shape(
+                active_journal->authority,
+                active_journal->options);
+            if (!broker_bound_package_family_name.empty() &&
+                broker_bound_package_family_name != active_journal->options.package_family_name)
+            {
+                throw hresult_error(
+                    E_ACCESSDENIED,
+                    L"Cleanup journal package family does not match the broker binding");
+            }
+            broker_bound_package_family_name = active_journal->options.package_family_name;
+            if (active_journal->phase == LegacyCleanupJournalPhase::Acknowledged)
+            {
+                append_legacy_cleanup_diagnostic(
+                    "cleanup-journal-recovery",
+                    "acknowledged",
+                    "retire-acknowledged-run-registration",
+                    utf8(legacy_cleanup_journal_path().wstring()),
+                    std::nullopt,
+                    S_OK,
+                    "transitionId=" + utf8(active_journal->options.transition_id));
+                remove_cleanup_broker_run_value();
+                return 0;
+            }
+            authority_capture = active_journal->authority;
+            authority_capture.session_id = session_id;
+            if (active_journal->phase == LegacyCleanupJournalPhase::Complete)
+            {
+                verify_complete_cleanup_postconditions(
+                    authority_capture,
+                    active_journal->options);
+            }
+            else
+            {
+                verify_recoverable_authority_state(
+                    authority_capture,
+                    active_journal->options);
+            }
+            append_legacy_cleanup_diagnostic(
+                "cleanup-journal-recovery",
+                active_journal->phase == LegacyCleanupJournalPhase::Complete
+                    ? "complete"
+                    : "prepared",
+                active_journal->phase == LegacyCleanupJournalPhase::Complete
+                    ? "validate-complete-journal"
+                    : "validate-prepared-journal",
+                utf8(legacy_cleanup_journal_path().wstring()),
+                std::nullopt,
+                S_OK,
+                "transitionId=" + utf8(active_journal->options.transition_id) +
+                    "; attemptId=" + utf8(active_journal->options.attempt_id));
+        }
+        else
+        {
+            authority_capture = capture_legacy_cleanup_authority();
+        }
+        if (_wcsicmp(authority_capture.user_sid.c_str(), user_sid.c_str()) != 0 ||
+            authority_capture.session_id != session_id)
+        {
+            throw hresult_error(E_ACCESSDENIED, L"Cleanup broker authority capture changed process context");
+        }
+
+        bool exit_after_response = false;
+        while (!exit_after_response)
+        {
+            scoped_handle pipe(create_user_restricted_pipe(
+                legacy_cleanup_broker_pipe_name(),
+                PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                1));
+            if (!pipe)
+            {
+                const DWORD error = GetLastError();
+                throw hresult_error(
+                    HRESULT_FROM_WIN32(
+                        error == ERROR_ACCESS_DENIED || error == ERROR_PIPE_BUSY
+                            ? ERROR_ALREADY_EXISTS
+                            : error),
+                    L"Another cleanup broker already owns the current session pipe");
+            }
+            const BOOL connected = ConnectNamedPipe(pipe.get(), nullptr);
+            const DWORD connect_error = connected ? ERROR_SUCCESS : GetLastError();
+            if (!connected && connect_error != ERROR_PIPE_CONNECTED)
+            {
+                throw hresult_error(
+                    HRESULT_FROM_WIN32(connect_error),
+                    L"Unable to accept a cleanup broker client");
+            }
+
+            LegacyCleanupBrokerResponse response;
+            scoped_handle cleanup_active_marker;
+            scoped_handle transition_mutation_mutex;
+            scoped_mutex_ownership transition_mutation_ownership;
+            try
+            {
+                const DWORD client_process_id = named_pipe_client_process_id(pipe.get());
+                scoped_handle client = open_verified_pipe_peer_process(
+                    client_process_id,
+                    authority_capture.user_sid,
+                    authority_capture.session_id);
+                auto [message, payload] = receive_broker_frame(pipe.get());
+                if (message == LegacyCleanupBrokerMessage::Ping)
+                {
+                    if (!payload.empty())
+                    {
+                        throw hresult_invalid_argument(L"Cleanup broker ping contains a payload");
+                    }
+                    response.message = "ready";
+                }
+                else if (message == LegacyCleanupBrokerMessage::Stop)
+                {
+                    if (!payload.empty())
+                    {
+                        throw hresult_invalid_argument(L"Cleanup broker stop contains a payload");
+                    }
+                    if (process_package_family(client.get()))
+                    {
+                        throw hresult_error(
+                            E_ACCESSDENIED,
+                            L"Cleanup broker shutdown requires an unpackaged client");
+                    }
+                    if (any_allowed_memmy_package_is_registered())
+                    {
+                        throw hresult_error(
+                            E_ACCESSDENIED,
+                            L"Refusing to stop a cleanup broker while a Memmy Store package is registered");
+                    }
+                    if (active_journal)
+                    {
+                        if (active_journal->phase == LegacyCleanupJournalPhase::Acknowledged)
+                        {
+                            remove_cleanup_broker_run_value();
+                            delete_cleanup_journal_file(
+                                L"Unable to retire the acknowledged cleanup journal during broker shutdown");
+                            active_journal.reset();
+                        }
+                    }
+                    remove_cleanup_broker_run_value();
+                    response.message = "stopped";
+                    exit_after_response = true;
+                }
+                else if (message == LegacyCleanupBrokerMessage::Acknowledge)
+                {
+                    LegacyTransitionOptions options = deserialize_legacy_transition_options(payload);
+                    response.transition_id = options.transition_id;
+                    response.attempt_id = options.attempt_id;
+                    initialize_legacy_cleanup_diagnostics(options, "native-cleanup-broker-ack");
+                    begin_legacy_cleanup_operation("ack-options-validate");
+                    validate_legacy_transition_options(options, true, false);
+                    if (!options.external_helper_path.empty())
+                    {
+                        throw hresult_invalid_argument(
+                            L"Cleanup broker acknowledgement must not contain an external helper path");
+                    }
+                    require_allowed_memmy_package_identity(options);
+                    if (!active_journal ||
+                        (active_journal->phase != LegacyCleanupJournalPhase::Complete &&
+                         active_journal->phase != LegacyCleanupJournalPhase::Acknowledged) ||
+                        !equivalent_transition_options(active_journal->options, options) ||
+                        (!broker_bound_package_family_name.empty() &&
+                         options.package_family_name != broker_bound_package_family_name))
+                    {
+                        throw hresult_error(
+                            E_ACCESSDENIED,
+                            L"Cleanup acknowledgement does not match a completed broker transaction");
+                    }
+                    complete_legacy_cleanup_operation();
+
+                    begin_legacy_cleanup_operation(
+                        "ack-client-identity-attestation",
+                        std::to_string(client_process_id));
+                    validate_cleanup_broker_client(pipe.get(), options, authority_capture);
+                    complete_legacy_cleanup_operation(
+                        "packageFamilyName=" + utf8(options.package_family_name) +
+                        "; aumid=" + utf8(options.aumid));
+
+                    if (active_journal->phase == LegacyCleanupJournalPhase::Complete)
+                    {
+                        begin_legacy_cleanup_operation(
+                            "ack-native-postconditions",
+                            utf8(authority_capture.install_directory.wstring()));
+                        verify_complete_cleanup_postconditions(authority_capture, options);
+                        complete_legacy_cleanup_operation("nativeCleanupStillComplete=true");
+
+                        begin_legacy_cleanup_operation(
+                            "ack-journal-commit",
+                            utf8(legacy_cleanup_journal_path().wstring()));
+                        LegacyCleanupJournal acknowledged_journal = *active_journal;
+                        acknowledged_journal.phase = LegacyCleanupJournalPhase::Acknowledged;
+                        write_cleanup_journal_atomic(acknowledged_journal);
+                        *active_journal = std::move(acknowledged_journal);
+                        complete_legacy_cleanup_operation("phase=acknowledged");
+                    }
+                    else
+                    {
+                        begin_legacy_cleanup_operation(
+                            "ack-journal-replay",
+                            utf8(legacy_cleanup_journal_path().wstring()));
+                        complete_legacy_cleanup_operation(
+                            "durableAcknowledgementReplayed=true");
+                    }
+
+                    remove_cleanup_broker_run_value();
+                    response.message = "cleanup-acknowledged-durable";
+                    exit_after_response = true;
+                }
+                else if (message == LegacyCleanupBrokerMessage::Cleanup)
+                {
+                    LegacyTransitionOptions options = deserialize_legacy_transition_options(payload);
+                    response.transition_id = options.transition_id;
+                    response.attempt_id = options.attempt_id;
+                    initialize_legacy_cleanup_diagnostics(options, "native-cleanup-broker");
+                    begin_legacy_cleanup_operation("options-validate");
+                    validate_legacy_transition_options(options, true, false);
+                    if (!options.external_helper_path.empty())
+                    {
+                        throw hresult_invalid_argument(
+                            L"Cleanup broker request must not contain an external helper path");
+                    }
+                    require_allowed_memmy_package_identity(options);
+                    if (!broker_bound_package_family_name.empty() &&
+                        options.package_family_name != broker_bound_package_family_name)
+                    {
+                        throw hresult_error(
+                            E_ACCESSDENIED,
+                            L"Cleanup request package family does not match the broker binding");
+                    }
+                    if (active_journal &&
+                        !equivalent_transition_options(active_journal->options, options))
+                    {
+                        throw hresult_error(
+                            E_ACCESSDENIED,
+                            L"Cleanup request does not match the broker's prepared journal");
+                    }
+                    complete_legacy_cleanup_operation();
+
+                    begin_legacy_cleanup_operation(
+                        "client-identity-attestation",
+                        std::to_string(client_process_id));
+                    validate_cleanup_broker_client(pipe.get(), options, authority_capture);
+                    complete_legacy_cleanup_operation(
+                        "packageFamilyName=" + utf8(options.package_family_name) +
+                        "; aumid=" + utf8(options.aumid));
+
+                    begin_legacy_cleanup_operation(
+                        "broker-authority-attestation",
+                        utf8(authority_capture.install_directory.wstring()));
+                    if (current_process_has_package_identity() ||
+                        _wcsicmp(current_user_sid().c_str(), authority_capture.user_sid.c_str()) != 0 ||
+                        current_process_session_id() != authority_capture.session_id)
+                    {
+                        throw hresult_error(
+                            E_ACCESSDENIED,
+                            L"Cleanup broker process context changed after startup attestation");
+                    }
+                    validate_cleanup_request_against_capture(options, authority_capture);
+                    const LegacyTransitionOptions trusted_options =
+                        derive_trusted_cleanup_options(options, authority_capture);
+                    if (active_journal &&
+                        active_journal->phase == LegacyCleanupJournalPhase::Acknowledged)
+                    {
+                        complete_legacy_cleanup_operation(
+                            "brokerContextAndAcknowledgedJournalSourceMatch=true");
+                        begin_legacy_cleanup_operation(
+                            "acknowledged-cleanup-native-postconditions",
+                            utf8(authority_capture.install_directory.wstring()));
+                        verify_complete_cleanup_postconditions(
+                            authority_capture,
+                            trusted_options);
+                        complete_legacy_cleanup_operation(
+                            "acknowledgedJournalAndNativePostconditionsMatch=true");
+                        response.message = "cleanup-already-acknowledged";
+                    }
+                    else if (active_journal &&
+                        active_journal->phase == LegacyCleanupJournalPhase::Complete)
+                    {
+                        complete_legacy_cleanup_operation(
+                            "brokerContextAndCompleteJournalSourceMatch=true");
+                        begin_legacy_cleanup_operation(
+                            "cleanup-active-marker-acquire",
+                            utf8(legacy_transition_cleanup_active_pipe_name()));
+                        cleanup_active_marker = acquire_cleanup_active_marker();
+                        complete_legacy_cleanup_operation(
+                            "sourceLeaseHeld=true; cleanupActiveHeld=true; replay=true");
+                        begin_legacy_cleanup_operation(
+                            "transition-mutation-mutex-acquire",
+                            "Local\\MemmyStoreTransitionNsisMutation");
+                        transition_mutation_mutex = create_transition_mutation_mutex();
+                        transition_mutation_ownership.acquire(transition_mutation_mutex.get());
+                        complete_legacy_cleanup_operation("owned=true; replay=true");
+                        begin_legacy_cleanup_operation(
+                            "post-mutex-cleanup-authorization",
+                            utf8(options.package_family_name));
+                        require_post_mutex_cleanup_authorization(trusted_options);
+                        complete_legacy_cleanup_operation(
+                            "sourceLeaseHeld=true; packageRegistered=true; replay=true");
+                        begin_legacy_cleanup_operation(
+                            "complete-cleanup-native-postconditions",
+                            utf8(authority_capture.install_directory.wstring()));
+                        verify_complete_cleanup_postconditions(
+                            authority_capture,
+                            trusted_options);
+                        complete_legacy_cleanup_operation(
+                            "completeJournalAndNativePostconditionsMatch=true");
+                        response.message = "cleanup-complete-replayed-by-native-broker";
+                    }
+                    else
+                    {
+                        begin_legacy_cleanup_operation(
+                            "cleanup-active-marker-acquire",
+                            utf8(legacy_transition_cleanup_active_pipe_name()));
+                        cleanup_active_marker = acquire_cleanup_active_marker();
+                        complete_legacy_cleanup_operation("sourceLeaseHeld=true; cleanupActiveHeld=true");
+
+                        begin_legacy_cleanup_operation(
+                            "transition-mutation-mutex-acquire",
+                            "Local\\MemmyStoreTransitionNsisMutation");
+                        transition_mutation_mutex = create_transition_mutation_mutex();
+                        transition_mutation_ownership.acquire(transition_mutation_mutex.get());
+                        complete_legacy_cleanup_operation("owned=true");
+
+                        begin_legacy_cleanup_operation(
+                            "post-mutex-cleanup-authorization",
+                            utf8(options.package_family_name));
+                        require_post_mutex_cleanup_authorization(trusted_options);
+                        complete_legacy_cleanup_operation(
+                            "sourceLeaseHeld=true; packageRegistered=true");
+
+                        begin_legacy_cleanup_operation(
+                            "broker-authority-mutation-attestation",
+                            utf8(authority_capture.install_directory.wstring()));
+                        if (active_journal)
+                        {
+                            verify_recoverable_authority_state(
+                                authority_capture,
+                                trusted_options);
+                            complete_legacy_cleanup_operation(
+                                "preparedJournalAndRecoverableAuthorityMatch=true");
+                        }
+                        else
+                        {
+                            verify_legacy_cleanup_authority_unchanged(authority_capture);
+                            complete_legacy_cleanup_operation(
+                                "startupCaptureAndCurrentAuthorityMatch=true");
+                        }
+
+                        if (!active_journal)
+                        {
+                            LegacyCleanupJournal prepared_journal{
+                                LegacyCleanupJournalPhase::Prepared,
+                                trusted_options,
+                                authority_capture
+                            };
+                            begin_legacy_cleanup_operation(
+                                "cleanup-journal-prepare",
+                                utf8(legacy_cleanup_journal_path().wstring()));
+                            write_cleanup_journal_atomic(prepared_journal);
+                            active_journal = std::move(prepared_journal);
+                            complete_legacy_cleanup_operation("phase=prepared");
+                        }
+
+                        finalize_legacy_cleanup_unpacked(trusted_options, true);
+                        // The inner cleanup routine checks the caller's HKCU view. Before
+                        // attesting completion, independently re-open the captured native
+                        // HKCU/HKU<SID> authority in both registry views and verify the
+                        // install directory is gone. If this fails, leave the durable journal
+                        // in Prepared so a later broker request can safely retry cleanup.
+                        begin_legacy_cleanup_operation(
+                            "broker-native-cleanup-postcheck",
+                            utf8(authority_capture.install_directory.wstring()));
+                        verify_complete_cleanup_postconditions(
+                            authority_capture,
+                            trusted_options);
+                        complete_legacy_cleanup_operation(
+                            "nativeHkcuAndHkuPostconditionsMatch=true");
+                        begin_legacy_cleanup_operation(
+                            "cleanup-journal-complete",
+                            utf8(legacy_cleanup_journal_path().wstring()));
+                        LegacyCleanupJournal completed_journal = *active_journal;
+                        completed_journal.phase = LegacyCleanupJournalPhase::Complete;
+                        write_cleanup_journal_atomic(completed_journal);
+                        *active_journal = std::move(completed_journal);
+                        complete_legacy_cleanup_operation("phase=complete");
+                        response.message = "cleanup-complete-awaiting-store-ack";
+                    }
+                }
+                else
+                {
+                    throw hresult_invalid_argument(L"Cleanup broker received an invalid request type");
+                }
+            }
+            catch (const hresult_error& error)
+            {
+                response = cleanup_broker_error_response(
+                    error.code(),
+                    to_string(error.message()),
+                    response.transition_id,
+                    response.attempt_id);
+                exit_after_response = false;
+            }
+            catch (const std::filesystem::filesystem_error& error)
+            {
+                const DWORD win32_error = static_cast<DWORD>(error.code().value());
+                const HRESULT hresult = HRESULT_FROM_WIN32(win32_error);
+                const std::string target = !error.path1().empty()
+                    ? utf8(error.path1().wstring())
+                    : (!error.path2().empty() ? utf8(error.path2().wstring()) : "");
+                set_legacy_cleanup_failure_context("std::filesystem", target, win32_error);
+                response = cleanup_broker_error_response(
+                    hresult,
+                    error.what(),
+                    response.transition_id,
+                    response.attempt_id);
+                exit_after_response = false;
+            }
+            catch (const std::exception& error)
+            {
+                response = cleanup_broker_error_response(
+                    E_FAIL,
+                    error.what(),
+                    response.transition_id,
+                    response.attempt_id);
+                exit_after_response = false;
+            }
+
+            try
+            {
+                send_broker_frame(
+                    pipe.get(),
+                    LegacyCleanupBrokerMessage::Response,
+                    serialize_broker_response(response));
+                FlushFileBuffers(pipe.get());
+            }
+            catch (const hresult_error& error)
+            {
+                // The journal is the durable result. In particular, a Cleanup
+                // response can be lost after Complete was committed. Keep the
+                // broker alive for another client request instead of requiring
+                // a new logon merely to replay that journal. ACK/Stop already
+                // set exit_after_response and retain their durable/offline
+                // recovery paths.
+                append_legacy_cleanup_diagnostic(
+                    "broker-response-write",
+                    "failed",
+                    "named-pipe-response",
+                    utf8(legacy_cleanup_broker_pipe_name()),
+                    std::nullopt,
+                    error.code(),
+                    std::string("durableStatePreserved=true; continueListening=") +
+                        (exit_after_response ? "false" : "true"));
+            }
+            catch (...)
+            {
+                append_legacy_cleanup_diagnostic(
+                    "broker-response-write",
+                    "failed",
+                    "named-pipe-response",
+                    utf8(legacy_cleanup_broker_pipe_name()),
+                    std::nullopt,
+                    E_FAIL,
+                    std::string("durableStatePreserved=true; continueListening=") +
+                        (exit_after_response ? "false" : "true"));
+            }
+            DisconnectNamedPipe(pipe.get());
+            transition_mutation_ownership.reset();
+            transition_mutation_mutex.reset();
+            cleanup_active_marker.reset();
+        }
+        return 0;
+    }
+
+    bool matching_acknowledged_cleanup_proof_exists(
+        const LegacyTransitionOptions& options);
+
+    void finalize_legacy_cleanup_via_broker(const LegacyTransitionOptions& options)
+    {
+        begin_legacy_cleanup_operation(
+            "cleanup-broker-connect",
+            utf8(legacy_cleanup_broker_pipe_name()));
+        LegacyCleanupBrokerResponse response;
+        try
+        {
+            response = request_cleanup_broker(
+                LegacyCleanupBrokerMessage::Cleanup,
+                &options,
+                10000);
+        }
+        catch (...)
+        {
+            const std::exception_ptr broker_failure = std::current_exception();
+            begin_legacy_cleanup_operation(
+                "cleanup-broker-finalize-proof-replay",
+                utf8(legacy_cleanup_journal_path().wstring()));
+            if (matching_acknowledged_cleanup_proof_exists(options))
+            {
+                complete_legacy_cleanup_operation(
+                    "durableAcknowledgementMatched=true; finalizeReplay=true");
+                return;
+            }
+            std::rethrow_exception(broker_failure);
+        }
+        if (FAILED(response.hresult))
+        {
+            throw_broker_response_failure(response);
+        }
+        complete_legacy_cleanup_operation("brokerAttestedCleanup=true");
+    }
+
+    bool matching_acknowledged_cleanup_proof_exists(
+        const LegacyTransitionOptions& options)
+    {
+        // This fallback performs no cleanup mutation. Acknowledged is written only
+        // by the unpackaged broker after native post-checks and an authenticated
+        // packaged acknowledgement; unlike Complete, it is safe to replay when
+        // the acknowledgement response or broker exit raced the packaged client.
+        const auto journal = read_cleanup_journal();
+        if (!journal || journal->phase != LegacyCleanupJournalPhase::Acknowledged)
+        {
+            return false;
+        }
+        validate_legacy_transition_options(journal->options, true, false);
+        if (!journal->options.external_helper_path.empty())
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Acknowledged cleanup proof contains a deprecated external helper path");
+        }
+        require_allowed_memmy_package_identity(journal->options);
+        validate_persisted_authority_shape(journal->authority, journal->options);
+        return equivalent_transition_options(journal->options, options);
+    }
+
+    void acknowledge_legacy_cleanup_via_broker(const LegacyTransitionOptions& options)
+    {
+        begin_legacy_cleanup_operation(
+            "cleanup-broker-ack-connect",
+            utf8(legacy_cleanup_broker_pipe_name()));
+        LegacyCleanupBrokerResponse response;
+        try
+        {
+            response = request_cleanup_broker(
+                LegacyCleanupBrokerMessage::Acknowledge,
+                &options,
+                10000);
+        }
+        catch (...)
+        {
+            const std::exception_ptr broker_failure = std::current_exception();
+            begin_legacy_cleanup_operation(
+                "cleanup-broker-ack-proof-replay",
+                utf8(legacy_cleanup_journal_path().wstring()));
+            if (matching_acknowledged_cleanup_proof_exists(options))
+            {
+                complete_legacy_cleanup_operation(
+                    "durableAcknowledgementMatched=true");
+                return;
+            }
+            std::rethrow_exception(broker_failure);
+        }
+        if (FAILED(response.hresult))
+        {
+            throw_broker_response_failure(response);
+        }
+        complete_legacy_cleanup_operation("brokerAcknowledged=true");
     }
 
     void launch_store_update_finalizer_breakaway(
@@ -4320,9 +7735,29 @@ namespace
         {
             return Command::PrepareLegacyTakeover;
         }
+        if (value == L"ensure-legacy-cleanup-broker")
+        {
+            return Command::EnsureLegacyCleanupBroker;
+        }
+        if (value == L"legacy-cleanup-broker")
+        {
+            return Command::LegacyCleanupBroker;
+        }
+        if (value == L"stop-legacy-cleanup-broker")
+        {
+            return Command::StopLegacyCleanupBroker;
+        }
+        if (value == L"authorize-nsis-mutation")
+        {
+            return Command::AuthorizeNsisMutation;
+        }
         if (value == L"finalize-legacy-cleanup")
         {
             return Command::FinalizeLegacyCleanup;
+        }
+        if (value == L"ack-legacy-cleanup")
+        {
+            return Command::AckLegacyCleanup;
         }
         if (value == L"finalize-legacy-cleanup-breakaway-launcher")
         {
@@ -4338,7 +7773,12 @@ namespace
     bool is_legacy_transition_command(Command command)
     {
         return command == Command::PrepareLegacyTakeover ||
+            command == Command::EnsureLegacyCleanupBroker ||
+            command == Command::LegacyCleanupBroker ||
+            command == Command::StopLegacyCleanupBroker ||
+            command == Command::AuthorizeNsisMutation ||
             command == Command::FinalizeLegacyCleanup ||
+            command == Command::AckLegacyCleanup ||
             command == Command::FinalizeLegacyCleanupBreakawayLauncher ||
             command == Command::FinalizeLegacyCleanupUnpackaged;
     }
@@ -4346,6 +7786,7 @@ namespace
     bool is_legacy_cleanup_diagnostic_command(Command command)
     {
         return command == Command::FinalizeLegacyCleanup ||
+            command == Command::AckLegacyCleanup ||
             command == Command::FinalizeLegacyCleanupBreakawayLauncher ||
             command == Command::FinalizeLegacyCleanupUnpackaged;
     }
@@ -4384,7 +7825,7 @@ int wmain(int argc, wchar_t* argv[])
     {
         if (argc < 2)
         {
-            std::cerr << "usage: MemmyStoreUpdate.exe <identity|package-family-registration|check|download-silent|download-user|handoff-install|launch-store-update-finalizer|finalize-store-update|startup-status|startup-enable|startup-disable|prepare-legacy-takeover|finalize-legacy-cleanup> [options]\n";
+            std::cerr << "usage: MemmyStoreUpdate.exe <identity|package-family-registration|check|download-silent|download-user|handoff-install|launch-store-update-finalizer|finalize-store-update|startup-status|startup-enable|startup-disable|prepare-legacy-takeover|ensure-legacy-cleanup-broker|legacy-cleanup-broker|stop-legacy-cleanup-broker|authorize-nsis-mutation|finalize-legacy-cleanup|ack-legacy-cleanup> [options]\n";
             return 64;
         }
 
@@ -4394,6 +7835,7 @@ int wmain(int argc, wchar_t* argv[])
         StoreInstallHandoffOptions options;
         LegacyTransitionOptions legacy_options;
         std::wstring registration_package_family_name;
+        bool store_only_option_was_provided = false;
         for (int index = 2; index < argc; ++index)
         {
             const std::wstring argument = argv[index];
@@ -4428,6 +7870,7 @@ int wmain(int argc, wchar_t* argv[])
 
             if (argument == L"--hwnd")
             {
+                store_only_option_was_provided = true;
                 owner = parse_window_handle(require_value());
                 continue;
             }
@@ -4460,36 +7903,43 @@ int wmain(int argc, wchar_t* argv[])
             }
             if (argument == L"--state-path")
             {
+                store_only_option_was_provided = true;
                 options.state_path = require_value();
                 continue;
             }
             if (argument == L"--result-path")
             {
+                store_only_option_was_provided = true;
                 options.result_path = require_value();
                 continue;
             }
             if (argument == L"--log-path")
             {
+                store_only_option_was_provided = true;
                 options.log_path = require_value();
                 continue;
             }
             if (argument == L"--old-pid")
             {
+                store_only_option_was_provided = true;
                 options.old_process_id = parse_process_id(require_value());
                 continue;
             }
             if (argument == L"--baseline-package-version")
             {
+                store_only_option_was_provided = true;
                 options.baseline_package_version = require_value();
                 continue;
             }
             if (argument == L"--baseline-package-full-name")
             {
+                store_only_option_was_provided = true;
                 options.baseline_package_full_name = require_value();
                 continue;
             }
             if (argument == L"--created-at")
             {
+                store_only_option_was_provided = true;
                 options.created_at = require_value();
                 continue;
             }
@@ -4539,6 +7989,7 @@ int wmain(int argc, wchar_t* argv[])
             }
             if (argument == L"--mode")
             {
+                store_only_option_was_provided = true;
                 options.mode = require_value();
                 continue;
             }
@@ -4555,8 +8006,66 @@ int wmain(int argc, wchar_t* argv[])
             emit_package_family_registration(registration_package_family_name);
             return 0;
         }
+        if (is_legacy_transition_command(command) &&
+            (store_only_option_was_provided || owner != nullptr || has_handoff_options(options)))
+        {
+            throw hresult_invalid_argument(
+                L"Legacy transition commands do not accept Store handoff or UI options");
+        }
 
         init_apartment(apartment_type::single_threaded);
+        if (command == Command::EnsureLegacyCleanupBroker ||
+            command == Command::LegacyCleanupBroker)
+        {
+            if (!legacy_options.external_helper_path.empty() ||
+                !legacy_options.legacy_install_directory.empty() ||
+                !legacy_options.legacy_executable_path.empty() ||
+                !legacy_options.shortcut_path.empty() ||
+                !legacy_options.aumid.empty() ||
+                !legacy_options.transition_id.empty() ||
+                !legacy_options.attempt_id.empty())
+            {
+                throw hresult_invalid_argument(L"Cleanup broker command arguments are invalid");
+            }
+            if (command == Command::EnsureLegacyCleanupBroker)
+            {
+                ensure_legacy_cleanup_broker(legacy_options.package_family_name);
+                return 0;
+            }
+            return run_legacy_cleanup_broker(legacy_options.package_family_name);
+        }
+        if (command == Command::StopLegacyCleanupBroker)
+        {
+            if (!legacy_options.external_helper_path.empty() ||
+                !legacy_options.legacy_install_directory.empty() ||
+                !legacy_options.legacy_executable_path.empty() ||
+                !legacy_options.shortcut_path.empty() ||
+                !legacy_options.aumid.empty() ||
+                !legacy_options.package_family_name.empty() ||
+                !legacy_options.transition_id.empty() ||
+                !legacy_options.attempt_id.empty())
+            {
+                throw hresult_invalid_argument(L"Cleanup broker shutdown accepts no options");
+            }
+            stop_legacy_cleanup_broker();
+            return 0;
+        }
+        if (command == Command::AuthorizeNsisMutation)
+        {
+            if (!legacy_options.external_helper_path.empty() ||
+                !legacy_options.legacy_install_directory.empty() ||
+                !legacy_options.legacy_executable_path.empty() ||
+                !legacy_options.shortcut_path.empty() ||
+                !legacy_options.aumid.empty() ||
+                !legacy_options.package_family_name.empty() ||
+                !legacy_options.transition_id.empty() ||
+                !legacy_options.attempt_id.empty())
+            {
+                throw hresult_invalid_argument(L"NSIS mutation authorization accepts no options");
+            }
+            authorize_nsis_mutation();
+            return 0;
+        }
         if (command == Command::PrepareLegacyTakeover)
         {
             validate_legacy_transition_options(legacy_options, false, false);
@@ -4576,7 +8085,13 @@ int wmain(int argc, wchar_t* argv[])
         {
             initialize_legacy_cleanup_diagnostics(legacy_options, "packaged-helper");
             begin_legacy_cleanup_operation("options-validate");
-            validate_legacy_transition_options(legacy_options, true, true);
+            validate_legacy_transition_options(legacy_options, true, false);
+            if (!legacy_options.external_helper_path.empty())
+            {
+                throw hresult_invalid_argument(
+                    L"Brokered legacy cleanup does not accept an external helper path");
+            }
+            require_allowed_memmy_package_identity(legacy_options);
             complete_legacy_cleanup_operation();
             begin_legacy_cleanup_operation(
                 "identity-query",
@@ -4587,72 +8102,78 @@ int wmain(int argc, wchar_t* argv[])
                     E_ACCESSDENIED,
                     L"Legacy cleanup entry point must retain application package identity");
             }
-            complete_legacy_cleanup_operation("requiredPackageIdentity=true");
-            const std::filesystem::path executable_path = current_executable_path();
-            begin_legacy_cleanup_operation(
-                "child-breakaway-launch",
-                utf8(executable_path.wstring()));
-            run_legacy_cleanup_process(
-                executable_path,
-                build_legacy_cleanup_arguments(
-                    executable_path,
-                    L"finalize-legacy-cleanup-breakaway-launcher",
-                    legacy_options,
-                    true),
-                true);
+            const auto package_family = process_package_family(GetCurrentProcess());
+            if (!package_family ||
+                *package_family != legacy_options.package_family_name ||
+                process_application_user_model_id(GetCurrentProcess()) != legacy_options.aumid)
+            {
+                throw hresult_error(
+                    E_ACCESSDENIED,
+                    L"Legacy cleanup entry point package identity does not match its request");
+            }
+            complete_legacy_cleanup_operation("requiredPackageIdentity=true; identityMatchesRequest=true");
+            finalize_legacy_cleanup_via_broker(legacy_options);
+            append_legacy_cleanup_diagnostic("process-complete", "success");
+            return 0;
+        }
+        if (command == Command::AckLegacyCleanup)
+        {
+            initialize_legacy_cleanup_diagnostics(legacy_options, "packaged-helper-ack");
+            begin_legacy_cleanup_operation("ack-options-validate");
+            validate_legacy_transition_options(legacy_options, true, false);
+            if (!legacy_options.external_helper_path.empty())
+            {
+                throw hresult_invalid_argument(
+                    L"Brokered legacy cleanup acknowledgement does not accept an external helper path");
+            }
+            require_allowed_memmy_package_identity(legacy_options);
             complete_legacy_cleanup_operation();
+            begin_legacy_cleanup_operation(
+                "ack-identity-query",
+                utf8(current_executable_path().wstring()));
+            if (!current_process_has_package_identity())
+            {
+                throw hresult_error(
+                    E_ACCESSDENIED,
+                    L"Legacy cleanup acknowledgement must retain application package identity");
+            }
+            const auto package_family = process_package_family(GetCurrentProcess());
+            if (!package_family ||
+                *package_family != legacy_options.package_family_name ||
+                process_application_user_model_id(GetCurrentProcess()) != legacy_options.aumid)
+            {
+                throw hresult_error(
+                    E_ACCESSDENIED,
+                    L"Legacy cleanup acknowledgement identity does not match its request");
+            }
+            complete_legacy_cleanup_operation("requiredPackageIdentity=true; identityMatchesRequest=true");
+            acknowledge_legacy_cleanup_via_broker(legacy_options);
             append_legacy_cleanup_diagnostic("process-complete", "success");
             return 0;
         }
         if (command == Command::FinalizeLegacyCleanupBreakawayLauncher)
         {
             initialize_legacy_cleanup_diagnostics(legacy_options, "breakaway-launcher");
-            begin_legacy_cleanup_operation("options-validate");
-            validate_legacy_transition_options(legacy_options, true, true);
-            complete_legacy_cleanup_operation();
-            begin_legacy_cleanup_operation(
-                "identity-query",
-                utf8(current_executable_path().wstring()));
-            const bool breakaway_launcher_has_package_identity =
-                current_process_has_package_identity();
-            // BREAKAWAY_OVERRIDE keeps this launcher inside the desktop-app
-            // runtime; ENABLE_PROCESS_TREE applies to the child it creates.
-            // The external child below still enforces that destructive cleanup
-            // is unpackaged.
-            complete_legacy_cleanup_operation(
-                std::string("breakawayLauncherHasPackageIdentity=") +
-                (breakaway_launcher_has_package_identity ? "true" : "false") +
-                "; breakawayPolicyAppliesToChildCreation=true");
-            begin_legacy_cleanup_operation(
-                "child-external-launch",
-                utf8(legacy_options.external_helper_path.wstring()));
-            run_legacy_cleanup_process(
-                legacy_options.external_helper_path,
-                build_legacy_cleanup_arguments(
-                    legacy_options.external_helper_path,
-                    L"finalize-legacy-cleanup-unpackaged",
-                    legacy_options,
-                    false),
-                false);
-            complete_legacy_cleanup_operation();
-            append_legacy_cleanup_diagnostic("process-complete", "success");
-            return 0;
+            set_legacy_cleanup_failure_context(
+                "deprecated-cleanup-entry-point",
+                "finalize-legacy-cleanup-breakaway-launcher",
+                ERROR_NOT_SUPPORTED);
+            throw hresult_error(
+                HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED),
+                L"Breakaway legacy cleanup is disabled; use the pre-established native broker");
         }
         if (command == Command::FinalizeLegacyCleanupUnpackaged)
         {
             initialize_legacy_cleanup_diagnostics(
                 legacy_options,
                 "external-unpackaged-helper");
-            begin_legacy_cleanup_operation("options-validate");
-            validate_legacy_transition_options(legacy_options, true, false);
-            if (!legacy_options.external_helper_path.empty())
-            {
-                throw hresult_invalid_argument(L"Unpackaged legacy cleanup received an external helper path");
-            }
-            complete_legacy_cleanup_operation();
-            finalize_legacy_cleanup_unpacked(legacy_options);
-            append_legacy_cleanup_diagnostic("process-complete", "success");
-            return 0;
+            set_legacy_cleanup_failure_context(
+                "deprecated-cleanup-entry-point",
+                "finalize-legacy-cleanup-unpackaged",
+                ERROR_NOT_SUPPORTED);
+            throw hresult_error(
+                HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED),
+                L"Direct unpackaged legacy cleanup is disabled; use the pre-established native broker");
         }
         if (command == Command::HandoffInstall)
         {

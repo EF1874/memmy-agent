@@ -886,7 +886,7 @@ export function bundledMemoryInstallArguments(
     "--memmy-config-preexisting", String(memmyConfigPreexisting),
     "--node-executable", executable,
     "--non-interactive",
-    ...(process.platform === "win32" ? ["--replace-same-version"] : []),
+    ...(process.platform === "win32" ? ["--replace-same-version-on-executable-change"] : []),
     "--use-compatible-installed",
     "--health-check-timeout-ms", String(MEMORY_STARTUP_TIMEOUT_MS)
   ];

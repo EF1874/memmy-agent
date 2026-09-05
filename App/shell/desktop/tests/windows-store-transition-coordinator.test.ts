@@ -47,6 +47,9 @@ describe("Windows Store transition coordinator", () => {
     const finalizeLegacyInstallation = vi.fn(async (state: WindowsStoreTransitionState) => {
       expect(state.phase).toBe("app-verified");
     });
+    const acknowledgeLegacyCleanup = vi.fn(async (state: WindowsStoreTransitionState) => {
+      expect(state.phase).toBe("legacy-cleanup-attested");
+    });
 
     const prepared = await prepareWindowsStoreTransitionForBoot(fixture.options);
     expect(prepared).toMatchObject({ status: "prepared", phase: "awaiting-app-verification" });
@@ -57,23 +60,25 @@ describe("Windows Store transition coordinator", () => {
     expect(await readPointer(fixture.layout.pointerPath)).toBe(fixture.layout.runtimeHomePath);
 
     const firstBoot = await advanceWindowsStoreTransitionForVerifiedBoot(fixture.options, {
-      finalizeLegacyInstallation
+      finalizeLegacyInstallation,
+      acknowledgeLegacyCleanup
     });
     expect(firstBoot.status).toBe("verified");
     expect(finalizeLegacyInstallation).toHaveBeenCalledOnce();
     await expect(readWindowsStoreTransitionState(
       resolveWindowsStoreTransitionStatePath(fixture.localAppDataPath)
-    )).resolves.toMatchObject({ phase: "legacy-cleanup-complete" });
+    )).resolves.toMatchObject({ phase: "cleanup-eligible" });
     await expect(stat(fixture.sourceUserDataPath)).resolves.toBeDefined();
     await expect(stat(fixture.sourceRuntimeHomePath)).resolves.toBeDefined();
 
     await writeFile(win32.join(fixture.layout.userDataPath, "boot-created.txt"), "new target state");
     await expect(prepareWindowsStoreTransitionForBoot(fixture.options)).resolves.toMatchObject({
       status: "prepared",
-      phase: "legacy-cleanup-complete"
+      phase: "cleanup-eligible"
     });
     const secondBoot = await advanceWindowsStoreTransitionForVerifiedBoot(fixture.options);
     expect(secondBoot.status).toBe("cleaned");
+    expect(acknowledgeLegacyCleanup).toHaveBeenCalledOnce();
     await expect(readFile(win32.join(fixture.sourceUserDataPath, "app.sqlite"), "utf8"))
       .resolves.toBe("source-account");
     await expect(readFile(win32.join(fixture.sourceRuntimeHomePath, "config.yaml"), "utf8"))
@@ -88,13 +93,14 @@ describe("Windows Store transition coordinator", () => {
   });
 
   it.each([
-    ["awaiting-app-verification", "legacy-finalizer", "legacy-cleanup-complete"],
-    ["app-verified", "legacy-finalizer", "legacy-cleanup-complete"],
-    ["legacy-cleanup-complete", "authority-retirement", "cleaned"],
-    ["cleanup-eligible", "authority-retirement", "cleaned"]
+    ["awaiting-app-verification", ["legacy-finalizer", "legacy-ack"], "cleanup-eligible"],
+    ["app-verified", ["legacy-finalizer", "legacy-ack"], "cleanup-eligible"],
+    ["legacy-cleanup-complete", ["legacy-finalizer", "legacy-ack"], "cleanup-eligible"],
+    ["legacy-cleanup-attested", ["legacy-ack"], "cleanup-eligible"],
+    ["cleanup-eligible", ["authority-retirement"], "cleaned"]
   ] as const)("holds the source lease through verified-boot work from %s", async (
     phase,
-    protectedAction,
+    protectedActions,
     expectedPhase
   ) => {
     const fixture = await createFixture({ sharedRuntime: true });
@@ -121,6 +127,12 @@ describe("Windows Store transition coordinator", () => {
         await expect(stat(fixture.sourceUserDataPath)).resolves.toBeDefined();
         actions.push("legacy-finalizer");
       },
+      acknowledgeLegacyCleanup: async () => {
+        await expect(readWindowsStoreTransitionState(statePath)).resolves.toMatchObject({
+          phase: "legacy-cleanup-attested"
+        });
+        actions.push("legacy-ack");
+      },
       retireLegacyInstallAuthority: async () => {
         await expect(readFile(win32.join(fixture.sourceUserDataPath, "app.sqlite"), "utf8"))
           .resolves.toBe("source-account");
@@ -128,11 +140,12 @@ describe("Windows Store transition coordinator", () => {
       }
     });
 
-    expect(actions).toEqual(["lease-acquired", protectedAction, "lease-released"]);
+    expect(actions).toEqual(["lease-acquired", ...protectedActions, "lease-released"]);
   });
 
   it.each([
     ["app-verified", "finalizeLegacyInstallation", "app-verified"],
+    ["legacy-cleanup-attested", "acknowledgeLegacyCleanup", "legacy-cleanup-attested"],
     ["cleanup-eligible", "retireLegacyInstallAuthority", "cleanup-eligible"]
   ] as const)("releases the source lease when %s work fails", async (
     phase,
@@ -160,6 +173,10 @@ describe("Windows Store transition coordinator", () => {
         actions.push("legacy-finalizer");
         if (failurePoint === "finalizeLegacyInstallation") throw injectedError;
       },
+      acknowledgeLegacyCleanup: async () => {
+        actions.push("legacy-ack");
+        if (failurePoint === "acknowledgeLegacyCleanup") throw injectedError;
+      },
       retireLegacyInstallAuthority: async () => {
         actions.push("authority-retirement");
         if (failurePoint === "retireLegacyInstallAuthority") throw injectedError;
@@ -168,7 +185,11 @@ describe("Windows Store transition coordinator", () => {
 
     expect(actions).toEqual([
       "lease-acquired",
-      failurePoint === "finalizeLegacyInstallation" ? "legacy-finalizer" : "authority-retirement",
+      failurePoint === "finalizeLegacyInstallation"
+        ? "legacy-finalizer"
+        : failurePoint === "acknowledgeLegacyCleanup"
+          ? "legacy-ack"
+          : "authority-retirement",
       "lease-released"
     ]);
     await expect(readWindowsStoreTransitionState(statePath)).resolves.toMatchObject({
@@ -187,6 +208,7 @@ describe("Windows Store transition coordinator", () => {
     const competingSourceLease = await tryAcquireWindowsStoreTransitionSourceLease(statePath);
     expect(competingSourceLease).not.toBeNull();
     const finalizeLegacyInstallation = vi.fn(async () => undefined);
+    const acknowledgeLegacyCleanup = vi.fn(async () => undefined);
     const retireLegacyInstallAuthority = vi.fn(async () => undefined);
 
     try {
@@ -197,6 +219,7 @@ describe("Windows Store transition coordinator", () => {
           retryIntervalMs: 5
         }),
         finalizeLegacyInstallation,
+        acknowledgeLegacyCleanup,
         retireLegacyInstallAuthority
       })).rejects.toBeInstanceOf(WindowsStoreTransitionSourceLeaseTimeoutError);
     } finally {
@@ -204,6 +227,7 @@ describe("Windows Store transition coordinator", () => {
     }
 
     expect(finalizeLegacyInstallation).not.toHaveBeenCalled();
+    expect(acknowledgeLegacyCleanup).not.toHaveBeenCalled();
     expect(retireLegacyInstallAuthority).not.toHaveBeenCalled();
     await expect(stat(fixture.sourceUserDataPath)).resolves.toBeDefined();
     await expect(readWindowsStoreTransitionState(statePath)).resolves.toMatchObject({ phase });
@@ -224,7 +248,10 @@ describe("Windows Store transition coordinator", () => {
     );
     expect(prepared?.plan.migrateRuntime).toBe(false);
     expect(prepared?.copies.map((copy) => copy.category)).toEqual(["user-data"]);
-    await advanceWindowsStoreTransitionForVerifiedBoot(fixture.options);
+    await advanceWindowsStoreTransitionForVerifiedBoot(fixture.options, {
+      finalizeLegacyInstallation: async () => undefined,
+      acknowledgeLegacyCleanup: async () => undefined
+    });
     const retireLegacyInstallAuthority = vi.fn(async (state: WindowsStoreTransitionState) => {
       expect(state.phase).toBe("cleanup-eligible");
       await expect(readFile(win32.join(fixture.sourceUserDataPath, "app.sqlite"), "utf8"))
@@ -249,7 +276,8 @@ describe("Windows Store transition coordinator", () => {
       .mockResolvedValue(undefined);
 
     await expect(advanceWindowsStoreTransitionForVerifiedBoot(fixture.options, {
-      finalizeLegacyInstallation
+      finalizeLegacyInstallation,
+      acknowledgeLegacyCleanup: async () => undefined
     })).rejects.toThrow("injected legacy cleanup failure");
     await expect(readWindowsStoreTransitionState(
       resolveWindowsStoreTransitionStatePath(fixture.localAppDataPath)
@@ -257,12 +285,13 @@ describe("Windows Store transition coordinator", () => {
     await expect(stat(fixture.sourceUserDataPath)).resolves.toBeDefined();
 
     await expect(advanceWindowsStoreTransitionForVerifiedBoot(fixture.options, {
-      finalizeLegacyInstallation
+      finalizeLegacyInstallation,
+      acknowledgeLegacyCleanup: async () => undefined
     })).resolves.toMatchObject({ status: "verified" });
     expect(finalizeLegacyInstallation).toHaveBeenCalledTimes(2);
     await expect(readWindowsStoreTransitionState(
       resolveWindowsStoreTransitionStatePath(fixture.localAppDataPath)
-    )).resolves.toMatchObject({ phase: "legacy-cleanup-complete" });
+    )).resolves.toMatchObject({ phase: "cleanup-eligible" });
     await expect(stat(fixture.sourceUserDataPath)).resolves.toBeDefined();
 
     await expect(advanceWindowsStoreTransitionForVerifiedBoot(fixture.options))
@@ -271,10 +300,96 @@ describe("Windows Store transition coordinator", () => {
       .resolves.toBe("source-account");
   });
 
+  it("persists attestation before ACK and retries ACK without repeating destructive cleanup", async () => {
+    const fixture = await createFixture({ sharedRuntime: true });
+    await prepareWindowsStoreTransitionForBoot(fixture.options);
+    const finalizeLegacyInstallation = vi.fn(async () => undefined);
+    const acknowledgeLegacyCleanup = vi.fn()
+      .mockImplementationOnce(async (state: WindowsStoreTransitionState) => {
+        expect(state.phase).toBe("legacy-cleanup-attested");
+        await expect(readWindowsStoreTransitionState(
+          resolveWindowsStoreTransitionStatePath(fixture.localAppDataPath)
+        )).resolves.toMatchObject({ phase: "legacy-cleanup-attested" });
+        throw new Error("injected acknowledgement response loss");
+      })
+      .mockResolvedValue(undefined);
+
+    await expect(advanceWindowsStoreTransitionForVerifiedBoot(fixture.options, {
+      finalizeLegacyInstallation,
+      acknowledgeLegacyCleanup
+    })).rejects.toThrow("injected acknowledgement response loss");
+    await expect(readWindowsStoreTransitionState(
+      resolveWindowsStoreTransitionStatePath(fixture.localAppDataPath)
+    )).resolves.toMatchObject({ phase: "legacy-cleanup-attested" });
+
+    await expect(advanceWindowsStoreTransitionForVerifiedBoot(fixture.options, {
+      finalizeLegacyInstallation,
+      acknowledgeLegacyCleanup
+    })).resolves.toMatchObject({ status: "verified" });
+    expect(finalizeLegacyInstallation).toHaveBeenCalledOnce();
+    expect(acknowledgeLegacyCleanup).toHaveBeenCalledTimes(2);
+    await expect(readWindowsStoreTransitionState(
+      resolveWindowsStoreTransitionStatePath(fixture.localAppDataPath)
+    )).resolves.toMatchObject({ phase: "cleanup-eligible" });
+    await expect(advanceWindowsStoreTransitionForVerifiedBoot(fixture.options))
+      .resolves.toMatchObject({ status: "cleaned" });
+  });
+
+  it("replays an acknowledged cleanup when persisting cleanup eligibility fails", async () => {
+    const fixture = await createFixture({ sharedRuntime: true });
+    await prepareWindowsStoreTransitionForBoot(fixture.options);
+    const finalizeLegacyInstallation = vi.fn(async () => undefined);
+    const acknowledgeLegacyCleanup = vi.fn(async () => undefined);
+    const injectedError = new Error("injected cleanup-eligible write failure");
+
+    await expect(advanceWindowsStoreTransitionForVerifiedBoot(fixture.options, {
+      finalizeLegacyInstallation,
+      acknowledgeLegacyCleanup,
+      writeState: async (statePath, state) => {
+        if (state.phase === "cleanup-eligible") throw injectedError;
+        await writeWindowsStoreTransitionState(statePath, state);
+      }
+    })).rejects.toBe(injectedError);
+    await expect(readWindowsStoreTransitionState(
+      resolveWindowsStoreTransitionStatePath(fixture.localAppDataPath)
+    )).resolves.toMatchObject({ phase: "legacy-cleanup-attested" });
+
+    await expect(advanceWindowsStoreTransitionForVerifiedBoot(fixture.options, {
+      finalizeLegacyInstallation,
+      acknowledgeLegacyCleanup
+    })).resolves.toMatchObject({ status: "verified" });
+    expect(finalizeLegacyInstallation).toHaveBeenCalledOnce();
+    expect(acknowledgeLegacyCleanup).toHaveBeenCalledTimes(2);
+    await expect(stat(fixture.sourceUserDataPath)).resolves.toBeDefined();
+    await expect(readWindowsStoreTransitionState(
+      resolveWindowsStoreTransitionStatePath(fixture.localAppDataPath)
+    )).resolves.toMatchObject({ phase: "cleanup-eligible" });
+
+    await expect(advanceWindowsStoreTransitionForVerifiedBoot(fixture.options))
+      .resolves.toMatchObject({ status: "cleaned" });
+  });
+
+  it("requires the ACK path before starting destructive legacy cleanup", async () => {
+    const fixture = await createFixture({ sharedRuntime: true });
+    await prepareWindowsStoreTransitionForBoot(fixture.options);
+    const finalizeLegacyInstallation = vi.fn(async () => undefined);
+
+    await expect(advanceWindowsStoreTransitionForVerifiedBoot(fixture.options, {
+      finalizeLegacyInstallation
+    })).rejects.toThrow("broker acknowledgement is unavailable");
+    expect(finalizeLegacyInstallation).not.toHaveBeenCalled();
+    await expect(readWindowsStoreTransitionState(
+      resolveWindowsStoreTransitionStatePath(fixture.localAppDataPath)
+    )).resolves.toMatchObject({ phase: "app-verified" });
+  });
+
   it("retries authority retirement without marking the transition cleaned", async () => {
     const fixture = await createFixture({ sharedRuntime: true });
     await prepareWindowsStoreTransitionForBoot(fixture.options);
-    await advanceWindowsStoreTransitionForVerifiedBoot(fixture.options);
+    await advanceWindowsStoreTransitionForVerifiedBoot(fixture.options, {
+      finalizeLegacyInstallation: async () => undefined,
+      acknowledgeLegacyCleanup: async () => undefined
+    });
     const retireLegacyInstallAuthority = vi.fn()
       .mockRejectedValueOnce(new Error("injected authority retirement failure"))
       .mockResolvedValue(undefined);
@@ -333,7 +448,10 @@ describe("Windows Store transition coordinator", () => {
   it("fails closed before legacy cleanup when an old runtime-copy journal meets a shared-runtime layout", async () => {
     const fixture = await createFixture({ sharedRuntime: false });
     await prepareWindowsStoreTransitionForBoot(fixture.options);
-    await advanceWindowsStoreTransitionForVerifiedBoot(fixture.options);
+    await advanceWindowsStoreTransitionForVerifiedBoot(fixture.options, {
+      finalizeLegacyInstallation: async () => undefined,
+      acknowledgeLegacyCleanup: async () => undefined
+    });
     const finalizeLegacyInstallation = vi.fn(async () => undefined);
     const retireLegacyInstallAuthority = vi.fn(async () => undefined);
     const sharedRuntimeOptions = {
@@ -760,17 +878,26 @@ const persistVerifiedBootPhase = async (
   statePath: string,
   targetPhase: Extract<
     WindowsStoreTransitionState["phase"],
-    "awaiting-app-verification" | "app-verified" | "legacy-cleanup-complete" | "cleanup-eligible"
+    "awaiting-app-verification" | "app-verified" | "legacy-cleanup-complete"
+      | "legacy-cleanup-attested" | "cleanup-eligible"
   >
 ): Promise<void> => {
   let state = await readWindowsStoreTransitionState(statePath);
   if (!state || state.phase !== "awaiting-app-verification") {
     throw new Error("test transition is not awaiting app verification");
   }
+  if (targetPhase === "legacy-cleanup-complete") {
+    await writeWindowsStoreTransitionState(statePath, {
+      ...state,
+      phase: targetPhase,
+      updatedAt: state.updatedAt
+    });
+    return;
+  }
   const phases = [
     "awaiting-app-verification",
     "app-verified",
-    "legacy-cleanup-complete",
+    "legacy-cleanup-attested",
     "cleanup-eligible"
   ] as const;
   const targetIndex = phases.indexOf(targetPhase);

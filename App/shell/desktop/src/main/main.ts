@@ -154,10 +154,13 @@ import {
   setWindowsStoreStartupTaskEnabled
 } from "./windows-store-startup-task.js";
 import {
+  resolveExpectedWindowsStoreMigrationIdentity,
   resolveWindowsStoreMigrationPolicy,
   type WindowsStoreMigrationPolicy
 } from "./windows-store-migration-config.js";
+import { ensureWindowsStoreLegacyCleanupBroker } from "./windows-store-legacy-broker.js";
 import {
+  acknowledgeWindowsStoreLegacyCleanup,
   finalizeWindowsStoreLegacyInstallation,
   retireWindowsStoreLegacyInstallAuthority,
   type WindowsStoreLegacyTransitionOptions
@@ -500,6 +503,12 @@ async function boot(): Promise<void> {
             resolveCurrentWindowsStoreTransitionCoordinatorOptions(),
             {
               finalizeLegacyInstallation: (state) => finalizeWindowsStoreLegacyInstallation({
+                resourcesPath: resolveCurrentWindowsStorePackagedResourcesPath(),
+                localAppDataPath: process.env.LOCALAPPDATA?.trim() ?? "",
+                desktopPath: app.getPath("desktop"),
+                state
+              }),
+              acknowledgeLegacyCleanup: (state) => acknowledgeWindowsStoreLegacyCleanup({
                 resourcesPath: resolveCurrentWindowsStorePackagedResourcesPath(),
                 localAppDataPath: process.env.LOCALAPPDATA?.trim() ?? "",
                 desktopPath: app.getPath("desktop"),
@@ -2986,6 +2995,10 @@ async function openWindowsStoreMigration(
     ownerWebContentsId,
     preparedUpdate,
     async (activeOffer) => {
+      // Opening the acquisition route is the irreversible handoff boundary.
+      // Re-establish and attest the native-HKCU broker here instead of relying
+      // only on the best-effort startup preparation.
+      await requireCurrentWindowsStoreLegacyCleanupBroker();
       const binding = createCurrentWindowsStoreTransitionBinding(
         activeOffer.transactionId,
         activeOffer.policy,
@@ -3166,6 +3179,35 @@ async function applyWindowsStoreTransitionSourceBarrier(): Promise<boolean> {
   await writePackagedStartupLog(`boot:store-transition-source-barrier ${result.reason} ${detail}`);
   app.quit();
   return true;
+}
+
+async function ensureCurrentWindowsStoreLegacyCleanupBroker(): Promise<void> {
+  if (process.platform !== "win32" || !app.isPackaged || isWindowsStoreApp()) return;
+  try {
+    const result = await requireCurrentWindowsStoreLegacyCleanupBroker();
+    if (result.status === "ready") {
+      await writePackagedStartupLog("boot:store-transition-native-broker-ready");
+    }
+  } catch (error) {
+    console.warn("Windows Store native cleanup broker preparation deferred:", error);
+    await writePackagedStartupLog(
+      `boot:store-transition-native-broker-deferred\n${formatStartupError(error)}`
+    );
+  }
+}
+
+async function requireCurrentWindowsStoreLegacyCleanupBroker() {
+  if (process.platform !== "win32" || !app.isPackaged || isWindowsStoreApp()) {
+    throw new Error("Microsoft Store migration cleanup broker requires the unpackaged Windows app");
+  }
+  const identity = resolveExpectedWindowsStoreMigrationIdentity(resolveCurrentDesktopEdition());
+  return ensureWindowsStoreLegacyCleanupBroker({
+    platform: process.platform,
+    isPackaged: app.isPackaged,
+    isWindowsStore: false,
+    resourcesPath: process.resourcesPath,
+    packageFamilyName: identity.packageFamilyName
+  });
 }
 
 async function installWindowsStorePreparedUpdate(
@@ -6002,6 +6044,12 @@ app.whenReady().then(async () => {
   if (await applyWindowsStoreInstallStartupBarrier()) {
     return;
   }
+
+  // Establish/repair the unpackaged broker before holding cleanup-active for
+  // this NSIS process. The native helper can then retire an orphaned durable
+  // journal when no Store package is registered. If Store cleanup wins this
+  // narrow window, the source barrier below observes it and safely quits.
+  await ensureCurrentWindowsStoreLegacyCleanupBroker();
 
   if (await applyWindowsStoreTransitionSourceBarrier()) {
     return;
