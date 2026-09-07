@@ -30,6 +30,7 @@ async function fixture(options: {
   platform?: NodeJS.Platform;
   repairFails?: boolean;
   repairStopsService?: boolean;
+  repairChangesIdentity?: boolean;
   noRuntimeMarkers?: boolean;
   noOfflineRuntime?: boolean;
 } = {}) {
@@ -65,7 +66,7 @@ async function fixture(options: {
     "const lock = db + '.server.lock'; const version = process.env.FIXTURE_VERSION || '2.1.1';",
     "fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, sqlitePath: db, host: '127.0.0.1', port }));",
     "const server = http.createServer((request, response) => {",
-    "  if (request.url === '/api/v1/health') { response.setHeader('content-type', 'application/json'); response.end(JSON.stringify({ ok: process.env.FIXTURE_IDENTITY !== 'false', protocolVersion: 1, serviceVersion: version })); return; }",
+    "  if (request.url === '/api/v1/health') { response.setHeader('content-type', 'application/json'); response.end(JSON.stringify({ ok: process.env.FIXTURE_IDENTITY !== 'false' && !fs.existsSync(path.join(serviceHome, 'unexpected-service')), protocolVersion: 1, serviceVersion: version })); return; }",
     "  if (request.url === '/api/v1/admin/shutdown') { response.end('{}'); setImmediate(shutdown); return; }",
     "  response.writeHead(404); response.end();",
     "});",
@@ -88,16 +89,16 @@ async function fixture(options: {
     "if (args[0] === 'service' && args[1] === 'repair-launcher') {",
     `  fs.appendFileSync(${JSON.stringify(repairCallsPath)}, JSON.stringify(args) + '\\n');`,
     "  if (!fs.existsSync(path.join(arg('--home'), 'memory-service', 'runtime.json'))) { console.error('launcher repair raced a migrating database owner'); process.exit(19); }",
-    `  if (${Boolean(options.repairFails)}) { console.error('launcher repair failed'); process.exit(23); }`,
+    `  const finishRepair = () => { if (${Boolean(options.repairChangesIdentity)}) fs.writeFileSync(path.join(arg('--home'), 'memory-service', 'unexpected-service'), 'fixture'); if (${Boolean(options.repairFails)}) { console.error('schtasks /Create failed: Access is denied.'); process.exit(23); } process.exit(0); };`,
     `  if (${Boolean(options.repairStopsService)}) {`,
     "    const running = JSON.parse(fs.readFileSync(path.join(arg('--home'), 'memory-service', 'runtime.json'), 'utf8'));",
     "    fetch(running.endpoint + '/api/v1/admin/shutdown', { method: 'POST' }).then(response => {",
     "      if (!response.ok) throw new Error('fixture shutdown failed');",
-    "      setInterval(() => { if (!fs.existsSync(running.sqlitePath + '.server.lock')) process.exit(0); }, 10);",
+    "      setInterval(() => { if (!fs.existsSync(running.sqlitePath + '.server.lock')) finishRepair(); }, 10);",
     "    }).catch(error => { console.error(error); process.exit(20); });",
     "    return;",
     "  }",
-    "  process.exit(0);",
+    "  finishRepair();",
     "}",
     `if (args[0] === 'stop') process.exit(${options.stopFails ? 17 : 0});`,
     "if (args[0] !== 'install' || !args.includes('--skip-service-registration')) process.exit(17);",
@@ -200,9 +201,33 @@ describe("bundled Memory upgrades", () => {
     expect(await running.repairCalls()).toEqual([]);
   });
 
-  it("reports a failed Windows launcher repair instead of reusing the healthy endpoint", async () => {
+  it("reuses healthy Memory when a legacy Windows task cannot be updated", async () => {
     const running = await fixture({ version: "2.1.1", platform: "win32", repairFails: true });
-    await expect(running.ensure()).rejects.toThrow("launcher repair failed");
+    await running.ensure();
+    expect(running.children).toHaveLength(0);
+    expect(running.old.process.exitCode).toBeNull();
+    expect(await running.version()).toBe("2.1.1");
+  });
+
+  it.each(["2.1.0", "2.1.1"])("starts a Desktop child if launcher repair stopped Memory %s before task update was denied", async (version) => {
+    const running = await fixture({ version, platform: "win32", repairFails: true, repairStopsService: true });
+    await running.ensure();
+    expect(running.old.process.exitCode).toBe(0);
+    expect(running.children).toHaveLength(1);
+    expect(await running.version()).toBe("2.1.1");
+  });
+
+  it("still waits for migrations before recovering from a denied Windows task update", async () => {
+    const running = await fixture({ version: "2.1.1", platform: "win32", repairFails: true, delay: 400 });
+    await running.ensure();
+    expect(await running.repairCalls()).toHaveLength(1);
+    expect(running.children).toHaveLength(0);
+    expect(running.old.process.exitCode).toBeNull();
+  });
+
+  it("rejects a changed endpoint identity after failed launcher repair", async () => {
+    const running = await fixture({ version: "2.1.1", platform: "win32", repairFails: true, repairChangesIdentity: true });
+    await expect(running.ensure()).rejects.toThrow("unexpected service");
     expect(running.children).toHaveLength(0);
     expect(running.old.process.exitCode).toBeNull();
   });

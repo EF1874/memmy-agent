@@ -129,7 +129,8 @@ export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions 
     }
     await writeJsonAtomic(currentPath, pointer);
     await writeStableLauncher(home, serviceHome, pointer.runtimeExecutable!);
-    if (!options.skipServiceRegistration || repairLegacyTask) registerAndStartUserService(home, serviceHome, !options.skipServiceRegistration);
+    if (!options.skipServiceRegistration) registerAndStartUserService(home, serviceHome);
+    else if (repairLegacyTask) tryRepairLegacyWindowsTaskRegistration(home, serviceHome);
 
     if (!options.skipHealthCheck) {
       try {
@@ -399,7 +400,8 @@ async function reuseInstalledRuntime(
     const repairLegacyTask = Boolean(options.skipServiceRegistration && isLegacyWindowsTask(home));
     if (process.platform === "win32" && (!options.skipServiceRegistration || repairLegacyTask)) await stopInstalledMemoryService(home);
     await writeStableLauncher(home, serviceHome, pointer.runtimeExecutable ?? options.nodeExecutable ?? process.execPath);
-    if (!options.skipServiceRegistration || repairLegacyTask) registerAndStartUserService(home, serviceHome, !options.skipServiceRegistration);
+    if (!options.skipServiceRegistration) registerAndStartUserService(home, serviceHome);
+    else if (repairLegacyTask) tryRepairLegacyWindowsTaskRegistration(home, serviceHome);
     if (!options.skipHealthCheck) {
       await waitForRuntimeHealth(
         options.endpoint ?? "http://127.0.0.1:18960",
@@ -645,6 +647,16 @@ function isLegacyWindowsTask(home: string): boolean {
   // Do not rewrite a task belonging to another home or an already hidden host.
   const normalize = (value: string) => value.replace(/^"|"$/g, "").replace(/\//g, "\\").toLowerCase();
   return normalize(command) === normalize(launcherPaths(home).command);
+}
+
+function tryRepairLegacyWindowsTaskRegistration(home: string, serviceHome: string): void {
+  try {
+    registerAndStartUserService(home, serviceHome, false);
+  } catch (error) {
+    // Desktop explicitly owns startup when registration was skipped. A task
+    // ACL must not invalidate its installed runtime or prevent child startup.
+    console.warn("Optional Windows Memory task update failed: " + (error instanceof Error ? error.message : String(error)));
+  }
 }
 
 function registerAndStartUserService(home: string, serviceHome: string, start = true): void {

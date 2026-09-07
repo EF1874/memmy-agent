@@ -802,13 +802,20 @@ export async function ensureMemoryService(
     if (shouldStop?.()) return;
     // Repair before the healthy-service early return; newer Desktop installs
     // deliberately skip OS registration and otherwise leave old .cmd tasks intact.
-    await runBundledMemoryCli(
-      options.offlineMemoryRuntimeDirectory,
-      runtimeConfig,
-      options,
-      ["service", "repair-launcher", "--home", dirname(runtimeConfig.configPath)],
-      MEMORY_STARTUP_TIMEOUT_MS
-    );
+    try {
+      await runBundledMemoryCli(
+        options.offlineMemoryRuntimeDirectory,
+        runtimeConfig,
+        options,
+        ["service", "repair-launcher", "--home", dirname(runtimeConfig.configPath)],
+        MEMORY_STARTUP_TIMEOUT_MS
+      );
+    } catch (error) {
+      // A readable legacy task may still deny updates to a non-elevated
+      // Desktop. Repair is optional; recheck identity and locks below because
+      // it may have stopped the old service before registration failed.
+      console.warn("Windows Memory launcher repair failed: " + errorMessage(error));
+    }
     if (shouldStop?.()) return;
     probe = await probeMemoryService(healthUrl, healthHeaders);
   }

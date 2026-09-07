@@ -187,6 +187,55 @@ describe("Windows standalone Memory service", () => {
     ]);
   });
 
+  it.each(["reuse", "upgrade"])("keeps Desktop runtime %s usable when optional task repair is denied", async (action) => {
+    await install(true);
+    const legacyCommand = join(home, "bin", "memmy-memory-service.cmd");
+    lifecycle.mockImplementation((...args: unknown[]) => {
+      if ((args[1] as string[]).includes("/Create")) return { status: 1, stdout: "", stderr: "Access is denied." };
+      return { status: 0, stdout: Buffer.from(legacyCommand, "utf8").toString("base64"), stderr: "" };
+    });
+    if (action === "upgrade") {
+      fs.writeFileSync(join(runtimeDirectory, "memory-runtime.json"), JSON.stringify({ version: "2.2.0", protocolVersion: 1, target: `windows-${process.arch}` }));
+    }
+    await expect(installMemoryRuntime({ home, runtimeDirectory, preferInstalledCompatible: true, skipServiceRegistration: true, skipHealthCheck: true }))
+      .resolves.toMatchObject({ ok: true, version: action === "upgrade" ? "2.2.0" : "2.1.0" });
+    const pointer = JSON.parse(fs.readFileSync(join(home, "memory-service", "current.json"), "utf8")) as { entrypoint: string };
+    expect(fs.existsSync(pointer.entrypoint)).toBe(true);
+  });
+
+  it("still rejects a denied task registration when the standalone CLI owns startup", async () => {
+    lifecycle.mockImplementation((...args: unknown[]) => (args[1] as string[]).includes("/Create")
+      ? { status: 1, stdout: "", stderr: "Access is denied." }
+      : { status: 0, stdout: "", stderr: "" });
+    await expect(install()).rejects.toThrow("Access is denied");
+  });
+
+  it("materializes for Desktop after repair stopped Memory and both task update attempts were denied", async () => {
+    await install(true);
+    const legacyCommand = join(home, "bin", "memmy-memory-service.cmd");
+    lifecycle.mockClear();
+    lifecycle.mockImplementation((...args: unknown[]) => (args[1] as string[]).includes("/Create")
+      ? { status: 1, stdout: "", stderr: "Access is denied." }
+      : { status: 0, stdout: Buffer.from(legacyCommand, "utf8").toString("base64"), stderr: "" });
+    const configPath = join(home, "config.yaml");
+    fs.writeFileSync(configPath, "memmyMemory:\n  storage:\n    endpoint: http://127.0.0.1:18961\n");
+    fs.writeFileSync(join(home, "memory-service", "runtime.json"), JSON.stringify({ endpoint: "http://127.0.0.1:18961", configPath }));
+    let running = true;
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (!running) throw new Error("fixture service stopped");
+      if (url.endsWith("/api/v1/admin/shutdown")) running = false;
+      return new Response(JSON.stringify({ ok: true, protocolVersion: 1 }));
+    }));
+
+    await expect(repairInstalledWindowsMemoryService(home)).rejects.toThrow("Access is denied");
+    expect(running).toBe(false);
+    await expect(installMemoryRuntime({ home, runtimeDirectory, preferInstalledCompatible: true, skipServiceRegistration: true, skipHealthCheck: true }))
+      .resolves.toMatchObject({ ok: true, reused: true });
+    const commands = (lifecycle.mock.calls as unknown[][]).map((call) => call[1] as string[]);
+    expect(commands.filter((args) => args.includes("/Create"))).toHaveLength(2);
+    expect(commands.some((args) => args.includes("/Run"))).toBe(false);
+  });
+
   it.each(["reuse", "start", "upgrade"])("repairs old launchers and stops the old task before %s", async (action) => {
     await install(true);
     const pointerPath = join(home, "memory-service", "current.json");
