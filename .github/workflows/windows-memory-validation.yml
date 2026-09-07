@@ -42,11 +42,14 @@ jobs:
           if (-not $interactive -or $sessionId -le 0) {
             throw 'Native Memory validation requires a logged-in interactive desktop session.'
           }
-          $sessions = query.exe user $sessionId 2>&1
+          $sessions = quser.exe $sessionId 2>&1
           $queryExitCode = $LASTEXITCODE
-          Write-Host ($sessions -join "`n")
-          if ($queryExitCode -ne 0 -or ($sessions -join "`n") -notmatch "\s$sessionId\s+Active\s") {
-            throw 'The runner process must belong to an active logged-in user session.'
+          $sessionText = $sessions -join "`n"
+          $activeSession = $sessionText -match ("\s{0}\s+Active\s" -f $sessionId)
+          Write-Host $sessionText
+          Write-Host "quserExitCode=$queryExitCode; ActiveSession=$activeSession"
+          if (($queryExitCode -ne 0) -or (-not $activeSession)) {
+            throw "The runner process must belong to an active logged-in user session (quser exit $queryExitCode; matched=$activeSession)."
           }
           node -e "if (process.platform !== 'win32' || process.arch !== 'x64' || process.versions.node.split('.')[0] !== '22') process.exit(1)"
           if ($LASTEXITCODE -ne 0) { throw 'Expected Windows x64 with Node 22.' }

@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import YAML from "yaml";
@@ -18,6 +19,8 @@ interface WorkflowStep {
   "continue-on-error"?: boolean;
 }
 const steps = (job.steps ?? []) as WorkflowStep[];
+const powershell = process.platform === "win32" ? "pwsh.exe" : "pwsh";
+const hasPowerShell = spawnSync(powershell, ["-NoLogo", "-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"], { encoding: "utf8" }).status === 0;
 
 describe("Windows Memory validation workflow", () => {
   it("validates PRs and manual runs without release permissions or persisted credentials", () => {
@@ -50,7 +53,7 @@ describe("Windows Memory validation workflow", () => {
     expect(nativeIndex).toBeGreaterThan(preflightIndex);
     const preflight = steps[preflightIndex]!;
     expect(preflight.shell ?? job.defaults?.run?.shell).toBe("pwsh");
-    for (const check of ["[Environment]::UserInteractive", ".SessionId", "query.exe user", "Active", "throw"]) {
+    for (const check of ["[Environment]::UserInteractive", ".SessionId", "quser.exe", "Active", "throw"]) {
       expect(preflight.run).toContain(check);
     }
     expect(preflight.if).toBeUndefined();
@@ -66,5 +69,43 @@ describe("Windows Memory validation workflow", () => {
     expect(native.run).toContain("$report.numPassedTests -ne $report.numTotalTests");
     expect(native.run).toContain("throw");
     expect(steps.some((step) => String(step.run ?? "").includes("Memory/tests/runtime-installer-windows.test.ts"))).toBe(true);
+  });
+});
+
+describe.skipIf(process.platform !== "win32" && !hasPowerShell)("Windows session preflight behavior", () => {
+  const activeOutput = " USERNAME              SESSIONNAME        ID  STATE   IDLE TIME  LOGON TIME\n>runneradmin           console             2  Active      none   9/7/2026 7:15 AM";
+
+  it.each([
+    { name: "accepts the active session using the direct query even when the wrapper fails", output: activeOutput, exitCode: 0, accepted: true },
+    { name: "rejects a failed native query despite apparently active output", output: activeOutput, exitCode: 1, accepted: false },
+    { name: "rejects a disconnected session", output: activeOutput.replace("Active", "Disc"), exitCode: 0, accepted: false },
+    { name: "rejects a different session", output: activeOutput.replace("2  Active", "3  Active"), exitCode: 0, accepted: false },
+    { name: "rejects empty output", output: "", exitCode: 0, accepted: false },
+  ])("$name", ({ output, exitCode, accepted }) => {
+    const preflight = steps.find((step) => step.id === "interactive-session")!.run!;
+    const queryStart = preflight.indexOf("$sessions =");
+    const runtimeCheck = preflight.indexOf("node -e");
+    expect(queryStart).toBeGreaterThanOrEqual(0);
+    expect(runtimeCheck).toBeGreaterThan(queryStart);
+    // Execute the workflow's actual PowerShell decision with controlled native
+    // query output, including the active session shown in the failing CI log.
+    const script = [
+      "$ErrorActionPreference = 'Stop'",
+      "$sessionId = 2",
+      "$fixture = $env:MEMMY_TEST_SESSION_QUERY | ConvertFrom-Json",
+      "function query.exe { $global:LASTEXITCODE = 1; $fixture.output }",
+      "function quser.exe { param([int]$id) if ($id -ne $sessionId) { throw 'Wrong query session' }; $global:LASTEXITCODE = $fixture.exitCode; $fixture.output }",
+      "try {",
+      preflight.slice(queryStart, runtimeCheck),
+      "exit 0",
+      "} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }",
+    ].join("\n");
+    const result = spawnSync(powershell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], {
+      encoding: "utf8",
+      timeout: 10_000,
+      env: { ...process.env, MEMMY_TEST_SESSION_QUERY: JSON.stringify({ output, exitCode }) },
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(accepted ? 0 : 1);
   });
 });
