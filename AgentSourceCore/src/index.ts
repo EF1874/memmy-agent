@@ -361,7 +361,7 @@ function splitText(value: string, maxTokens: number, maxBytes: number): string[]
       }
       if (part) chunks.push(part);
     } else {
-      current = candidate;
+      current = current ? candidate : line;
     }
   }
   if (current) chunks.push(...splitUtf8(current, maxBytes));
