@@ -5,6 +5,7 @@ export const MEMORY_RESTART_IPC_TYPE = "memmy-memory:restart";
 
 export interface MemoryServiceRestartDependencies {
   env?: NodeJS.ProcessEnv;
+  platform?: NodeJS.Platform;
   send?: ((message: unknown, callback: (error: Error | null) => void) => void) | null;
   restartInstalled?: () => void | Promise<void>;
   restartLocal?: () => void | Promise<void>;
@@ -15,6 +16,13 @@ export async function requestMemoryServiceRestart(
 ): Promise<void> {
   const env = dependencies.env ?? process.env;
   if (env[DESKTOP_MANAGED_MEMORY_ENV] !== "1") {
+    if ((dependencies.platform ?? process.platform) === "win32") {
+      // Ending the scheduled task can also terminate a spawned restart helper.
+      // Rebuild locally so the running task continues supervising this process.
+      if (!dependencies.restartLocal) throw new Error("Windows Memory restart is unavailable");
+      await dependencies.restartLocal();
+      return;
+    }
     return Promise.resolve(
       (dependencies.restartInstalled ?? restartInstalledMemoryService)()
     );

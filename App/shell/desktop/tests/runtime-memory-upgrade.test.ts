@@ -27,6 +27,11 @@ async function fixture(options: {
   shutdownDelay?: number;
   wrongConfig?: boolean;
   stopFails?: boolean;
+  platform?: NodeJS.Platform;
+  repairFails?: boolean;
+  repairStopsService?: boolean;
+  noRuntimeMarkers?: boolean;
+  noOfflineRuntime?: boolean;
 } = {}) {
   const root = await mkdtemp(join(tmpdir(), "memmy-runtime-upgrade-"));
   roots.push(root);
@@ -36,6 +41,7 @@ async function fixture(options: {
   const runtimeDir = join(serviceHome, "runtime", "2.1.0", "fixture");
   const entry = join(runtimeDir, "dist", "src", "server", "index.js");
   const cli = join(bundled, "dist", "src", "cli", "index.js");
+  const repairCallsPath = join(root, "repair-calls.jsonl");
   await mkdir(dirname(entry), { recursive: true });
   await mkdir(dirname(cli), { recursive: true });
   const reservation = createServer();
@@ -79,6 +85,20 @@ async function fixture(options: {
   await writeFile(cli, [
     "const fs = require('node:fs'); const path = require('node:path');",
     "const args = process.argv.slice(2); const arg = key => args[args.indexOf(key) + 1];",
+    "if (args[0] === 'service' && args[1] === 'repair-launcher') {",
+    `  fs.appendFileSync(${JSON.stringify(repairCallsPath)}, JSON.stringify(args) + '\\n');`,
+    "  if (!fs.existsSync(path.join(arg('--home'), 'memory-service', 'runtime.json'))) { console.error('launcher repair raced a migrating database owner'); process.exit(19); }",
+    `  if (${Boolean(options.repairFails)}) { console.error('launcher repair failed'); process.exit(23); }`,
+    `  if (${Boolean(options.repairStopsService)}) {`,
+    "    const running = JSON.parse(fs.readFileSync(path.join(arg('--home'), 'memory-service', 'runtime.json'), 'utf8'));",
+    "    fetch(running.endpoint + '/api/v1/admin/shutdown', { method: 'POST' }).then(response => {",
+    "      if (!response.ok) throw new Error('fixture shutdown failed');",
+    "      setInterval(() => { if (!fs.existsSync(running.sqlitePath + '.server.lock')) process.exit(0); }, 10);",
+    "    }).catch(error => { console.error(error); process.exit(20); });",
+    "    return;",
+    "  }",
+    "  process.exit(0);",
+    "}",
     `if (args[0] === 'stop') process.exit(${options.stopFails ? 17 : 0});`,
     "if (args[0] !== 'install' || !args.includes('--skip-service-registration')) process.exit(17);",
     "const home = arg('--home'); const bundled = arg('--runtime-directory');",
@@ -103,6 +123,10 @@ async function fixture(options: {
   };
   await waitUntil(async () => readFile(config.memoryDatabasePath + ".server.lock").then(() => true, () => false));
   if (!options.delay) await waitUntil(async () => fetch(config.memoryBaseUrl + "/api/v1/health").then(() => true, () => false));
+  if (options.noRuntimeMarkers) {
+    await rm(join(serviceHome, "current.json"));
+    await rm(join(serviceHome, "runtime.json"));
+  }
   const children: ManagedChild[] = [];
   return {
     old, config, children,
@@ -110,7 +134,9 @@ async function fixture(options: {
       try {
         await ensureMemoryService({ memoryEntry: entry, agentEntry: join(root, "unused.js") }, config, children, {
           appPath: root, appDatabaseFile: join(home, "app.sqlite"), resourcesPath: root,
-          logDirectory: root, logLevel: "info", runtimeExecutable: process.execPath, offlineMemoryRuntimeDirectory: bundled,
+          logDirectory: root, logLevel: "info", runtimeExecutable: process.execPath,
+          offlineMemoryRuntimeDirectory: options.noOfflineRuntime ? undefined : bundled,
+          platform: options.platform,
         });
       } finally {
         processes.push(...children);
@@ -119,10 +145,68 @@ async function fixture(options: {
     async version() {
       return (await (await fetch(config.memoryBaseUrl + "/api/v1/health")).json() as { serviceVersion: string }).serviceVersion;
     },
+    async repairCalls(): Promise<string[][]> {
+      return readFile(repairCallsPath, "utf8").then(
+        (text) => text.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as string[]),
+        () => [],
+      );
+    },
   };
 }
 
 describe("bundled Memory upgrades", () => {
+  it("repairs an old Windows launcher before reusing a healthy same-version service", async () => {
+    const running = await fixture({ version: "2.1.1", platform: "win32" });
+    await running.ensure();
+    expect(await running.repairCalls()).toEqual([["service", "repair-launcher", "--home", dirname(running.config.configPath)]]);
+    expect(running.children).toHaveLength(0);
+    expect(running.old.process.exitCode).toBeNull();
+    expect(await running.version()).toBe("2.1.1");
+  });
+
+  it("waits for a migrating Windows database owner before repairing its launcher", async () => {
+    const running = await fixture({ version: "2.1.1", platform: "win32", delay: 400 });
+    await running.ensure();
+    expect(await running.repairCalls()).toHaveLength(1);
+    expect(running.children).toHaveLength(0);
+    expect(running.old.process.exitCode).toBeNull();
+  });
+
+  it("starts a Desktop child after launcher repair stops the legacy service", async () => {
+    const running = await fixture({ version: "2.1.1", platform: "win32", repairStopsService: true });
+    await running.ensure();
+    expect(await running.repairCalls()).toHaveLength(1);
+    expect(running.old.process.exitCode).toBe(0);
+    expect(running.children).toHaveLength(1);
+    expect(running.children[0]?.persistOnDesktopExit).toBe(true);
+    expect(await running.version()).toBe("2.1.1");
+  });
+
+  it.each(["darwin", "linux"] as const)("does not request Windows launcher repair on %s", async (platform) => {
+    const running = await fixture({ version: "2.1.1", platform });
+    await running.ensure();
+    expect(await running.repairCalls()).toEqual([]);
+  });
+
+  it("does not request launcher repair without previous runtime markers", async () => {
+    const running = await fixture({ version: "2.1.1", platform: "win32", noRuntimeMarkers: true });
+    await running.ensure();
+    expect(await running.repairCalls()).toEqual([]);
+  });
+
+  it("does not request launcher repair without an offline bundled runtime", async () => {
+    const running = await fixture({ version: "2.1.1", platform: "win32", noOfflineRuntime: true });
+    await running.ensure();
+    expect(await running.repairCalls()).toEqual([]);
+  });
+
+  it("reports a failed Windows launcher repair instead of reusing the healthy endpoint", async () => {
+    const running = await fixture({ version: "2.1.1", platform: "win32", repairFails: true });
+    await expect(running.ensure()).rejects.toThrow("launcher repair failed");
+    expect(running.children).toHaveLength(0);
+    expect(running.old.process.exitCode).toBeNull();
+  });
+
   it("replaces a healthy older Desktop runtime before reusing its endpoint", async () => {
     const running = await fixture();
     await running.ensure();

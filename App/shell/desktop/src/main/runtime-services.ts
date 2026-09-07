@@ -57,6 +57,7 @@ export interface StartPackagedRuntimeServicesOptions {
 export interface StartManagedRuntimeServicesOptions extends StartPackagedRuntimeServicesOptions {
   runtimeEntries?: RuntimeEntryPaths;
   runtimeExecutable?: string;
+  platform?: NodeJS.Platform;
   /** Runs after migrations/config preparation and before any managed child starts. */
   beforeStartServices?: (input: { databasePath: string; configPath: string }) => Promise<void>;
   /** Unpacked Memory runtime shipped as an offline Desktop resource. */
@@ -779,7 +780,38 @@ export async function ensureMemoryService(
   if (shouldStop?.()) return;
   const healthUrl = `${runtimeConfig.memoryBaseUrl}/api/v1/health`;
   const healthHeaders = memoryAuthHeaders(runtimeConfig.memoryToken);
-  const probe = await probeMemoryService(healthUrl, healthHeaders);
+  let probe = await probeMemoryService(healthUrl, healthHeaders);
+  if ((options.platform ?? process.platform) === "win32"
+    && options.offlineMemoryRuntimeDirectory
+    && hasPreviousMemoryRuntimeMarker(runtimeConfig.configPath)
+    && (probe === "ready" || probe === "unreachable")) {
+    const lock = readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath);
+    if (lock) {
+      // A legacy scheduled service may still be migrating its database. Wait
+      // before repairing the launcher, because repair ends that scheduled task.
+      try {
+        await waitForExistingMemoryService(healthUrl, healthHeaders, lock);
+      } catch (error) {
+        if (readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath)) throw error;
+      }
+      const remainingLock = readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath);
+      if (remainingLock && remainingLock.pid !== lock.pid) {
+        throw new Error("Memory database ownership changed before launcher repair");
+      }
+    }
+    if (shouldStop?.()) return;
+    // Repair before the healthy-service early return; newer Desktop installs
+    // deliberately skip OS registration and otherwise leave old .cmd tasks intact.
+    await runBundledMemoryCli(
+      options.offlineMemoryRuntimeDirectory,
+      runtimeConfig,
+      options,
+      ["service", "repair-launcher", "--home", dirname(runtimeConfig.configPath)],
+      MEMORY_STARTUP_TIMEOUT_MS
+    );
+    if (shouldStop?.()) return;
+    probe = await probeMemoryService(healthUrl, healthHeaders);
+  }
   if (probe === "ready") {
     if (!(await stopOlderBundledMemoryRuntime(runtimeConfig, options, shouldStop))) return;
   }
