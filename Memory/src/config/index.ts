@@ -636,18 +636,27 @@ function resolveRuntimeMemmyMemoryConfig(
   const evolution = routing.evolution === "follow" && hasCatalog
     ? resolveAssignedLlm(rootConfig, assignmentMode, "agent", DEFAULT_MEMMY_CONFIG.evolution)
     : asRecord(input.evolution);
-  const summary = routing.summary === "follow"
-    ? inheritLlmConnection(
-        evolution,
-        deepMerge(
-          DEFAULT_MEMMY_CONFIG.summary as unknown as Record<string, unknown>,
-          asRecord(input.summary)
+  const rawSummary = asRecord(input.summary);
+  const accountSummaryNeedsAssignment = assignmentMode === "account"
+    && hasCatalog
+    && (routing.summary === "follow" || !optionalString(rawSummary.model));
+  const summary = accountSummaryNeedsAssignment
+    ? resolveAssignedLlm(rootConfig, assignmentMode, "memory_summary", DEFAULT_MEMMY_CONFIG.summary)
+    : routing.summary === "follow" && assignmentMode !== "account"
+      ? inheritLlmConnection(
+          evolution,
+          deepMerge(
+            DEFAULT_MEMMY_CONFIG.summary as unknown as Record<string, unknown>,
+            rawSummary
+          )
         )
-      )
-    : asRecord(input.summary);
+      : rawSummary;
+  const effectiveRouting = assignmentMode === "account"
+    ? { ...routing, summary: "fixed" as const }
+    : routing;
   return {
     ...input,
-    roleRouting: routing,
+    roleRouting: effectiveRouting,
     summary,
     evolution,
     evolutionSourceProvider: optionalString(evolution.sourceProvider),
