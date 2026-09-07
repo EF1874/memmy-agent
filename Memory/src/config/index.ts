@@ -633,13 +633,16 @@ function resolveRuntimeMemmyMemoryConfig(
   const routing = normalizeRoleRouting(asRecord(input.roleRouting));
   const assignmentMode = runtimeAssignmentMode(rootConfig);
   const hasCatalog = isRecord(rootConfig.modelAssignments);
-  const evolution = routing.evolution === "follow" && hasCatalog
-    ? resolveAssignedLlm(rootConfig, assignmentMode, "agent", DEFAULT_MEMMY_CONFIG.evolution)
-    : asRecord(input.evolution);
+  const accountMode = assignmentMode === "account" && hasCatalog;
+  const evolution = accountMode
+    ? resolveAssignedLlm(rootConfig, assignmentMode, "memory_evolution", DEFAULT_MEMMY_CONFIG.evolution)
+    : routing.evolution === "follow" && hasCatalog
+      ? resolveAssignedLlm(rootConfig, assignmentMode, "agent", DEFAULT_MEMMY_CONFIG.evolution)
+      : asRecord(input.evolution);
   const rawSummary = asRecord(input.summary);
-  const accountSummaryNeedsAssignment = assignmentMode === "account"
-    && hasCatalog
-    && (routing.summary === "follow" || !optionalString(rawSummary.model));
+  // Account assignments are authoritative for both roles, even when an old
+  // config file contains a stale fixed connection from another mode.
+  const accountSummaryNeedsAssignment = accountMode;
   const summary = accountSummaryNeedsAssignment
     ? resolveAssignedLlm(rootConfig, assignmentMode, "memory_summary", DEFAULT_MEMMY_CONFIG.summary)
     : routing.summary === "follow" && assignmentMode !== "account"
@@ -652,7 +655,7 @@ function resolveRuntimeMemmyMemoryConfig(
         )
       : rawSummary;
   const effectiveRouting = assignmentMode === "account"
-    ? { ...routing, summary: "fixed" as const }
+    ? { ...routing, summary: "fixed" as const, evolution: "fixed" as const }
     : routing;
   return {
     ...input,

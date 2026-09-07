@@ -339,7 +339,7 @@ describe("memmy memory config", () => {
 
     const { config } = loadMemmyConfig(configPath);
 
-    expect(config.roleRouting).toEqual({ summary: "fixed", evolution: "follow" });
+    expect(config.roleRouting).toEqual({ summary: "fixed", evolution: "fixed" });
     expect(config.userId).toBe("user_account");
     expect(config.summary).toMatchObject({
       provider: "openai_compatible",
@@ -351,7 +351,7 @@ describe("memmy memory config", () => {
     expect(config.evolution).toMatchObject({
       provider: "openai_compatible",
       sourceProvider: "memmy_account",
-      model: "agent_chat",
+      model: "memory_evolution",
       thinkingBudget: 1_000,
       timeoutMs: 180_000
     });
