@@ -32,7 +32,9 @@ export type LlmVendorName =
   | "kimi"
   | "minimax"
   | "baidu"
-  | "doubao";
+  | "doubao"
+  | "stepfun"
+  | "xiaomi";
 
 export type EmbeddingProviderName =
   | "local"
@@ -845,12 +847,16 @@ function memoryLlmVendor(
     case "qianfan":
     case "doubao":
     case "volcengine":
+    case "stepfun":
+    case "xiaomi":
+    case "xiaomi_mimo":
       return ({
         dashscope: "qwen",
         moonshot: "kimi",
         qianfan: "baidu",
-        volcengine: "doubao"
-      } as const)[provider as "dashscope" | "moonshot" | "qianfan" | "volcengine"]
+        volcengine: "doubao",
+        xiaomi_mimo: "xiaomi"
+      } as const)[provider as "dashscope" | "moonshot" | "qianfan" | "volcengine" | "xiaomi_mimo"]
         ?? provider as LlmVendorName;
     default:
       return runtimeProvider === "openai_compatible" ? "openai_compatible" : "";
@@ -1280,7 +1286,9 @@ function llmVendor(value: unknown, fallback: LlmVendorName): LlmVendorName {
     vendor === "kimi" ||
     vendor === "minimax" ||
     vendor === "baidu" ||
-    vendor === "doubao"
+    vendor === "doubao" ||
+    vendor === "stepfun" ||
+    vendor === "xiaomi"
   ) {
     return vendor;
   }
