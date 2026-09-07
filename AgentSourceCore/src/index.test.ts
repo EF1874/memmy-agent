@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { conversationContentHash, orderedTurns, splitTurn, type ConversationMessage } from "./index.js";
+import { conversationContentHash, estimateTokens, orderedTurns, splitTurn, type ConversationMessage } from "./index.js";
 
 const message = (id: string, role: ConversationMessage["role"], content: string, createdAt: string): ConversationMessage => ({
   messageId: id, sourceId: "fixture", conversationId: "conversation", role, content, createdAt,
@@ -28,5 +28,31 @@ describe("agent source core", () => {
     expect(new Set(parts.map((part) => part.contentHash)).size).toBe(parts.length);
     expect(parts.every((part) => Buffer.byteLength(part.content) <= 1_000_000)).toBe(true);
     expect(conversationContentHash(turn.messages)).toHaveLength(64);
+  });
+
+  it("does not re-emit flushed text when splitting multi-line content", () => {
+    const lines = Array.from({ length: 350 }, (_, index) => `line ${index} ${"y".repeat(40)}`);
+    const content = lines.join("\n");
+    const turn = { sourceId: "fixture", conversationId: "conversation", turnIndex: 0, messages: [message("u", "user", content, "2026-01-01T00:00:00Z"), message("a", "assistant", "ok", "2026-01-01T00:00:01Z")] };
+    const parts = splitTurn(turn, 4000, 1_000_000);
+    const emitted = parts.reduce((total, part) => total + part.content.length, 0);
+    expect(emitted).toBeLessThan(content.length * 2);
+    for (const line of lines) expect(parts.filter((part) => part.content.includes(line))).toHaveLength(1);
+  });
+
+  it("keeps every multi-line part within the token budget", () => {
+    const content = Array.from({ length: 350 }, (_, index) => `line ${index} ${"y".repeat(40)}`).join("\n");
+    const turn = { sourceId: "fixture", conversationId: "conversation", turnIndex: 0, messages: [message("u", "user", content, "2026-01-01T00:00:00Z"), message("a", "assistant", "ok", "2026-01-01T00:00:01Z")] };
+    const parts = splitTurn(turn, 4000, 1_000_000);
+    expect(parts.every((part) => estimateTokens(part.content) <= 4000)).toBe(true);
+  });
+
+  it("splits multibyte content on byte boundaries without losing characters", () => {
+    const content = Array.from({ length: 200 }, () => "汉字测试").join("\n");
+    const turn = { sourceId: "fixture", conversationId: "conversation", turnIndex: 0, messages: [message("u", "user", content, "2026-01-01T00:00:00Z"), message("a", "assistant", "ok", "2026-01-01T00:00:01Z")] };
+    const parts = splitTurn(turn, 1_000_000, 512);
+    expect(parts.every((part) => Buffer.byteLength(part.content) <= 512)).toBe(true);
+    const emitted = parts.reduce((total, part) => total + (part.content.match(/汉/gu) ?? []).length, 0);
+    expect(emitted).toBe(200);
   });
 });
