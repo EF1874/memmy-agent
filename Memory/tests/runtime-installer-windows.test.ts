@@ -53,7 +53,120 @@ function registeredXml(): string {
   return bytes.subarray(2).toString("utf16le");
 }
 
+function executeGeneratedLauncher(platform: NodeJS.Platform = "win32") {
+  const hostPid = 654321;
+  const launcherPid = 654322;
+  const child = Object.assign(new EventEmitter(), { kill: vi.fn(() => true) });
+  const exit = vi.fn();
+  let parentError: string | undefined;
+  let tick: (() => void) | undefined;
+  let stopAfterGrace: (() => void) | undefined;
+  const probe = vi.fn((pid: number, signal: number | string) => {
+    if (pid === hostPid && signal === 0 && parentError) {
+      throw Object.assign(new Error("fixture host probe"), { code: parentError });
+    }
+    return true;
+  });
+  const timer = { unref: vi.fn() };
+  const schedule = vi.fn((callback: () => void, _interval: number) => { tick = callback; return timer; });
+  const clear = vi.fn();
+  const stopTimer = { unref: vi.fn() };
+  const scheduleStop = vi.fn((callback: () => void, _timeout: number) => { stopAfterGrace = callback; return stopTimer; });
+  const clearStop = vi.fn();
+  runInNewContext(fs.readFileSync(join(home, "bin", "memmy-memory-service.cjs"), "utf8"), {
+    require: (id: string) => id === "node:child_process" ? { spawn: () => child } : id === "node:fs" ? fs : { join },
+    process: { ...realProcess, platform, ppid: hostPid, pid: launcherPid, argv: [realProcess.execPath, "launcher.cjs"], kill: probe, exit },
+    setInterval: schedule,
+    clearInterval: clear,
+    setTimeout: scheduleStop,
+    clearTimeout: clearStop,
+    console,
+  });
+  return {
+    child, exit, probe, timer, schedule, clear, hostPid, launcherPid, stopTimer, scheduleStop, clearStop,
+    parentFailure(code: string) { parentError = code; },
+    tick() { if (!tick) throw new Error("launcher did not supervise its host"); tick(); },
+    endGrace() { if (!stopAfterGrace) throw new Error("launcher did not bound its shutdown grace period"); stopAfterGrace(); },
+  };
+}
+
 describe("Windows standalone Memory service", () => {
+  it("keeps Memory running while its Windows script host is alive", async () => {
+    await install(true);
+    const launcher = executeGeneratedLauncher();
+    expect(launcher.schedule).toHaveBeenCalledWith(expect.any(Function), 500);
+    launcher.tick();
+    expect(launcher.probe).toHaveBeenCalledWith(launcher.hostPid, 0);
+    expect(launcher.child.kill).not.toHaveBeenCalled();
+    expect(launcher.exit).not.toHaveBeenCalled();
+  });
+
+  it("gives graceful shutdown time before stopping only its own child once after the Windows host exits", async () => {
+    await install(true);
+    const launcher = executeGeneratedLauncher();
+    launcher.parentFailure("ESRCH");
+    launcher.tick();
+    launcher.tick();
+    expect(launcher.child.kill).not.toHaveBeenCalled();
+    expect(launcher.scheduleStop).toHaveBeenCalledOnce();
+    expect(launcher.scheduleStop).toHaveBeenCalledWith(expect.any(Function), 5_000);
+    expect(launcher.clear).toHaveBeenCalledWith(launcher.timer);
+    expect(launcher.exit).not.toHaveBeenCalled();
+    expect(launcher.probe.mock.calls).toEqual([[launcher.hostPid, 0]]);
+    launcher.endGrace();
+    launcher.endGrace();
+    expect(launcher.child.kill).toHaveBeenCalledOnce();
+    expect(launcher.exit).not.toHaveBeenCalled();
+    launcher.child.emit("exit", 0, null);
+    expect(launcher.exit).toHaveBeenCalledWith(0);
+  });
+
+  it.each(["EPERM", "EACCES"])("does not mistake host probe %s for host exit", async (code) => {
+    await install(true);
+    const launcher = executeGeneratedLauncher();
+    launcher.parentFailure(code);
+    launcher.tick();
+    launcher.tick();
+    expect(launcher.probe).toHaveBeenCalledTimes(2);
+    expect(launcher.child.kill).not.toHaveBeenCalled();
+    expect(launcher.clear).not.toHaveBeenCalled();
+    expect(launcher.exit).not.toHaveBeenCalled();
+  });
+
+  it.each(["exit", "error"])("clears host supervision when the child emits %s", async (event) => {
+    await install(true);
+    const launcher = executeGeneratedLauncher();
+    if (event === "exit") launcher.child.emit("exit", 7, null);
+    else launcher.child.emit("error", new Error("fixture spawn failure"));
+    expect(launcher.clear).toHaveBeenCalledWith(launcher.timer);
+    expect(launcher.exit).toHaveBeenCalledWith(event === "exit" ? 7 : 1);
+    launcher.parentFailure("ESRCH");
+    launcher.tick();
+    expect(launcher.probe).not.toHaveBeenCalled();
+    expect(launcher.child.kill).not.toHaveBeenCalled();
+  });
+
+  it.each(["exit", "error"])("cancels the pending forced stop when the child emits %s during graceful shutdown", async (event) => {
+    await install(true);
+    const launcher = executeGeneratedLauncher();
+    launcher.parentFailure("ESRCH");
+    launcher.tick();
+    if (event === "exit") launcher.child.emit("exit", 0, null);
+    else launcher.child.emit("error", new Error("fixture child failure"));
+    expect(launcher.clearStop).toHaveBeenCalledWith(launcher.stopTimer);
+    launcher.endGrace();
+    launcher.tick();
+    expect(launcher.child.kill).not.toHaveBeenCalled();
+    expect(launcher.scheduleStop).toHaveBeenCalledOnce();
+    expect(launcher.exit).toHaveBeenCalledWith(event === "exit" ? 0 : 1);
+  });
+
+  it("does not add Windows host supervision to other platform launchers", async () => {
+    await install(true);
+    const launcher = executeGeneratedLauncher("darwin");
+    expect(launcher.schedule).not.toHaveBeenCalled();
+  });
+
   it("writes Task Scheduler XML with a matching Unicode declaration and preserves non-ASCII paths", async () => {
     await install();
     const xml = registeredXml();
@@ -123,6 +236,8 @@ describe("Windows standalone Memory service", () => {
     runInNewContext(fs.readFileSync(join(home, "bin", "memmy-memory-service.cjs"), "utf8"), {
       require: (id: string) => id === "node:child_process" ? { spawn } : id === "node:fs" ? fs : { join },
       process: { ...realProcess, platform: "win32", argv: [realProcess.execPath, "launcher.cjs"], exit },
+      setInterval: vi.fn(() => ({ unref: vi.fn() })),
+      clearInterval: vi.fn(),
       console,
     });
     expect(spawn).toHaveBeenCalledOnce();
@@ -141,6 +256,8 @@ describe("Windows standalone Memory service", () => {
     runInNewContext(fs.readFileSync(join(home, "bin", "memmy-memory-service.cjs"), "utf8"), {
       require: (id: string) => id === "node:child_process" ? { spawn: () => child } : id === "node:fs" ? fs : { join },
       process: { ...realProcess, platform: "win32", argv: [realProcess.execPath, "launcher.cjs"], exit },
+      setInterval: vi.fn(() => ({ unref: vi.fn() })),
+      clearInterval: vi.fn(),
       console,
     });
     if (failure === "spawn failure") child.emit("error", new Error("could not start runtime"));
