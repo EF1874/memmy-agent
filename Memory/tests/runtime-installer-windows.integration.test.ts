@@ -46,7 +46,7 @@ describe.skipIf(!enabled)("Windows scheduled Memory launcher integration", () =>
       const xmlPath = join(root, "integration-task.xml");
       // Register only this unique test task. The product installer's registration
       // path deliberately stays disabled so an installed Memmy service is untouched.
-      writeFileSync(xmlPath, taskXml(launcher), "utf8");
+      writeFileSync(xmlPath, `\uFEFF${taskXml(launcher)}`, "utf16le");
       windowsCommand("schtasks.exe", ["/Create", "/TN", taskName, "/XML", xmlPath, "/F"]);
       taskRegistered = true;
       windowsCommand("schtasks.exe", ["/Run", "/TN", taskName]);
@@ -163,7 +163,7 @@ function xmlEscape(value: string): string {
 
 function taskXml(launcher: string): string {
   const wscript = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "wscript.exe");
-  return `<?xml version="1.0" encoding="UTF-8"?>
+  return `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
 <Principals><Principal id="Author"><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
 <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT0S</ExecutionTimeLimit></Settings>

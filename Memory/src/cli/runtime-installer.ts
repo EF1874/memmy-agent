@@ -694,13 +694,15 @@ function registerAndStartUserService(home: string, serviceHome: string, start = 
     const taskPath = join(serviceHome, "service-task.xml");
     const host = join(process.env.SystemRoot || "C:\\Windows", "System32", "wscript.exe");
     const args = `/B /Nologo /E:JScript "${launcherPaths(home).hidden!}"`;
-    writeFileSyncForLifecycle(taskPath, `<?xml version="1.0" encoding="UTF-8"?>
+    // schtasks imports XML as Unicode; its declaration must match the UTF-16
+    // bytes, including a BOM so non-ASCII installation paths stay intact.
+    writeFileSyncForLifecycle(taskPath, `\uFEFF<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
 <Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>
 <Principals><Principal id="User"><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
 <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT0S</ExecutionTimeLimit></Settings>
 <Actions Context="User"><Exec><Command>${xmlEscape(host)}</Command><Arguments>${xmlEscape(args)}</Arguments></Exec></Actions>
-</Task>\n`);
+</Task>\n`, "utf16le");
     runLifecycle("schtasks", ["/Create", "/TN", "Memmy Memory Service", "/XML", taskPath, "/F"]);
     if (start) runLifecycle("schtasks", ["/Run", "/TN", "Memmy Memory Service"]);
     return;
@@ -871,4 +873,4 @@ function shellQuote(value: string): string { return "'" + value.replace(/'/g, "'
 function systemdEscape(value: string): string { return value.replace(/([\\"\s])/g, "\\$1"); }
 function xmlEscape(value: string): string { return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
 function mkdirSyncForLifecycle(path: string): void { mkdirSync(path, { recursive: true }); }
-function writeFileSyncForLifecycle(path: string, value: string): void { writeFileSync(path, value, { encoding: "utf8", mode: 0o600 }); }
+function writeFileSyncForLifecycle(path: string, value: string, encoding: "utf8" | "utf16le" = "utf8"): void { writeFileSync(path, value, { encoding, mode: 0o600 }); }

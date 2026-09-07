@@ -48,10 +48,20 @@ function registeredXml(): string {
   expect(call, "scheduled task registration").toBeDefined();
   const args = call![1] as string[];
   expect(args).toContain("/XML");
-  return fs.readFileSync(args[args.indexOf("/XML") + 1]!, "utf8");
+  const bytes = fs.readFileSync(args[args.indexOf("/XML") + 1]!);
+  expect([...bytes.subarray(0, 2)], "Task Scheduler XML UTF-16LE BOM").toEqual([0xff, 0xfe]);
+  return bytes.subarray(2).toString("utf16le");
 }
 
 describe("Windows standalone Memory service", () => {
+  it("writes Task Scheduler XML with a matching Unicode declaration and preserves non-ASCII paths", async () => {
+    await install();
+    const xml = registeredXml();
+    expect(xml).toMatch(/^<\?xml version="1\.0" encoding="UTF-16"\?>/);
+    expect(xml).toContain("中文 home &amp; data");
+    expect(xml).toContain("memmy-memory-service.js");
+  });
+
   it("routes Desktop's repair command to the selected installation", async () => {
     const repairInstalledService = vi.fn().mockResolvedValue({ ok: true, repaired: false });
     await expect(runCommand({ argv: ["service", "repair-launcher", "--home", home], repairInstalledService }))
