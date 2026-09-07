@@ -864,6 +864,9 @@ export function bundledMemoryInstallArguments(
     "--memmy-config-preexisting", String(memmyConfigPreexisting),
     "--node-executable", executable,
     "--non-interactive",
+    // Desktop has prepared its config. Legacy plugin import needs a separate
+    // explicit CLI install so config selection or old data cannot block startup.
+    "--skip-legacy-migration",
     "--use-compatible-installed",
     "--health-check-timeout-ms", String(MEMORY_STARTUP_TIMEOUT_MS)
   ];
