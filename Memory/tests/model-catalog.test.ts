@@ -19,9 +19,9 @@ describe("Memory model catalog inheritance", () => {
 
     syncMemoryModelCatalog(root, memory, { roleRouting: memory.roleRouting });
 
-    expect(memory.roleRouting.summary).toBe("fixed");
+    expect(memory.roleRouting).toEqual({ summary: "fixed", evolution: "fixed" });
     expect((root.modelAssignments as any).account.memorySummary).toBe("account-summary");
-    expect((root.modelAssignments as any).account.memoryEvolution).toBe("account-agent");
+    expect((root.modelAssignments as any).account.memoryEvolution).toBe("account-evolution");
   });
 
   it("syncs follow routing as summary -> evolution -> Agent Chat", () => {

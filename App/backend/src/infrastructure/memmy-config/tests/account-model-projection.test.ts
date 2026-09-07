@@ -95,7 +95,7 @@ describe("account model projection current catalog", () => {
       userId: "owner-a"
     }, file);
 
-    expect(result).toEqual({ changed: true, memoryConfigAffected: false });
+    expect(result).toEqual({ changed: true, memoryConfigAffected: true });
     const saved = await readConfig(file);
     expect(saved.providers.memmy_account).toMatchObject({
       ownerAccountId: "owner-a",
@@ -118,6 +118,9 @@ describe("account model projection current catalog", () => {
       });
     }
     expect(saved.modelAssignments.byok).toEqual(beforeByok);
+    expect(saved.memmyMemory).toMatchObject({
+      roleRouting: { summary: "fixed", evolution: "fixed" }
+    });
     expect(saved.modelAssignments.account).toMatchObject({
       ownerAccountId: "owner-a",
       agent: {
