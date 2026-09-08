@@ -583,7 +583,7 @@ async function scanPersistent(
         store.saveMeta({ jobId: store.getMeta()?.jobId ?? jobId, sourceId: store.getMeta()?.sourceId ?? requestedSourceId, mode: stage.mode, phase: "prepare", createdAt: store.getMeta()?.createdAt ?? now(), updatedAt: now() });
         const sourceState = store.getSourceState(stage.sourceId);
         store.saveSourceState({ ...(sourceState ?? { sourceId: stage.sourceId, mode: stage.mode, messageCount: store.count(stage.sourceId), resultCount: store.resultCount(stage.sourceId), errorCount: stage.scanErrorCount, updatedAt: now() }), phase: "prepare", updatedAt: now() });
-        await preparePersistentSource(options, store, stage.sourceId, stage.mode);
+        await preparePersistentSource(options, store, stage.sourceId, stage.mode, stage.since);
       }
       store.selectInitialTurns(stages.map((stage) => stage.sourceId), INITIAL_GLOBAL_MEMORY_LIMIT, INITIAL_ABSENT_SOURCE_MEMORY_LIMIT);
     }
@@ -639,7 +639,10 @@ async function stagePersistentSource(
     for await (const message of adapter.scan({
       since,
       order: scanOptions.order ?? (mode === "initial_subset" ? "recent_first" : "source_default"),
-      fullHistory: true,
+      // Only explicit full scans may bypass the incremental boundary. If an
+      // incremental scan streams every historical message, an active long
+      // conversation can make the scanner re-import its entire history.
+      fullHistory: mode === "full",
       signal: scanOptions.signal,
       onProgress: (progress) => emitProgress(scanOptions, { ...progress, phase: "scan" })
     })) {
@@ -697,7 +700,7 @@ async function ingestPersistentStagedSource(
     store.saveMeta({ jobId: store.getMeta()?.jobId ?? scanOptions.scanJobId ?? "", sourceId: store.getMeta()?.sourceId ?? sourceId, mode, phase: "prepare", createdAt: store.getMeta()?.createdAt ?? now(), updatedAt: now() });
     const sourceState = store.getSourceState(sourceId);
     store.saveSourceState({ ...(sourceState ?? { sourceId, mode, messageCount: store.count(sourceId), resultCount: store.resultCount(sourceId), errorCount: stage.scanErrorCount, updatedAt: now() }), phase: "prepare", updatedAt: now() });
-    await preparePersistentSource(options, store, sourceId, mode);
+    await preparePersistentSource(options, store, sourceId, mode, since);
     if (mode === "initial_subset") store.selectInitialTurns([sourceId], INITIAL_SOURCE_MEMORY_LIMIT, 0);
   }
   store.saveMeta({ jobId: store.getMeta()?.jobId ?? scanOptions.scanJobId ?? "", sourceId: store.getMeta()?.sourceId ?? sourceId, mode, phase: "ingest", createdAt: store.getMeta()?.createdAt ?? now(), updatedAt: now() });
@@ -726,7 +729,7 @@ async function ingestPersistentStagedSource(
   };
 }
 
-async function preparePersistentSource(options: CreateAgentSourceServiceOptions, store: AppAgentSourceScanStore, sourceId: string, mode: AgentSourceScanMode): Promise<void> {
+async function preparePersistentSource(options: CreateAgentSourceServiceOptions, store: AppAgentSourceScanStore, sourceId: string, mode: AgentSourceScanMode, since?: string): Promise<void> {
   let cursor: { conversationId: string; createdAt: string; messageId: string; ordinal: number } | undefined;
   let currentId: string | null = null;
   let currentTurn: ConversationMessage[] = [];
@@ -747,7 +750,9 @@ async function preparePersistentSource(options: CreateAgentSourceServiceOptions,
       firstCreatedAt: firstMessage.createdAt,
       lastMessageId: lastMessage.messageId,
       lastCreatedAt: lastMessage.createdAt,
-      selected: true
+      // A changed conversation must not cause all of its historical turns to
+      // be imported again. Select only turns at or after the scan boundary.
+      selected: mode !== "incremental" || !since || isAtOrAfter(lastMessage.createdAt, since)
     });
     turnIndex += 1;
   };
@@ -791,6 +796,12 @@ async function preparePersistentSource(options: CreateAgentSourceServiceOptions,
   }
   flushTurn();
   if (currentId && latest) flush();
+}
+
+function isAtOrAfter(value: string, boundary: string): boolean {
+  const valueAt = Date.parse(value);
+  const boundaryAt = Date.parse(boundary);
+  return !Number.isFinite(valueAt) || !Number.isFinite(boundaryAt) || valueAt >= boundaryAt;
 }
 
 function hashMetaString(message: ConversationMessage, key: string): string | undefined {
