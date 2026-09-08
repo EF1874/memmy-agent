@@ -277,13 +277,15 @@ describe("standalone Memory runtime installer", () => {
       fileURLToPath(new URL("../src/cli/runtime-installer.ts", import.meta.url)),
       "utf8"
     );
-    const replacementGuard = source.indexOf("if ((replacingSameVersion || rebindingSameVersion) && previous && !options.skipServiceRegistration)");
+    const serviceGuard = source.indexOf("if (!options.skipServiceRegistration || repairLegacyTask)");
+    const replacementGuard = source.indexOf("if (process.platform === \"win32\" || ((replacingSameVersion || rebindingSameVersion) && previous))", serviceGuard);
     const stopAttempted = source.indexOf("previousServiceStopAttempted = true;", replacementGuard);
     const verifiedStop = source.indexOf("await stopInstalledMemoryService(home);", replacementGuard);
     const backupMove = source.indexOf("await rename(runtimeDir, backupPath);", replacementGuard);
     const rollbackRestart = source.indexOf("previousServiceStopAttempted || serviceStartAttempted", verifiedStop);
 
-    expect(replacementGuard).toBeGreaterThan(-1);
+    expect(serviceGuard).toBeGreaterThan(-1);
+    expect(replacementGuard).toBeGreaterThan(serviceGuard);
     expect(stopAttempted).toBeGreaterThan(replacementGuard);
     expect(verifiedStop).toBeGreaterThan(stopAttempted);
     expect(backupMove).toBeGreaterThan(verifiedStop);

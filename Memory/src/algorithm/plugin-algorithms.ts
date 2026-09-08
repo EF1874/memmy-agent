@@ -5143,11 +5143,12 @@ function candidateFromMemory(
     return null;
   }
   const kind = memory.properties.internal_info.memory_kind ?? kindFromLayer(memory.memoryLayer);
+  const traceLike = kind === "trace" || kind === "span";
   const tier = memory.memoryLayer === "Skill" ? "tier1" : memory.memoryLayer === "L3" ? "tier3" : "tier2";
   const text = memoryTextForRetrieval(memory);
   const vectorChannels = vectorChannelsForMemory(memory, queryVec, options.config, {
     suppressTraceVector:
-      memory.memoryLayer === "L1" &&
+      traceLike &&
       options.traceVectorTagsRequired &&
       !memoryHasAnyTag(memory, options.traceVectorTags),
     seededChannelScores: options.seededChannelScores,

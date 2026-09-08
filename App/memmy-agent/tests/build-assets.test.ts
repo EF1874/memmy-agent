@@ -50,6 +50,17 @@ describe("build runtime assets", () => {
     expect(fs.existsSync(path.join(process.cwd(), "dist/skills/ui-craft/SKILL.md"))).toBe(true);
     expect(fs.existsSync(path.join(process.cwd(), "dist/skills/ui-craft/references"))).toBe(false);
 
+    const renderingRoot = path.join(process.cwd(), "dist/extra-dependencies/office-rendering");
+    for (const platform of ["darwin-arm64", "darwin-x64", "win32-x64", "linux-x64", "linux-arm64"]) {
+      expect(fs.existsSync(path.join(renderingRoot, platform, "OFFICE-RENDERING-MANIFEST.json"))).toBe(true);
+    }
+    expect(fs.existsSync(path.join(renderingRoot, "THIRD-PARTY-NOTICES.md"))).toBe(true);
+    expect(fs.existsSync(path.join(process.cwd(), "dist/extra-dependencies/docx-rendering"))).toBe(false);
+    expect(fs.existsSync(path.join(process.cwd(), "dist/skills/pptx/SKILL.md"))).toBe(true);
+    expect(fs.existsSync(path.join(process.cwd(), "dist/skills/xlsx/SKILL.md"))).toBe(true);
+    const docxScripts = path.join(process.cwd(), "dist/skills/docx/scripts");
+    expect(fs.readdirSync(docxScripts).filter((entry) => entry.endsWith(".py"))).toEqual([]);
+
     const tmuxScript = path.join(process.cwd(), "dist/skills/tmux/scripts/find-sessions.sh");
     expect(fs.existsSync(tmuxScript)).toBe(true);
     if (process.platform !== "win32") expect(fs.statSync(tmuxScript).mode & 0o111).not.toBe(0);
