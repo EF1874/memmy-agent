@@ -31,6 +31,9 @@ const signedMacArm64PackagePath = fileURLToPath(
 );
 const packageWinPath = fileURLToPath(new URL("../../../../scripts/package-win.sh", import.meta.url));
 const packageWinX64Path = fileURLToPath(new URL("../../../../scripts/internal/win/build-nsis.sh", import.meta.url));
+const createMemoryRuntimeManifestPath = fileURLToPath(
+  new URL("../../../../scripts/internal/win/create-memory-runtime-manifest.mjs", import.meta.url),
+);
 const winUnsignedBuilderPath = fileURLToPath(new URL("../electron-builder.win.unsigned.yml", import.meta.url));
 const winUnsignedInstallerIncludePath = fileURLToPath(new URL("../build/installer-win-unsigned.nsh", import.meta.url));
 const winUpgradeRelayScriptPath = fileURLToPath(new URL("../build/MemmyWindowsUpgradeRelay.ps1", import.meta.url));
@@ -121,7 +124,7 @@ describe("desktop packaged runtime boundaries", () => {
       yaml: expect.any(String),
       zod: expect.any(String)
     });
-    expect(memoryPackage.version).toBe("2.1.0");
+    expect(memoryPackage.version).toBe("2.1.1");
     expect(memoryPackage.dependencies ?? {}).not.toHaveProperty("@memmy/local-api-contracts");
     expect(memoryPackage.dependencies ?? {}).not.toHaveProperty("@memmy/migrations");
     expect(memoryPackage.scripts?.prebuild).toBeUndefined();
@@ -289,13 +292,15 @@ describe("desktop packaged runtime boundaries", () => {
 
   it("keeps the Windows Memory runtime independent from private workspaces", () => {
     const source = readFileSync(packageWinX64Path, "utf8");
+    const manifestSource = readFileSync(createMemoryRuntimeManifestPath, "utf8");
 
     expect(source).toContain("run build -w @memmy/local-api-contracts");
     expect(source).not.toContain('memory/node_modules/@memmy/local-api-contracts');
     expect(source).not.toContain('memory/node_modules/@memmy/migrations');
     expect(source).toContain('cp -R "$MEMORY_DIR/dist/viewer" "$RUNTIME_DIR/memory/dist/viewer"');
     expect(source).toContain('cp -R "$MEMORY_DIR/adapters" "$RUNTIME_DIR/memory/adapters"');
-    expect(source).toContain('protocolVersion: 1');
+    expect(source).toContain('node "$ROOT_DIR/scripts/internal/win/create-memory-runtime-manifest.mjs" \\');
+    expect(manifestSource).toContain("protocolVersion: 1");
     expect(source.indexOf("run build -w @memmy/local-api-contracts")).toBeLessThan(
       source.indexOf("run build -w @memmy/memory"),
     );
@@ -369,6 +374,39 @@ describe("desktop packaged runtime boundaries", () => {
         filter: ["**/*"]
       });
     }
+  });
+
+  it("ships the standalone Memory runtime with production dependencies on macOS", () => {
+    for (const configPath of [electronBuilderPath, unsignedElectronBuilderPath]) {
+      const config = parseYaml(readFileSync(configPath, "utf8")) as {
+        extraResources?: Array<{ from?: string; to?: string; filter?: string[] }>;
+      };
+      expect(config.extraResources).toContainEqual({
+        from: "dist/runtime/memory",
+        to: "memory-runtime",
+        filter: ["**/*"]
+      });
+      expect(config.extraResources).toContainEqual({
+        from: "dist/runtime/memory/node_modules",
+        to: "memory-runtime/node_modules",
+        filter: ["**/*"]
+      });
+    }
+
+    const macSource = readFileSync(packageMacDmgPath, "utf8");
+    expect(macSource).toContain(
+      'packaged_memory_runtime="$app_path/Contents/Resources/memory-runtime"'
+    );
+    expect(macSource).toContain(
+      '$packaged_memory_runtime/node_modules/onnxruntime-node/bin/napi-v3/darwin/$target_cpu/libonnxruntime*.dylib'
+    );
+    expect(macSource).not.toContain(
+      '$unpacked_runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/darwin/$target_cpu/libonnxruntime*.dylib'
+    );
+    const asarGuardSource = readFileSync(verifyPackagedAsarPath, "utf8");
+    expect(asarGuardSource).toContain(
+      'if (platform === "win32") {\n  requiredFiles.push(\n    "dist/runtime/memory/package.json"'
+    );
   });
 
   it("excludes dependency root tests and docs from every desktop app archive", () => {
@@ -1867,7 +1905,7 @@ describe("desktop packaged runtime boundaries", () => {
   it("points packaged Memory at the bundled local embedding model resources", () => {
     const source = readFileSync(runtimeServicesPath, "utf8");
 
-    expect(source).toContain('MEMMY_EMBEDDING_MODEL_ROOT: join(options.resourcesPath, "embedding-models")');
+    expect(source).toContain('MEMMY_EMBEDDING_MODEL_ROOT: join(runtimeDir ?? options.resourcesPath, "embedding-models")');
   });
 
   it("prunes and verifies only proven Windows x64 packaged runtime waste", () => {

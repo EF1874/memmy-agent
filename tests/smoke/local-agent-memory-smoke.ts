@@ -583,18 +583,44 @@ async function drainImportedMemoryWorkers(service: MemoryService, memoryIds: rea
   throw new Error(`Imported memories did not reach a ready state: ${JSON.stringify(states)}`);
 }
 
-function readExecutorState(
+interface ExecutorSourceStateSnapshot {
+  messageCount: number;
+  latestSeenAt: string | null;
+  contentHash: string | null;
+}
+
+export function readExecutorState(
   statePath: string,
   sourceIds: readonly LocalAgentSourceId[]
-): Map<LocalAgentSourceId, string[]> {
+): Map<LocalAgentSourceId, ExecutorSourceStateSnapshot> {
   const parsed = assertRecord(JSON.parse(readFileSync(statePath, "utf8")), "executor state");
+  assert(parsed.version === 2, "executor state.version must be 2");
   const sources = assertRecord(parsed.sources, "executor state.sources");
-  const result = new Map<LocalAgentSourceId, string[]>();
+  const result = new Map<LocalAgentSourceId, ExecutorSourceStateSnapshot>();
   for (const sourceId of sourceIds) {
     const source = assertRecord(sources[sourceId], `executor state.sources.${sourceId}`);
-    const requestIds = readStringArray(source.importedRequestIds, `${sourceId}.importedRequestIds`);
-    assert(requestIds.length === 1, `${sourceId} must persist exactly one imported request id`);
-    result.set(sourceId, requestIds);
+    assert(!Object.hasOwn(source, "importedRequestIds"), `${sourceId} must not persist legacy imported request ids`);
+    assert(
+      typeof source.messageCount === "number" && Number.isInteger(source.messageCount) && source.messageCount >= 0,
+      `${sourceId}.messageCount must be a non-negative integer`
+    );
+    assert(
+      typeof source.lastScannedAt === "string" && source.lastScannedAt.length > 0,
+      `${sourceId}.lastScannedAt must be a non-empty string`
+    );
+    assert(
+      source.latestSeenAt === null || (typeof source.latestSeenAt === "string" && source.latestSeenAt.length > 0),
+      `${sourceId}.latestSeenAt must be null or a non-empty string`
+    );
+    assert(
+      source.contentHash === undefined || (typeof source.contentHash === "string" && source.contentHash.length > 0),
+      `${sourceId}.contentHash must be absent or a non-empty string`
+    );
+    result.set(sourceId, {
+      messageCount: source.messageCount,
+      latestSeenAt: source.latestSeenAt,
+      contentHash: typeof source.contentHash === "string" ? source.contentHash : null
+    });
   }
   return result;
 }
@@ -602,15 +628,17 @@ function readExecutorState(
 function assertExecutorStateDeduplicated(
   statePath: string,
   sourceIds: readonly LocalAgentSourceId[],
-  firstState: ReadonlyMap<LocalAgentSourceId, string[]>
+  firstState: ReadonlyMap<LocalAgentSourceId, ExecutorSourceStateSnapshot>
 ): void {
   const secondState = readExecutorState(statePath, sourceIds);
   for (const sourceId of sourceIds) {
     const first = requireMapValue(firstState, sourceId);
     const second = requireMapValue(secondState, sourceId);
     assert(
-      first.length === second.length && first.every((value, index) => value === second[index]),
-      `${sourceId} scan must deduplicate by request id`
+      first.messageCount === second.messageCount &&
+        first.latestSeenAt === second.latestSeenAt &&
+        first.contentHash === second.contentHash,
+      `${sourceId} repeated scan must preserve its persisted source checkpoint`
     );
   }
 }
@@ -653,13 +681,6 @@ function readRequiredString(value: unknown, field: string, label: string): strin
   const item = record[field];
   assert(typeof item === "string" && item.length > 0, `${label}.${field} must be a non-empty string`);
   return item;
-}
-
-function readStringArray(value: unknown, label: string): string[] {
-  assert(Array.isArray(value), `${label} must be an array`);
-  const result = value.filter((item): item is string => typeof item === "string" && item.length > 0);
-  assert(result.length === value.length, `${label} must contain only non-empty strings`);
-  return result;
 }
 
 function assertRecord(value: unknown, label: string): Record<string, unknown> {

@@ -21,6 +21,112 @@ afterEach(() => {
 });
 
 describe("standalone Agent source executor", () => {
+  it("also waits for a canceled scan when a replacement scan starts before disposal", async () => {
+    const root = tempRoot();
+    let finishFirst!: () => void;
+    let finishSecond!: () => void;
+    const first = new Promise<void>((done) => { finishFirst = done; });
+    const second = new Promise<void>((done) => { finishSecond = done; });
+    const detect = vi.fn()
+      .mockImplementationOnce(async () => { await first; return true; })
+      .mockImplementationOnce(async () => { await second; return true; });
+    const executor = createAgentSourceExecutor({
+      service: {} as MemoryService,
+      configPath: join(root, "config.yaml"),
+      sourceRegistry: createSourceRegistry([{
+        descriptor: { sourceId: "fixture-agent", displayName: "Fixture Agent", builtin: true, dataPath: root },
+        detect,
+        async *scan() { yield fixtureMessage("user", "disposal", "2026-08-28T01:00:00.000Z"); },
+      }]),
+    });
+    try {
+      await executor.startScan({ sourceId: "fixture-agent" });
+      await vi.waitFor(() => expect(detect).toHaveBeenCalledTimes(1));
+      await executor.cancelScan();
+      await executor.startScan({ sourceId: "fixture-agent" });
+      await vi.waitFor(() => expect(detect).toHaveBeenCalledTimes(2));
+      let completed = false;
+      const disposal = Promise.resolve(executor.dispose()).then(() => { completed = true; });
+      finishSecond();
+      await new Promise((done) => setTimeout(done, 20));
+      expect(completed).toBe(false);
+      finishFirst();
+      await disposal;
+    } finally {
+      finishFirst();
+      finishSecond();
+      await executor.dispose();
+    }
+  });
+
+  it("waits for an aborted scan to release its store before disposal completes", async () => {
+    const root = tempRoot();
+    let finishDetection!: () => void;
+    const detection = new Promise<void>((done) => { finishDetection = done; });
+    const detect = vi.fn(async () => { await detection; return true; });
+    const adapter: SourceAdapter = {
+      descriptor: { sourceId: "fixture-agent", displayName: "Fixture Agent", builtin: true, dataPath: root },
+      detect,
+      async *scan() { yield fixtureMessage("user", "disposal", "2026-08-28T01:00:00.000Z"); },
+    };
+    const addMemory = vi.fn();
+    const executor = createAgentSourceExecutor({
+      service: { addMemory } as unknown as MemoryService,
+      configPath: join(root, "config.yaml"),
+      sourceRegistry: createSourceRegistry([adapter]),
+    });
+    try {
+      await executor.startScan({ sourceId: "fixture-agent", mode: "full" });
+      await vi.waitFor(() => expect(detect).toHaveBeenCalledOnce());
+      let completed = false;
+      const disposal = Promise.resolve(executor.dispose()).then(() => { completed = true; });
+      await new Promise((done) => setTimeout(done, 10));
+      expect(completed).toBe(false);
+      finishDetection();
+      await disposal;
+      expect(addMemory).not.toHaveBeenCalled();
+      await expect(executor.startScan({ sourceId: "fixture-agent" })).rejects.toThrow("shutting down");
+    } finally {
+      finishDetection();
+      await executor.dispose();
+    }
+  });
+
+  it("waits for automation and prevents a scan from starting after disposal", async () => {
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, JSON.stringify({ memmyMemory: {
+      agentAccess: { autoScanKnownAgents: true, watchFileChanges: true, autoInjectSkill: true },
+    } }));
+    let finishDetection!: () => void;
+    const detection = new Promise<void>((done) => { finishDetection = done; });
+    const detect = vi.fn(async () => { await detection; return true; });
+    const executor = createAgentSourceExecutor({
+      service: {} as MemoryService,
+      configPath,
+      initialScanDelayMs: 0,
+      sourceRegistry: createSourceRegistry([{
+        descriptor: { sourceId: "fixture-agent", displayName: "Fixture Agent", builtin: true, dataPath: root },
+        detect,
+        async *scan() { yield fixtureMessage("user", "disposal", "2026-08-28T01:00:00.000Z"); },
+      }]),
+    });
+    try {
+      executor.startAutomation();
+      await vi.waitFor(() => expect(detect).toHaveBeenCalledOnce());
+      let completed = false;
+      const disposal = Promise.resolve(executor.dispose()).then(() => { completed = true; });
+      await new Promise((done) => setTimeout(done, 10));
+      expect(completed).toBe(false);
+      finishDetection();
+      await disposal;
+      expect(executor.scanStatus().jobId).toBeNull();
+    } finally {
+      finishDetection();
+      await executor.dispose();
+    }
+  });
+
   it("owns the complete built-in source registry without a Desktop bridge", () => {
     expect(createBuiltinSourceRegistry().list().map((source) => source.descriptor.sourceId)).toEqual([
       "cursor",
@@ -38,7 +144,9 @@ describe("standalone Agent source executor", () => {
 
   it("scans, imports, persists progress, and deduplicates without Memmy Desktop", async () => {
     const root = tempRoot();
-    const addMemory = vi.fn(() => ({ id: "memory-1" }));
+    const addMemory = vi.fn()
+      .mockReturnValueOnce({ id: "memory-1", duplicate: false })
+      .mockReturnValue({ id: "memory-1", duplicate: true });
     const enqueuePendingImportSummaries = vi.fn();
     const scheduleWorker = vi.fn();
     const service = { addMemory, enqueuePendingImportSummaries } as unknown as MemoryService;
@@ -89,7 +197,7 @@ describe("standalone Agent source executor", () => {
       sources: [{ sourceId: "fixture-agent", available: true, messageCount: 0 }]
     });
 
-    await executor.startScan({ sourceId: "fixture-agent" });
+    await executor.startScan({ sourceId: "fixture-agent", mode: "full" });
     await waitForScan(executor);
     expect(addMemory).toHaveBeenCalledTimes(1);
     expect(addMemory).toHaveBeenCalledWith(expect.objectContaining({
@@ -101,9 +209,9 @@ describe("standalone Agent source executor", () => {
     expect(scheduleWorker).toHaveBeenCalledTimes(1);
     expect((await executor.list()).sources[0]).toMatchObject({ messageCount: 2 });
 
-    await executor.startScan({ sourceId: "fixture-agent" });
+    await executor.startScan({ sourceId: "fixture-agent", mode: "full" });
     await waitForScan(executor);
-    expect(addMemory).toHaveBeenCalledTimes(1);
+    expect(addMemory).toHaveBeenCalledTimes(2);
     expect(JSON.parse(readFileSync(statePath, "utf8"))).toMatchObject({
       version: 2,
       sources: {
