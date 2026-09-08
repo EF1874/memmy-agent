@@ -663,7 +663,10 @@ async function stageStandaloneSource(
     for await (const message of adapter.scan({
       ...(mode === "incremental" && stored.latestSeenAt ? { since: stored.latestSeenAt } : {}),
       order: mode === "initial_subset" ? "recent_first" : "source_default",
-      fullHistory: true,
+      // Incremental scans must honor the persisted boundary. Full-history
+      // streaming is only safe for an explicit full scan; otherwise the
+      // adapter would stage every historical message in an active session.
+      fullHistory: mode === "full",
       signal,
       onProgress
     })) {
@@ -848,13 +851,16 @@ async function prepareStandaloneSource(
       firstCreatedAt: firstMessage.createdAt,
       lastMessageId: lastMessage.messageId,
       lastCreatedAt: lastMessage.createdAt,
-      selected: true
+      // A conversation may contain years of history but only one new turn.
+      // Select turns at the watermark, not every turn in that conversation.
+      selected: mode !== "incremental" || !latestSeenAt ||
+        isAtOrAfter(lastMessage.createdAt, latestSeenAt)
     });
   };
   const flushConversation = () => {
     if (!currentConversation || !latest) return;
     hash.update("]");
-    const selected = mode !== "incremental" || !latestSeenAt || Date.parse(latest.createdAt) > Date.parse(latestSeenAt);
+    const selected = mode !== "incremental" || !latestSeenAt || isAtOrAfter(latest.createdAt, latestSeenAt);
     store.saveConversationMeta({
       sourceId,
       conversationId: currentConversation,
@@ -908,6 +914,12 @@ async function prepareStandaloneSource(
   const contentHash = sourceHash.digest("hex");
   if (mode === "incremental" && previousContentHash !== contentHash) store.selectAllConversations(sourceId);
   return contentHash;
+}
+
+function isAtOrAfter(value: string, boundary: string): boolean {
+  const valueAt = Date.parse(value);
+  const boundaryAt = Date.parse(boundary);
+  return !Number.isFinite(valueAt) || !Number.isFinite(boundaryAt) || valueAt >= boundaryAt;
 }
 
 function hashMeta(message: ConversationMessage, key: string): string | undefined {
