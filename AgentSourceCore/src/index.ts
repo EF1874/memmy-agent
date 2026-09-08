@@ -229,8 +229,9 @@ export function legacyTurnId(turn: ImportedTurn): string {
   return `${turn.sourceId}:${createHash("sha256").update(stableTurnIdentity(turn)).digest("hex").slice(0, 24)}`;
 }
 
-/** Leaves ample room for JSON escaping and the add-memory envelope. */
+/** Raw UTF-8 content limit; JSON escaping has a separate transport budget. */
 export const TURN_CONTENT_MAX_BYTES = 512 * 1024;
+const TURN_CONTENT_MAX_JSON_BYTES = 1024 * 1024;
 
 /**
  * Renders a whole turn as one memory body. Agent-source scans deliberately keep
@@ -242,19 +243,31 @@ export const TURN_CONTENT_MAX_BYTES = 512 * 1024;
 export function renderTurnClipped(messages: readonly ConversationMessage[], maxBytes = TURN_CONTENT_MAX_BYTES): string {
   const content = renderTurn(messages);
   const bytes = Buffer.byteLength(content);
-  if (bytes <= maxBytes) return content;
-  const marker = `\n\n[... truncated ${bytes - maxBytes} bytes of tool output ...]`;
-  const budget = Math.max(0, maxBytes - Buffer.byteLength(marker));
-  return `${clipUtf8(content, budget)}${marker}`;
+  if (bytes <= maxBytes && jsonContentBytes(content) + 2 <= TURN_CONTENT_MAX_JSON_BYTES) return content;
+  const marker = (omitted: number) => `\n\n[... truncated ${omitted} bytes of tool output ...]`;
+  // Reserving the largest possible omission count also bounds the final marker.
+  const reservedMarker = marker(bytes);
+  const markerBytes = Buffer.byteLength(reservedMarker);
+  const rawBudget = Math.max(0, maxBytes);
+  if (rawBudget <= markerBytes) return clipUtf8(reservedMarker, rawBudget, TURN_CONTENT_MAX_JSON_BYTES - 2);
+  const prefix = clipUtf8(content, rawBudget - markerBytes, TURN_CONTENT_MAX_JSON_BYTES - 2 - jsonContentBytes(reservedMarker));
+  return `${prefix}${marker(bytes - Buffer.byteLength(prefix))}`;
 }
 
-function clipUtf8(value: string, maxBytes: number): string {
+function jsonContentBytes(value: string): number {
+  return Buffer.byteLength(JSON.stringify(value)) - 2;
+}
+
+function clipUtf8(value: string, maxBytes: number, maxJsonBytes: number): string {
   let bytes = 0;
+  let jsonBytes = 0;
   let end = 0;
   for (const character of value) {
     const characterBytes = Buffer.byteLength(character);
-    if (bytes + characterBytes > maxBytes) break;
+    const characterJsonBytes = jsonContentBytes(character);
+    if (bytes + characterBytes > maxBytes || jsonBytes + characterJsonBytes > maxJsonBytes) break;
     bytes += characterBytes;
+    jsonBytes += characterJsonBytes;
     end += character.length;
   }
   return value.slice(0, end);

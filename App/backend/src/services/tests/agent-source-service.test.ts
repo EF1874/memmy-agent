@@ -1,6 +1,7 @@
 /** Agent source service tests. */
 import { DatabaseSync } from "node:sqlite";
 import { MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH } from "@memmy/local-api-contracts";
+import { legacyTurnId, legacyTurnRequestId } from "@memmy/agent-source-core";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -40,6 +41,42 @@ afterEach(() => {
 
 describe("agent source service", () => {
   describe("persistent scan turn boundaries", () => {
+    it("stores one oversized tool turn once and reuses its legacy idempotency keys", async () => {
+      tempDir = mkdtempSync(join(tmpdir(), "memmy-persistent-one-turn-"));
+      const messages = createCompleteMemoryMessages("cursor", 1, "2026-05-28T10:00:00.000Z", { includeTool: true })
+        .map((message) => message.role === "tool" ? { ...message, content: "Tool calls:\n\n- tool_1\n\n".repeat(30_000) } : message);
+      const turn = { sourceId: "cursor", conversationId: messages[0]!.conversationId, turnIndex: 0, messages };
+      const memoryClient = createMockMemoryClient();
+      const added: Parameters<MemoryClient["addMemory"]>[0][] = [];
+      const service = createService({
+        scanStoreDirectory: tempDir,
+        adapters: [createFakeAdapter("cursor", messages)],
+        memoryClient: {
+          ...memoryClient,
+          async addMemory(input) {
+            added.push(input);
+            return { ...await memoryClient.addMemory(input), id: "oversized-turn", duplicate: added.length > 1 };
+          },
+          async getMemoryProcessingStatus(ids) {
+            return { items: ids.map((memoryId) => ({ memoryId, state: "ready" as const, attemptCount: 0, manualRetryCount: 0, retryAction: "retry" as const, updatedAt: "2026-05-28T10:00:00.000Z" })), serverTime: "2026-05-28T10:00:00.000Z" };
+          }
+        }
+      });
+
+      const first = await service.scanOne("cursor", { mode: "full" });
+      expect(first.errors).toEqual([]);
+      expect(added).toHaveLength(1);
+      expect(added[0]).toMatchObject({ requestId: legacyTurnRequestId(turn), turnId: legacyTurnId(turn) });
+      expect(added[0]?.content).toContain("truncated");
+      const replay = await service.scanOne("cursor", { mode: "full" });
+      expect(replay.errors).toEqual([]);
+      expect(added).toHaveLength(2);
+      expect(added[1]?.requestId).toBe(added[0]?.requestId);
+      expect(added[1]?.turnId).toBe(added[0]?.turnId);
+      expect(replay.skipped).toBe(messages.length);
+      expect(replay.memoryIdCount).toBe(0);
+    });
+
     it.each([
       ["after the watermark", "2026-05-28T10:01:53.000Z", ["query 1"]],
       ["ending exactly at the watermark", "2026-05-28T10:01:52.000Z", ["query 2", "query 1"]],

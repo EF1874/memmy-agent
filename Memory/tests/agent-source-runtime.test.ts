@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { legacyTurnId, legacyTurnRequestId } from "@memmy/agent-source-core";
 import {
   createAgentSourceExecutor,
   createBuiltinSourceRegistry
@@ -21,6 +22,30 @@ afterEach(() => {
 });
 
 describe("standalone Agent source executor", () => {
+  it("keeps an oversized standalone tool turn as one memory with stable legacy dedup keys", async () => {
+    const root = tempRoot();
+    const adapter = longConversationAdapter(1, "Tool calls:\n\n- tool_1\n\n".repeat(30_000));
+    const messages = [];
+    for await (const message of adapter.scan({})) messages.push(message);
+    const turn = { sourceId: "fixture-agent", conversationId: messages[0]!.conversationId, turnIndex: 0, messages };
+    const addMemory = vi.fn((input: { title: string; content: string; requestId: string; turnId: string }) => ({ id: input.title, duplicate: false }));
+    const enqueuePendingImportSummaries = vi.fn();
+    const executor = createAgentSourceExecutor({
+      service: { addMemory, enqueuePendingImportSummaries } as unknown as MemoryService,
+      configPath: join(root, "config.yaml"), statePath: join(root, "agent-sources.json"),
+      sourceRegistry: createSourceRegistry([adapter]),
+    });
+    try {
+      await executor.startScan({ sourceId: "fixture-agent", mode: "full" });
+      await vi.waitFor(() => expect(executor.scanStatus().running).toBe(false), { timeout: 5_000 });
+      expect(executor.scanStatus().error).toBeNull();
+      expect(addMemory).toHaveBeenCalledOnce();
+      expect(addMemory.mock.calls[0]?.[0]).toMatchObject({ requestId: legacyTurnRequestId(turn), turnId: legacyTurnId(turn) });
+      expect(addMemory.mock.calls[0]?.[0].content).toContain("truncated");
+      expect(enqueuePendingImportSummaries).toHaveBeenCalledWith(1000, ["question-0"]);
+    } finally { await executor.dispose(); }
+  });
+
   it.each([
     ["after the watermark", "2026-08-28T01:00:13.000Z", ["question-2"]],
     ["ending exactly at the watermark", "2026-08-28T01:00:12.000Z", ["question-1", "question-2"]],
@@ -611,7 +636,7 @@ function fixtureMessage(
   } as const;
 }
 
-function longConversationAdapter(turnCount: number): SourceAdapter {
+function longConversationAdapter(turnCount: number, toolContent?: string): SourceAdapter {
   return {
     descriptor: { sourceId: "fixture-agent", displayName: "Fixture Agent", builtin: true, dataPath: "/synthetic-history" },
     async detect() { return true; },
@@ -619,6 +644,7 @@ function longConversationAdapter(turnCount: number): SourceAdapter {
       for (let index = 0; index < turnCount; index += 1) {
         const userAt = Date.parse("2026-08-28T01:00:00.000Z") + index * 10_000;
         yield { ...fixtureMessage("user", `user-${index}`, new Date(userAt).toISOString()), content: `question-${index}` };
+        if (toolContent) yield { ...fixtureMessage("user", `tool-${index}`, new Date(userAt + 1_000).toISOString()), role: "tool", content: toolContent };
         yield { ...fixtureMessage("assistant", `assistant-${index}`, new Date(userAt + 2_000).toISOString()), content: `answer-${index}` };
       }
     },
