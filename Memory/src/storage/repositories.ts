@@ -2664,70 +2664,81 @@ export class RuntimeRepository {
   }
 
   enqueueJob(job: EvolutionJobRecord): EvolutionJobRecord {
-    const transaction = this.db.transaction(() => {
-      const existing = job.dedupeKey ? this.getActiveJobByDedupeKey(job.dedupeKey) : undefined;
-      if (existing) {
-        const updatedAt = job.updatedAt ?? nowIso();
-        const payload = mergeJobPayload(existing.payload, job.payload);
-        this.db
-          .prepare(
-            `UPDATE evolution_jobs
-             SET status = CASE WHEN status = 'failed' THEN 'queued' ELSE status END,
-                 session_id = COALESCE(@sessionId, session_id),
-                 episode_id = COALESCE(@episodeId, episode_id),
-                 target_memory_id = COALESCE(@targetMemoryId, target_memory_id),
-                 payload_json = @payloadJson,
-                 max_attempts = MAX(max_attempts, @maxAttempts),
-                 leased_until = CASE WHEN status = 'failed' THEN NULL ELSE leased_until END,
-                 last_error = CASE WHEN status = 'failed' THEN NULL ELSE last_error END,
-                 updated_at = @updatedAt
-             WHERE id = @id`
-          )
-          .run({
-            id: existing.id,
-            sessionId: job.sessionId ?? null,
-            episodeId: job.episodeId ?? null,
-            targetMemoryId: job.targetMemoryId ?? null,
-            payloadJson: toJson(payload),
-            maxAttempts: job.maxAttempts,
-            updatedAt
-          });
-        return this.getJob(existing.id) ?? {
-          ...existing,
-          payload,
-          updatedAt,
-          status: existing.status === "failed" ? "queued" : existing.status,
-          leasedUntil: existing.status === "failed" ? null : existing.leasedUntil,
-          lastError: existing.status === "failed" ? null : existing.lastError
-        };
-      }
+    return this.db.transaction(() => this.enqueueJobInTransaction(job))();
+  }
+
+  enqueueJobInTransaction(job: EvolutionJobRecord): EvolutionJobRecord {
+    const existing = job.dedupeKey ? this.getActiveJobByDedupeKey(job.dedupeKey) : undefined;
+    if (existing) {
+      const updatedAt = job.updatedAt ?? nowIso();
+      const payload = mergeJobPayload(existing.payload, job.payload);
       this.db
         .prepare(
-          `INSERT INTO evolution_jobs (
-            id, job_type, status, dedupe_key, user_id, session_id, episode_id, target_memory_id,
-            scope_key, scope_seq, payload_json, attempts, max_attempts, leased_until, last_error,
-            created_at, updated_at
-          ) VALUES (
-            @id, @jobType, @status, @dedupeKey, @userId, @sessionId, @episodeId, @targetMemoryId,
-            @scopeKey, @scopeSeq, @payloadJson, @attempts, @maxAttempts, @leasedUntil, @lastError,
-            @createdAt, @updatedAt
-          )`
+          `UPDATE evolution_jobs
+           SET status = CASE WHEN status = 'failed' THEN 'queued' ELSE status END,
+               session_id = COALESCE(@sessionId, session_id),
+               episode_id = COALESCE(@episodeId, episode_id),
+               target_memory_id = COALESCE(@targetMemoryId, target_memory_id),
+               payload_json = @payloadJson,
+               max_attempts = MAX(max_attempts, @maxAttempts),
+               leased_until = CASE WHEN status = 'failed' THEN NULL ELSE leased_until END,
+               last_error = CASE WHEN status = 'failed' THEN NULL ELSE last_error END,
+               updated_at = @updatedAt
+           WHERE id = @id`
         )
         .run({
-          ...job,
-          dedupeKey: job.dedupeKey ?? null,
+          id: existing.id,
           sessionId: job.sessionId ?? null,
           episodeId: job.episodeId ?? null,
           targetMemoryId: job.targetMemoryId ?? null,
-          scopeKey: job.scopeKey ?? null,
-          scopeSeq: job.scopeSeq ?? null,
-          payloadJson: toJson(job.payload),
-          leasedUntil: job.leasedUntil ?? null,
-          lastError: job.lastError ?? null
+          payloadJson: toJson(payload),
+          maxAttempts: job.maxAttempts,
+          updatedAt
         });
-      return job;
-    });
-    return transaction();
+      return this.getJob(existing.id) ?? {
+        ...existing,
+        payload,
+        updatedAt,
+        status: existing.status === "failed" ? "queued" : existing.status,
+        leasedUntil: existing.status === "failed" ? null : existing.leasedUntil,
+        lastError: existing.status === "failed" ? null : existing.lastError
+      };
+    }
+    this.db
+      .prepare(
+        `INSERT INTO evolution_jobs (
+          id, job_type, status, dedupe_key, user_id, session_id, episode_id, target_memory_id,
+          scope_key, scope_seq, payload_json, attempts, max_attempts, leased_until, last_error,
+          created_at, updated_at
+        ) VALUES (
+          @id, @jobType, @status, @dedupeKey, @userId, @sessionId, @episodeId, @targetMemoryId,
+          @scopeKey, @scopeSeq, @payloadJson, @attempts, @maxAttempts, @leasedUntil, @lastError,
+          @createdAt, @updatedAt
+        )`
+      )
+      .run({
+        ...job,
+        dedupeKey: job.dedupeKey ?? null,
+        sessionId: job.sessionId ?? null,
+        episodeId: job.episodeId ?? null,
+        targetMemoryId: job.targetMemoryId ?? null,
+        scopeKey: job.scopeKey ?? null,
+        scopeSeq: job.scopeSeq ?? null,
+        payloadJson: toJson(job.payload),
+        leasedUntil: job.leasedUntil ?? null,
+        lastError: job.lastError ?? null
+      });
+    return job;
+  }
+
+  /** Allocate the next FIFO sequence for Work Memory jobs in a merge scope. */
+  nextWorkMemoryScopeSeq(scopeKey: string): number {
+    const row = this.db.prepare(
+      `SELECT COALESCE(MAX(scope_seq), 0) + 1 AS next_seq
+       FROM evolution_jobs
+       WHERE job_type = 'work_memory_extract' AND scope_key = ?`
+    ).get(scopeKey) as { next_seq: number };
+    return Number(row.next_seq);
   }
 
   listJobs(status?: JobStatus, limit = 50, userId?: string): EvolutionJobRecord[] {
@@ -2944,14 +2955,14 @@ export class RuntimeRepository {
                OR CAST(json_extract(payload_json, '$.runAfter') AS TEXT) <= ?
              )
              AND (
-               job_type <> 'l3_world_model_update'
+               job_type NOT IN ('l3_world_model_update', 'work_memory_extract')
                OR (
                  scope_key IS NOT NULL
                  AND scope_seq IS NOT NULL
                  AND NOT EXISTS (
                    SELECT 1
                    FROM evolution_jobs AS leased_l3_job
-                   WHERE leased_l3_job.job_type = 'l3_world_model_update'
+                   WHERE leased_l3_job.job_type = evolution_jobs.job_type
                      AND leased_l3_job.scope_key = evolution_jobs.scope_key
                      AND leased_l3_job.status = 'leased'
                      AND leased_l3_job.id <> evolution_jobs.id
@@ -2959,7 +2970,7 @@ export class RuntimeRepository {
                  AND NOT EXISTS (
                    SELECT 1
                    FROM evolution_jobs AS earlier_l3_job
-                   WHERE earlier_l3_job.job_type = 'l3_world_model_update'
+                   WHERE earlier_l3_job.job_type = evolution_jobs.job_type
                      AND earlier_l3_job.scope_key = evolution_jobs.scope_key
                      AND earlier_l3_job.scope_seq < evolution_jobs.scope_seq
                      AND earlier_l3_job.status IN ('queued', 'leased', 'failed')
@@ -4326,6 +4337,24 @@ export class L3WorldModelRepository {
     return this.db.transaction(() => this.freezeBatchesInTransaction(input))();
   }
 
+  /** Freeze L3 batches and run boundary-owned work in the same transaction. */
+  freezeBatchesWithCallback(
+    input: {
+      sessionId: string;
+      trigger: L3WorldModelBatchTrigger;
+      throughL1MemoryId?: string;
+      episodeId?: string;
+      at?: string;
+    },
+    callback: (result: FreezeL3WorldModelBatchesResult) => void
+  ): FreezeL3WorldModelBatchesResult {
+    return this.db.transaction(() => {
+      const result = this.freezeBatchesInTransaction(input);
+      callback(result);
+      return result;
+    })();
+  }
+
   getBatch(batchId: string): L3WorldModelEvidenceBatchRecord | undefined {
     const row = this.db.prepare(
       `SELECT * FROM l3_world_model_evidence_batches WHERE id = ?`
@@ -5602,6 +5631,9 @@ export function titleFromValue(value: string): string {
 
 function listTitleForMemory(memory: MemoryRow): string {
   const internal = memory.properties.internal_info;
+  if (internal.memory_kind === "work_memory" && typeof internal.work_topic === "string" && internal.work_topic.trim()) {
+    return internal.work_topic.trim();
+  }
   const policy = recordValue(internal.policy);
   const world = recordValue(internal.world_model);
   const skill = recordValue(internal.skill);
@@ -5640,6 +5672,9 @@ function listTitleForMemory(memory: MemoryRow): string {
 
 function listSummaryForMemory(memory: MemoryRow): string {
   const internal = memory.properties.internal_info;
+  if (internal.memory_kind === "work_memory" && typeof internal.requirement === "string") {
+    return internal.requirement.trim();
+  }
   const policy = recordValue(internal.policy);
   const world = recordValue(internal.world_model);
   const skill = recordValue(internal.skill);
@@ -5941,6 +5976,8 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
   addArrayClause("memory_layer", filter.memoryLayer);
   addArrayClause("status", filter.status);
   addArrayClause("id", filter.ids);
+  addMemoryKindClause(filter.memoryKind);
+  addWorkMemoryScopeClause(filter.workMemoryUserId, filter.workMemoryProjectId);
   addTagClauses(filter.tags);
 
   return {
@@ -5988,6 +6025,35 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
     }
     clauses.push(`${column} IN (${values.map(() => "?").join(", ")})`);
     params.push(...values);
+  }
+
+  function addMemoryKindClause(value: MemoryKind | MemoryKind[] | undefined): void {
+    if (value === undefined) return;
+    const values = Array.isArray(value) ? value : [value];
+    if (values.length === 0) return;
+    const expression = `COALESCE(
+      json_extract(properties_json, '$.internal_info.memory_kind'),
+      CASE memory_layer
+        WHEN 'L1' THEN 'trace'
+        WHEN 'L2' THEN 'policy'
+        WHEN 'L3' THEN 'world_model'
+        WHEN 'Skill' THEN 'skill'
+        ELSE 'trace'
+      END
+    )`;
+    clauses.push(`${expression} IN (${values.map(() => "?").join(", ")})`);
+    params.push(...values);
+  }
+
+  function addWorkMemoryScopeClause(userId: string | undefined, projectId: string | null | undefined): void {
+    if (userId === undefined || projectId === undefined) return;
+    const normalizedProjectExpression = "NULLIF(TRIM(CAST(json_extract(info_json, '$.project_id') AS TEXT)), '')";
+    clauses.push(`(
+      COALESCE(json_extract(properties_json, '$.internal_info.memory_kind'), 'trace') != 'work_memory'
+      OR (user_id = ? AND ${projectId === null ? `${normalizedProjectExpression} IS NULL` : `${normalizedProjectExpression} = ?`})
+    )`);
+    params.push(userId);
+    if (projectId !== null) params.push(projectId);
   }
 
   function addTagClauses(tags: string[] | undefined): void {
