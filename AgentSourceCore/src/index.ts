@@ -361,7 +361,7 @@ function splitText(value: string, maxTokens: number, maxBytes: number): string[]
       }
       if (part) chunks.push(part);
     } else {
-      current = candidate;
+      current = current ? candidate : line;
     }
   }
   if (current) chunks.push(...splitUtf8(current, maxBytes));
@@ -371,13 +371,16 @@ function splitText(value: string, maxTokens: number, maxBytes: number): string[]
 function splitUtf8(value: string, maxBytes: number): string[] {
   const parts: string[] = [];
   let current = "";
+  let currentBytes = 0;
   for (const character of value) {
-    const candidate = current + character;
-    if (current && Buffer.byteLength(candidate) > maxBytes) {
+    const characterBytes = Buffer.byteLength(character);
+    if (current && currentBytes + characterBytes > maxBytes) {
       parts.push(current);
       current = character;
+      currentBytes = characterBytes;
     } else {
-      current = candidate;
+      current += character;
+      currentBytes += characterBytes;
     }
   }
   if (current) parts.push(current);

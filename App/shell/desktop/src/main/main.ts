@@ -3765,10 +3765,23 @@ function applyMainWindowActionResolution(
   }
 
   if (resolution === "hide") {
-    if (process.platform === "win32") {
-      syncMenuBarTray(true);
+    const hideWindow = () => {
+      if (targetWindow.isDestroyed()) {
+        return;
+      }
+      if (process.platform === "win32") {
+        syncMenuBarTray(true);
+      }
+      targetWindow.hide();
+    };
+
+    if (isWindowFullScreenLike(targetWindow)) {
+      waitForWindowToLeaveFullScreen(targetWindow, hideWindow);
+      leaveWindowFullScreen(targetWindow);
+      return;
     }
-    targetWindow.hide();
+
+    hideWindow();
     return;
   }
 
