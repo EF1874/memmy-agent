@@ -9,6 +9,7 @@ const repoRoot = resolve(import.meta.dirname, "..");
 const legacyWorkflowPath = resolve(repoRoot, ".github/workflows/github-release.yml");
 const draftWorkflowPath = resolve(repoRoot, ".github/workflows/github-draft-release-v2.yml");
 const releaseCompareScriptPath = resolve(repoRoot, "scripts/build-release-compare.mjs");
+const releaseNotesSanitizerPath = resolve(repoRoot, "scripts/sanitize-release-notes.mjs");
 const ossIntegrityScriptPath = resolve(repoRoot, "scripts/internal/shared/oss-object-integrity.mjs");
 const draftSource = readFileSync(draftWorkflowPath, "utf8");
 const releaseCompareSource = readFileSync(releaseCompareScriptPath, "utf8");
@@ -56,6 +57,103 @@ function readJson(relativePath: string): {
 } {
   return JSON.parse(readFileSync(resolve(repoRoot, relativePath), "utf8"));
 }
+
+function runReleaseNotesSanitizer(markdown: string) {
+  const tempDir = mkdtempSync(resolve(tmpdir(), "memmy-release-notes-sanitizer-"));
+  const inputPath = resolve(tempDir, "input.md");
+  const outputPath = resolve(tempDir, "output.md");
+  writeFileSync(inputPath, markdown);
+
+  const result = spawnSync(
+    "node",
+    [releaseNotesSanitizerPath, inputPath, outputPath],
+    { cwd: repoRoot, encoding: "utf8" },
+  );
+
+  return {
+    result,
+    output: existsSync(outputPath) ? readFileSync(outputPath, "utf8") : "",
+  };
+}
+
+describe("public release notes sanitizer", () => {
+  it("removes reserved audit comments but preserves public and fenced content", () => {
+    const { result, output } = runReleaseNotesSanitizer(`
+# Memmy v1.1.3
+
+Public release notes.
+
+<!-- doc-agent: source-id=memmy-official-changelog-v2 -->
+<!-- memmy-release-notes-source
+source: doc-agent
+needs_review: false
+-->
+<!-- memmy-release-evidence
+schema_version: 2
+target_sha: abc123
+-->
+
+<!-- ordinary-comment: keep -->
+
+\`\`\`markdown
+<!-- doc-agent: source-id=example-inside-code -->
+<!-- memmy-release-evidence
+inside: backtick-fence
+-->
+\`\`\`
+
+~~~text
+<!-- memmy-release-notes-source
+inside: tilde-fence
+-->
+~~~
+`);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(output).toContain("# Memmy v1.1.3");
+    expect(output).toContain("Public release notes.");
+    expect(output).toContain("<!-- ordinary-comment: keep -->");
+    expect(output).toContain("<!-- doc-agent: source-id=example-inside-code -->");
+    expect(output).toContain("inside: backtick-fence");
+    expect(output).toContain("inside: tilde-fence");
+    expect(output).not.toContain("memmy-official-changelog-v2");
+    expect(output).not.toContain("target_sha: abc123");
+    expect(output.endsWith("\n")).toBe(true);
+  });
+
+  it("fails closed for unterminated or inline reserved metadata", () => {
+    const unterminated = runReleaseNotesSanitizer(`
+# Memmy
+
+<!-- memmy-release-evidence
+schema_version: 2
+`);
+    expect(unterminated.result.status).not.toBe(0);
+    expect(unterminated.result.stderr).toContain("Unterminated reserved release metadata");
+    expect(unterminated.output).toBe("");
+
+    const inline = runReleaseNotesSanitizer(
+      "Public text <!-- doc-agent: source-id=memmy-official-changelog-v2 -->\n",
+    );
+    expect(inline.result.status).not.toBe(0);
+    expect(inline.result.stderr).toContain("must occupy complete lines");
+    expect(inline.output).toBe("");
+
+    const afterOrdinaryComment = runReleaseNotesSanitizer(
+      "<!-- ordinary-comment: keep --> <!-- memmy-release-evidence -->\n",
+    );
+    expect(afterOrdinaryComment.result.status).not.toBe(0);
+    expect(afterOrdinaryComment.result.stderr).toContain("must occupy complete lines");
+    expect(afterOrdinaryComment.output).toBe("");
+
+    const metadataOnly = runReleaseNotesSanitizer(
+      "<!-- doc-agent: source-id=memmy-official-changelog-v2 -->\n",
+    );
+    expect(metadataOnly.result.status).not.toBe(0);
+    expect(metadataOnly.result.stderr).toContain("no public content");
+    expect(metadataOnly.output).toBe("");
+  });
+});
 
 describe("Memmy release workflow metadata", () => {
   it("keeps Memmy metadata aligned while preserving the independent Memory version", () => {
@@ -451,6 +549,15 @@ describe("GitHub Draft Release v2 workflow", () => {
     expect(releaseNotes).toContain("Release notes generation produced an empty body");
     expect(releaseNotes).toContain("RELEASE_NOTES_SOURCE.json");
     expect(releaseNotes).toContain("QUALITY_REPORT.json");
+    expect(existsSync(releaseNotesSanitizerPath)).toBe(true);
+    expect(releaseNotes).toContain(
+      'node scripts/sanitize-release-notes.mjs "$notes" "$sanitized_notes"',
+    );
+    expect(releaseNotes).toContain('mv "$sanitized_notes" "$notes"');
+    expect(releaseNotes).toContain("Release notes sanitization failed");
+    expect(releaseNotes).not.toContain("<!-- doc-agent:");
+    expect(releaseNotes).not.toContain("<!-- memmy-release-notes-source");
+    expect(releaseNotes).not.toContain("<!-- memmy-release-evidence");
     expect(releaseNotes).not.toContain("releases/generate-notes");
     expect(releaseNotes).not.toContain("github-generated");
     const snapshot = draftScript("Build complete release change snapshot");
@@ -473,9 +580,6 @@ describe("GitHub Draft Release v2 workflow", () => {
     expect(evidence).toContain("releaseNotesSource");
     expect(evidence).toContain("releaseNotesNeedsReview");
     expect(evidence).toContain("artifacts");
-    expect(releaseNotes).toContain(
-      "doc-agent: source-id=memmy-official-changelog-v2",
-    );
     const uploadAudit = draftSteps.find((step) => step.name === "Upload release audit artifact");
     expect(uploadAudit?.uses).toBe("actions/upload-artifact@v4");
     expect(JSON.stringify(uploadAudit)).toContain("RELEASE_NOTES.md");

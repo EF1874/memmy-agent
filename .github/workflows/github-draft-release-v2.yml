@@ -692,6 +692,13 @@ jobs:
             fi
           fi
 
+          sanitized_notes="${notes}.sanitized"
+          if ! node scripts/sanitize-release-notes.mjs "$notes" "$sanitized_notes"; then
+            echo "::error title=Release notes sanitization failed::Reserved Doc Agent metadata was malformed or could not be removed safely. Manual recovery: inspect the selected release notes source and keep internal audit data in the structured Release assets." >&2
+            exit 1
+          fi
+          mv "$sanitized_notes" "$notes"
+
           cat >> "$notes" <<EOF
 
           ## Downloads
@@ -708,17 +715,6 @@ jobs:
           ## Checksums
 
           Verify downloads with MD5SUMS.txt or SHA256SUMS.txt attached to this release. Before creating the Draft, the workflow verifies Normal OSS objects with Content-MD5 and Multipart objects with OSS CRC-64/XZ.
-
-          <!-- doc-agent: source-id=memmy-official-changelog-v2 -->
-          <!-- memmy-release-evidence
-          schema_version: 2
-          source_id: $GITHUB_REPOSITORY@$TAG
-          previous_tag: $PREVIOUS_TAG
-          target_sha: $TARGET_SHA
-          release_notes_source: $notes_source
-          release_notes_needs_review: $needs_review
-          artifact_manifest: SHA256SUMS.txt
-          -->
           EOF
 
       - name: Build auditable release evidence
