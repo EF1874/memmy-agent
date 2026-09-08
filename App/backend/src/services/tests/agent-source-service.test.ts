@@ -39,6 +39,73 @@ afterEach(() => {
 });
 
 describe("agent source service", () => {
+  describe("persistent scan turn boundaries", () => {
+    it.each([
+      ["after the watermark", "2026-05-28T10:01:53.000Z", ["query 1"]],
+      ["ending exactly at the watermark", "2026-05-28T10:01:52.000Z", ["query 2", "query 1"]],
+      ["when the newest turn ends exactly at the watermark", "2026-05-28T10:02:02.000Z", ["query 1"]]
+    ] as const)("imports only complete turns %s from a changed long conversation", async (_label, since, expectedTitles) => {
+      tempDir = mkdtempSync(join(tmpdir(), "memmy-persistent-boundary-"));
+      const repository = createRepository();
+      repository.upsertSource({ sourceId: "cursor", displayName: "Cursor", dataPath: "/tmp/cursor", builtin: true });
+      repository.upsertScanWatermark({ sourceId: "cursor", mode: "incremental", baselineAt: since, latestSeenCreatedAt: since, updatedAt: since });
+      const memoryClient = createMockMemoryClient();
+      const added: Parameters<MemoryClient["addMemory"]>[0][] = [];
+      const service = createService({
+        repository,
+        scanStoreDirectory: tempDir,
+        adapters: [createFakeAdapter("cursor", createCompleteMemoryMessages("cursor", 3, "2026-05-28T10:02:00.000Z")
+          .map((message) => ({ ...message, conversationId: "long-conversation" })))],
+        memoryClient: {
+          ...memoryClient,
+          async addMemory(input) { added.push(input); return memoryClient.addMemory(input); },
+          async getMemoryProcessingStatus(ids) {
+            return { items: ids.map((memoryId) => ({ memoryId, state: "ready" as const, attemptCount: 0, manualRetryCount: 0, retryAction: "retry" as const, updatedAt: since })), serverTime: since };
+          }
+        }
+      });
+
+      const result = await service.scanOne("cursor", { mode: "incremental" });
+
+      expect(result.errors).toEqual([]);
+      expect(added.map((input) => input.title)).toEqual(expectedTitles);
+      for (const input of added) expect(input.content).toContain(String(input.title).replace("query", "answer"));
+      expect(repository.getScanWatermark("cursor")?.latestSeenCreatedAt).toBe("2026-05-28T10:02:02.000Z");
+    });
+
+    it.each(["full", "initial_subset"] as const)("preserves the %s history selection with an existing watermark", async (mode) => {
+      tempDir = mkdtempSync(join(tmpdir(), "memmy-persistent-mode-"));
+      const repository = createRepository();
+      const boundary = "2026-05-28T10:02:02.000Z";
+      repository.upsertSource({ sourceId: "cursor", displayName: "Cursor", dataPath: "/tmp/cursor", builtin: true });
+      repository.upsertScanWatermark({ sourceId: "cursor", mode: "incremental", baselineAt: boundary, latestSeenCreatedAt: boundary, updatedAt: boundary });
+      const added: Parameters<MemoryClient["addMemory"]>[0][] = [];
+      const memoryClient = createMockMemoryClient();
+      const count = mode === "initial_subset" ? 1001 : 3;
+      const service = createService({
+        repository,
+        scanStoreDirectory: tempDir,
+        adapters: [createFakeAdapter("cursor", createCompleteMemoryMessages("cursor", count, "2026-05-28T10:02:00.000Z")
+          .map((message) => ({ ...message, conversationId: "long-conversation" })))],
+        memoryClient: {
+          ...memoryClient,
+          async addMemory(input) { added.push(input); return memoryClient.addMemory(input); },
+          async getMemoryProcessingStatus(ids) {
+            return { items: ids.map((memoryId) => ({ memoryId, state: "ready" as const, attemptCount: 0, manualRetryCount: 0, retryAction: "retry" as const, updatedAt: boundary })), serverTime: boundary };
+          }
+        }
+      });
+
+      const result = await service.scanOne("cursor", { mode });
+
+      expect(result.errors).toEqual([]);
+      expect(added).toHaveLength(mode === "initial_subset" ? 1000 : 3);
+      expect(added.map((input) => input.title)).toContain("query 1");
+      expect(added.map((input) => input.title)).toContain(`query ${mode === "initial_subset" ? 1000 : 3}`);
+      if (mode === "initial_subset") expect(added.map((input) => input.title)).not.toContain("query 1001");
+    });
+  });
+
   it("lists builtin registry sources together with persisted manual sources", async () => {
     const repository = createRepository();
     repository.upsertSource({
@@ -1499,6 +1566,7 @@ function createService(
     memoryClient?: MemoryClient;
     agentSourceAnalytics?: AgentSourceLifecycleAnalytics;
     getScanPermission?: () => Promise<import("@memmy/local-api-contracts").ScanPermission>;
+    scanStoreDirectory?: string;
   } = {}
 ): AgentSourceService {
   return createAgentSourceService({
@@ -1508,6 +1576,7 @@ function createService(
     memoryClient: options.memoryClient ?? createMockMemoryClient(),
     agentSourceAnalytics: options.agentSourceAnalytics,
     getScanPermission: options.getScanPermission,
+    scanStoreDirectory: options.scanStoreDirectory,
     skillDistributionService:
       options.skillDistributionService ??
       ({

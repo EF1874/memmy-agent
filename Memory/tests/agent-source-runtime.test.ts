@@ -21,6 +21,59 @@ afterEach(() => {
 });
 
 describe("standalone Agent source executor", () => {
+  it.each([
+    ["after the watermark", "2026-08-28T01:00:13.000Z", ["question-2"]],
+    ["ending exactly at the watermark", "2026-08-28T01:00:12.000Z", ["question-1", "question-2"]],
+    ["when the newest turn ends exactly at the watermark", "2026-08-28T01:00:22.000Z", ["question-2"]]
+  ] as const)("imports only complete turns %s from a changed long conversation", async (_label, latestSeenAt, expectedTitles) => {
+    const root = tempRoot();
+    const statePath = join(root, "agent-sources.json");
+    writeFileSync(statePath, JSON.stringify({ version: 2, sources: { "fixture-agent": {
+      status: "not_connected", messageCount: 0, lastScannedAt: latestSeenAt, latestSeenAt,
+    } } }));
+    const addMemory = vi.fn((input: { title: string; content: string }) => ({ id: input.title, duplicate: false }));
+    const executor = createAgentSourceExecutor({
+      service: { addMemory, enqueuePendingImportSummaries: vi.fn() } as unknown as MemoryService,
+      configPath: join(root, "config.yaml"), statePath,
+      sourceRegistry: createSourceRegistry([longConversationAdapter(3)]),
+    });
+    try {
+      await executor.startScan({ sourceId: "fixture-agent", mode: "incremental" });
+      await vi.waitFor(() => expect(executor.scanStatus().running).toBe(false), { timeout: 5_000 });
+
+      expect(executor.scanStatus().error).toBeNull();
+      expect(addMemory.mock.calls.map(([input]) => input.title)).toEqual(expectedTitles);
+      for (const [input] of addMemory.mock.calls) expect(input.content).toContain(input.title.replace("question", "answer"));
+      const saved = JSON.parse(readFileSync(statePath, "utf8"));
+      expect(saved.sources["fixture-agent"].latestSeenAt).toBe("2026-08-28T01:00:22.000Z");
+    } finally { await executor.dispose(); }
+  });
+
+  it.each(["full", "initial_subset"] as const)("preserves standalone %s history selection with an existing watermark", async (mode) => {
+    const root = tempRoot();
+    const statePath = join(root, "agent-sources.json");
+    writeFileSync(statePath, JSON.stringify({ version: 2, sources: { "fixture-agent": {
+      status: "not_connected", messageCount: 0, lastScannedAt: "2026-09-01T00:00:00.000Z", latestSeenAt: "2026-09-01T00:00:00.000Z",
+    } } }));
+    const addMemory = vi.fn((input: { title: string }) => ({ id: input.title, duplicate: false }));
+    const executor = createAgentSourceExecutor({
+      service: { addMemory, enqueuePendingImportSummaries: vi.fn() } as unknown as MemoryService,
+      configPath: join(root, "config.yaml"), statePath,
+      sourceRegistry: createSourceRegistry([longConversationAdapter(mode === "initial_subset" ? 1001 : 3)]),
+    });
+    try {
+      await executor.startScan({ sourceId: "fixture-agent", mode });
+      await vi.waitFor(() => expect(executor.scanStatus().running).toBe(false), { timeout: 5_000 });
+
+      expect(executor.scanStatus().error).toBeNull();
+      const titles = addMemory.mock.calls.map(([input]) => input.title);
+      expect(titles).toHaveLength(mode === "initial_subset" ? 1000 : 3);
+      expect(titles).toContain(mode === "initial_subset" ? "question-1000" : "question-2");
+      if (mode === "initial_subset") expect(titles).not.toContain("question-0");
+      else expect(titles).toContain("question-0");
+    } finally { await executor.dispose(); }
+  });
+
   it("also waits for a canceled scan when a replacement scan starts before disposal", async () => {
     const root = tempRoot();
     let finishFirst!: () => void;
@@ -556,6 +609,20 @@ function fixtureMessage(
     gitRoot: null,
     rawMeta: {}
   } as const;
+}
+
+function longConversationAdapter(turnCount: number): SourceAdapter {
+  return {
+    descriptor: { sourceId: "fixture-agent", displayName: "Fixture Agent", builtin: true, dataPath: "/synthetic-history" },
+    async detect() { return true; },
+    async *scan() {
+      for (let index = 0; index < turnCount; index += 1) {
+        const userAt = Date.parse("2026-08-28T01:00:00.000Z") + index * 10_000;
+        yield { ...fixtureMessage("user", `user-${index}`, new Date(userAt).toISOString()), content: `question-${index}` };
+        yield { ...fixtureMessage("assistant", `assistant-${index}`, new Date(userAt + 2_000).toISOString()), content: `answer-${index}` };
+      }
+    },
+  };
 }
 
 async function waitForFakeTimerScan(executor: ReturnType<typeof createAgentSourceExecutor>): Promise<void> {
