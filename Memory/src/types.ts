@@ -29,7 +29,7 @@ export const DEFAULT_NAMESPACE_SOURCE = "unknown";
 export type Cursor = string;
 export type MemoryLayer = "L1" | "L2" | "L3" | "Skill";
 export type RecallMemoryLayer = MemoryLayer | "UserMemory";
-export type MemoryKind = "user_memory" | "trace" | "span" | "policy" | "world_model" | "skill" | "work_memory";
+export type MemoryKind = "user_memory" | "trace" | "span" | "policy" | "world_model" | "skill";
 export type MemoryStatus = "activated" | "resolving" | "archived" | "deleted";
 export type RetrievalMode =
   | "search"
@@ -81,8 +81,7 @@ export type JobType =
   | "l3_world_model_update"
   | "project_environment_profile"
   | "skill_crystallization"
-  | "skill_trial_resolve"
-  | "work_memory_extract";
+  | "skill_trial_resolve";
 
 export interface RuntimeNamespace {
   source: string;
@@ -189,9 +188,6 @@ export interface MemoryFilter {
   status?: MemoryStatus | MemoryStatus[];
   tags?: string[];
   ids?: string[];
-  memoryKind?: MemoryKind | MemoryKind[];
-  workMemoryUserId?: string;
-  workMemoryProjectId?: string | null;
 }
 
 export interface RecallHit {
@@ -277,12 +273,6 @@ export interface MemoryDetailItem extends MemoryListItem {
   createdAt: IsoTime;
   sourceMemoryIds: string[];
   metadata: Record<string, unknown>;
-  workMemory?: {
-    workTopic?: string;
-    requirement?: string;
-    reason?: string;
-    projectId?: string | null;
-  };
 }
 
 export interface RawTurnSummary {

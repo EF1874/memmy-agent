@@ -156,7 +156,6 @@ import {
   repairEvidenceValueDiff as sessionRepairEvidenceValueDiff
 } from "./session/session-turn-service.js";
 import { SkillTrialResolver } from "./trials/skill-trial-resolver.js";
-import { WorkMemoryPipeline } from "./work-memory/work-memory-pipeline.js";
 import {
   buildSearchQuery,
   sanitizeMemoryAddRequest,
@@ -262,7 +261,6 @@ export class MemoryService {
   private readonly skillReadModel: SkillReadModel;
   private readonly workerHandlers: ReturnType<typeof createWorkerJobHandlers>;
   private readonly workerRunner: WorkerRunner;
-  private readonly workMemory: WorkMemoryPipeline;
   private readonly repos: Repositories;
   private readonly startedAt = Date.now();
   private readonly mode: "local" | "cloud" | "dev";
@@ -282,14 +280,6 @@ export class MemoryService {
     this.llm = this.modelTasks.client("summary");
     this.skillLlm = this.modelTasks.client("evolution");
     this.embedder = this.modelTasks.embedder();
-    const serviceOwner = this;
-    this.workMemory = new WorkMemoryPipeline({
-      repos: this.repos,
-      get llm() { return serviceOwner.llm; },
-      get embedder() { return serviceOwner.embedder; },
-      get embedAfterCapture() { return serviceOwner.config.algorithm.capture.embedAfterCapture; },
-      nowIso
-    });
     const projectEnvironmentOwner = this;
     this.projectEnvironment = new ProjectEnvironmentService({
       repos: this.repos,
@@ -328,9 +318,6 @@ export class MemoryService {
         embedding: {
           embedMemory: this.embedMemory.bind(this),
           embedUserMemory: (job) => this.embeddingJobs.embedUserMemory(job)
-        },
-        workMemory: {
-          extract: (job) => this.workMemory.extract(job)
         }
       }
     });
@@ -972,14 +959,10 @@ export class MemoryService {
     if (!this.repos.l3WorldModels.inputTraceByL1MemoryId(sessionId, request.throughL1MemoryId)) {
       throw new MemoryServiceError("conflict", "through L1 memory was not registered for this Session");
     }
-    const result = this.repos.l3WorldModels.freezeBatchesWithCallback({
+    const result = this.repos.l3WorldModels.freezeBatches({
       sessionId,
       trigger: request.trigger,
       throughL1MemoryId: request.throughL1MemoryId
-    }, (frozen) => {
-      if (request.trigger === "token_compaction" && frozen.batchIds.length > 0) {
-        this.workMemory.scheduleBatchesInTransaction(frozen.batchIds, nowIso());
-      }
     });
     if (!result.throughTraceSeq) {
       throw new MemoryServiceError("conflict", "through L1 memory was not registered");
