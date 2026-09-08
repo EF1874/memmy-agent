@@ -498,6 +498,7 @@ describe("GitHub Draft Release v2 workflow", () => {
       (step) => step.name === "Preflight Doc Agent draft endpoint",
     );
     expect(preflight).toBeDefined();
+    expect(preflight?.id).toBe("doc_agent");
     expect(preflight?.if).toBeUndefined();
     const script = draftScript("Preflight Doc Agent draft endpoint");
 
@@ -514,6 +515,10 @@ describe("GitHub Draft Release v2 workflow", () => {
     expect(script).toContain("Doc Agent draft endpoint unavailable");
     expect(script).toContain("Doc Agent smoke response contract mismatch");
     expect(script).toContain("LLM generation: not invoked by smoke");
+    expect(script).toContain('echo "available=false" >> "$GITHUB_OUTPUT"');
+    expect(script).toContain('echo "available=true" >> "$GITHUB_OUTPUT"');
+    expect(script).toContain("safe needs-review Draft");
+    expect(script).not.toContain("::error title=Doc Agent");
   });
 
   it("reuses a pre-existing tag only when it points at the target commit", () => {
@@ -621,16 +626,20 @@ describe("GitHub Draft Release v2 workflow", () => {
     expect(releaseNotes).toContain("MEMMY_RELEASE_STYLE_EXAMPLES.json");
     expect(releaseNotes).toContain("candidate_count: 3");
     expect(releaseNotes).toContain('public_release_language: "en"');
+    expect(releaseNotes).toContain("reviewed_release_notes");
+    expect(releaseNotes).toContain("REVIEWED_RELEASE_NOTES.md");
+    expect(releaseNotes).toContain("manual-reviewed-by-doc-agent");
+    expect(releaseNotes).toContain("manual-repaired-by-doc-agent");
+    expect(releaseNotes).toContain("doc-agent-manual-regeneration");
     expect(releaseNotes).toContain(".release_notes_md // .release_notes_markdown");
-    expect(releaseNotes).toContain("Doc Agent draft configuration missing");
-    expect(releaseNotes).toContain("Doc Agent draft generation failed");
-    expect(releaseNotes).toContain("do not fall back silently");
-    expect(releaseNotes).toContain("Doc Agent returned invalid release notes");
-    expect(releaseNotes).toContain("Doc Agent quality report missing");
-    expect(releaseNotes).toContain("Doc Agent candidate selection missing");
-    expect(releaseNotes).toContain("Doc Agent release notes need review");
+    expect(releaseNotes).toContain("write_safe_fallback_body");
+    expect(releaseNotes).toContain("safe-needs-review-fallback");
+    expect(releaseNotes).toContain("manual-needs-review-fallback");
+    expect(releaseNotes).toContain("safe_needs_review_draft");
+    expect(releaseNotes).toContain("will not publish it automatically");
+    expect(releaseNotes).toContain("exhausted automatic wording repair");
     expect(releaseNotes).toContain("requested_candidate_count");
-    expect(releaseNotes).toContain("Release notes generation produced an empty body");
+    expect(releaseNotes).toContain("Release notes body was empty");
     expect(releaseNotes).toContain("RELEASE_NOTES_SOURCE.json");
     expect(releaseNotes).toContain("QUALITY_REPORT.json");
     expect(existsSync(releaseNotesSanitizerPath)).toBe(true);
@@ -638,7 +647,8 @@ describe("GitHub Draft Release v2 workflow", () => {
       'node scripts/sanitize-release-notes.mjs "$notes" "$sanitized_notes" --language en',
     );
     expect(releaseNotes).toContain('mv "$sanitized_notes" "$notes"');
-    expect(releaseNotes).toContain("Release notes sanitization failed");
+    expect(releaseNotes).toContain("Release notes sanitization repaired with safe fallback");
+    expect(releaseNotes).toContain("Safe release-notes fallback failed");
     expect(releaseNotes).toContain('public_release_language: "en"');
     expect(releaseNotes).toContain("language_validation");
     expect(releaseNotes).not.toContain("<!-- doc-agent:");
