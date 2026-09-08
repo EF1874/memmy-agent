@@ -58,7 +58,7 @@ function readJson(relativePath: string): {
   return JSON.parse(readFileSync(resolve(repoRoot, relativePath), "utf8"));
 }
 
-function runReleaseNotesSanitizer(markdown: string) {
+function runReleaseNotesSanitizer(markdown: string, publicLanguage?: "en") {
   const tempDir = mkdtempSync(resolve(tmpdir(), "memmy-release-notes-sanitizer-"));
   const inputPath = resolve(tempDir, "input.md");
   const outputPath = resolve(tempDir, "output.md");
@@ -66,7 +66,12 @@ function runReleaseNotesSanitizer(markdown: string) {
 
   const result = spawnSync(
     "node",
-    [releaseNotesSanitizerPath, inputPath, outputPath],
+    [
+      releaseNotesSanitizerPath,
+      inputPath,
+      outputPath,
+      ...(publicLanguage ? ["--language", publicLanguage] : []),
+    ],
     { cwd: repoRoot, encoding: "utf8" },
   );
 
@@ -152,6 +157,84 @@ schema_version: 2
     expect(metadataOnly.result.status).not.toBe(0);
     expect(metadataOnly.result.stderr).toContain("no public content");
     expect(metadataOnly.output).toBe("");
+  });
+
+  it("keeps only English sections when a reviewed source contains parallel Chinese sections", () => {
+    const { result, output } = runReleaseNotesSanitizer(
+      `# Memmy v1.1.3
+
+## Fixes
+
+- Fixed packaged Memory startup.
+
+## 修复
+
+- 修复随包 Memory 的启动问题。
+
+## Upgrade notes
+
+- Memory remains independently versioned.
+
+## 升级说明
+
+- Memory 继续独立发版。
+`,
+      "en",
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(output).toContain("## Fixes");
+    expect(output).toContain("Fixed packaged Memory startup.");
+    expect(output).toContain("## Upgrade notes");
+    expect(output).not.toMatch(/[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff]/);
+    expect(output.match(/^## Fixes$/gm)).toHaveLength(1);
+  });
+
+  it("rejects Chinese prose that remains inside an English section", () => {
+    const { result, output } = runReleaseNotesSanitizer(
+      `# Memmy v1.1.3
+
+## Fixes
+
+- 修复随包 Memory 的启动问题。
+`,
+      "en",
+    );
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("English public release notes contain visible CJK text");
+    expect(output).toBe("");
+  });
+
+  it("allows CJK characters in code spans while validating English prose", () => {
+    const { result, output } = runReleaseNotesSanitizer(
+      `# Memmy v1.1.3
+
+## Fixes
+
+- Fixed startup when the configured path is \`C:\\\\用户\\\\Memmy\`.
+`,
+      "en",
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(output).toContain("`C:\\\\用户\\\\Memmy`");
+  });
+
+  it("normalizes the real v1.1.3 reviewed notes to a single English public body", () => {
+    const notes = readFileSync(
+      resolve(repoRoot, ".github/release-notes/v1.1.3.md"),
+      "utf8",
+    );
+    const { result, output } = runReleaseNotesSanitizer(notes, "en");
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(output).toContain("# Memmy v1.1.3");
+    expect(output).toContain("## Fixes");
+    expect(output).toContain("## Upgrade notes");
+    expect(output).not.toMatch(/[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff]/);
+    expect(output.match(/^## Fixes$/gm)).toHaveLength(1);
+    expect(output.match(/^## Upgrade notes$/gm)).toHaveLength(1);
   });
 });
 
@@ -537,6 +620,7 @@ describe("GitHub Draft Release v2 workflow", () => {
     expect(releaseNotes).toContain("DOC_AGENT_RELEASE_NOTES_REQUEST.json");
     expect(releaseNotes).toContain("MEMMY_RELEASE_STYLE_EXAMPLES.json");
     expect(releaseNotes).toContain("candidate_count: 3");
+    expect(releaseNotes).toContain('public_release_language: "en"');
     expect(releaseNotes).toContain(".release_notes_md // .release_notes_markdown");
     expect(releaseNotes).toContain("Doc Agent draft configuration missing");
     expect(releaseNotes).toContain("Doc Agent draft generation failed");
@@ -551,10 +635,12 @@ describe("GitHub Draft Release v2 workflow", () => {
     expect(releaseNotes).toContain("QUALITY_REPORT.json");
     expect(existsSync(releaseNotesSanitizerPath)).toBe(true);
     expect(releaseNotes).toContain(
-      'node scripts/sanitize-release-notes.mjs "$notes" "$sanitized_notes"',
+      'node scripts/sanitize-release-notes.mjs "$notes" "$sanitized_notes" --language en',
     );
     expect(releaseNotes).toContain('mv "$sanitized_notes" "$notes"');
     expect(releaseNotes).toContain("Release notes sanitization failed");
+    expect(releaseNotes).toContain('public_release_language: "en"');
+    expect(releaseNotes).toContain("language_validation");
     expect(releaseNotes).not.toContain("<!-- doc-agent:");
     expect(releaseNotes).not.toContain("<!-- memmy-release-notes-source");
     expect(releaseNotes).not.toContain("<!-- memmy-release-evidence");

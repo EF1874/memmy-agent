@@ -607,6 +607,7 @@ jobs:
                   candidate_count: 3,
                   require_source_refs: true,
                   require_bilingual_output: true,
+                  public_release_language: "en",
                   require_surfaces: true,
                   max_items: 10,
                   max_added_items: 5,
@@ -618,6 +619,7 @@ jobs:
                 release_context: {
                   release_kind: "memmy_official_desktop_agent_memory_cli",
                   public_release_body: "github_draft_release_notes",
+                  public_release_language: "en",
                   docs_product_extraction: "release_published_revalidated_by_106",
                   manual_release_notes_file: ".github/release-notes/vX.Y.Z.md is optional"
                 }
@@ -692,13 +694,6 @@ jobs:
             fi
           fi
 
-          sanitized_notes="${notes}.sanitized"
-          if ! node scripts/sanitize-release-notes.mjs "$notes" "$sanitized_notes"; then
-            echo "::error title=Release notes sanitization failed::Reserved Doc Agent metadata was malformed or could not be removed safely. Manual recovery: inspect the selected release notes source and keep internal audit data in the structured Release assets." >&2
-            exit 1
-          fi
-          mv "$sanitized_notes" "$notes"
-
           cat >> "$notes" <<EOF
 
           ## Downloads
@@ -716,6 +711,29 @@ jobs:
 
           Verify downloads with MD5SUMS.txt or SHA256SUMS.txt attached to this release. Before creating the Draft, the workflow verifies Normal OSS objects with Content-MD5 and Multipart objects with OSS CRC-64/XZ.
           EOF
+
+          sanitized_notes="${notes}.sanitized"
+          if ! node scripts/sanitize-release-notes.mjs "$notes" "$sanitized_notes" --language en; then
+            echo "::error title=Release notes sanitization failed::The final public Release body contains malformed reserved metadata or visible non-English prose. Automatic recovery removes complete Chinese translation sections when an English body exists; otherwise fix the reviewed source or Doc Agent output before retrying." >&2
+            exit 1
+          fi
+          mv "$sanitized_notes" "$notes"
+
+          source_report="release-assets/RELEASE_NOTES_SOURCE.json"
+          source_report_tmp="${source_report}.tmp"
+          jq '. + {
+            public_release_language: "en",
+            language_validation: {ok: true, visible_body: "english_only"}
+          }' "$source_report" > "$source_report_tmp"
+          mv "$source_report_tmp" "$source_report"
+
+          quality_report="release-assets/QUALITY_REPORT.json"
+          quality_report_tmp="${quality_report}.tmp"
+          jq '. + {
+            public_release_language: "en",
+            language_validation: {ok: true, visible_body: "english_only"}
+          }' "$quality_report" > "$quality_report_tmp"
+          mv "$quality_report_tmp" "$quality_report"
 
       - name: Build auditable release evidence
         if: ${{ steps.release.outputs.preflight_level == 'full' }}

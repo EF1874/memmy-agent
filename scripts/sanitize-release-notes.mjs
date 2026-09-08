@@ -8,6 +8,7 @@ const RESERVED_MARKERS = [
   /^<!--\s*memmy-release-notes-source(?:\s|-->|$)/,
   /^<!--\s*memmy-release-evidence(?:\s|-->|$)/,
 ];
+const CJK_RE = /[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff]/;
 
 function isReservedMarker(value) {
   return RESERVED_MARKERS.some((pattern) => pattern.test(value));
@@ -41,7 +42,130 @@ function assertCommentOccupiesCompleteLines(line, markerOffset, lineNumber) {
   }
 }
 
-export function sanitizeReleaseNotes(markdown) {
+function removeCjkHeadingSections(markdown) {
+  const lines = markdown.split(/\r?\n/);
+  const output = [];
+  let fence = null;
+  let htmlComment = false;
+  let skippedHeadingDepth = null;
+
+  for (const line of lines) {
+    if (fence) {
+      if (skippedHeadingDepth === null) output.push(line);
+      if (isFenceClosing(line, fence)) fence = null;
+      continue;
+    }
+
+    const openingFence = fenceOpening(line);
+    if (openingFence) {
+      fence = openingFence;
+      if (skippedHeadingDepth === null) output.push(line);
+      continue;
+    }
+
+    if (htmlComment) {
+      if (skippedHeadingDepth === null) output.push(line);
+      if (line.includes("-->")) htmlComment = false;
+      continue;
+    }
+    if (line.includes("<!--")) {
+      if (!line.includes("-->", line.indexOf("<!--") + 4)) htmlComment = true;
+      if (skippedHeadingDepth === null) output.push(line);
+      continue;
+    }
+
+    const heading = line.match(/^[ \t]{0,3}(#{2,6})[ \t]+(.+?)[ \t]*#*[ \t]*$/);
+    if (heading) {
+      const depth = heading[1].length;
+      if (skippedHeadingDepth !== null && depth <= skippedHeadingDepth) {
+        skippedHeadingDepth = null;
+      }
+      if (CJK_RE.test(heading[2])) {
+        skippedHeadingDepth = depth;
+        continue;
+      }
+    }
+
+    if (skippedHeadingDepth === null) output.push(line);
+  }
+
+  return output.join("\n");
+}
+
+function visibleLineForLanguageValidation(line) {
+  return line
+    .replace(/(`+).*?\1/g, "")
+    .replace(/\]\([^)]*\)/g, "]")
+    .replace(/<https?:\/\/[^>]+>/gi, "")
+    .replace(/https?:\/\/\S+/gi, "");
+}
+
+function assertEnglishPublicBody(markdown) {
+  const lines = markdown.split(/\r?\n/);
+  let fence = null;
+  let htmlComment = false;
+  let hasBodyContent = false;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (fence) {
+      if (isFenceClosing(line, fence)) fence = null;
+      continue;
+    }
+
+    const openingFence = fenceOpening(line);
+    if (openingFence) {
+      fence = openingFence;
+      continue;
+    }
+
+    if (htmlComment) {
+      if (line.includes("-->")) htmlComment = false;
+      continue;
+    }
+    const commentOffset = line.indexOf("<!--");
+    if (commentOffset !== -1) {
+      if (!line.includes("-->", commentOffset + 4)) htmlComment = true;
+      const visiblePrefix = visibleLineForLanguageValidation(line.slice(0, commentOffset));
+      if (CJK_RE.test(visiblePrefix)) {
+        throw new Error(
+          `English public release notes contain visible CJK text (line ${index + 1})`,
+        );
+      }
+      continue;
+    }
+
+    const visible = visibleLineForLanguageValidation(line);
+    if (CJK_RE.test(visible)) {
+      throw new Error(
+        `English public release notes contain visible CJK text (line ${index + 1})`,
+      );
+    }
+    if (
+      /[A-Za-z]/.test(visible) &&
+      !/^[ \t]{0,3}#{1,6}[ \t]/.test(visible) &&
+      !/^[ \t]*(?:[-*_][ \t]*){3,}$/.test(visible)
+    ) {
+      hasBodyContent = true;
+    }
+  }
+
+  if (!hasBodyContent) {
+    throw new Error("English public release notes contain no English body content");
+  }
+}
+
+function normalizePublicLanguage(markdown, publicLanguage) {
+  if (!publicLanguage) return markdown;
+  if (publicLanguage !== "en") {
+    throw new Error(`Unsupported public release language: ${publicLanguage}`);
+  }
+  const normalized = removeCjkHeadingSections(markdown).trimEnd();
+  assertEnglishPublicBody(normalized);
+  return normalized;
+}
+
+export function sanitizeReleaseNotes(markdown, { publicLanguage = "" } = {}) {
   const lines = markdown.split(/\r?\n/);
   const publicLines = [];
   let fence = null;
@@ -106,7 +230,10 @@ export function sanitizeReleaseNotes(markdown) {
     );
   }
 
-  const publicMarkdown = publicLines.join("\n").trimEnd();
+  const publicMarkdown = normalizePublicLanguage(
+    publicLines.join("\n").trimEnd(),
+    publicLanguage,
+  );
   if (publicMarkdown.trim() === "") {
     throw new Error("Release notes contain no public content after sanitization");
   }
@@ -142,9 +269,17 @@ function assertNoReservedMetadata(markdown) {
 }
 
 function main() {
-  const [inputArg, outputArg, ...extraArgs] = process.argv.slice(2);
-  if (!inputArg || !outputArg || extraArgs.length > 0) {
-    throw new Error("Usage: node scripts/sanitize-release-notes.mjs <input.md> <output.md>");
+  const [inputArg, outputArg, languageFlag, languageArg, ...extraArgs] = process.argv.slice(2);
+  const hasLanguage = languageFlag !== undefined || languageArg !== undefined;
+  if (
+    !inputArg ||
+    !outputArg ||
+    extraArgs.length > 0 ||
+    (hasLanguage && (languageFlag !== "--language" || !languageArg))
+  ) {
+    throw new Error(
+      "Usage: node scripts/sanitize-release-notes.mjs <input.md> <output.md> [--language en]",
+    );
   }
 
   const inputPath = resolve(inputArg);
@@ -154,7 +289,9 @@ function main() {
   }
 
   const markdown = readFileSync(inputPath, "utf8");
-  const sanitized = sanitizeReleaseNotes(markdown);
+  const sanitized = sanitizeReleaseNotes(markdown, {
+    publicLanguage: languageArg || "",
+  });
   writeFileSync(outputPath, sanitized, "utf8");
 }
 
