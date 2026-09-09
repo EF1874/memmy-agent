@@ -5,6 +5,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 VERSION="$(node -p "require('$REPO_ROOT/package.json').version")"
 OUTPUT_DIR="$REPO_ROOT/release-assets"
 ARCHIVE_NAME="memmy-agent-linux-cli.tar.gz"
+# The Office rendering executables are provisioned by release packaging and are
+# not tracked here, so contract runs opt out of the presence check. Hashes named
+# by a manifest still describe a real payload and are always verified below.
+ALLOW_MISSING_OFFICE_PAYLOAD="${MEMMY_LINUX_CLI_ALLOW_MISSING_OFFICE_PAYLOAD:-0}"
 
 usage() {
   printf '%s\n' \
@@ -103,10 +107,14 @@ verify_office_rendering_bundle() {
   local bundle_dir="$PAYLOAD_DIR/App/memmy-agent/dist/extra-dependencies/office-rendering/$target_key"
   local manifest="$bundle_dir/OFFICE-RENDERING-MANIFEST.json"
   [ -f "$manifest" ] || { echo "Missing Office rendering manifest: $manifest" >&2; exit 1; }
-  for binary in soffice pdfinfo pdftoppm; do
-    [ -f "$bundle_dir/bin/$binary" ] || { echo "Missing Office rendering binary: $bundle_dir/bin/$binary" >&2; exit 1; }
-    [ -x "$bundle_dir/bin/$binary" ] || { echo "Office rendering binary is not executable: $bundle_dir/bin/$binary" >&2; exit 1; }
-  done
+  if [ "$ALLOW_MISSING_OFFICE_PAYLOAD" = "1" ] && [ ! -e "$bundle_dir/bin/soffice" ]; then
+    echo "Office rendering payload absent for $target_key; skipping executable checks" >&2
+  else
+    for binary in soffice pdfinfo pdftoppm; do
+      [ -f "$bundle_dir/bin/$binary" ] || { echo "Missing Office rendering binary: $bundle_dir/bin/$binary" >&2; exit 1; }
+      [ -x "$bundle_dir/bin/$binary" ] || { echo "Office rendering binary is not executable: $bundle_dir/bin/$binary" >&2; exit 1; }
+    done
+  fi
 node - "$manifest" "$target_key" <<'NODE'
 const { createHash } = require("node:crypto");
 const { readFileSync } = require("node:fs");
