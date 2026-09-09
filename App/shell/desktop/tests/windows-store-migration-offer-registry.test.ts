@@ -6,6 +6,41 @@ const TOKEN_A = "a".repeat(43);
 const TOKEN_B = "b".repeat(43);
 
 describe("Windows Store migration offer registry", () => {
+  it("keeps verified prepared offers usable until their last renderer closes", async () => {
+    let now = 1_000;
+    const registry = createWindowsStoreMigrationOfferRegistry<Policy, Authority>({
+      createToken: () => TOKEN_A, now: () => now, maxAgeMs: 500
+    });
+    const handle = registry.getOrCreate(createOffer());
+    registry.bindOwner(handle, OWNER_ID);
+    expect(() => registry.markPrepared(OWNER_ID + 1, handle)).toThrow("unavailable");
+    registry.markPrepared(OWNER_ID, handle);
+    now = 60_000;
+    expect(registry.prune()).toBe(0);
+    expect(() => registry.read(OWNER_ID + 1, handle)).toThrow("unavailable");
+    expect(registry.read(OWNER_ID, handle).transactionId).toBe("transaction-a");
+    registry.unbindOwner(OWNER_ID);
+    expect(registry.prune()).toBe(1);
+    expect(() => registry.read(OWNER_ID, handle)).toThrow("unavailable");
+  });
+
+  it("reads a bound download offer without consuming or exposing mutable authority", async () => {
+    let now = 1_000;
+    const registry = createWindowsStoreMigrationOfferRegistry<Policy, Authority>({
+      createToken: () => TOKEN_A, now: () => now, maxAgeMs: 500
+    });
+    const offer = createOffer();
+    const handle = registry.getOrCreate(offer);
+    registry.bindOwner(handle, OWNER_ID);
+    const snapshot = registry.read(OWNER_ID, handle);
+    snapshot.policy.storeId = "tampered";
+    expect(registry.read(OWNER_ID, handle)).toEqual(offer);
+    expect(() => registry.read(OWNER_ID + 1, handle)).toThrow("unavailable");
+    expect(() => registry.read(OWNER_ID, { ...handle, filePath: "C:\\other.exe" })).toThrow("invalid");
+    now = 1_500;
+    expect(() => registry.read(OWNER_ID, handle)).toThrow("expired");
+  });
+
   it("reuses an unconsumed main-owned offer across background checks", async () => {
     const registry = createWindowsStoreMigrationOfferRegistry<Policy, Authority>({
       createToken: () => TOKEN_A,

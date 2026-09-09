@@ -3,15 +3,17 @@
 /** App-level update coordinator tests. */
 import type {
   DesktopStoreMigrationToken,
+  DesktopUpdateCheckResult,
   DesktopUpdateDownloadProgress,
   DesktopUpdateInstallResult,
   DesktopUpdateOfferToken
 } from "@memmy/desktop-interface";
-import { act, useState } from "react";
+import { AppBootstrapResponseSchema } from "@memmy/local-api-contracts";
+import { act, useEffect, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
-import { AppStateProvider } from "../../state/app-state.js";
+import { AppStateProvider, useAppState } from "../../state/app-state.js";
 import {
   GlobalUpdateDialog,
   UpdateCoordinatorProvider,
@@ -41,6 +43,7 @@ describe("UpdateCoordinatorProvider", () => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
 
   it("keeps downloading across route content changes and reopens the prepared installer dialog", async () => {
@@ -466,7 +469,7 @@ describe("UpdateCoordinatorProvider", () => {
       getButtonByLabel("update-action").click();
       await Promise.resolve();
     });
-    expect(container.textContent).toContain("Microsoft Store 更新可用");
+    expect(container.textContent).toContain("发现新版本");
 
     await act(async () => {
       getButtonByText("下载更新").click();
@@ -475,7 +478,7 @@ describe("UpdateCoordinatorProvider", () => {
     expect(downloadUpdate).toHaveBeenCalledWith(OFFER_TOKEN, { openInstaller: false });
     expect(readOutput("phase")).toBe("prepared");
     expect(readOutput("prepared-path")).toBe("");
-    expect(container.textContent).toContain("Microsoft Store 更新已下载");
+    expect(container.textContent).toContain("安装包已准备好");
 
     await act(async () => {
       getButtonByText("重启安装").click();
@@ -484,15 +487,189 @@ describe("UpdateCoordinatorProvider", () => {
     expect(openUpdateInstaller).toHaveBeenCalledWith(preparedUpdate);
   });
 
-  it("offers an installer-to-Store migration without treating the Store URI as a package path", async () => {
+  it.each(["dialog", "inline"] as const)("downloads Store migration asynchronously via %s and opens only on restart-install", async (action) => {
+    let resolveDownload!: (result: DesktopUpdateInstallResult) => void;
+    let progressCallback!: (progress: DesktopUpdateDownloadProgress) => void;
+    const downloadPromise = new Promise<DesktopUpdateInstallResult>((resolve) => {
+      resolveDownload = resolve;
+    });
+    const preparedUpdate = { kind: "store-migration" as const, offerToken: STORE_MIGRATION_TOKEN };
+    const checkForUpdates = vi.fn(async () => createStoreMigrationResult());
+    const downloadUpdate = vi.fn(() => downloadPromise);
+    const openUpdateInstaller = vi.fn(async () => ({ preparedUpdate, opened: true, willQuit: true }));
+    const browserOpen = vi.spyOn(window, "open").mockReturnValue(null);
+    setDesktopBridge({
+      platform: "win32",
+      checkForUpdates,
+      downloadUpdate,
+      openUpdateInstaller,
+      onUpdateDownloadProgress: (callback) => {
+        progressCallback = callback;
+        return vi.fn();
+      }
+    });
+    await renderUpdateHarness(root);
+    await act(async () => getButtonByLabel("update-action").click());
+    expect(readOutput("phase")).toBe("available");
+    expect(readOutput("feedback-key")).toBe("settings.about.storeUpdateReady");
+    expect(readOutput("feedback-values")).toBe("");
+    expect(container.textContent).toContain("当前版本 v1.1.1。是否下载更新？");
+    expect(container.textContent).not.toContain("安装包已准备好");
+    expect(container.textContent).not.toContain("打开 Microsoft Store");
+    expect(downloadUpdate).not.toHaveBeenCalled();
+    expect(openUpdateInstaller).not.toHaveBeenCalled();
+
+    if (action === "inline") {
+      act(() => getButtonByText("稍后再说").click());
+    }
+    await act(async () => {
+      (action === "inline" ? getButtonByLabel("inline-update-action") : getButtonByText("下载更新")).click();
+    });
+    expect(readOutput("phase")).toBe("downloading");
+    expect(readOutput("feedback-key")).toBe("settings.about.storeUpdateDownloading");
+    expect(readOutput("feedback-values")).toBe("");
+    expect(downloadUpdate).toHaveBeenCalledExactlyOnceWith(OFFER_TOKEN, { openInstaller: false });
+
+    act(() => progressCallback({
+      kind: "installer-file",
+      downloadUrl: "https://get.microsoft.com/installer/download/store-product",
+      filePath: "C:\\Temp\\Memmy-WebInstaller.exe",
+      transferredBytes: 512,
+      totalBytes: 1024,
+      percent: 50
+    }));
+    expect(readOutput("download-progress")).toBe("50");
+    await act(async () => {
+      getButtonByLabel("update-action").click();
+      getButtonByLabel("inline-update-action").click();
+    });
+    expect(downloadUpdate).toHaveBeenCalledTimes(1);
+    expect(openUpdateInstaller).not.toHaveBeenCalled();
+    act(() => getButtonByLabel("toggle-route").click());
+
+    await act(async () => {
+      resolveDownload({ preparedUpdate, opened: false });
+      await downloadPromise;
+    });
+    expect(readOutput("phase")).toBe("prepared");
+    expect(readOutput("prepared-path")).toBe("");
+    expect(readOutput("download-progress")).toBe("");
+    expect(readOutput("feedback-key")).toBe("settings.about.storeUpdatePrepared");
+    expect(readOutput("feedback-values")).toBe("");
+    expect(container.textContent?.includes("安装包已准备好")).toBe(action === "dialog");
+    expect(openUpdateInstaller).not.toHaveBeenCalled();
+    if (action === "dialog") {
+      act(() => getButtonByText("稍后再说").click());
+    }
+    act(() => getButtonByLabel("toggle-route").click());
+    await act(async () => getButtonByLabel("update-action").click());
+    expect(container.textContent).toContain("安装包已准备好");
+    expect(container.textContent).not.toMatch(/Microsoft Store|Web Installer|迁移|\{version\}/);
+    expect(container.textContent).toContain("当前版本 v1.1.1。安装包已准备好，是否重启并安装更新？");
+    expect(checkForUpdates).toHaveBeenCalledTimes(1);
+    await act(async () => getButtonByText("重启安装").click());
+    expect(openUpdateInstaller).toHaveBeenCalledExactlyOnceWith(preparedUpdate);
+    expect(readOutput("phase")).toBe("installing");
+    expect(readOutput("feedback-key")).toBe("settings.about.installerOpenedQuit");
+    expect(browserOpen).not.toHaveBeenCalled();
+  });
+
+  it("rechecks and retries a failed Store migration download without opening an installer", async () => {
+    let rejectDownload!: (error: Error) => void;
+    let progressCallback!: (progress: DesktopUpdateDownloadProgress) => void;
+    const downloadPromise = new Promise<DesktopUpdateInstallResult>((_resolve, reject) => { rejectDownload = reject; });
+    const refreshedOfferToken = "b".repeat(43) as DesktopUpdateOfferToken;
+    const preparedUpdate = { kind: "store-migration" as const, offerToken: SECOND_STORE_MIGRATION_TOKEN };
+    const checkForUpdates = vi.fn()
+      .mockResolvedValueOnce(createStoreMigrationResult())
+      .mockResolvedValueOnce(createStoreMigrationResult({ offerToken: refreshedOfferToken, storeMigrationOffer: preparedUpdate }));
+    const downloadUpdate = vi.fn()
+      .mockReturnValueOnce(downloadPromise)
+      .mockResolvedValueOnce({ preparedUpdate, opened: false });
+    const openUpdateInstaller = vi.fn();
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    setDesktopBridge({
+      platform: "win32", checkForUpdates, downloadUpdate, openUpdateInstaller,
+      onUpdateDownloadProgress: (callback) => { progressCallback = callback; return vi.fn(); }
+    });
+    await renderUpdateHarness(root);
+    await act(async () => getButtonByLabel("update-action").click());
+    await act(async () => getButtonByText("下载更新").click());
+    act(() => progressCallback({
+      kind: "installer-file", downloadUrl: "https://get.microsoft.com/installer/download/store-product",
+      filePath: "C:\\Temp\\Memmy-WebInstaller.exe", transferredBytes: 512, totalBytes: 1024, percent: 50
+    }));
+    expect(readOutput("download-progress")).toBe("50");
+    await act(async () => { rejectDownload(new Error("download failed")); });
+    expect(readOutput("phase")).toBe("error");
+    expect(readOutput("prepared-path")).toBe("");
+    expect(readOutput("download-progress")).toBe("");
+    expect(readOutput("feedback-key")).toBe("settings.about.updateInstallFailed");
+    expect(container.textContent).not.toContain("重启安装");
+    await act(async () => getButtonByLabel("update-action").click());
+    expect(checkForUpdates).toHaveBeenCalledTimes(2);
+    expect(readOutput("phase")).toBe("available");
+    await act(async () => getButtonByText("下载更新").click());
+    expect(downloadUpdate).toHaveBeenNthCalledWith(1, OFFER_TOKEN, { openInstaller: false });
+    expect(downloadUpdate).toHaveBeenNthCalledWith(2, refreshedOfferToken, { openInstaller: false });
+    expect(readOutput("phase")).toBe("prepared");
+    expect(openUpdateInstaller).not.toHaveBeenCalled();
+  });
+
+  it("does not fall back to a browser when the Store migration download bridge is unavailable", async () => {
+    const browserOpen = vi.spyOn(window, "open").mockReturnValue(null);
+    const openUpdateInstaller = vi.fn();
+    setDesktopBridge({
+      platform: "win32",
+      checkForUpdates: vi.fn(async () => createStoreMigrationResult({ downloadUrl: "https://get.microsoft.com/installer/download/store-product" })),
+      openUpdateInstaller
+    });
+    await renderUpdateHarness(root);
+    await act(async () => getButtonByLabel("update-action").click());
+    await act(async () => getButtonByLabel("inline-update-action").click());
+    expect(readOutput("phase")).toBe("available");
+    expect(readOutput("feedback-key")).toBe("settings.about.versionlessUpdateAvailableNoLink");
+    expect(readOutput("feedback-values")).toBe("");
+    expect(container.textContent).not.toContain("下载更新");
+    expect(browserOpen).not.toHaveBeenCalled();
+    expect(openUpdateInstaller).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("notifies about Store migration with cached ready = %s", async (cachedReady) => {
+    vi.useFakeTimers();
+    const preparedUpdate = { kind: "store-migration" as const, offerToken: STORE_MIGRATION_TOKEN };
+    const checkForUpdates = vi.fn(async () => createStoreMigrationResult(cachedReady ? { preparedUpdate } : {}));
+    const downloadUpdate = vi.fn();
+    const openUpdateInstaller = vi.fn();
+    const notifyUpdateAvailable = vi.fn(async () => undefined);
+    setDesktopBridge({ platform: "win32", checkForUpdates, downloadUpdate, openUpdateInstaller, notifyUpdateAvailable });
+    await renderUpdateHarness(root, true);
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(readOutput("phase")).toBe(cachedReady ? "prepared" : "available");
+    expect(readOutput("feedback-key")).toBe(cachedReady ? "settings.about.storeUpdatePrepared" : "settings.about.storeUpdateReady");
+    expect(notifyUpdateAvailable).toHaveBeenCalledExactlyOnceWith({
+      title: "Memmy 有新版本",
+      body: "发现新版本，前往设置检查更新。",
+      silent: false
+    });
+    expect(container.textContent).not.toContain("迁移到 Microsoft Store");
+    await act(async () => { await vi.advanceTimersByTimeAsync(60 * 60 * 1000); });
+    expect(notifyUpdateAvailable).toHaveBeenCalledTimes(1);
+    expect(downloadUpdate).not.toHaveBeenCalled();
+    expect(openUpdateInstaller).not.toHaveBeenCalled();
+  });
+
+  it("uses a cached ready Store migration installer without downloading again", async () => {
     const preparedUpdate = {
       kind: "store-migration" as const,
       offerToken: STORE_MIGRATION_TOKEN
     };
     const openUpdateInstaller = vi.fn(async () => ({
       preparedUpdate,
-      opened: true
+      opened: true,
+      willQuit: true
     }));
+    const downloadUpdate = vi.fn();
     setDesktopBridge({
       platform: "win32",
       getAppInfo: vi.fn(async () => ({
@@ -510,7 +687,8 @@ describe("UpdateCoordinatorProvider", () => {
         updateMode: "manual" as const,
         preparedUpdate
       })),
-      openUpdateInstaller
+      openUpdateInstaller,
+      downloadUpdate
     });
 
     await act(async () => {
@@ -531,18 +709,21 @@ describe("UpdateCoordinatorProvider", () => {
 
     expect(readOutput("phase")).toBe("prepared");
     expect(readOutput("prepared-path")).toBe("");
-    expect(container.textContent).toContain("迁移到 Microsoft Store");
-    expect(container.textContent).toContain("首次启动商店版本时会迁移现有数据");
+    expect(container.textContent).toContain("发现新版本");
+    expect(container.textContent).not.toMatch(/Microsoft Store|Web Installer|迁移|\{version\}/);
 
     await act(async () => {
-      getButtonByText("打开 Microsoft Store").click();
+      getButtonByText("重启安装").click();
       await Promise.resolve();
     });
     expect(openUpdateInstaller).toHaveBeenCalledWith(preparedUpdate);
-    expect(readOutput("feedback-key")).toBe("settings.about.storeMigrationOpened");
+    expect(downloadUpdate).not.toHaveBeenCalled();
+    expect(readOutput("phase")).toBe("installing");
+    expect(readOutput("feedback-key")).toBe("settings.about.installerOpenedQuit");
   });
 
   it("drops an expired Store migration handle so the next action can recheck", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const firstPreparedUpdate = {
       kind: "store-migration" as const,
       offerToken: STORE_MIGRATION_TOKEN
@@ -603,10 +784,12 @@ describe("UpdateCoordinatorProvider", () => {
       await Promise.resolve();
     });
     await act(async () => {
-      getButtonByText("打开 Microsoft Store").click();
+      getButtonByText("重启安装").click();
       await Promise.resolve();
     });
     expect(readOutput("phase")).toBe("error");
+    expect(readOutput("prepared-path")).toBe("");
+    expect(container.textContent).not.toContain("重启安装");
     expect(readOutput("feedback-key")).toBe("settings.about.updateInstallFailed");
 
     await act(async () => {
@@ -617,11 +800,12 @@ describe("UpdateCoordinatorProvider", () => {
     expect(readOutput("phase")).toBe("prepared");
 
     await act(async () => {
-      getButtonByText("打开 Microsoft Store").click();
+      getButtonByText("重启安装").click();
       await Promise.resolve();
     });
     expect(openUpdateInstaller).toHaveBeenNthCalledWith(1, firstPreparedUpdate);
     expect(openUpdateInstaller).toHaveBeenNthCalledWith(2, refreshedPreparedUpdate);
+    expect(readOutput("phase")).toBe("installing");
   });
 });
 
@@ -659,9 +843,52 @@ function UpdateHarness() {
       <output aria-label="prepared-path">{update.preparedUpdatePath ?? ""}</output>
       <output aria-label="download-progress">{update.downloadProgress?.percent ?? ""}</output>
       <output aria-label="feedback-key">{update.feedback?.key ?? ""}</output>
+      <output aria-label="feedback-values">{update.feedback?.values ? JSON.stringify(update.feedback.values) : ""}</output>
       <GlobalUpdateDialog />
     </>
   );
+}
+
+function createStoreMigrationResult(overrides: Partial<DesktopUpdateCheckResult> = {}): DesktopUpdateCheckResult {
+  return {
+    status: "available",
+    provider: "store-migration",
+    currentVersion: "1.1.1",
+    offerToken: OFFER_TOKEN,
+    storeMigrationOffer: { kind: "store-migration", offerToken: STORE_MIGRATION_TOKEN },
+    updateMode: "manual",
+    ...overrides
+  };
+}
+
+async function renderUpdateHarness(root: Root, startupReady = false): Promise<void> {
+  await act(async () => {
+    root.render(
+      <AppStateProvider>
+        <I18nProvider language="zh-CN">
+          {startupReady && <StartupReadyHarness />}
+          <UpdateCoordinatorProvider><UpdateHarness /></UpdateCoordinatorProvider>
+        </I18nProvider>
+      </AppStateProvider>
+    );
+  });
+}
+
+function StartupReadyHarness() {
+  const { dispatch } = useAppState();
+  useEffect(() => {
+    dispatch({ type: "bootstrap/loaded", initialPath: "/main", bootstrap: AppBootstrapResponseSchema.parse({
+      app: { userMode: "unset", language: "system", theme: "system", autoUpdateEnabled: true },
+      onboarding: {
+        completed: false, currentStep: "scan_permission_required", hasAcceptedTerms: false,
+        acceptedTermsVersion: null, scanPermission: "unset", improvementProgram: "unset", completedAt: null
+      },
+      privacy: { telemetryOptIn: false, crashReportOptIn: false, allowMemoryImprovementUpload: false, localOnlyMode: false },
+      tokenUsage: { planName: "Test", totalTokens: 0, usedTokens: 0, remainingTokens: 0, expiresAt: null, lastSyncedAt: null },
+      health: { localApi: "ok", memory: "mock", cloud: "mock" }
+    }) });
+  }, [dispatch]);
+  return null;
 }
 
 function setDesktopBridge(bridge: Partial<NonNullable<Window["memmy"]>>): void {

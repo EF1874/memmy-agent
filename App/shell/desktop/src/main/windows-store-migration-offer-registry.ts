@@ -32,6 +32,8 @@ export interface WindowsStoreMigrationOfferRegistry<Policy, Authority> {
   >;
   findReusable(contextKey: string): WindowsStoreMigrationOffer<Policy, Authority> | null;
   bindOwner(preparedUpdate: unknown, ownerWebContentsId: number): void;
+  read(ownerWebContentsId: number, preparedUpdate: unknown): WindowsStoreMigrationOffer<Policy, Authority>;
+  markPrepared(ownerWebContentsId: number, preparedUpdate: unknown): void;
   run<T>(
     ownerWebContentsId: number,
     preparedUpdate: unknown,
@@ -48,6 +50,7 @@ interface WindowsStoreMigrationOfferEntry<Policy, Authority> {
   expiresAt: number;
   issuedSequence: number;
   inFlight?: Promise<unknown>;
+  prepared?: boolean;
 }
 
 export const createWindowsStoreMigrationOfferRegistry = <Policy, Authority>(
@@ -68,10 +71,13 @@ export const createWindowsStoreMigrationOfferRegistry = <Policy, Authority>(
     return timestamp;
   };
 
+  const isExpired = (entry: WindowsStoreMigrationOfferEntry<Policy, Authority>, timestamp: number): boolean =>
+    timestamp >= entry.expiresAt && !(entry.prepared && entry.ownerWebContentsIds.size > 0);
+
   const pruneExpired = (timestamp: number): number => {
     let pruned = 0;
     for (const [token, entry] of entries) {
-      if (!entry.inFlight && timestamp >= entry.expiresAt) {
+      if (!entry.inFlight && isExpired(entry, timestamp)) {
         entries.delete(token);
         pruned += 1;
       }
@@ -113,9 +119,9 @@ export const createWindowsStoreMigrationOfferRegistry = <Policy, Authority>(
     if (
       !entry
       || !entry.ownerWebContentsIds.has(ownerId)
-      || readNow() >= entry.expiresAt
+      || isExpired(entry, readNow())
     ) {
-      if (entry && !entry.inFlight && readNow() >= entry.expiresAt) entries.delete(token);
+      if (entry && !entry.inFlight && isExpired(entry, readNow())) entries.delete(token);
       throw new Error("Microsoft Store migration offer is missing, expired, or unavailable");
     }
     return { token, entry };
@@ -165,11 +171,21 @@ export const createWindowsStoreMigrationOfferRegistry = <Policy, Authority>(
       const ownerId = normalizeOwnerId(ownerWebContentsId);
       const token = readPreparedUpdateToken(preparedUpdate);
       const entry = entries.get(token);
-      if (!entry || readNow() >= entry.expiresAt) {
+      if (!entry || isExpired(entry, readNow())) {
         if (entry && !entry.inFlight) entries.delete(token);
         throw new Error("Microsoft Store migration offer is missing, expired, or unavailable");
       }
       entry.ownerWebContentsIds.add(ownerId);
+    },
+
+    read(ownerWebContentsId, preparedUpdate) {
+      return structuredClone(resolveEntry(ownerWebContentsId, preparedUpdate).entry.offer);
+    },
+
+    markPrepared(ownerWebContentsId, preparedUpdate) {
+      // A verified download remains usable while its renderer owns the offer.
+      // Installation still revalidates the executable immediately before launch.
+      resolveEntry(ownerWebContentsId, preparedUpdate).entry.prepared = true;
     },
 
     run<T>(

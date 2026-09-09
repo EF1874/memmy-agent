@@ -1,5 +1,8 @@
 #include <windows.h>
 #include <appmodel.h>
+#include <exdisp.h>
+#include <shldisp.h>
+#include <servprov.h>
 #include <sddl.h>
 #include <shlobj_core.h>
 #include <shobjidl_core.h>
@@ -19,6 +22,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -34,6 +38,7 @@
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Services.Store.h>
 #include <winrt/base.h>
+#include "LegacyProcessStop.h"
 
 using namespace winrt;
 using namespace Windows::ApplicationModel;
@@ -57,6 +62,12 @@ namespace
         StartupEnable,
         StartupDisable,
         PrepareLegacyTakeover,
+        StopLegacyForDataImport,
+        CreateStoreShortcut,
+        DiscoverLegacyInstallation,
+        LaunchDiscoveredLegacyCleanup,
+        RunDiscoveredLegacyCleanup,
+        RecoverLegacyCleanupJournal,
         EnsureLegacyCleanupBroker,
         LegacyCleanupBroker,
         StopLegacyCleanupBroker,
@@ -113,6 +124,7 @@ namespace
         std::wstring package_family_name;
         std::wstring transition_id;
         std::wstring attempt_id;
+        std::wstring legacy_install_fingerprint;
     };
 
     struct DeleteTreeResult
@@ -349,6 +361,7 @@ namespace
         ULONGLONG creation_time;
         std::filesystem::path image_path;
         bool image_path_verified = false;
+        std::wstring executable_name;
     };
 
     std::string escape_json(std::string_view value)
@@ -1021,7 +1034,7 @@ namespace
             processes.push_back({
                 entry.th32ProcessID,
                 entry.th32ParentProcessID,
-                query_process_creation_time(entry.th32ProcessID)
+                query_process_creation_time(entry.th32ProcessID), {}, false, entry.szExeFile
             });
         } while (Process32NextW(snapshot, &entry));
         CloseHandle(snapshot);
@@ -1164,37 +1177,36 @@ namespace
 
     BOOL CALLBACK close_legacy_window(HWND window, LPARAM parameter)
     {
-        const auto* process_ids =
-            reinterpret_cast<const std::unordered_set<DWORD>*>(parameter);
+        const auto* targets = reinterpret_cast<const std::vector<ProcessSnapshotEntry>*>(parameter);
         DWORD process_id = 0;
         GetWindowThreadProcessId(window, &process_id);
-        if (!process_ids->contains(process_id))
+        const auto target = std::find_if(targets->begin(), targets->end(), [process_id](const ProcessSnapshotEntry& entry) {
+            return entry.process_id == process_id;
+        });
+        if (target == targets->end())
         {
             return TRUE;
         }
-        DWORD_PTR ignored = 0;
-        SendMessageTimeoutW(
-            window,
-            WM_CLOSE,
-            0,
-            0,
-            SMTO_ABORTIFHUNG | SMTO_BLOCK,
-            1000,
-            &ignored);
+        const HANDLE process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id);
+        if (!process) return TRUE;
+        if (target->creation_time == 0 || query_process_creation_time(process) != target->creation_time ||
+            WaitForSingleObject(process, 0) != WAIT_TIMEOUT)
+        {
+            CloseHandle(process);
+            return TRUE;
+        }
+        // Let the shared wait below bound shutdown for all windows together.
+        PostMessageW(window, WM_CLOSE, 0, 0);
+        CloseHandle(process);
         return TRUE;
     }
 
     void request_graceful_legacy_exit(
         const std::vector<ProcessSnapshotEntry>& targets)
     {
-        std::unordered_set<DWORD> process_ids;
-        for (const auto& target : targets)
-        {
-            process_ids.insert(target.process_id);
-        }
         EnumWindows(
             close_legacy_window,
-            reinterpret_cast<LPARAM>(&process_ids));
+            reinterpret_cast<LPARAM>(&targets));
     }
 
     bool wait_for_process_snapshot_to_exit(
@@ -1213,6 +1225,7 @@ namespace
                     target.process_id);
                 if (!process)
                 {
+                    if (GetLastError() != ERROR_INVALID_PARAMETER) return false;
                     continue;
                 }
                 any_running =
@@ -1235,10 +1248,13 @@ namespace
     }
 
     void terminate_legacy_process_tree(
-        const std::vector<ProcessSnapshotEntry>& targets)
+        const std::vector<ProcessSnapshotEntry>& targets,
+        ULONGLONG deadline = 0)
     {
         for (const auto& target : targets)
         {
+            if (deadline && GetTickCount64() >= deadline)
+                throw hresult_error(HRESULT_FROM_WIN32(ERROR_TIMEOUT), L"Legacy shutdown deadline reached");
             const HANDLE process = OpenProcess(
                 PROCESS_TERMINATE | SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
                 FALSE,
@@ -1265,6 +1281,7 @@ namespace
             if (!try_query_process_image_path(process, current_image_path))
             {
                 const DWORD error = GetLastError();
+                if (WaitForSingleObject(process, 0) == WAIT_OBJECT_0) { CloseHandle(process); continue; }
                 CloseHandle(process);
                 throw hresult_error(
                     HRESULT_FROM_WIN32(error == ERROR_SUCCESS ? ERROR_ACCESS_DENIED : error),
@@ -1281,13 +1298,17 @@ namespace
             if (!TerminateProcess(process, 0))
             {
                 const DWORD error = GetLastError();
+                if (WaitForSingleObject(process, 0) == WAIT_OBJECT_0) { CloseHandle(process); continue; }
                 CloseHandle(process);
                 throw hresult_error(
                     HRESULT_FROM_WIN32(error),
                     L"Unable to terminate a validated legacy Memmy process");
             }
-            WaitForSingleObject(process, 3000);
+            const auto current = GetTickCount64();
+            const auto remaining = deadline ? (deadline > current ? deadline - current : 0) : 3000;
+            const DWORD wait_result = WaitForSingleObject(process, static_cast<DWORD>((std::min)(remaining, 3000ULL)));
             CloseHandle(process);
+            if (wait_result != WAIT_OBJECT_0) throw hresult_error(HRESULT_FROM_WIN32(ERROR_BUSY), L"Legacy process did not exit");
         }
     }
 
@@ -3473,6 +3494,9 @@ namespace
                 options.shortcut_path.wstring()
             });
         }
+        if (!options.legacy_install_fingerprint.empty()) {
+            arguments.insert(arguments.end(), { L"--legacy-install-fingerprint", options.legacy_install_fingerprint });
+        }
         return arguments;
     }
 
@@ -3727,7 +3751,8 @@ namespace
 
     void finalize_legacy_cleanup_unpacked(
         const LegacyTransitionOptions& options,
-        bool authority_was_attested = false)
+        bool authority_was_attested = false,
+        bool processes_already_closed = false)
     {
         begin_legacy_cleanup_operation(
             "identity-query",
@@ -3783,7 +3808,11 @@ namespace
             begin_legacy_cleanup_operation(
                 "legacy-processes-stop",
                 utf8(options.legacy_install_directory.wstring()));
-            if (authority_was_attested)
+            if (processes_already_closed)
+            {
+                // The independent importer already verified every same-user legacy process.
+            }
+            else if (authority_was_attested)
             {
                 // A Prepared journal proves the original executable generation.
                 // A prior idempotent delete attempt may already have removed
@@ -4166,6 +4195,471 @@ namespace
                 L"Unable to read a process package-family name");
         }
         return std::wstring(value.data());
+    }
+
+    std::vector<ProcessSnapshotEntry> discover_legacy_import_targets(
+        std::vector<std::filesystem::path>& known_roots,
+        const std::wstring& user_sid)
+    {
+        std::vector<ProcessSnapshotEntry> targets;
+        for (auto entry : snapshot_processes())
+        {
+            const bool desktop = _wcsicmp(entry.executable_name.c_str(), L"Memmy.exe") == 0;
+            if (!desktop && _wcsicmp(entry.executable_name.c_str(), L"node.exe") != 0 &&
+                _wcsicmp(entry.executable_name.c_str(), L"memmy-memory.exe") != 0) continue;
+            scoped_handle process(OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.process_id));
+            if (!process.get())
+            {
+                if (desktop && GetLastError() != ERROR_INVALID_PARAMETER) throw hresult_error(E_ACCESSDENIED, L"Unable to inspect a running Memmy process");
+                continue;
+            }
+            if (WaitForSingleObject(process.get(), 0) == WAIT_OBJECT_0) continue;
+            if (!try_query_process_image_path(process.get(), entry.image_path))
+            {
+                if (WaitForSingleObject(process.get(), 0) == WAIT_OBJECT_0) continue;
+                if (desktop) throw hresult_error(E_ACCESSDENIED, L"Unable to inspect the Memmy executable");
+                continue;
+            }
+            if (is_windows_apps_path(entry.image_path)) continue;
+            auto directory = entry.image_path.parent_path();
+            bool candidate = desktop || std::any_of(known_roots.begin(), known_roots.end(), [&](const auto& root) {
+                return is_path_within_directory(entry.image_path, root);
+            });
+            // Include orphaned Node workers under the installed resources directory.
+            for (int depth = 0; !candidate && depth < 7 && directory != directory.root_path(); ++depth, directory = directory.parent_path())
+            {
+                std::error_code error;
+                candidate = std::filesystem::is_regular_file(directory / L"Memmy.exe", error) &&
+                    std::filesystem::is_regular_file(directory / L"resources" / L"app.asar", error);
+                if (candidate) { known_roots.push_back(directory); break; }
+            }
+            if (!candidate) continue;
+            try
+            {
+                if (process_user_sid(process.get()) != user_sid || process_package_family(process.get())) continue;
+                entry.creation_time = query_process_creation_time(process.get());
+                if (entry.creation_time == 0) throw hresult_error(E_ACCESSDENIED, L"Unable to identify a running Memmy process instance");
+            }
+            catch (...)
+            {
+                if (WaitForSingleObject(process.get(), 0) == WAIT_OBJECT_0) continue;
+                std::cerr << "legacy-inspect pid=" << entry.process_id << " failed while process remains active\n";
+                throw;
+            }
+            entry.image_path_verified = true;
+            if (desktop) known_roots.push_back(entry.image_path.parent_path());
+            targets.push_back(std::move(entry));
+        }
+        return targets;
+    }
+
+    // Only the current user's unpackaged Memmy processes are eligible, including other logon sessions.
+    bool stop_legacy_for_data_import()
+    {
+        try
+        {
+            const auto user_sid = current_user_sid();
+            std::vector<std::filesystem::path> roots;
+            const auto started = GetTickCount64();
+            const bool clear = memmy::stop_legacy_until_clear(
+                [&] { return discover_legacy_import_targets(roots, user_sid); },
+                [&](const auto& targets, ULONGLONG deadline) {
+                    std::cerr << "legacy-stop elapsed-ms=" << GetTickCount64() - started << " targets=";
+                    for (const auto& target : targets) std::cerr << target.process_id << ',';
+                    std::cerr << '\n';
+                    request_graceful_legacy_exit(targets);
+                    const auto current = GetTickCount64();
+                    const DWORD grace = static_cast<DWORD>((std::min)(deadline > current ? deadline - current : 0, 2000ULL));
+                    if (!wait_for_process_snapshot_to_exit(targets, grace))
+                        terminate_legacy_process_tree(targets, deadline);
+                },
+                [] { return GetTickCount64(); },
+                [](ULONGLONG milliseconds) { Sleep(static_cast<DWORD>(milliseconds)); },
+                [] {
+                    try { throw; }
+                    catch (const hresult_error& error) {
+                        std::cerr << "legacy-stop retry hresult=" << hresult_text(error.code()) << ' ' << to_string(error.message()) << '\n';
+                    }
+                    catch (const std::exception& error) { std::cerr << "legacy-stop retry " << error.what() << '\n'; }
+                    catch (...) { std::cerr << "legacy-stop retry unknown-error\n"; }
+                }, 25'000);
+            std::cerr << "legacy-stop result=" << (clear ? "clear" : "blocked") << " elapsed-ms=" << GetTickCount64() - started << '\n';
+            return clear;
+        }
+        catch (const hresult_error& error)
+        {
+            std::cerr << "legacy-stop initialization hresult=" << hresult_text(error.code()) << ' ' << to_string(error.message()) << '\n';
+            return false;
+        }
+        catch (...) { std::cerr << "legacy-stop initialization failed\n"; }
+        return false;
+    }
+
+    struct StoreShortcutItemId
+    {
+        PIDLIST_ABSOLUTE value = nullptr;
+        ~StoreShortcutItemId() { CoTaskMemFree(value); }
+    };
+
+    std::filesystem::path store_shortcut_local_app_data()
+    {
+        PWSTR raw = nullptr;
+        const HRESULT result = SHGetKnownFolderPath(FOLDERID_LocalAppData,
+            KF_FLAG_NO_PACKAGE_REDIRECTION, nullptr, &raw);
+        const std::filesystem::path path(raw ? raw : L"");
+        CoTaskMemFree(raw);
+        check_hresult(result);
+        if (path.empty()) throw hresult_error(E_UNEXPECTED, L"Local AppData is unavailable");
+        return path;
+    }
+
+    std::filesystem::path store_shortcut_package_path(const LegacyTransitionOptions& options)
+    {
+        UINT32 length = PACKAGE_FAMILY_NAME_MAX_LENGTH;
+        wchar_t family[PACKAGE_FAMILY_NAME_MAX_LENGTH]{};
+        check_hresult(HRESULT_FROM_WIN32(GetCurrentPackageFamilyName(&length, family)));
+        if (options.package_family_name != family)
+            throw hresult_error(E_ACCESSDENIED, L"Shortcut package does not match the current package");
+        length = 0;
+        const LONG result = GetCurrentPackagePath(&length, nullptr);
+        if (result != ERROR_INSUFFICIENT_BUFFER) check_hresult(HRESULT_FROM_WIN32(result));
+        std::vector<wchar_t> path(length);
+        check_hresult(HRESULT_FROM_WIN32(GetCurrentPackagePath(&length, path.data())));
+        return std::filesystem::path(path.data());
+    }
+
+    // The Shell reads this icon after package upgrades have removed the old
+    // WindowsApps directory. Keep it in this user's package LocalState instead.
+    std::filesystem::path persist_store_shortcut_icon(const LegacyTransitionOptions& options,
+        const std::filesystem::path& package_path, const std::filesystem::path& local_app_data)
+    {
+        const auto directory = local_app_data / L"Packages" / options.package_family_name /
+            L"LocalState" / L"Memmy" / L"shell";
+        std::filesystem::create_directories(directory);
+        const auto icon = directory / L"memmy-shortcut-v1.ico";
+        const auto temporary = directory / (L"icon-" + std::to_wstring(GetCurrentProcessId()) + L".tmp");
+        if (!CopyFileW((package_path / L"app" / L"resources" / L"icon.ico").c_str(), temporary.c_str(), FALSE))
+            throw hresult_error(HRESULT_FROM_WIN32(GetLastError()), L"Unable to copy the Store shortcut icon");
+        if (!SetFileAttributesW(temporary.c_str(), FILE_ATTRIBUTE_NORMAL))
+        {
+            const DWORD error = GetLastError();
+            DeleteFileW(temporary.c_str());
+            throw hresult_error(HRESULT_FROM_WIN32(error), L"Unable to make the private shortcut icon writable");
+        }
+        if (!MoveFileExW(temporary.c_str(), icon.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        {
+            const DWORD error = GetLastError();
+            DeleteFileW(temporary.c_str());
+            throw hresult_error(HRESULT_FROM_WIN32(error), L"Unable to publish the Store shortcut icon");
+        }
+        return icon;
+    }
+
+    struct PinnedStoreShortcut
+    {
+        scoped_handle file;
+        com_ptr<IShellLinkW> link;
+    };
+
+    PinnedStoreShortcut read_pinned_store_shortcut(const std::filesystem::path& path)
+    {
+        // Parse the same file handle that will be deleted. Deny concurrent writes
+        // and renames so a different app cannot be substituted after inspection.
+        PinnedStoreShortcut result;
+        result.file.reset(CreateFileW(path.c_str(), GENERIC_READ | DELETE, FILE_SHARE_READ,
+            nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+        if (!result.file) return result;
+        BY_HANDLE_FILE_INFORMATION info{};
+        if (!GetFileInformationByHandle(result.file.get(), &info) ||
+            (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) ||
+            info.nFileSizeHigh || !info.nFileSizeLow || info.nFileSizeLow > 1024 * 1024) return result;
+        std::vector<BYTE> bytes(info.nFileSizeLow);
+        DWORD read = 0;
+        if (!ReadFile(result.file.get(), bytes.data(), info.nFileSizeLow, &read, nullptr) || read != info.nFileSizeLow) return result;
+        com_ptr<IStream> stream;
+        check_hresult(CreateStreamOnHGlobal(nullptr, TRUE, stream.put()));
+        check_hresult(stream->Write(bytes.data(), read, nullptr));
+        check_hresult(stream->Seek({}, STREAM_SEEK_SET, nullptr));
+        com_ptr<IShellLinkW> link;
+        check_hresult(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(link.put())));
+        if (SUCCEEDED(link.as<IPersistStream>()->Load(stream.get()))) result.link = std::move(link);
+        return result;
+    }
+
+    bool store_shortcut_has_identity(IShellLinkW* link, PCIDLIST_ABSOLUTE item)
+    {
+        StoreShortcutItemId existing;
+        return SUCCEEDED(link->GetIDList(&existing.value)) && existing.value && ILIsEqual(existing.value, item);
+    }
+
+    bool store_shortcut_is_owned(IShellLinkW* link, PCIDLIST_ABSOLUTE item,
+        const LegacyTransitionOptions& options, const std::filesystem::path& package_path,
+        const std::filesystem::path& local_app_data, const std::vector<std::wstring>& legacy_executables)
+    {
+        if (store_shortcut_has_identity(link, item)) return true;
+        std::vector<wchar_t> raw(32768), arguments(32768), expanded(32768);
+        if (FAILED(link->GetPath(raw.data(), static_cast<int>(raw.size()), nullptr, SLGP_RAWPATH)) || !raw[0] ||
+            FAILED(link->GetArguments(arguments.data(), static_cast<int>(arguments.size())))) return false;
+        const DWORD length = ExpandEnvironmentStringsW(raw.data(), expanded.data(), static_cast<DWORD>(expanded.size()));
+        if (!length || length > expanded.size()) return false;
+        const std::filesystem::path executable(expanded.data());
+        if (!executable.is_absolute()) return false;
+        const auto target = normalize_absolute_path(executable);
+        if (std::find(legacy_executables.begin(), legacy_executables.end(), target) != legacy_executables.end()) return true;
+        // Direct links made by older packages can still contain a versioned EXE.
+        const auto old_package = executable.parent_path().parent_path();
+        if (_wcsicmp(executable.filename().c_str(), L"Memmy.exe") == 0 &&
+            _wcsicmp(executable.parent_path().filename().c_str(), L"app") == 0 &&
+            normalize_absolute_path(old_package.parent_path()) == normalize_absolute_path(package_path.parent_path()))
+        {
+            UINT32 length = PACKAGE_FAMILY_NAME_MAX_LENGTH;
+            wchar_t family[PACKAGE_FAMILY_NAME_MAX_LENGTH]{};
+            if (PackageFamilyNameFromFullName(old_package.filename().c_str(), &length, family) == ERROR_SUCCESS &&
+                options.package_family_name == family) return true;
+        }
+        // NSIS shortcuts use the fixed per-user launch proxy, not an arbitrary
+        // script whose filename happens to be MemmyLauncher.vbs.
+        wchar_t windows[MAX_PATH]{};
+        if (!GetWindowsDirectoryW(windows, MAX_PATH)) return false;
+        const auto system = std::filesystem::path(windows);
+        const auto launcher = local_app_data / L"Memmy" / L"launcher" / L"MemmyLauncher.vbs";
+        const std::wstring args(arguments.data());
+        return (target == normalize_absolute_path(system / L"System32" / L"wscript.exe") ||
+                target == normalize_absolute_path(system / L"SysWOW64" / L"wscript.exe")) &&
+            (_wcsicmp(args.c_str(), (L"\"" + launcher.wstring() + L"\"").c_str()) == 0 ||
+             _wcsicmp(args.c_str(), launcher.c_str()) == 0);
+    }
+
+    void delete_pinned_store_shortcut(PinnedStoreShortcut& shortcut)
+    {
+        FILE_DISPOSITION_INFO disposition{ TRUE };
+        if (!SetFileInformationByHandle(shortcut.file.get(), FileDispositionInfo, &disposition, sizeof(disposition)))
+            throw hresult_error(HRESULT_FROM_WIN32(GetLastError()), L"Unable to retire the owned Memmy shortcut");
+        shortcut.file.reset();
+    }
+
+    constexpr bool is_generated_store_shortcut_stem(std::wstring_view stem)
+    {
+        if (stem == L"Memmy" || stem == L"Memmy (Microsoft Store)") return true;
+        const auto is_generated_number = [](std::wstring_view number) constexpr {
+            // Generated suffixes are canonical decimal integers >= 2. Reject
+            // signs, leading zeroes and extra text without integer overflow.
+            if (number.empty() || number.front() < L'1' || number.front() > L'9') return false;
+            for (const auto digit : number)
+                if (digit < L'0' || digit > L'9') return false;
+            return number.size() > 1 || number.front() >= L'2';
+        };
+        constexpr std::wstring_view store_prefix = L"Memmy (Microsoft Store ";
+        if (stem.starts_with(store_prefix) && stem.ends_with(L")"))
+            return is_generated_number(stem.substr(store_prefix.size(), stem.size() - store_prefix.size() - 1));
+        constexpr std::wstring_view prefix = L"Memmy ";
+        return stem.starts_with(prefix) && is_generated_number(stem.substr(prefix.size()));
+    }
+
+    void create_store_shortcut(const LegacyTransitionOptions& options)
+    {
+        require_allowed_memmy_package_identity(options);
+        const auto package_path = store_shortcut_package_path(options);
+        const auto local_app_data = store_shortcut_local_app_data();
+        const auto icon = persist_store_shortcut_icon(options, package_path, local_app_data);
+        const auto desktop = resolve_known_folder_path(FOLDERID_Desktop, L"Desktop directory is unavailable");
+        com_ptr<IShellItem> apps_folder;
+        check_hresult(SHGetKnownFolderItem(FOLDERID_AppsFolder, KF_FLAG_DEFAULT, nullptr, IID_PPV_ARGS(apps_folder.put())));
+        com_ptr<IShellItem> application;
+        check_hresult(SHCreateItemFromRelativeName(apps_folder.get(), options.aumid.c_str(), nullptr, IID_PPV_ARGS(application.put())));
+        StoreShortcutItemId item;
+        check_hresult(SHGetIDListFromObject(application.get(), &item.value));
+        if (!item.value) throw hresult_error(E_UNEXPECTED, L"Store application shell identity is empty");
+        std::vector<std::wstring> legacy_executables;
+        for (const auto key : { legacy_uninstall_key, legacy_installer_key })
+            for (const auto view : { KEY_WOW64_32KEY, KEY_WOW64_64KEY })
+            {
+                const auto directory = read_current_user_registry_string(key, L"InstallLocation", view, "shortcut");
+                if (directory && std::filesystem::path(*directory).is_absolute() && !is_windows_apps_path(*directory))
+                    legacy_executables.push_back(normalize_absolute_path(std::filesystem::path(*directory) / L"Memmy.exe"));
+            }
+        const auto owned = [&](const PinnedStoreShortcut& shortcut) {
+            return shortcut.link && store_shortcut_is_owned(shortcut.link.get(), item.value,
+                options, package_path, local_app_data, legacy_executables);
+        };
+        std::filesystem::path published;
+        for (int index = 0; index < 100; ++index)
+        {
+            const std::wstring name = index == 0 ? L"Memmy.lnk" : L"Memmy " + std::to_wstring(index + 1) + L".lnk";
+            const auto target = desktop / name;
+            auto existing = read_pinned_store_shortcut(target);
+            if (std::filesystem::exists(target) && !owned(existing)) continue;
+            if (existing.link && store_shortcut_has_identity(existing.link.get(), item.value))
+            {
+                std::vector<wchar_t> current_icon(32768);
+                int icon_index = -1;
+                if (SUCCEEDED(existing.link->GetIconLocation(current_icon.data(), static_cast<int>(current_icon.size()), &icon_index)) &&
+                    current_icon[0] && icon_index == 0 && normalize_absolute_path(current_icon.data()) == normalize_absolute_path(icon))
+                {
+                    published = target;
+                    break;
+                }
+            }
+            com_ptr<IShellLinkW> link;
+            check_hresult(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(link.put())));
+            auto persist = link.as<IPersistFile>();
+            check_hresult(link->SetIDList(item.value));
+            check_hresult(link->SetDescription(L"Memmy"));
+            check_hresult(link->SetIconLocation(icon.c_str(), 0));
+            const auto temporary = desktop / (name + L"." + std::to_wstring(GetCurrentProcessId()) + L".tmp");
+            const HRESULT save_result = persist->Save(temporary.c_str(), TRUE);
+            if (FAILED(save_result)) { DeleteFileW(temporary.c_str()); check_hresult(save_result); }
+            try { if (owned(existing)) delete_pinned_store_shortcut(existing); }
+            catch (...) { DeleteFileW(temporary.c_str()); throw; }
+            // Never replace an uninspected file, even if it appeared after the
+            // owned link was removed. A name collision moves on to Memmy 2, etc.
+            if (MoveFileW(temporary.c_str(), target.c_str())) { published = target; break; }
+            const auto error = GetLastError();
+            DeleteFileW(temporary.c_str());
+            if (error != ERROR_ALREADY_EXISTS && error != ERROR_FILE_EXISTS) throw hresult_error(HRESULT_FROM_WIN32(error));
+        }
+        if (published.empty()) throw hresult_error(HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS), L"No free Memmy shortcut name");
+        // Retire only proven Memmy links, including old Store-suffixed names,
+        // after the replacement is durable. A filename alone is never authority.
+        for (const auto& entry : std::filesystem::directory_iterator(desktop))
+        {
+            const auto path = entry.path();
+            const auto stem = path.stem().wstring();
+            if (path == published || _wcsicmp(path.extension().c_str(), L".lnk") != 0 ||
+                !is_generated_store_shortcut_stem(stem)) continue;
+            auto existing = read_pinned_store_shortcut(path);
+            if (owned(existing)) delete_pinned_store_shortcut(existing);
+        }
+        SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW, published.c_str(), nullptr);
+        SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATHW, desktop.c_str(), nullptr);
+    }
+
+    LegacySourceExecutableIdentity capture_source_executable_identity(const std::filesystem::path& executable_path);
+    scoped_handle create_transition_mutation_mutex();
+    std::wstring legacy_transition_cleanup_active_pipe_name();
+    HANDLE create_user_restricted_pipe(const std::wstring& pipe_name, DWORD open_mode, DWORD maximum_instances);
+    std::filesystem::path legacy_cleanup_journal_path();
+
+    std::wstring discovered_install_fingerprint(const std::filesystem::path& install)
+    {
+        const auto value = capture_source_executable_identity(install / L"Memmy.exe");
+        std::wostringstream text;
+        text << std::hex << value.volume_serial_number << L":" << value.file_index << L":"
+             << value.file_size << L":" << value.last_write_time;
+        return text.str();
+    }
+
+    // Refuse junction/short-name aliases before a recursive install cleanup. Ordinary
+    // installations already use the final DOS path recorded by NSIS.
+    void require_direct_install_path(const std::filesystem::path& install)
+    {
+        scoped_handle directory(CreateFileW(install.c_str(), FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+        if (!directory) throw hresult_error(HRESULT_FROM_WIN32(GetLastError()), L"Cannot inspect the legacy install path");
+        std::vector<wchar_t> final_path(32768);
+        const DWORD size = GetFinalPathNameByHandleW(directory.get(), final_path.data(), static_cast<DWORD>(final_path.size()), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+        if (size == 0 || size >= final_path.size()) throw hresult_error(E_ACCESSDENIED, L"Cannot resolve the real legacy install path");
+        std::wstring resolved(final_path.data(), size);
+        if (resolved.rfind(L"\\\\?\\", 0) == 0) resolved.erase(0, 4);
+        if (normalize_absolute_path(resolved) != normalize_absolute_path(install))
+            throw hresult_error(E_ACCESSDENIED, L"Legacy install path is an alias; automatic cleanup skipped");
+    }
+
+    void emit_discovered_legacy_installation()
+    {
+        auto directory = read_current_user_registry_string(legacy_uninstall_key, L"InstallLocation", KEY_WOW64_64KEY, "64-bit");
+        if (!directory) directory = read_current_user_registry_string(legacy_uninstall_key, L"InstallLocation", KEY_WOW64_32KEY, "32-bit");
+        if (!directory) directory = read_current_user_registry_string(legacy_installer_key, L"InstallLocation", KEY_WOW64_64KEY, "64-bit");
+        if (!directory) directory = read_current_user_registry_string(legacy_installer_key, L"InstallLocation", KEY_WOW64_32KEY, "32-bit");
+        if (!directory) { std::cout << "null\n"; return; }
+        const std::filesystem::path install(*directory);
+        if (!install.is_absolute() || install == install.root_path() || is_windows_apps_path(install))
+            throw hresult_invalid_argument(L"Legacy installation directory is unsafe");
+        const auto version = read_current_user_registry_string(legacy_uninstall_key, L"DisplayVersion", KEY_WOW64_64KEY, "64-bit");
+        std::wstring fingerprint;
+        try { fingerprint = discovered_install_fingerprint(install); } catch (...) { /* Data discovery also works after uninstall. */ }
+        std::cout << "{\"installDirectory\":\"" << escape_json(utf8(install.wstring())) << "\",\"appVersion\":\""
+                  << escape_json(utf8(version.value_or(L"0.0.0"))) << "\",\"fingerprint\":\"" << escape_json(utf8(fingerprint)) << "\"}\n";
+    }
+
+    // Explorer supplies an ordinary current-user process and registry context. Merely
+    // starting an external EXE as a child of the package can retain virtualization.
+    void launch_discovered_legacy_cleanup(const LegacyTransitionOptions& options)
+    {
+        validate_legacy_transition_options(options, true, true);
+        require_allowed_memmy_package_identity(options);
+        com_ptr<IShellWindows> windows;
+        check_hresult(CoCreateInstance(CLSID_ShellWindows, nullptr, CLSCTX_LOCAL_SERVER, IID_PPV_ARGS(windows.put())));
+        VARIANT location{}; location.vt = VT_I4; location.lVal = CSIDL_DESKTOP;
+        VARIANT empty{};
+        long hwnd = 0;
+        com_ptr<IDispatch> desktop;
+        check_hresult(windows->FindWindowSW(&location, &empty, SWC_DESKTOP, &hwnd, SWFO_NEEDDISPATCH, desktop.put()));
+        com_ptr<IShellBrowser> browser;
+        check_hresult(desktop.as<::IServiceProvider>()->QueryService(SID_STopLevelBrowser, IID_PPV_ARGS(browser.put())));
+        com_ptr<IShellView> view;
+        check_hresult(browser->QueryActiveShellView(view.put()));
+        com_ptr<IDispatch> background;
+        check_hresult(view->GetItemObject(SVGIO_BACKGROUND, IID_PPV_ARGS(background.put())));
+        com_ptr<IDispatch> application;
+        check_hresult(background.as<IShellFolderViewDual>()->get_Application(application.put()));
+        const auto command = build_legacy_cleanup_arguments(options.external_helper_path, L"run-discovered-legacy-cleanup", options, true);
+        std::wstring arguments;
+        for (size_t index = 1; index < command.size(); ++index) {
+            if (!arguments.empty()) arguments += L" ";
+            arguments += quote_command_line_argument(command[index]);
+        }
+        struct AutoVariant { VARIANT value{}; ~AutoVariant() { VariantClear(&value); } } file, args;
+        file.value.vt = VT_BSTR; file.value.bstrVal = SysAllocString(options.external_helper_path.c_str());
+        args.value.vt = VT_BSTR; args.value.bstrVal = SysAllocString(arguments.c_str());
+        if (!file.value.bstrVal || !args.value.bstrVal) throw hresult_error(E_OUTOFMEMORY);
+        VARIANT show{}; show.vt = VT_I4; show.lVal = SW_HIDE;
+        check_hresult(application.as<IShellDispatch2>()->ShellExecute(file.value.bstrVal, args.value, empty, empty, show));
+    }
+
+    void run_discovered_legacy_cleanup(const LegacyTransitionOptions& options)
+    {
+        validate_legacy_transition_options(options, true, true);
+        require_allowed_memmy_package_identity(options);
+        if (current_process_has_package_identity() ||
+            normalize_absolute_path(current_executable_path()) != normalize_absolute_path(options.external_helper_path))
+            throw hresult_error(E_ACCESSDENIED, L"Independent cleanup requires the fixed unpackaged helper");
+        const auto receipt = options.external_helper_path.parent_path() / (L"cleanup-" + options.attempt_id + L".json");
+        try
+        {
+            scoped_handle cleanup_active(create_user_restricted_pipe(legacy_transition_cleanup_active_pipe_name(),
+                PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE, 1));
+            if (!cleanup_active) throw hresult_error(HRESULT_FROM_WIN32(ERROR_BUSY), L"Another legacy cleanup is active");
+            auto mutex = create_transition_mutation_mutex();
+            scoped_mutex_ownership ownership;
+            ownership.acquire(mutex.get());
+            if (registered_package_full_names(options.package_family_name).empty())
+                throw hresult_error(E_ACCESSDENIED, L"Store package is no longer registered");
+            if (std::filesystem::exists(legacy_cleanup_journal_path()))
+                throw hresult_error(E_ACCESSDENIED, L"A compatible cleanup journal requires broker recovery");
+            require_direct_install_path(options.legacy_install_directory);
+            if (options.legacy_install_fingerprint.empty() ||
+                discovered_install_fingerprint(options.legacy_install_directory) != options.legacy_install_fingerprint)
+                throw hresult_error(E_ACCESSDENIED, L"Legacy installation changed after data discovery");
+            const auto user_home = resolve_known_folder_path(FOLDERID_Profile, L"User profile is unavailable");
+            const auto drive = options.legacy_install_directory.root_path();
+            if (paths_overlap(options.legacy_install_directory, user_home / L".memmy") ||
+                paths_overlap(options.legacy_install_directory, drive / L"MemmyData" / L".memmy"))
+                throw hresult_error(E_ACCESSDENIED, L"Legacy installation overlaps retained user data");
+            initialize_legacy_cleanup_diagnostics(options, "discovered-unpackaged-helper");
+            if (!stop_legacy_for_data_import()) throw hresult_error(HRESULT_FROM_WIN32(ERROR_BUSY), L"Legacy Memmy could not be closed");
+            require_direct_install_path(options.legacy_install_directory);
+            if (discovered_install_fingerprint(options.legacy_install_directory) != options.legacy_install_fingerprint)
+                throw hresult_error(E_ACCESSDENIED, L"Legacy installation changed while closing processes");
+            finalize_legacy_cleanup_unpacked(options, false, true);
+            write_text_file_atomic(receipt, "{\"status\":\"cleaned\"}\n");
+        }
+        catch (...)
+        {
+            write_text_file_atomic(receipt, "{\"status\":\"failed\"}\n");
+            throw;
+        }
     }
 
     std::wstring process_application_user_model_id(HANDLE process)
@@ -5571,28 +6065,18 @@ namespace
         }
     }
 
-    void retire_orphaned_cleanup_journal_for_native_install()
+    void validate_orphaned_cleanup_journal_for_native_install(
+        const LegacyCleanupJournal& journal)
     {
-        const auto journal = read_cleanup_journal();
-        if (!journal)
-        {
-            return;
-        }
-        if (exclusive_pipe_name_is_owned(legacy_transition_cleanup_active_pipe_name()))
-        {
-            throw hresult_error(
-                HRESULT_FROM_WIN32(ERROR_BUSY),
-                L"Refusing to retire a cleanup journal while native cleanup is active");
-        }
-        validate_legacy_transition_options(journal->options, true, false);
-        if (!journal->options.external_helper_path.empty())
+        validate_legacy_transition_options(journal.options, true, false);
+        if (!journal.options.external_helper_path.empty())
         {
             throw hresult_error(
                 E_ACCESSDENIED,
                 L"Cleanup journal contains a deprecated external helper path");
         }
-        require_allowed_memmy_package_identity(journal->options);
-        validate_persisted_authority_shape(journal->authority, journal->options);
+        require_allowed_memmy_package_identity(journal.options);
+        validate_persisted_authority_shape(journal.authority, journal.options);
         if (!registered_package_full_names(allowed_memmy_package_family).empty() ||
             !registered_package_full_names(allowed_memmy_agent_package_family).empty())
         {
@@ -5600,10 +6084,8 @@ namespace
                 E_ACCESSDENIED,
                 L"Refusing to retire a cleanup journal while a Memmy Store package remains registered");
         }
-        if (journal->phase == LegacyCleanupJournalPhase::Acknowledged)
+        if (journal.phase == LegacyCleanupJournalPhase::Acknowledged)
         {
-            delete_cleanup_journal_file(
-                L"Unable to retire the acknowledged cleanup journal");
             return;
         }
         // With the Store package unregistered, a currently valid native authority
@@ -5626,6 +6108,22 @@ namespace
                 E_ACCESSDENIED,
                 L"Unable to retire an orphaned cleanup journal without a valid native installation");
         }
+    }
+
+    void retire_orphaned_cleanup_journal_for_native_install()
+    {
+        const auto journal = read_cleanup_journal();
+        if (!journal)
+        {
+            return;
+        }
+        if (exclusive_pipe_name_is_owned(legacy_transition_cleanup_active_pipe_name()))
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(ERROR_BUSY),
+                L"Refusing to retire a cleanup journal while native cleanup is active");
+        }
+        validate_orphaned_cleanup_journal_for_native_install(*journal);
         delete_cleanup_journal_file(
             L"Unable to retire the orphaned cleanup journal for a native installation");
     }
@@ -6570,6 +7068,43 @@ namespace
                 L"Unable to create the NSIS and Store transition mutation mutex");
         }
         return mutex;
+    }
+
+    bool recover_orphaned_cleanup_journal()
+    {
+        if (current_process_has_package_identity())
+        {
+            throw hresult_error(
+                E_ACCESSDENIED,
+                L"Orphan cleanup journal recovery requires an unpackaged process");
+        }
+        // Acquire in the same order as destructive cleanup. Never borrow a
+        // running NSIS source lease or temporarily drop its cleanup guard.
+        scoped_handle cleanup_guard(create_user_restricted_pipe(
+            legacy_transition_cleanup_active_pipe_name(),
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            1));
+        if (!cleanup_guard)
+        {
+            throw hresult_error(
+                HRESULT_FROM_WIN32(GetLastError()),
+                L"Unable to acquire the orphan journal recovery cleanup guard");
+        }
+        scoped_handle mutation_mutex = create_transition_mutation_mutex();
+        scoped_mutex_ownership mutation_ownership;
+        mutation_ownership.acquire(mutation_mutex.get());
+
+        // The TypeScript existence check is only an optimization. Re-read and
+        // attest the fixed journal and both allowed package registrations here,
+        // while both locks exclude another cleanup or NSIS mutation.
+        const auto journal = read_cleanup_journal();
+        if (!journal)
+        {
+            return false;
+        }
+        validate_orphaned_cleanup_journal_for_native_install(*journal);
+        delete_cleanup_journal_file(L"Unable to recover the orphaned cleanup journal");
+        return true;
     }
 
     void require_parent_held_transition_mutation_mutex()
@@ -7735,6 +8270,12 @@ namespace
         {
             return Command::PrepareLegacyTakeover;
         }
+        if (value == L"stop-legacy-for-data-import") return Command::StopLegacyForDataImport;
+        if (value == L"create-store-shortcut") return Command::CreateStoreShortcut;
+        if (value == L"discover-legacy-installation") return Command::DiscoverLegacyInstallation;
+        if (value == L"launch-discovered-legacy-cleanup") return Command::LaunchDiscoveredLegacyCleanup;
+        if (value == L"run-discovered-legacy-cleanup") return Command::RunDiscoveredLegacyCleanup;
+        if (value == L"recover-legacy-cleanup-journal") return Command::RecoverLegacyCleanupJournal;
         if (value == L"ensure-legacy-cleanup-broker")
         {
             return Command::EnsureLegacyCleanupBroker;
@@ -7773,6 +8314,10 @@ namespace
     bool is_legacy_transition_command(Command command)
     {
         return command == Command::PrepareLegacyTakeover ||
+            command == Command::StopLegacyForDataImport || command == Command::CreateStoreShortcut ||
+            command == Command::DiscoverLegacyInstallation || command == Command::LaunchDiscoveredLegacyCleanup ||
+            command == Command::RunDiscoveredLegacyCleanup ||
+            command == Command::RecoverLegacyCleanupJournal ||
             command == Command::EnsureLegacyCleanupBroker ||
             command == Command::LegacyCleanupBroker ||
             command == Command::StopLegacyCleanupBroker ||
@@ -7825,7 +8370,7 @@ int wmain(int argc, wchar_t* argv[])
     {
         if (argc < 2)
         {
-            std::cerr << "usage: MemmyStoreUpdate.exe <identity|package-family-registration|check|download-silent|download-user|handoff-install|launch-store-update-finalizer|finalize-store-update|startup-status|startup-enable|startup-disable|prepare-legacy-takeover|ensure-legacy-cleanup-broker|legacy-cleanup-broker|stop-legacy-cleanup-broker|authorize-nsis-mutation|finalize-legacy-cleanup|ack-legacy-cleanup> [options]\n";
+            std::cerr << "usage: MemmyStoreUpdate.exe <identity|package-family-registration|check|download-silent|download-user|handoff-install|launch-store-update-finalizer|finalize-store-update|startup-status|startup-enable|startup-disable|prepare-legacy-takeover|recover-legacy-cleanup-journal|ensure-legacy-cleanup-broker|legacy-cleanup-broker|stop-legacy-cleanup-broker|authorize-nsis-mutation|finalize-legacy-cleanup|ack-legacy-cleanup> [options]\n";
             return 64;
         }
 
@@ -7889,6 +8434,13 @@ int wmain(int argc, wchar_t* argv[])
             if (argument == L"--legacy-install-directory")
             {
                 legacy_options.legacy_install_directory = require_value();
+                continue;
+            }
+            if (argument == L"--legacy-install-fingerprint")
+            {
+                if (command != Command::LaunchDiscoveredLegacyCleanup && command != Command::RunDiscoveredLegacyCleanup)
+                    throw hresult_invalid_argument(L"Installation fingerprint is only valid for discovered cleanup");
+                legacy_options.legacy_install_fingerprint = require_value();
                 continue;
             }
             if (argument == L"--legacy-executable-path")
@@ -8014,6 +8566,43 @@ int wmain(int argc, wchar_t* argv[])
         }
 
         init_apartment(apartment_type::single_threaded);
+        if (command == Command::DiscoverLegacyInstallation)
+        {
+            if (argc != 2) throw hresult_invalid_argument(L"Legacy installation discovery accepts no options");
+            emit_discovered_legacy_installation();
+            return 0;
+        }
+        if (command == Command::LaunchDiscoveredLegacyCleanup || command == Command::RunDiscoveredLegacyCleanup)
+        {
+            if (command == Command::LaunchDiscoveredLegacyCleanup) launch_discovered_legacy_cleanup(legacy_options);
+            else run_discovered_legacy_cleanup(legacy_options);
+            return 0;
+        }
+        if (command == Command::StopLegacyForDataImport)
+        {
+            if (argc != 2) throw hresult_invalid_argument(L"Data import process shutdown accepts no options");
+            const bool clear = stop_legacy_for_data_import();
+            std::cout << "{\"status\":\"" << (clear ? "clear" : "blocked") << "\"}\n";
+            return 0;
+        }
+        if (command == Command::CreateStoreShortcut)
+        {
+            if (argc != 6 || !is_valid_aumid(legacy_options.aumid) ||
+                legacy_options.aumid != legacy_options.package_family_name + L"!Memmy")
+                throw hresult_invalid_argument(L"Store shortcut identity is invalid");
+            create_store_shortcut(legacy_options);
+            return 0;
+        }
+        if (command == Command::RecoverLegacyCleanupJournal)
+        {
+            if (argc != 2)
+            {
+                throw hresult_invalid_argument(L"Orphan cleanup journal recovery accepts no options");
+            }
+            const bool recovered = recover_orphaned_cleanup_journal();
+            std::cout << "{\"status\":\"" << (recovered ? "recovered" : "no-journal") << "\"}\n";
+            return 0;
+        }
         if (command == Command::EnsureLegacyCleanupBroker ||
             command == Command::LegacyCleanupBroker)
         {

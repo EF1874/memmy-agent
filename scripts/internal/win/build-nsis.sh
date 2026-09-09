@@ -1122,6 +1122,14 @@ package_step_start "Verify pruned Windows runtime boundaries"
 verify_windows_agent_html_lint_runtime
 verify_pruned_windows_runtime
 
+package_step_start "Bundle Windows native runtime dependencies"
+powershell.exe \
+  -NoProfile \
+  -ExecutionPolicy Bypass \
+  -File "$(to_node_readable_path "$ROOT_DIR/scripts/internal/prepare-windows-native-dependencies.ps1")" \
+  -RuntimeRoot "$(to_node_readable_path "$RUNTIME_DIR")" \
+  -Architecture "$PACKAGE_ARCH"
+
 package_step_start "Prune and verify Windows runtime versions"
 node "$ROOT_DIR/scripts/internal/shared/prune-runtime-env-files.mjs" "$RUNTIME_DIR"
 RUNTIME_NODE_DIR="$(to_node_readable_path "$RUNTIME_DIR")"
@@ -1175,6 +1183,13 @@ BUILDER_ARGS+=(--config.artifactName="$ARTIFACT_NAME")
 npx electron-builder "${BUILDER_ARGS[@]}"
 package_step_start "Verify packaged Windows app artifacts"
 verify_packaged_windows_unpacked_artifacts
+powershell.exe \
+  -NoProfile \
+  -ExecutionPolicy Bypass \
+  -File "$(to_node_readable_path "$ROOT_DIR/scripts/internal/prepare-windows-native-dependencies.ps1")" \
+  -RuntimeRoot "$(to_node_readable_path "$DESKTOP_DIR/release/win-unpacked")" \
+  -Architecture "$PACKAGE_ARCH" \
+  -VerifyOnly
 require_packaged_runtime_file "$DESKTOP_DIR/release/win-unpacked/resources/native/MemmyStoreUpdate.exe"
 verify_windows_x64_native_module \
   "$DESKTOP_DIR/release/win-unpacked/resources/native/MemmyStoreUpdate.exe" \

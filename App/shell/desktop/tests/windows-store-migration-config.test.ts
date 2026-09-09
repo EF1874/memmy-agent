@@ -35,7 +35,7 @@ describe("Windows NSIS-to-Store manifest-first policy", () => {
     });
   });
 
-  it.each(["available", "error", "not-configured"] as const)(
+  it.each(["available"] as const)(
     "never migrates while the NSIS manifest status is %s",
     (manifestStatus) => {
       expect(resolveWindowsStoreMigrationPolicy({
@@ -45,6 +45,11 @@ describe("Windows NSIS-to-Store manifest-first policy", () => {
       })).toBeNull();
     }
   );
+
+  it.each(["error", "not-configured"] as const)("offers Web Install when NSIS is %s", (manifestStatus) => {
+    expect(resolveWindowsStoreMigrationPolicy({ manifestStatus, currentEdition: "cn", storeDestination: cnDestination })?.kind)
+      .toBe("store-migration");
+  });
 
   it("defaults the internal switch to enabled but honors an explicit false", () => {
     expect(resolveWindowsStoreMigrationPolicy({

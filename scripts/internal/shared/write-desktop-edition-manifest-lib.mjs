@@ -18,6 +18,7 @@ const windowsStorePublishingApplicationKeys = ["cn", "intl"];
 const windowsStorePublishingProfileKeys = [
   "storeListingDisplayName",
   "storeProductId",
+  "acquisitionUri",
   "identityName",
   "manifestApplicationId",
   "packageFamilyName",
@@ -122,6 +123,7 @@ function validateWindowsStorePublishingProfile(value, edition) {
 
   return {
     storeProductId,
+    acquisitionUri: normalizeWindowsStoreAcquisitionUri(value.acquisitionUri, storeProductId, `${context} acquisitionUri`),
     identityName,
     manifestApplicationId,
     packageFamilyName,
@@ -239,7 +241,7 @@ function resolveWindowsStoreMigration({ edition, environment, publishingConfig }
       profile.storeProductId,
       acquisitionVariable,
     )
-    : undefined;
+    : profile.acquisitionUri;
   const storeDestination = {
     edition,
     storeId: profile.storeProductId,

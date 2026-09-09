@@ -12,4 +12,5 @@ try {
   throw new Error("Windows Store pre-ready transition input is invalid", { cause });
 }
 
-await executeWindowsStoreTransitionPreReady(input as Parameters<typeof executeWindowsStoreTransitionPreReady>[0]);
+const result = await executeWindowsStoreTransitionPreReady(input as Parameters<typeof executeWindowsStoreTransitionPreReady>[0]);
+process.stdout.write(JSON.stringify(result));

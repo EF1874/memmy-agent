@@ -202,7 +202,7 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
         phase: "available",
         dialog: null,
         downloadProgress: null,
-        feedback: { key: "settings.about.updateAvailableNoLink", values: { version: version ?? update.currentVersion } }
+        feedback: resolveUnavailableUpdateFeedback(update)
       }));
       return;
     }
@@ -239,7 +239,7 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
         preparedUpdate: null,
         downloadProgress: null,
         dialog: null,
-        feedback: { key: "settings.about.updateAvailableNoLink", values: { version: version ?? update.currentVersion } }
+        feedback: resolveUnavailableUpdateFeedback(update)
       }));
       return;
     }
@@ -418,7 +418,7 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
         downloadProgress: null,
         feedback: canDownloadUpdate(result)
           ? resolveAvailableUpdateFeedback(result)
-          : { key: "settings.about.updateAvailableNoLink", values: { version: result.latestVersion ?? result.currentVersion } },
+          : resolveUnavailableUpdateFeedback(result),
         dialog: canDownloadUpdate(result) ? "download-confirm" : null
       }));
     } catch (error) {
@@ -508,7 +508,7 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
         downloadProgress: null,
         feedback: canDownloadUpdate(result)
           ? resolveAvailableUpdateFeedback(result)
-          : { key: "settings.about.updateAvailableNoLink", values: { version: result.latestVersion ?? result.currentVersion } },
+          : resolveUnavailableUpdateFeedback(result),
         dialog: null
       };
     });
@@ -556,8 +556,6 @@ export function UpdateCoordinatorProvider(props: { children: ReactNode }) {
           title: notificationContext.translate("notification.update.title"),
           body: plan.version
             ? notificationContext.translate("notification.update.body", { version: plan.version })
-            : result.provider === "store-migration"
-            ? notificationContext.translate("notification.update.storeMigrationBody")
             : notificationContext.translate("notification.update.storeBody"),
           silent: plan.silent
         }).catch(() => undefined);
@@ -624,11 +622,7 @@ export function GlobalUpdateDialog(props: { suspended?: boolean }) {
   const installReady = update.dialog === "install-confirm";
   const forced = isForceUpdate(update.result);
   const version = update.result.latestVersion;
-  const versionlessStoreUpdate = isVersionlessMicrosoftStoreUpdate(update.result);
-  const storeMigration = isWindowsStoreMigration(update.result);
-  const titleKey: MessageKey = storeMigration
-    ? "settings.about.storeMigrationConfirmTitle"
-    : versionlessStoreUpdate
+  const titleKey: MessageKey = isVersionlessUpdate(update.result)
     ? "settings.about.storeUpdateConfirmTitle"
     : "settings.about.updateConfirmTitle";
   return (
@@ -638,19 +632,11 @@ export function GlobalUpdateDialog(props: { suspended?: boolean }) {
       message={(
         <div className="space-y-2 text-left">
           <p>
-            {storeMigration
-              ? t("settings.about.storeMigrationConfirmDesc", { currentVersion: update.result.currentVersion })
-              : installReady
-              ? t(versionlessStoreUpdate
-                ? "settings.about.storePreparedUpdateConfirmDesc"
-                : "settings.about.preparedUpdateConfirmDesc", { currentVersion: update.result.currentVersion })
+            {installReady
+              ? t("settings.about.preparedUpdateConfirmDesc", { currentVersion: update.result.currentVersion })
               : forced
-              ? t(versionlessStoreUpdate
-                ? "settings.about.storeForceUpdateConfirmDesc"
-                : "settings.about.forceUpdateConfirmDesc", { currentVersion: update.result.currentVersion })
-              : t(versionlessStoreUpdate
-                ? "settings.about.storeUpdateConfirmDesc"
-                : "settings.about.updateConfirmDesc", { currentVersion: update.result.currentVersion })}
+              ? t("settings.about.forceUpdateConfirmDesc", { currentVersion: update.result.currentVersion })
+              : t("settings.about.updateConfirmDesc", { currentVersion: update.result.currentVersion })}
           </p>
           {update.result.releaseNotes && (
             <p className="whitespace-pre-wrap text-text-ink/55">{update.result.releaseNotes}</p>
@@ -659,9 +645,7 @@ export function GlobalUpdateDialog(props: { suspended?: boolean }) {
       )}
       cancelLabel={t("settings.about.updateConfirmCancel")}
       closeLabel={t("common.close")}
-      confirmLabel={storeMigration
-        ? t("settings.about.storeMigrationConfirmOk")
-        : installReady
+      confirmLabel={installReady
         ? t("settings.about.preparedUpdateConfirmOk")
         : t("settings.about.updateConfirmOk")}
       ariaLabel={t(titleKey, version ? { version } : undefined)}
@@ -700,7 +684,7 @@ function resolveUpdateInstallStartedMessageKey(
   platform: string | null
 ): MessageKey {
   if (preparedUpdate.kind === "store-migration") {
-    return "settings.about.storeMigrationOpening";
+    return "settings.about.installerOpening";
   }
   return platform === "win32"
     ? "settings.about.windowsBackgroundInstallStarted"
@@ -721,9 +705,6 @@ function resolveUpdateInstallResultMessageKey(
   result: DesktopUpdateInstallResult,
   platform: string | null
 ): MessageKey {
-  if (result.preparedUpdate.kind === "store-migration") {
-    return "settings.about.storeMigrationOpened";
-  }
   if (result.background) {
     return resolveUpdateInstallStartedMessageKey(result.preparedUpdate, platform);
   }
@@ -736,11 +717,14 @@ function isForceUpdate(update: DesktopUpdateCheckResult): boolean {
 
 function canDownloadUpdate(update: DesktopUpdateCheckResult): boolean {
   const bridge = typeof window === "undefined" ? undefined : window.memmy;
+  if (isWindowsStoreMigration(update)) {
+    return Boolean(bridge?.downloadUpdate && update.offerToken && update.storeMigrationOffer);
+  }
   return bridge?.downloadUpdate ? Boolean(update.offerToken) : Boolean(update.downloadUrl);
 }
 
-function isVersionlessMicrosoftStoreUpdate(update: DesktopUpdateCheckResult): boolean {
-  return update.provider === "microsoft-store" && !update.latestVersion;
+function isVersionlessUpdate(update: DesktopUpdateCheckResult): boolean {
+  return !update.latestVersion;
 }
 
 function isWindowsStoreMigration(update: DesktopUpdateCheckResult): boolean {
@@ -748,7 +732,7 @@ function isWindowsStoreMigration(update: DesktopUpdateCheckResult): boolean {
 }
 
 function resolveAvailableUpdateFeedback(update: DesktopUpdateCheckResult): UpdateFeedback {
-  if (isVersionlessMicrosoftStoreUpdate(update)) {
+  if (isVersionlessUpdate(update)) {
     return {
       key: isForceUpdate(update)
         ? "settings.about.storeForceUpdateReady"
@@ -763,7 +747,7 @@ function resolveAvailableUpdateFeedback(update: DesktopUpdateCheckResult): Updat
 }
 
 function resolveDownloadingUpdateFeedback(update: DesktopUpdateCheckResult): UpdateFeedback {
-  if (isVersionlessMicrosoftStoreUpdate(update)) {
+  if (isVersionlessUpdate(update)) {
     return { key: "settings.about.storeUpdateDownloading" };
   }
   return {
@@ -773,14 +757,21 @@ function resolveDownloadingUpdateFeedback(update: DesktopUpdateCheckResult): Upd
 }
 
 function resolvePreparedUpdateFeedback(update: DesktopUpdateCheckResult): UpdateFeedback {
-  if (isWindowsStoreMigration(update)) {
-    return { key: "settings.about.storeMigrationReady" };
-  }
-  if (isVersionlessMicrosoftStoreUpdate(update)) {
+  if (isVersionlessUpdate(update)) {
     return { key: "settings.about.storeUpdatePrepared" };
   }
   return {
     key: "settings.about.silentReady",
+    values: { version: update.latestVersion ?? update.currentVersion }
+  };
+}
+
+function resolveUnavailableUpdateFeedback(update: DesktopUpdateCheckResult): UpdateFeedback {
+  if (isVersionlessUpdate(update)) {
+    return { key: "settings.about.versionlessUpdateAvailableNoLink" };
+  }
+  return {
+    key: "settings.about.updateAvailableNoLink",
     values: { version: update.latestVersion ?? update.currentVersion }
   };
 }
@@ -808,13 +799,14 @@ function validatePreparedUpdateHandle(value: DesktopPreparedUpdateHandle): Deskt
 }
 
 function resolveUpdateNotificationKey(update: DesktopUpdateCheckResult): string | undefined {
+  if (isWindowsStoreMigration(update)) {
+    return `store-migration:${update.currentVersion}`;
+  }
   if (update.latestVersion) {
     return update.latestVersion;
   }
   if (update.provider !== "microsoft-store") {
-    return update.provider === "store-migration" && update.preparedUpdate?.kind === "store-migration"
-      ? `store-migration:${update.currentVersion}`
-      : undefined;
+    return undefined;
   }
   return update.windowsStore?.baselinePackageFullName || `microsoft-store:${update.currentVersion}`;
 }

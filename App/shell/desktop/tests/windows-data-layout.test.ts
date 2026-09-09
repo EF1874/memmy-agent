@@ -90,7 +90,7 @@ describe("Windows desktop data layout", () => {
     });
   });
 
-  it("uses a prevalidated Store runtime override without moving the PFN LocalState profile", () => {
+  it("keeps Store runtime in USERPROFILE even with an old non-system-drive selection", () => {
     const storeUserDataPath = "C:\\Users\\lee\\AppData\\Local\\Packages\\Memtensor.MemmyAgent_eyack96k521x2\\LocalState\\Memmy";
     expect(resolveWindowsDataLayout({
       platform: "win32",
@@ -104,12 +104,12 @@ describe("Windows desktop data layout", () => {
       storeRuntimeHomePath: "D:\\MemmyData\\.memmy"
     })).toMatchObject({
       userDataPath: storeUserDataPath,
-      runtimeHomePath: "D:\\MemmyData\\.memmy",
+      runtimeHomePath: "C:\\Users\\lee\\.memmy",
       pointerPath: `${storeUserDataPath}\\data-root.txt`
     });
   });
 
-  it("rejects unsafe Store runtime overrides and ignores the Store-only option for NSIS", () => {
+  it("ignores old runtime override values for both Store and NSIS", () => {
     const storeUserDataPath = "C:\\Users\\lee\\AppData\\Local\\Packages\\Memtensor.MemmyAgent_eyack96k521x2\\LocalState\\Memmy";
     const storeOptions = {
       platform: "win32" as const,
@@ -121,14 +121,14 @@ describe("Windows desktop data layout", () => {
       homeDirectory: "C:\\Users\\lee",
       storeUserDataPath
     };
-    expect(() => resolveWindowsDataLayout({
+    expect(resolveWindowsDataLayout({
       ...storeOptions,
       storeRuntimeHomePath: "D:\\"
-    })).toThrow("canonical non-root");
-    expect(() => resolveWindowsDataLayout({
+    })?.runtimeHomePath).toBe("C:\\Users\\lee\\.memmy");
+    expect(resolveWindowsDataLayout({
       ...storeOptions,
       storeRuntimeHomePath: "E:\\WindowsApps\\Memmy\\.memmy"
-    })).toThrow("WindowsApps");
+    })?.runtimeHomePath).toBe("C:\\Users\\lee\\.memmy");
 
     expect(resolveWindowsDataLayout({
       ...storeOptions,

@@ -61,9 +61,7 @@ export const resolveWindowsDataLayout = (
     ? legacyRuntimeHomePath
     : win32.join(installationRoot, "MemmyData");
   const runtimeHomePath = useLegacyRuntimeHome
-    ? options.isWindowsStore && options.storeRuntimeHomePath
-      ? normalizeExplicitWindowsStoreRuntimeHomePath(options.storeRuntimeHomePath)
-      : legacyRuntimeHomePath
+    ? legacyRuntimeHomePath
     : win32.join(dataContainerPath, ".memmy");
   const localAppDataPath = options.localAppDataPath
     || win32.join(options.homeDirectory, "AppData", "Local");
@@ -71,26 +69,14 @@ export const resolveWindowsDataLayout = (
   return {
     userDataPath,
     runtimeHomePath,
-    updatesPath: win32.join(dataContainerPath, "updates"),
+    updatesPath: win32.join(options.isWindowsStore ? runtimeHomePath : dataContainerPath, "updates"),
     pointerPath: win32.join(userDataPath, "data-root.txt"),
-    migrationStatePath: win32.join(localAppDataPath, "Memmy", "data-migration", "state.json"),
+    migrationStatePath: options.isWindowsStore
+      ? win32.join(userDataPath, "store-data-migration.json")
+      : win32.join(localAppDataPath, "Memmy", "data-migration", "state.json"),
     installationRecordPath: win32.join(localAppDataPath, "Memmy", "data-layout", "last-install.json"),
     legacyInstallDataPath: win32.join(win32.dirname(options.executablePath), "data")
   };
-};
-
-const normalizeExplicitWindowsStoreRuntimeHomePath = (runtimeHomePath: string): string => {
-  if (!runtimeHomePath || runtimeHomePath !== runtimeHomePath.trim() || !win32.isAbsolute(runtimeHomePath)) {
-    throw new Error("Windows Store runtime home must be an absolute path");
-  }
-  const normalizedPath = win32.normalize(runtimeHomePath);
-  if (normalizedPath !== runtimeHomePath || normalizedPath === win32.parse(normalizedPath).root) {
-    throw new Error("Windows Store runtime home must be a canonical non-root path");
-  }
-  if (containsWindowsAppsSegment(normalizedPath)) {
-    throw new Error("Windows Store runtime home must not be inside WindowsApps");
-  }
-  return normalizedPath;
 };
 
 const resolveExplicitWindowsStoreUserDataPath = (storeUserDataPath: string | undefined): string => {
@@ -102,7 +88,10 @@ const resolveExplicitWindowsStoreUserDataPath = (storeUserDataPath: string | und
     throw new Error("Windows Store storeUserDataPath must be an absolute path");
   }
   const normalizedPath = win32.normalize(trimmedPath);
-  const localStateDirectory = win32.dirname(normalizedPath);
+  const profileParent = win32.dirname(normalizedPath);
+  const isStoreGeneration = /^(?:standalone|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/u.test(win32.basename(profileParent))
+    && win32.basename(win32.dirname(profileParent)) === "store-data";
+  const localStateDirectory = isStoreGeneration ? win32.dirname(win32.dirname(profileParent)) : profileParent;
   const packageFamilyDirectory = win32.dirname(localStateDirectory);
   const packagesDirectory = win32.dirname(packageFamilyDirectory);
   if (

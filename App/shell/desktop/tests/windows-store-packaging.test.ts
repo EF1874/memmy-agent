@@ -94,6 +94,7 @@ describe("Windows Store packaging identity", () => {
         cn: {
           storeListingDisplayName: "Memmy",
           storeProductId: "9MZGLKWMZZV6",
+          acquisitionUri: "https://get.microsoft.com/installer/download/9MZGLKWMZZV6",
           identityName: "Memtensor.Memmy",
           manifestApplicationId: "Memmy",
           packageFamilyName: "Memtensor.Memmy_eyack96k521x2",
@@ -101,6 +102,7 @@ describe("Windows Store packaging identity", () => {
         intl: {
           storeListingDisplayName: "Memmy Agent",
           storeProductId: "9NFVJC9K7ZK9",
+          acquisitionUri: "https://get.microsoft.com/installer/download/9NFVJC9K7ZK9",
           identityName: "Memtensor.MemmyAgent",
           manifestApplicationId: "Memmy",
           packageFamilyName: "Memtensor.MemmyAgent_eyack96k521x2",
@@ -1078,6 +1080,7 @@ interface StorePublishingConfig {
     {
       storeListingDisplayName: string;
       storeProductId: string;
+      acquisitionUri: string;
       identityName: string;
       manifestApplicationId: string;
       packageFamilyName: string;

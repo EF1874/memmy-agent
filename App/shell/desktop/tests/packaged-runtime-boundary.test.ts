@@ -980,7 +980,6 @@ describe("desktop packaged runtime boundaries", () => {
     const brokerRemovalEnd = includeSource.indexOf("FunctionEnd", brokerRemovalStart);
     const brokerRemovalSource = includeSource.slice(brokerRemovalStart, brokerRemovalEnd);
     const completeMigrationIndex = includeSource.indexOf("Call MemmyCompleteDirectDataMigration");
-    const ensureBrokerIndex = includeSource.indexOf("Call MemmyEnsureLegacyCleanupBroker");
 
     expect(customInitSource).toContain("Call MemmyAcquireTransitionMutationMutex");
     expect(customInitSource).toContain("Call MemmyAuthorizeTransitionMutation");
@@ -1033,11 +1032,8 @@ describe("desktop packaged runtime boundaries", () => {
       'IfFileExists "$LOCALAPPDATA\\Memmy\\store-transition\\broker\\MemmyStoreUpdate.exe"'
     );
     expect(completeMigrationIndex).toBeGreaterThan(-1);
-    expect(ensureBrokerIndex).toBeGreaterThan(completeMigrationIndex);
-    expect(includeSource).toContain(
-      'StrCpy $R5 "$INSTDIR\\resources\\native\\MemmyStoreUpdate.exe"'
-    );
-    expect(includeSource).toContain("ensure-legacy-cleanup-broker");
+    expect(includeSource).not.toContain("Call MemmyEnsureLegacyCleanupBroker");
+    expect(includeSource).not.toContain("ensure-legacy-cleanup-broker");
     expect(includeSource).toContain("Call un.MemmyRemoveLegacyCleanupBroker");
     expect(includeSource).toContain("stop-legacy-cleanup-broker");
     expect(includeSource).toContain(

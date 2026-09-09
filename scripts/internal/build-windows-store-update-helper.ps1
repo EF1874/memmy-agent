@@ -66,6 +66,7 @@ $compiler = (Get-Command cl.exe -ErrorAction Stop).Source
   windowsapp.lib `
   advapi32.lib `
   ole32.lib `
+  oleaut32.lib `
   shell32.lib `
   user32.lib
 if ($LASTEXITCODE -ne 0) {

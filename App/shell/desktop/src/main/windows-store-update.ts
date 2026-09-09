@@ -107,6 +107,24 @@ export async function runWindowsStoreUpdate(
     const stderr: string[] = [];
     let result: WindowsStoreUpdateResult | null = null;
     let helperError: Error | null = null;
+    let settled = false;
+    const timeoutMs = options.command.startsWith("download-")
+      ? 30 * 60_000
+      : options.command === "identity" ? 15_000 : 30_000;
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      lines.close();
+      child.stdout.destroy();
+      child.stderr.destroy();
+      reject(error);
+    };
+    const timer = setTimeout(() => {
+      fail(new Error(`Microsoft Store ${options.command} helper timed out after ${timeoutMs}ms`));
+      try { child.kill(); } catch { /* Rejection must not wait for a stuck helper to exit. */ }
+    }, timeoutMs);
+    timer.unref?.();
 
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => {
@@ -132,18 +150,22 @@ export async function runWindowsStoreUpdate(
         helperError = error instanceof Error ? error : new Error(String(error));
       }
     });
-    child.once("error", reject);
+    child.once("error", fail);
     child.once("close", (code) => {
+      if (settled) return;
       if (helperError) {
-        reject(helperError);
+        fail(helperError);
         return;
       }
       if (code !== 0 || !result) {
-        reject(new Error(
+        fail(new Error(
           `Microsoft Store update helper exited with code ${code ?? "unknown"}${stderr.length > 0 ? `: ${stderr.join("").trim()}` : ""}`
         ));
         return;
       }
+      settled = true;
+      clearTimeout(timer);
+      lines.close();
       resolve(result);
     });
   });

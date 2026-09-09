@@ -73,6 +73,8 @@ export interface DesktopUpdateCheckResult {
   force?: boolean;
   downloadUrl?: string;
   windowsStore?: DesktopWindowsStoreUpdateMetadata;
+  /** Main-owned migration offer; it is not an installer until download succeeds. */
+  storeMigrationOffer?: Extract<DesktopPreparedUpdateHandle, { kind: "store-migration" }>;
   preparedUpdate?: DesktopPreparedUpdateHandle;
   releaseNotes?: string;
   publishedAt?: string;

@@ -49,7 +49,7 @@ export const resolveExpectedWindowsStoreMigrationIdentity = (
 export const resolveWindowsStoreMigrationPolicy = (
   options: ResolveWindowsStoreMigrationPolicyOptions
 ): WindowsStoreMigrationPolicy | null => {
-  if (options.manifestStatus !== "latest" || options.internalEnabled === false) return null;
+  if (options.manifestStatus === "available" || options.internalEnabled === false) return null;
   if (!isRecord(options.storeDestination)) return null;
 
   const identity = resolveWindowsStoreMigrationIdentity(options.storeDestination);

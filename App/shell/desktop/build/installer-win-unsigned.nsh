@@ -331,9 +331,8 @@ Var MemmyTransitionMutationMutexHandle
     Call MemmyClearRelayedUpgradeMarkers
     ; Release the direct-install barrier only after every install-time mutation is complete.
     Call MemmyCompleteDirectDataMigration
-    ; Stage the cleanup authority while this installer is still an unpackaged
-    ; process. Store descendants cannot prove access to the native HKCU hive.
-    Call MemmyEnsureLegacyCleanupBroker
+    ; The unpackaged app prepares its cleanup broker on startup and before Store handoff.
+    ; Do not spawn a resident broker here: older updaters wait for the whole installer tree.
   !macroend
 !endif
 
@@ -495,25 +494,6 @@ Function un.MemmyReleaseTransitionMutationMutex
   StrCpy $MemmyTransitionMutationMutexHandle ""
 
   memmy_un_mutation_mutex_release_done:
-FunctionEnd
-!endif
-
-!ifndef BUILD_UNINSTALLER
-Function MemmyEnsureLegacyCleanupBroker
-  StrCpy $R5 "$INSTDIR\resources\native\MemmyStoreUpdate.exe"
-  IfFileExists "$R5" 0 memmy_broker_ensure_missing
-  nsExec::ExecToStack '$\"$R5$\" ensure-legacy-cleanup-broker'
-  Pop $0
-  Pop $1
-  DetailPrint "$1"
-  StrCmp $0 "0" memmy_broker_ensure_done
-  DetailPrint "Memmy Store transition cleanup broker could not be prepared (exit $0)."
-  Return
-
-  memmy_broker_ensure_missing:
-    DetailPrint "Memmy Store transition cleanup helper is unavailable."
-
-  memmy_broker_ensure_done:
 FunctionEnd
 !endif
 
@@ -1212,6 +1192,19 @@ Function MemmyInstallLaunchProxy
   FileWrite $1 "  languagePath = legacyUserDataRoot & $\"\update-prompt-language.txt$\"$\r$\n"
   FileWrite $1 "End If$\r$\n"
   FileWrite $1 "lockPath = markerPath & $\".lock$\"$\r$\n"
+  FileWrite $1 "If fso.FolderExists(lockPath) And fso.FileExists(recoveryPath) Then$\r$\n"
+  FileWrite $1 "  On Error Resume Next$\r$\n"
+  FileWrite $1 "  Set recoveryProcess = shell.Exec(Chr(34) & powerShellPath & Chr(34) & $\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File $\" & Chr(34) & recoveryPath & Chr(34) & $\" -PreparedInstallerLock -InstallDir $\" & Chr(34) & fso.GetParentFolderName(appExe) & Chr(34) & $\" -LockPath $\" & Chr(34) & lockPath & Chr(34) & $\" -LogPath $\" & Chr(34) & upgradeLogPath & Chr(34))$\r$\n"
+  FileWrite $1 "  If Err.Number = 0 Then$\r$\n"
+  FileWrite $1 "    For recoveryPoll = 1 To 50$\r$\n"
+  FileWrite $1 "      If recoveryProcess.Status <> 0 Then Exit For$\r$\n"
+  FileWrite $1 "      WScript.Sleep 100$\r$\n"
+  FileWrite $1 "    Next$\r$\n"
+  FileWrite $1 "    If recoveryProcess.Status = 0 Then recoveryProcess.Terminate$\r$\n"
+  FileWrite $1 "  End If$\r$\n"
+  FileWrite $1 "  Err.Clear$\r$\n"
+  FileWrite $1 "  On Error GoTo 0$\r$\n"
+  FileWrite $1 "End If$\r$\n"
   FileWrite $1 "relayLockPath = shell.ExpandEnvironmentStrings($\"%LOCALAPPDATA%$\") & $\"\Memmy\upgrade-staging\active.lock$\"$\r$\n"
   FileWrite $1 "If fso.FolderExists(relayLockPath) And fso.FileExists(recoveryPath) Then$\r$\n"
   FileWrite $1 "  shell.Run Chr(34) & powerShellPath & Chr(34) & $\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File $\" & Chr(34) & recoveryPath & Chr(34) & $\" -InstallDir $\" & Chr(34) & fso.GetParentFolderName(appExe) & Chr(34) & $\" -LockPath $\" & Chr(34) & relayLockPath & Chr(34) & $\" -LogPath $\" & Chr(34) & upgradeLogPath & Chr(34) & $\" -DirectMigrationStatePath $\" & Chr(34) & migrationStatePath & Chr(34) & $\" -DirectMigrationScriptPath $\" & Chr(34) & migrationRecoveryPath & Chr(34) & $\" -DirectMigrationLogPath $\" & Chr(34) & migrationLogPath & Chr(34), 0, True$\r$\n"

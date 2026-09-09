@@ -291,7 +291,7 @@ describe("packaged desktop runtime configuration", () => {
     expect(readFileSync(output, "utf8")).not.toContain("cn.memtensor.memmy");
   });
 
-  it("defaults Store migration metadata to enabled and omits only a missing acquisition URI", async () => {
+  it("reads the CN Web Install URI from the edition-specific packaging config", async () => {
     const root = fixtureRoot();
     const output = join(root, "desktop-edition.json");
 
@@ -311,9 +311,10 @@ describe("packaged desktop runtime configuration", () => {
         storeId: "9MZGLKWMZZV6",
         packageFamilyName: "Memtensor.Memmy_eyack96k521x2",
         aumid: "Memtensor.Memmy_eyack96k521x2!Memmy",
+        acquisitionUri: "https://get.microsoft.com/installer/download/9MZGLKWMZZV6",
       },
     });
-    expect(manifest.windowsStoreMigration.storeDestination).not.toHaveProperty("acquisitionUri");
+    expect(manifest.windowsStoreMigration.storeDestination.acquisitionUri).toBe("https://get.microsoft.com/installer/download/9MZGLKWMZZV6");
   });
 
   it("writes Store migration metadata disabled when the internal build switch is false", async () => {
@@ -926,6 +927,7 @@ function writeStorePublishingProfiles(root) {
       cn: {
         storeListingDisplayName: "Memmy",
         storeProductId: "9MZGLKWMZZV6",
+        acquisitionUri: "https://get.microsoft.com/installer/download/9MZGLKWMZZV6",
         identityName: "Memtensor.Memmy",
         manifestApplicationId: "Memmy",
         packageFamilyName: "Memtensor.Memmy_eyack96k521x2",
@@ -933,6 +935,7 @@ function writeStorePublishingProfiles(root) {
       intl: {
         storeListingDisplayName: "Memmy Agent",
         storeProductId: "9NFVJC9K7ZK9",
+        acquisitionUri: "https://get.microsoft.com/installer/download/9NFVJC9K7ZK9",
         identityName: "Memtensor.MemmyAgent",
         manifestApplicationId: "Memmy",
         packageFamilyName: "Memtensor.MemmyAgent_eyack96k521x2",

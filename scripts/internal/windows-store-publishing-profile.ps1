@@ -232,6 +232,7 @@ function Get-ValidatedStorePublishingProfiles {
       -ExpectedProperties @(
         "storeListingDisplayName",
         "storeProductId",
+        "acquisitionUri",
         "identityName",
         "manifestApplicationId",
         "packageFamilyName"
@@ -326,6 +327,7 @@ function Get-ValidatedStorePublishingProfiles {
       WindowsDisplayName = $windowsDisplayName
       StoreListingDisplayName = $storeListingDisplayName
       StoreProductId = $storeProductId
+      AcquisitionUri = Get-RequiredStorePublishingValue -Object $applicationConfig -PropertyName "acquisitionUri" -ProfileName $profileName
       IdentityName = $identityName
       ApplicationId = $applicationId
       PackageFamilyName = $packageFamilyName
@@ -334,6 +336,14 @@ function Get-ValidatedStorePublishingProfiles {
     }
   }
 
+  foreach ($entry in $profiles.Values) {
+    $uri = $null
+    if (-not [Uri]::TryCreate($entry.AcquisitionUri, [UriKind]::Absolute, [ref]$uri) -or
+        $uri.Scheme -ne 'https' -or $uri.UserInfo -or -not $uri.IsDefaultPort -or $uri.Query -or $uri.Fragment -or
+        $uri.Host -ne 'get.microsoft.com' -or $uri.AbsolutePath -cne "/installer/download/$($entry.StoreProductId)") {
+      throw "Windows Store publishing profile '$($entry.Channel)' acquisitionUri must be its official Web Install URL."
+    }
+  }
   return $profiles
 }
 

@@ -32,12 +32,12 @@ describe.runIf(process.platform === "win32")("Windows Store transition source li
     const mainSource = await readFile(new URL("../src/main/main.ts", import.meta.url), "utf8");
     const barrierIndex = mainSource.indexOf("if (await applyWindowsStoreTransitionSourceBarrier())");
     const brokerIndex = mainSource.indexOf("await ensureCurrentWindowsStoreLegacyCleanupBroker();");
-    const storePreparationIndex = mainSource.indexOf("await prepareCurrentWindowsStoreTransitionForBoot();");
+    const storePreparationIndex = mainSource.indexOf("runCurrentWindowsStoreTransitionPreReady();", mainSource.indexOf("app.requestSingleInstanceLock()"));
 
     expect(barrierIndex).toBeGreaterThan(-1);
     expect(brokerIndex).toBeGreaterThan(-1);
     expect(brokerIndex).toBeLessThan(barrierIndex);
-    expect(storePreparationIndex).toBeGreaterThan(barrierIndex);
+    expect(storePreparationIndex).toBeLessThan(barrierIndex);
     expect(mainSource).toContain("windowsStoreTransitionSourceLease = result.lease;");
     expect(mainSource).toContain("resourcesPath: process.resourcesPath");
     expect(mainSource).toContain("boot:store-transition-source-orphan-recovered");

@@ -17,9 +17,9 @@ import type {
   MicrophoneAccessStatus
 } from "@memmy/desktop-interface";
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, shell, systemPreferences, Tray, type Event as ElectronEvent, type FileFilter, type IpcMainEvent, type MenuItemConstructorOptions, type Rectangle, type WebContents } from "electron";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { constants as fsConstants, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { constants as fsConstants, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { access, appendFile, chmod, copyFile, lstat, mkdir, open, readFile, readdir, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, extname, join, relative, resolve, sep, win32 } from "node:path";
@@ -158,40 +158,27 @@ import {
   resolveWindowsStoreMigrationPolicy,
   type WindowsStoreMigrationPolicy
 } from "./windows-store-migration-config.js";
-import { ensureWindowsStoreLegacyCleanupBroker } from "./windows-store-legacy-broker.js";
-import {
-  acknowledgeWindowsStoreLegacyCleanup,
-  finalizeWindowsStoreLegacyInstallation,
-  retireWindowsStoreLegacyInstallAuthority,
-  type WindowsStoreLegacyTransitionOptions
-} from "./windows-store-legacy-transition.js";
-import {
-  commitWindowsStoreRuntimeSelectionForVerifiedBoot,
-  resolveWindowsStoreRuntimeHomeForStartup
-} from "./windows-store-runtime-selection.js";
+import { ensureWindowsStoreLegacyCleanupBroker, recoverWindowsStoreLegacyCleanupJournal } from "./windows-store-legacy-broker.js";
+import type { WindowsStoreLegacyTransitionOptions } from "./windows-store-legacy-transition.js";
+import { resolveWindowsStoreFirstRunLayout, readWindowsStoreFirstRunRecord, recordWindowsStoreWorkerFailureSync } from "./windows-store-first-run-state.js";
+import { finishWindowsStoreFirstRunIntegration } from "./windows-store-first-run-integration.js";
 import {
   advanceWindowsStoreTransitionState,
-  assertWindowsStoreTransitionBinding,
   createWindowsStoreTransitionState,
-  readWindowsStoreTransitionState,
   resolveWindowsStoreTransitionStatePath,
   writeWindowsStoreTransitionState,
   type WindowsStoreTransitionBinding
 } from "./windows-store-transition-state.js";
 import {
-  advanceWindowsStoreTransitionForVerifiedBoot,
-  prepareWindowsStoreTransitionForBoot,
-  rollbackWindowsStoreTransitionAfterFailedBoot,
-  type WindowsStoreTransitionCoordinatorOptions
-} from "./windows-store-transition-coordinator.js";
-import {
   establishWindowsStoreTransitionSourceLifetime,
   type WindowsStoreTransitionSourceLease
 } from "./windows-store-transition-source-lifetime.js";
-import { runWindowsStoreTransitionPreReadyWorker } from "./windows-store-transition-pre-ready.js";
+import { runWindowsStoreTransitionPreReadyWorker, stopLegacyForStoreStartupSync } from "./windows-store-transition-pre-ready.js";
+import { checkLegacyUpdateThenStore } from "./windows-update-routing.js";
 import { resolveWindowsStorePackagedResourcesPath } from "./windows-store-packaged-resources.js";
 import { createDesktopUpdateOfferRegistry } from "./desktop-update-offer-registry.js";
 import { createWindowsStoreMigrationOfferRegistry } from "./windows-store-migration-offer-registry.js";
+import { createWindowsStoreWebInstaller } from "./windows-store-web-installer.js";
 
 let mainWindow: BrowserWindow | null = null;
 let petWindow: BrowserWindow | null = null;
@@ -389,7 +376,7 @@ async function startPackagedRendererServerIfNeeded(): Promise<void> {
   }
 
   const rendererRoot = join(import.meta.dirname, "../renderer");
-  packagedRendererServer = await startPackagedRendererStaticServer({ rootDirectory: rendererRoot });
+  packagedRendererServer = await startPackagedRendererStaticServer({ rootDirectory: rendererRoot, ...(isWindowsStoreApp() ? { port: 0 } : {}) });
   packagedRendererBaseUrl = packagedRendererServer.baseUrl;
 }
 
@@ -491,43 +478,19 @@ async function boot(): Promise<void> {
           resolveDesktopAppVersion(),
           { writeInstallationAuthority: !isWindowsStoreApp() }
         );
-        await commitCurrentWindowsStoreRuntimeSelectionForVerifiedBoot();
         dataLayoutRecorded = true;
       } catch (error) {
         console.warn("Windows data layout record deferred:", error);
         await writePackagedStartupLog(`boot:data-layout-record-deferred\n${formatStartupError(error)}`);
       }
-      if (dataLayoutRecorded) {
-        if (isWindowsStoreApp()) {
-          await advanceWindowsStoreTransitionForVerifiedBoot(
-            resolveCurrentWindowsStoreTransitionCoordinatorOptions(),
-            {
-              finalizeLegacyInstallation: (state) => finalizeWindowsStoreLegacyInstallation({
-                resourcesPath: resolveCurrentWindowsStorePackagedResourcesPath(),
-                localAppDataPath: process.env.LOCALAPPDATA?.trim() ?? "",
-                desktopPath: app.getPath("desktop"),
-                state
-              }),
-              acknowledgeLegacyCleanup: (state) => acknowledgeWindowsStoreLegacyCleanup({
-                resourcesPath: resolveCurrentWindowsStorePackagedResourcesPath(),
-                localAppDataPath: process.env.LOCALAPPDATA?.trim() ?? "",
-                desktopPath: app.getPath("desktop"),
-                state
-              }),
-              retireLegacyInstallAuthority: (state) => retireWindowsStoreLegacyInstallAuthority({
-                localAppDataPath: process.env.LOCALAPPDATA?.trim() ?? "",
-                state
-              })
-            }
-          ).then(async (result) => {
-            if (result.status !== "none") {
-              await writePackagedStartupLog(`boot:store-transition ${result.status}`);
-            }
+      if (isWindowsStoreApp()) {
+          void finishWindowsStoreFirstRunIntegration(resolveCurrentWindowsStoreLegacyTransitionOptions(), {
+            notifyFailure: (detail) => dialog.showMessageBox({ type: "warning", title: "Memmy 数据迁移未完成", message: "旧数据未能自动迁移", detail })
           }).catch(async (error: unknown) => {
             console.warn("Windows Store transition cleanup deferred:", error);
             await writePackagedStartupLog(`boot:store-transition-cleanup-deferred\n${formatStartupError(error)}`);
           });
-        } else {
+      } else if (dataLayoutRecorded) {
           await advanceWindowsDataMigrationAfterBoot(
             windowsDataLayout,
             [join(homedir(), ".memmy")]
@@ -535,7 +498,6 @@ async function boot(): Promise<void> {
             console.warn("Windows data migration cleanup deferred:", error);
             await writePackagedStartupLog(`boot:data-migration-cleanup-deferred\n${formatStartupError(error)}`);
           });
-        }
       }
     }
     startRequiredUpdateBackgroundChecks();
@@ -556,7 +518,7 @@ async function boot(): Promise<void> {
  * Configures the app name and user data directory.
  * @returns Nothing.
  */
-function configureAppIdentity(): void {
+function configureAppIdentity(independentStoreRuntime = false): void {
   const edition = resolveCurrentDesktopEdition();
   const isWindowsStore = isWindowsStoreApp();
   windowsStoreIdentity = resolveWindowsStoreIdentity({
@@ -584,15 +546,7 @@ function configureAppIdentity(): void {
     app.setPath("userData", storeUserDataPath);
   }
   const localAppDataPath = process.env.LOCALAPPDATA?.trim() ?? "";
-  const storeRuntimeHomePath = windowsStoreIdentity && storeUserDataPath
-    ? resolveWindowsStoreRuntimeHomeForStartup({
-      localAppDataPath,
-      roamingAppDataPath: app.getPath("appData"),
-      homeDirectory: homedir(),
-      storeUserDataPath,
-      identity: windowsStoreIdentity
-    }) ?? undefined
-    : undefined;
+  const storeLayout = storeUserDataPath ? resolveWindowsStoreFirstRunLayout(storeUserDataPath, homedir(), independentStoreRuntime) : undefined;
   windowsDataLayout = resolveWindowsDataLayout({
     platform: process.platform,
     isPackaged: app.isPackaged,
@@ -601,8 +555,8 @@ function configureAppIdentity(): void {
     appDataPath: app.getPath("appData"),
     localAppDataPath,
     homeDirectory: homedir(),
-    storeUserDataPath,
-    storeRuntimeHomePath
+    storeUserDataPath: storeLayout?.userDataPath,
+    storeRuntimeHomePath: storeLayout?.runtimeHomePath
   });
   const userDataPath = windowsDataLayout?.userDataPath ?? resolveDesktopUserDataPath(edition);
   const memmyHome = windowsDataLayout?.runtimeHomePath ?? resolveDesktopRuntimeHomePath(edition);
@@ -614,6 +568,10 @@ function configureAppIdentity(): void {
       const memoryDatabasePath = join(memmyHome, "memory-service", "memory.sqlite");
       process.env.MEMMY_MEMORY_DB = memoryDatabasePath;
       process.env.MEMORY_SERVICE_DB = memoryDatabasePath;
+      if (isWindowsStore) {
+        process.env.MEMMY_AGENT_DATA_DIR = memmyHome;
+        process.env.MEMMY_AGENT_SESSION_DAG_DIR = join(memmyHome, "session-dag");
+      }
     }
   } else {
     process.env.MEMMY_HOME ??= memmyHome;
@@ -1325,8 +1283,11 @@ async function checkForUpdatesForRenderer(sender: WebContents): Promise<DesktopU
   }
   const update = await checkForUpdates();
   if (update.status !== "available") return update;
-  if (update.provider === "store-migration" && update.preparedUpdate?.kind === "store-migration") {
-    windowsStoreMigrationOfferRegistry.bindOwner(update.preparedUpdate, ownerId);
+  if (update.provider === "store-migration" && update.storeMigrationOffer) {
+    windowsStoreMigrationOfferRegistry.bindOwner(update.storeMigrationOffer, ownerId);
+    if (update.preparedUpdate?.kind === "store-migration") {
+      windowsStoreMigrationOfferRegistry.markPrepared(ownerId, update.storeMigrationOffer);
+    }
   }
   return {
     ...update,
@@ -1432,6 +1393,17 @@ async function checkForUpdates(): Promise<DesktopUpdateCheckResult> {
   }
 
   const currentVersion = resolveDesktopAppVersion();
+  return checkLegacyUpdateThenStore({
+    checkLegacy: () => checkForLegacyInstallerUpdates(currentVersion),
+    checkStore: async () => {
+      const migration = await prepareWindowsStoreMigrationOffer();
+      return migration ? { status: "available", provider: "store-migration", currentVersion,
+        updateMode: "manual", ...migration } : null;
+    }
+  });
+}
+
+async function checkForLegacyInstallerUpdates(currentVersion: string): Promise<DesktopUpdateCheckResult> {
   const manifestUrl = resolveUpdateManifestUrl();
   if (!manifestUrl) {
     windowsStoreMigrationOfferRegistry.clear();
@@ -1450,16 +1422,6 @@ async function checkForUpdates(): Promise<DesktopUpdateCheckResult> {
   }
 
   if (compareVersionSegments(latestVersion, currentVersion) <= 0) {
-    const storeMigration = await prepareWindowsStoreMigrationOffer();
-    if (storeMigration) {
-      return {
-        status: "available",
-        provider: "store-migration",
-        currentVersion,
-        updateMode: "manual",
-        preparedUpdate: storeMigration
-      };
-    }
     return { status: "latest", currentVersion, latestVersion };
   }
 
@@ -1529,9 +1491,8 @@ async function checkForWindowsStoreUpdates(): Promise<DesktopUpdateCheckResult> 
   };
 }
 
-async function prepareWindowsStoreMigrationOffer(): Promise<Extract<
-  DesktopPreparedUpdateHandle,
-  { kind: "store-migration" }
+async function prepareWindowsStoreMigrationOffer(): Promise<Pick<
+  DesktopUpdateCheckResult, "storeMigrationOffer" | "preparedUpdate"
 > | null> {
   if (process.platform !== "win32" || !app.isPackaged || isWindowsStoreApp() || !windowsDataLayout) {
     windowsStoreMigrationOfferRegistry.clear();
@@ -1564,37 +1525,20 @@ async function prepareWindowsStoreMigrationOffer(): Promise<Extract<
       currentVersion
     );
     const contextKey = createWindowsStoreMigrationOfferContextKey(policy, authority);
-    const statePath = resolveCurrentWindowsStoreTransitionStatePath();
-    const existingState = await readWindowsStoreTransitionState(statePath);
-    if (existingState?.phase === "cleaned") {
-      windowsStoreMigrationOfferRegistry.clear();
-    }
-    const reusableOffer = existingState?.phase === "cleaned"
-      ? null
-      : windowsStoreMigrationOfferRegistry.findReusable(contextKey);
-    const transactionId = existingState?.phase === "cleaned"
-      ? randomUUID()
-      : existingState?.transactionId ?? reusableOffer?.transactionId ?? randomUUID();
-    const binding = createCurrentWindowsStoreTransitionBinding(
-      transactionId,
-      policy,
-      authority
-    );
-    if (existingState && existingState.phase !== "cleaned") {
-      if (existingState.phase !== "authority-recorded"
-          && existingState.phase !== "store-install-launched") {
-        return null;
-      }
-      assertWindowsStoreTransitionBinding(existingState, binding);
-    }
-    const preparedUpdate = windowsStoreMigrationOfferRegistry.getOrCreate({
+    const reusableOffer = windowsStoreMigrationOfferRegistry.findReusable(contextKey);
+    const transactionId = reusableOffer?.transactionId ?? randomUUID();
+    const storeMigrationOffer = windowsStoreMigrationOfferRegistry.getOrCreate({
       transactionId,
       acquisitionUri: policy.acquisitionUri,
       contextKey,
       policy,
       authority
     });
-    return preparedUpdate;
+    const installerPath = await currentWindowsStoreWebInstaller().findPrepared(policy);
+    return {
+      storeMigrationOffer,
+      ...(installerPath ? { preparedUpdate: storeMigrationOffer } : {})
+    };
   } catch (error) {
     console.warn("Windows Store migration offer skipped:", error);
     return null;
@@ -1719,6 +1663,9 @@ async function waitForWindowsPreparedRequiredUpdateBeforeBoot(): Promise<boolean
   const lockPath = resolvePreparedRequiredUpdateLockPath();
 
   try {
+    if (existsSync(lockPath) && lockPath === `${resolvePreparedRequiredUpdatePath()}.lock`) {
+      await recoverWindowsPreparedInstallerLock(lockPath);
+    }
     if (existsSync(lockPath)) {
       await writePackagedStartupLog("boot:prepared-required-update waiting-for-lock win32");
       if (existsSync(resolveWindowsUpdatePromptMarkerPath())) {
@@ -2459,6 +2406,46 @@ async function waitForPreparedRequiredUpdateLock(): Promise<void> {
   }
 }
 
+async function recoverWindowsPreparedInstallerLock(lockPath: string): Promise<void> {
+  const localAppData = process.env.LOCALAPPDATA;
+  const systemRoot = process.env.SystemRoot;
+  if (!localAppData || !systemRoot) return;
+  const recoveryPath = join(localAppData, "Memmy", "launcher", "MemmyWindowsUpgradeRecovery.ps1");
+  if (!existsSync(recoveryPath)) return;
+  await new Promise<void>((resolveRecovery) => {
+    let child: ReturnType<typeof execFile> | undefined;
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      console.warn("Windows update lock recovery timed out");
+      try { child?.kill(); } catch { /* Recovery must not wait for a stuck child. */ }
+      child?.stdout?.destroy();
+      child?.stderr?.destroy();
+      resolveRecovery();
+    }, 5_000);
+    timer.unref();
+    try {
+      child = execFile(join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), [
+        "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", recoveryPath,
+        "-PreparedInstallerLock", "-InstallDir", dirname(process.execPath), "-LockPath", lockPath,
+        "-LogPath", join(localAppData, "Memmy", "upgrade-logs", "windows-update-lock.log")
+      ], { windowsHide: true, timeout: 5_000 }, (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (error) console.warn("Windows update lock still active or recovery deferred:", error.message);
+        resolveRecovery();
+      });
+    } catch (error) {
+      clearTimeout(timer);
+      settled = true;
+      console.warn("Windows update lock recovery unavailable:", error);
+      resolveRecovery();
+    }
+  });
+}
+
 /**
  * Waits for the just-started background update helper to create its lock.
  *
@@ -2622,13 +2609,20 @@ async function downloadUpdate(
     return downloadWindowsStoreUpdate(update, options, progressTarget);
   }
   if (update.provider === "store-migration") {
-    const preparedUpdate = update.preparedUpdate;
+    let preparedUpdate = update.storeMigrationOffer;
     if (!progressTarget || preparedUpdate?.kind !== "store-migration") {
       throw new Error("Microsoft Store migration offer is unavailable for this renderer");
     }
+    const activeOffer = windowsStoreMigrationOfferRegistry.read(progressTarget.id, preparedUpdate);
+    const filePath = await currentWindowsStoreWebInstaller(progressTarget).prepare(activeOffer.policy);
+    // A slow download can outlive the original offer. Refresh from the trusted
+    // main-process snapshot and keep the verified result usable in this window.
+    preparedUpdate = windowsStoreMigrationOfferRegistry.getOrCreate(activeOffer);
     windowsStoreMigrationOfferRegistry.bindOwner(preparedUpdate, progressTarget.id);
+    windowsStoreMigrationOfferRegistry.markPrepared(progressTarget.id, preparedUpdate);
+    await emitCompletedUpdateDownloadProgress(activeOffer.policy.acquisitionUri, filePath, progressTarget);
     if (options.openInstaller === false) {
-      return { preparedUpdate, opened: false };
+      return { preparedUpdate, filePath, opened: false };
     }
     return openUpdateInstaller(preparedUpdate, progressTarget.id);
   }
@@ -2983,6 +2977,13 @@ async function openUpdateInstaller(
   };
 }
 
+function currentWindowsStoreWebInstaller(progressTarget?: WebContents) {
+  return createWindowsStoreWebInstaller({
+    updatesDirectory: resolveUpdatesDirectory(),
+    download: (url, filePath) => downloadUpdatePackageWithLock(url, filePath, progressTarget)
+  });
+}
+
 async function openWindowsStoreMigration(
   preparedUpdate: Extract<DesktopPreparedUpdateHandle, { kind: "store-migration" }>,
   ownerWebContentsId: number | undefined
@@ -2995,36 +2996,42 @@ async function openWindowsStoreMigration(
     ownerWebContentsId,
     preparedUpdate,
     async (activeOffer) => {
-      // Opening the acquisition route is the irreversible handoff boundary.
-      // Re-establish and attest the native-HKCU broker here instead of relying
-      // only on the best-effort startup preparation.
-      await requireCurrentWindowsStoreLegacyCleanupBroker();
+      const installer = currentWindowsStoreWebInstaller();
+      if (!await installer.findPrepared(activeOffer.policy)) {
+        throw new Error("Microsoft Store Web Install is not downloaded; check for updates and retry");
+      }
+      // Cleanup is optional. Store can acquire data even when this old installer
+      // cannot create its broker or persist an installation journal.
+      await ensureCurrentWindowsStoreLegacyCleanupBroker();
       const binding = createCurrentWindowsStoreTransitionBinding(
         activeOffer.transactionId,
         activeOffer.policy,
         activeOffer.authority
       );
-      const statePath = resolveCurrentWindowsStoreTransitionStatePath();
-      let state = await readWindowsStoreTransitionState(statePath);
-      if (!state || state.phase === "cleaned") {
-        state = createWindowsStoreTransitionState(binding);
+      let state = createWindowsStoreTransitionState(binding);
+      let statePath: string | undefined;
+      try {
+        statePath = resolveCurrentWindowsStoreTransitionStatePath();
+        await rename(statePath, `${statePath}.before-handoff-${randomUUID()}`).catch((error: NodeJS.ErrnoException) => {
+          if (error.code !== "ENOENT") throw error;
+        });
         await writeWindowsStoreTransitionState(statePath, state);
-      } else {
-        assertWindowsStoreTransitionBinding(state, binding);
-        if (state.phase !== "authority-recorded" && state.phase !== "store-install-launched") {
-          throw new Error(`Microsoft Store migration cannot be opened from phase ${state.phase}`);
-        }
+      } catch (error) {
+        console.warn("Windows Store migration journal unavailable; continuing with data discovery:", error);
       }
 
-      await shell.openExternal(activeOffer.policy.acquisitionUri);
-      if (state.phase === "authority-recorded") {
+      const filePath = await installer.launchPrepared(activeOffer.policy);
+      if (statePath && state.phase === "authority-recorded") {
         state = advanceWindowsStoreTransitionState(state, "store-install-launched");
-        await writeWindowsStoreTransitionState(statePath, state);
+        await writeWindowsStoreTransitionState(statePath, state).catch((error: unknown) => {
+          console.warn("Windows Store migration launch could not be recorded:", error);
+        });
       }
       await clearPreparedRequiredUpdate().catch(() => undefined);
       await clearPreparedRequiredUpdateAttempt().catch(() => undefined);
+      isManagedUpdateInstallerRunning = true;
       scheduleQuitForWindowsStoreMigration();
-      return { preparedUpdate, opened: true, willQuit: true };
+      return { preparedUpdate, filePath, opened: true, willQuit: true };
     }
   );
 }
@@ -3057,52 +3064,6 @@ function resolveCurrentWindowsStoreTransitionStatePath(): string {
   return resolveWindowsStoreTransitionStatePath(localAppDataPath);
 }
 
-function resolveCurrentWindowsStoreTransitionCoordinatorOptions(): WindowsStoreTransitionCoordinatorOptions {
-  const localAppDataPath = process.env.LOCALAPPDATA?.trim();
-  if (!localAppDataPath || !windowsStoreIdentity || !windowsDataLayout || !isWindowsStoreApp()) {
-    throw new Error("Microsoft Store transition requires the running package identity and data layout");
-  }
-  return {
-    localAppDataPath,
-    identity: {
-      edition: windowsStoreIdentity.edition,
-      packageFamilyName: windowsStoreIdentity.packageFamilyName,
-      aumid: windowsStoreIdentity.aumid
-    },
-    layout: {
-      userDataPath: windowsDataLayout.userDataPath,
-      runtimeHomePath: windowsDataLayout.runtimeHomePath,
-      pointerPath: windowsDataLayout.pointerPath
-    }
-  };
-}
-
-async function commitCurrentWindowsStoreRuntimeSelectionForVerifiedBoot(): Promise<void> {
-  if (!isWindowsStoreApp()) return;
-  const localAppDataPath = process.env.LOCALAPPDATA?.trim();
-  if (!localAppDataPath || !windowsStoreIdentity || !windowsDataLayout) {
-    throw new Error("Windows Store runtime selection requires the running package identity and data layout");
-  }
-  await commitWindowsStoreRuntimeSelectionForVerifiedBoot({
-    localAppDataPath,
-    roamingAppDataPath: app.getPath("appData"),
-    homeDirectory: homedir(),
-    storeUserDataPath: windowsDataLayout.userDataPath,
-    runtimeHomePath: windowsDataLayout.runtimeHomePath,
-    identity: windowsStoreIdentity
-  });
-}
-
-async function prepareCurrentWindowsStoreTransitionForBoot(): Promise<void> {
-  if (!isWindowsStoreApp()) return;
-  const result = await prepareWindowsStoreTransitionForBoot(
-    resolveCurrentWindowsStoreTransitionCoordinatorOptions()
-  );
-  if (result.status !== "none") {
-    await writePackagedStartupLog(`boot:store-transition ${result.phase}`);
-  }
-}
-
 function resolveCurrentWindowsStoreLegacyTransitionOptions(): WindowsStoreLegacyTransitionOptions {
   if (!isWindowsStoreApp() || !windowsStoreIdentity || !windowsDataLayout) {
     throw new Error("Windows Store legacy transition requires the running package identity");
@@ -3119,7 +3080,9 @@ function resolveCurrentWindowsStoreLegacyTransitionOptions(): WindowsStoreLegacy
     localAppDataPath,
     roamingAppDataPath: app.getPath("appData"),
     homeDirectory: homedir(),
-    storeUserDataPath: windowsDataLayout.userDataPath,
+    storeUserDataPath: resolveWindowsStoreUserDataPath({
+      isWindowsStore: true, resourcesPath: resolveCurrentWindowsStorePackagedResourcesPath(), localAppDataPath
+    })!,
     desktopPath: app.getPath("desktop"),
     identity: {
       edition: windowsStoreIdentity.edition,
@@ -3129,26 +3092,16 @@ function resolveCurrentWindowsStoreLegacyTransitionOptions(): WindowsStoreLegacy
   };
 }
 
-function runCurrentWindowsStoreTransitionPreReady(): void {
-  if (!isPackagedWindowsStorePreReadyProcess) return;
-  runWindowsStoreTransitionPreReadyWorker({
+function runCurrentWindowsStoreTransitionPreReady(recoveryOnlyError?: string): boolean {
+  if (!isPackagedWindowsStorePreReadyProcess) return true;
+  const result = runWindowsStoreTransitionPreReadyWorker({
     executablePath: process.execPath,
     workerPath: join(import.meta.dirname, "windows-store-transition-pre-ready-worker.js"),
     input: {
-      legacy: resolveCurrentWindowsStoreLegacyTransitionOptions(),
-      coordinator: resolveCurrentWindowsStoreTransitionCoordinatorOptions()
+      legacy: resolveCurrentWindowsStoreLegacyTransitionOptions(), recoveryOnlyError
     }
   });
-}
-
-async function rollbackCurrentWindowsStoreTransitionAfterFailedBoot(): Promise<void> {
-  if (!isWindowsStoreApp()) return;
-  const result = await rollbackWindowsStoreTransitionAfterFailedBoot(
-    resolveCurrentWindowsStoreTransitionCoordinatorOptions()
-  );
-  if (result.status !== "none") {
-    await writePackagedStartupLog(`boot:store-transition rolled-back ${result.transactionId}`);
-  }
+  return result.status === "ready";
 }
 
 async function applyWindowsStoreTransitionSourceBarrier(): Promise<boolean> {
@@ -3861,6 +3814,12 @@ function createWindowsUpdateInstallScript(): string {
 
 $ErrorActionPreference = 'Continue'
 $installExit = 0
+$installerWaitTimeoutMs = 300000
+$installTimedOut = $false
+$ownsLock = $false
+$retainInstallerLock = $false
+$lockOwnerToken = [Guid]::NewGuid().ToString('N')
+$installerProcess = $null
 $lockPath = ''
 $promptMarkerPath = ''
 if ($MarkerPath) {
@@ -3870,6 +3829,42 @@ if ($MarkerPath) {
 
 function Write-MemmyUpdateLog([string]$Message) {
   Add-Content -LiteralPath $LogPath -Value ("[{0}] {1}" -f (Get-Date), $Message)
+}
+
+function Write-MemmyInstallerLockState([string]$DestinationDirectory = $lockPath) {
+  if (-not $DestinationDirectory) { return }
+  $ownerProcess = [System.Diagnostics.Process]::GetCurrentProcess()
+  $state = @{ schemaVersion = 1; ownerToken = $lockOwnerToken; helperPid = $PID;
+    helperStartedAtTicks = [string]$ownerProcess.StartTime.ToUniversalTime().Ticks;
+    appExe = $AppExe; installerPath = $Installer; expectedVersion = $ExpectedVersion;
+    installerPid = $null; installerStartedAtTicks = $null }
+  if ($null -ne $installerProcess) {
+    $state.installerPid = $installerProcess.Id
+    $state.installerStartedAtTicks = [string]$installerProcess.StartTime.ToUniversalTime().Ticks
+  }
+  $statePath = Join-Path $DestinationDirectory 'state.json'
+  $temporaryState = Join-Path $DestinationDirectory ('state-' + $lockOwnerToken + '.tmp')
+  $state | ConvertTo-Json | Set-Content -LiteralPath $temporaryState -Encoding UTF8 -ErrorAction Stop
+  Move-Item -LiteralPath $temporaryState -Destination $statePath -Force -ErrorAction Stop
+}
+
+function Clear-MemmyOwnedUpdateLock {
+  if (-not $script:ownsLock) { return }
+  $script:ownsLock = $false
+  if ($retainInstallerLock) { return }
+  if ($lockPath -and (Test-Path -LiteralPath $lockPath)) {
+    $statePath = Join-Path $lockPath 'state.json'
+    if (Test-Path -LiteralPath $statePath) {
+      $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+      if ($state.ownerToken -ne $lockOwnerToken) { return }
+    }
+    if ($promptMarkerPath) {
+      Remove-Item -LiteralPath $promptMarkerPath -Force -ErrorAction SilentlyContinue
+    }
+    Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $lockPath ('state-' + $lockOwnerToken + '.tmp')) -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
+  }
 }
 
 function Start-MemmyAfterUpdate([string]$ExePath, [string]$WorkingDir) {
@@ -3897,11 +3892,32 @@ try {
   Write-MemmyUpdateLog "expected version $ExpectedVersion"
 
   if ($lockPath) {
+    $claimPath = $lockPath + '.claim-' + $lockOwnerToken
+    $claimCreated = $false
     try {
-      New-Item -ItemType Directory -Path $lockPath -ErrorAction Stop | Out-Null
+      # Publish a complete guard in one directory rename. A crash while preparing
+      # metadata leaves an inactive claim, never an unreadable active lock.
+      if (-not [string]::Equals([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($claimPath)),
+          [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($lockPath)), [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Update lock claim is outside its owner directory'
+      }
+      New-Item -ItemType Directory -Path $claimPath -ErrorAction Stop | Out-Null
+      $claimCreated = $true
+      Write-MemmyInstallerLockState -DestinationDirectory $claimPath
+      [System.IO.Directory]::Move($claimPath, $lockPath)
+      $ownsLock = $true
     } catch {
-      Write-MemmyUpdateLog 'another Memmy update installer is already running'
-      exit 0
+      if (Test-Path -LiteralPath $lockPath) {
+        Write-MemmyUpdateLog 'another Memmy update installer is already running'
+        exit 0
+      }
+      throw
+    } finally {
+      if ($claimCreated -and (Test-Path -LiteralPath $claimPath)) {
+        Remove-Item -LiteralPath (Join-Path $claimPath 'state.json') -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath (Join-Path $claimPath ('state-' + $lockOwnerToken + '.tmp')) -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $claimPath -Force -ErrorAction SilentlyContinue
+      }
     }
   }
 
@@ -3980,8 +3996,33 @@ try {
     }
 
     $arguments = @('/S', '--updated', '/currentuser', ('/D=' + $appDir))
-    $installerProcess = Start-Process -FilePath $Installer -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden
-    $installExit = if ($null -eq $installerProcess.ExitCode) { 0 } else { $installerProcess.ExitCode }
+    # Wait only for the installer. Its long-lived cleanup broker must not delay reopening Memmy.
+    $installerProcess = Start-Process -FilePath $Installer -ArgumentList $arguments -PassThru -WindowStyle Hidden
+    $retainInstallerLock = $true
+    Write-MemmyInstallerLockState
+    if ($installerProcess.WaitForExit($installerWaitTimeoutMs)) {
+      $retainInstallerLock = $false
+      $installExit = if ($null -eq $installerProcess.ExitCode) { 1 } else { $installerProcess.ExitCode }
+    } else {
+      # Recheck an exit racing the deadline before reporting a timeout.
+      $installerProcess.Refresh()
+      if ($installerProcess.HasExited) {
+        $retainInstallerLock = $false
+        $installExit = if ($null -eq $installerProcess.ExitCode) { 1 } else { $installerProcess.ExitCode }
+      } else {
+        $installExit = 1460
+        $installTimedOut = $true
+        $retainInstallerLock = $true
+        if ($promptMarkerPath) {
+          Set-Content -LiteralPath $promptMarkerPath -Value ([DateTime]::UtcNow.ToString('o')) -Encoding UTF8
+        }
+        Write-MemmyUpdateLog ('installer wait timed out; installer PID ' + $installerProcess.Id + '; startup recovery will release protection after this installer exits')
+        if ($MarkerPath) {
+          $attemptedVersion = if ($ExpectedVersion) { $ExpectedVersion } else { 'unknown' }
+          Set-Content -LiteralPath "$MarkerPath.attempt" -Value $attemptedVersion -Encoding UTF8
+        }
+      }
+    }
 
     if (Test-Path -LiteralPath $AppExe) {
       $afterVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($AppExe)
@@ -4008,6 +4049,7 @@ try {
     Remove-Item -LiteralPath $MarkerPath -Force -ErrorAction SilentlyContinue
   }
   if ($installExit -eq 0 -and $OpenAfterInstall -eq '1') {
+    Clear-MemmyOwnedUpdateLock
     $started = Start-MemmyAfterUpdate -ExePath $AppExe -WorkingDir $appDir
     if (-not $started) {
       Write-MemmyUpdateLog 'failed to start app after install'
@@ -4017,13 +4059,21 @@ try {
   Write-MemmyUpdateLog ('unexpected error: ' + ($_ | Out-String))
   $installExit = 1
 } finally {
-  if ($lockPath) {
-    Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
-  }
-  if ($promptMarkerPath) {
-    Remove-Item -LiteralPath $promptMarkerPath -Force -ErrorAction SilentlyContinue
-  }
+  Clear-MemmyOwnedUpdateLock
   Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+}
+
+if ($installTimedOut) {
+  # The helper stops waiting, but keeps a recoverable guard while files may still be changing.
+  # Never kill an installer or launch Memmy while installation may still be writing files.
+  try {
+    $message = 'The update is taking longer than expected. Wait for the installer to finish, then reopen Memmy. If it does not finish, run the downloaded installer again. Your data has been kept.'
+    if ([System.Globalization.CultureInfo]::CurrentUICulture.Name -like 'zh*') {
+      $message = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from("更新耗时较长。请等待安装器结束后重新打开 Memmy；若安装器一直未结束，请重新运行已下载的安装包。用户数据已保留。", "utf8").toString("base64")}'))
+    }
+    $notice = New-Object -ComObject WScript.Shell
+    $null = $notice.Popup($message, 30, 'Memmy', 48)
+  } catch { Write-MemmyUpdateLog ('update timeout notification failed: ' + ($_ | Out-String)) }
 }
 
 exit $installExit
@@ -4087,11 +4137,8 @@ function scheduleQuitForManualUpdateInstall(): void {
 }
 
 function scheduleQuitForWindowsStoreMigration(): void {
-  setTimeout(() => {
-    isQuitting = true;
-    hideAppShellForQuit();
-    app.quit();
-  }, WINDOWS_UPDATE_INSTALL_QUIT_DELAY_MS);
+  stopMemoryServiceForCurrentQuit = true;
+  scheduleQuitForManualUpdateInstall();
 }
 
 /**
@@ -4241,7 +4288,18 @@ function resolveDownloadedUpdatePath(filePath: string): string {
   if (candidatePath !== updatesDirectory && !candidatePath.startsWith(`${updatesDirectory}${sep}`)) {
     throw new Error("update installer path is outside the update directory");
   }
-  return candidatePath;
+  // Resolve junctions and Windows 8.3 aliases before deciding which installer
+  // may use the NSIS/DMG path. Store Web Install has its own verified handoff.
+  const actualDirectory = realpathSync.native(updatesDirectory);
+  const actualFilePath = realpathSync.native(candidatePath);
+  const actualRelativePath = relative(actualDirectory, actualFilePath);
+  if (actualRelativePath.split(sep)[0]?.toLowerCase() === "store-web-install") {
+    throw new Error("Microsoft Store Web Install requires its main-owned migration handle");
+  }
+  if (!actualRelativePath || actualRelativePath === ".." || actualRelativePath.includes(sep)) {
+    throw new Error("update installer must be directly inside the update directory");
+  }
+  return actualFilePath;
 }
 
 /**
@@ -5939,6 +5997,7 @@ async function sendAppExitEventBeforeQuit(): Promise<void> {
 
 let windowsStorePreReadyTransitionError: unknown = null;
 let windowsStorePreReadyTransitionCompleted = false;
+let windowsStoreLegacyProcessesBlocked = false;
 let hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (isPackagedWindowsStorePreReadyProcess) {
   if (!hasSingleInstanceLock) {
@@ -5948,10 +6007,21 @@ if (isPackagedWindowsStorePreReadyProcess) {
     // then let a plain Node child move that layout before Chromium can open files inside it.
     try {
       configureAppIdentity();
-      runCurrentWindowsStoreTransitionPreReady();
+      windowsStoreLegacyProcessesBlocked = !runCurrentWindowsStoreTransitionPreReady();
+      configureAppIdentity();
       windowsStorePreReadyTransitionCompleted = true;
     } catch (error) {
       windowsStorePreReadyTransitionError = error;
+      // Retry only recovery of the interrupted transaction, never another import.
+      // Process ownership must be confirmed independently even if the worker is broken.
+      try {
+        windowsStoreLegacyProcessesBlocked = !runCurrentWindowsStoreTransitionPreReady(String(error));
+      } catch {
+        const transitionOptions = resolveCurrentWindowsStoreLegacyTransitionOptions();
+        windowsStoreLegacyProcessesBlocked = !stopLegacyForStoreStartupSync(transitionOptions);
+        try { recordWindowsStoreWorkerFailureSync(transitionOptions.storeUserDataPath, error); } catch { /* optional marker is logged with the worker failure */ }
+      }
+      configureAppIdentity();
     }
   }
 }
@@ -6035,7 +6105,14 @@ app.whenReady().then(async () => {
   }
 
   if (windowsStorePreReadyTransitionError) {
-    throw windowsStorePreReadyTransitionError;
+    await writePackagedStartupLog(`boot:store-data-import-failed-open\n${formatStartupError(windowsStorePreReadyTransitionError)}`);
+  }
+  if (windowsStoreLegacyProcessesBlocked) {
+    await writePackagedStartupLog("boot:store-legacy-processes-blocked");
+    dialog.showMessageBoxSync({ type: "warning", title: "Memmy 无法关闭旧版本",
+      message: "系统检测到旧版本 Memmy，请卸载旧版本后再打开新版。" });
+    app.quit();
+    return;
   }
   if (windowsStorePreReadyTransitionCompleted) {
     await writePackagedStartupLog("boot:store-transition pre-ready");
@@ -6045,17 +6122,24 @@ app.whenReady().then(async () => {
     return;
   }
 
-  // Establish/repair the unpackaged broker before holding cleanup-active for
-  // this NSIS process. The native helper can then retire an orphaned durable
-  // journal when no Store package is registered. If Store cleanup wins this
-  // narrow window, the source barrier below observes it and safely quits.
-  await ensureCurrentWindowsStoreLegacyCleanupBroker();
+  // Retire only a verified orphan before taking the lifetime cleanup guard.
+  // This is a bounded one-shot recovery, not a resident Store cleanup broker.
+  try {
+    await recoverWindowsStoreLegacyCleanupJournal({
+      platform: process.platform,
+      isPackaged: app.isPackaged,
+      isWindowsStore: isWindowsStoreApp(),
+      resourcesPath: process.resourcesPath,
+      localAppDataPath: process.env.LOCALAPPDATA ?? ""
+    });
+  } catch (error) {
+    console.warn("Windows orphan cleanup journal recovery deferred:", error);
+    // The source barrier still owns the decision; never bypass an active cleanup.
+  }
 
   if (await applyWindowsStoreTransitionSourceBarrier()) {
     return;
   }
-
-  await prepareCurrentWindowsStoreTransitionForBoot();
 
   const windowsUpgradeLockPath = resolveWindowsUpgradeRelayLockPath();
   if (!isWindowsStoreApp() && windowsUpgradeLockPath && existsSync(windowsUpgradeLockPath)) {
@@ -6068,10 +6152,6 @@ app.whenReady().then(async () => {
   console.error(error);
   closeSplashWindow(); // Close the splash even on boot failure, so it does not stay stuck on screen
   await writePackagedStartupLog(`boot:error\n${formatStartupError(error)}`);
-  await rollbackCurrentWindowsStoreTransitionAfterFailedBoot().catch(async (rollbackError: unknown) => {
-    console.warn("Windows Store transition rollback failed:", rollbackError);
-    await writePackagedStartupLog(`boot:store-transition-rollback-failed\n${formatStartupError(rollbackError)}`);
-  });
   showPackagedStartupError(error);
   app.quit();
 });

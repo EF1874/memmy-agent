@@ -38,7 +38,7 @@ describe("Windows Store legacy transition", () => {
     const preReadyIndex = source.indexOf("runCurrentWindowsStoreTransitionPreReady();");
     const whenReadyIndex = source.indexOf("app.whenReady().then(async () => {");
     const finalUserDataIndex = source.indexOf('app.setPath("userData", storeUserDataPath);');
-    const runtimeSelectionIndex = source.indexOf("resolveWindowsStoreRuntimeHomeForStartup({");
+    const runtimeSelectionIndex = source.indexOf("resolveWindowsStoreFirstRunLayout(storeUserDataPath,");
 
     expect(gateIndex).toBeGreaterThanOrEqual(0);
     expect(lockIndex).toBeGreaterThan(gateIndex);
@@ -47,7 +47,8 @@ describe("Windows Store legacy transition", () => {
     expect(preReadyIndex).toBeLessThan(whenReadyIndex);
     expect(finalUserDataIndex).toBeGreaterThan(gateIndex);
     expect(finalUserDataIndex).toBeLessThan(runtimeSelectionIndex);
-    expect(source).toContain("retireLegacyInstallAuthority: (state) => retireWindowsStoreLegacyInstallAuthority({");
+    expect(source).toContain("finishWindowsStoreFirstRunIntegration(resolveCurrentWindowsStoreLegacyTransitionOptions(),");
+    expect(source).not.toContain("throw windowsStorePreReadyTransitionError;");
     expect(source.slice(whenReadyIndex)).not.toContain(
       "await prepareCurrentWindowsStoreLegacyTransitionBeforeLock();"
     );

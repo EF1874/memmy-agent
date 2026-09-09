@@ -35,6 +35,36 @@ const expectSourceOrder = (
 };
 
 describe("Windows Store native update helper boundary", () => {
+  it("publishes one owned Store shortcut with a stable icon and preserves other applications", async () => {
+    const source = await readFile(helperSourcePath, "utf8");
+    const shortcuts = sourceBetween(source, "std::filesystem::path store_shortcut_local_app_data()", "LegacySourceExecutableIdentity capture_source_executable_identity(");
+    expect(shortcuts).toContain("GetCurrentPackageFamilyName");
+    expect(shortcuts).toContain("GetCurrentPackagePath");
+    expect(shortcuts).toContain('L"LocalState" / L"Memmy" / L"shell"');
+    expect(shortcuts).toContain("SetIconLocation(icon.c_str(), 0)");
+    expect(shortcuts).toContain("SetIDList(item.value)");
+    expect(shortcuts).toContain('index == 0 ? L"Memmy.lnk"');
+    expect(shortcuts).not.toContain('L"Memmy (Microsoft Store).lnk"');
+    expect(shortcuts).toContain("std::filesystem::exists(target) && !owned(existing)");
+    expect(shortcuts).toContain("PackageFamilyNameFromFullName");
+    expect(shortcuts).toContain("if (owned(existing)) delete_pinned_store_shortcut(existing)");
+    expect(shortcuts).toContain("SHCNE_UPDATEITEM");
+  });
+
+  it("rechecks process-exit races without widening the legacy process ownership boundary", async () => {
+    const source = await readFile(helperSourcePath, "utf8");
+    const discovery = sourceBetween(source, "std::vector<ProcessSnapshotEntry> discover_legacy_import_targets(", "bool stop_legacy_for_data_import()");
+    expect(discovery).toContain("is_windows_apps_path(entry.image_path)");
+    expect(discovery).toContain("process_user_sid(process.get()) != user_sid");
+    expect(discovery).toContain("process_package_family(process.get())");
+    expect(discovery).toContain("WaitForSingleObject(process.get(), 0) == WAIT_OBJECT_0");
+    const shutdown = sourceBetween(source, "bool stop_legacy_for_data_import()", "void create_store_shortcut(");
+    expect(shutdown).toContain("memmy::stop_legacy_until_clear(");
+    expect(shutdown).toContain("terminate_legacy_process_tree(targets, deadline)");
+    expect(shutdown).toContain("25'000");
+    expect(shutdown).toContain("legacy-stop result=");
+  });
+
   it("exposes StoreContext commands plus authority-bound legacy takeover and cleanup", async () => {
     const source = await readFile(helperSourcePath, "utf8");
     const commands = [...source.matchAll(/value == L"([a-z-]+)"/gu)]
@@ -53,6 +83,12 @@ describe("Windows Store native update helper boundary", () => {
       "startup-enable",
       "startup-disable",
       "prepare-legacy-takeover",
+      "stop-legacy-for-data-import",
+      "create-store-shortcut",
+      "discover-legacy-installation",
+      "launch-discovered-legacy-cleanup",
+      "run-discovered-legacy-cleanup",
+      "recover-legacy-cleanup-journal",
       "ensure-legacy-cleanup-broker",
       "legacy-cleanup-broker",
       "stop-legacy-cleanup-broker",
@@ -424,6 +460,11 @@ describe("Windows Store native update helper boundary", () => {
       "void retire_orphaned_cleanup_journal_for_native_install()",
       "void send_broker_frame("
     );
+    const orphanValidation = sourceBetween(
+      source,
+      "void validate_orphaned_cleanup_journal_for_native_install(",
+      "void retire_orphaned_cleanup_journal_for_native_install()"
+    );
     const offlineStop = sourceBetween(
       source,
       "void validate_offline_cleanup_broker_stop()",
@@ -443,12 +484,17 @@ describe("Windows Store native update helper boundary", () => {
     );
     expect(packageRegistration).toContain(".empty() ||");
 
-    expect(nativeInstallRetirement).toContain(
+    expect(orphanValidation).toContain(
       "Refusing to retire a cleanup journal while a Memmy Store package remains registered"
     );
     expectSourceOrder(
-      nativeInstallRetirement,
+      orphanValidation,
       "registered_package_full_names(allowed_memmy_agent_package_family)",
+      "if (journal.phase == LegacyCleanupJournalPhase::Acknowledged)"
+    );
+    expectSourceOrder(
+      nativeInstallRetirement,
+      "validate_orphaned_cleanup_journal_for_native_install(*journal)",
       "delete_cleanup_journal_file("
     );
     expect(offlineStop).toContain(
@@ -468,6 +514,52 @@ describe("Windows Store native update helper boundary", () => {
       "delete_cleanup_journal_file("
     );
     expect(source.match(/delete_cleanup_journal_file\(/gu)).toHaveLength(5);
+  });
+
+  it("recovers only a fixed orphan journal under exclusive cleanup and mutation locks without starting a broker", async () => {
+    const source = await readFile(helperSourcePath, "utf8");
+    const recovery = sourceBetween(source,
+      "bool recover_orphaned_cleanup_journal()", "void require_parent_held_transition_mutation_mutex()");
+    const validation = sourceBetween(source,
+      "void validate_orphaned_cleanup_journal_for_native_install(",
+      "void retire_orphaned_cleanup_journal_for_native_install()");
+    const entry = sourceBetween(source,
+      "if (command == Command::RecoverLegacyCleanupJournal)",
+      "if (command == Command::EnsureLegacyCleanupBroker ||");
+    const routing = sourceBetween(source,
+      "bool is_legacy_transition_command(Command command)",
+      "bool is_legacy_cleanup_diagnostic_command(Command command)");
+    const ownership = sourceBetween(source, "class scoped_mutex_ownership", "struct ProcessSnapshotEntry");
+
+    expect(entry).toContain("if (argc != 2)");
+    expectSourceOrder(entry, "Orphan cleanup journal recovery accepts no options", "recover_orphaned_cleanup_journal()");
+    expect(entry).toContain('recovered ? "recovered" : "no-journal"');
+    expect(routing).toContain("Command::RecoverLegacyCleanupJournal");
+    expectSourceOrder(recovery, "current_process_has_package_identity()", "scoped_handle cleanup_guard(");
+    expect(recovery).toContain("legacy_transition_cleanup_active_pipe_name()");
+    expect(recovery).toContain("PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE");
+    expectSourceOrder(recovery, "if (!cleanup_guard)", "create_transition_mutation_mutex()");
+    expectSourceOrder(recovery, "mutation_ownership.acquire(mutation_mutex.get())", "read_cleanup_journal()");
+    expectSourceOrder(recovery, "read_cleanup_journal()", "validate_orphaned_cleanup_journal_for_native_install(*journal)");
+    expectSourceOrder(recovery, "validate_orphaned_cleanup_journal_for_native_install(*journal)", "delete_cleanup_journal_file(");
+    expect(recovery).toContain("return false;");
+    expect(recovery).toContain("return true;");
+    expect(ownership).toContain("WaitForSingleObject(handle_, 15000)");
+    expect(ownership).toContain("~scoped_mutex_ownership() noexcept");
+    expect(validation).toContain("validate_persisted_authority_shape(journal.authority, journal.options)");
+    expect(validation).toContain("require_allowed_memmy_package_identity(journal.options)");
+    expect(validation).toContain("registered_package_full_names(allowed_memmy_package_family)");
+    expect(validation).toContain("registered_package_full_names(allowed_memmy_agent_package_family)");
+    expect(validation).toContain("capture_legacy_cleanup_authority()");
+    expect(validation).toContain("FILE_ATTRIBUTE_REPARSE_POINT");
+    for (const forbidden of [
+      "ensure_legacy_cleanup_broker(", "launch_cleanup_broker_process(",
+      "register_cleanup_broker_run_value(", "try_stop_cleanup_broker(",
+      "finalize_legacy_cleanup_unpacked(", "remove_legacy_install_directory(",
+      "legacy_transition_source_lease_pipe_name()", "exclusive_pipe_name_is_owned("
+    ]) {
+      expect(recovery + validation + entry).not.toContain(forbidden);
+    }
   });
 
   it("rejects Store handoff and UI options for every legacy CLI and keeps authorize argument-free", async () => {
@@ -498,6 +590,12 @@ describe("Windows Store native update helper boundary", () => {
 
     expect(classifiedCommands).toEqual([
       "PrepareLegacyTakeover",
+      "StopLegacyForDataImport",
+      "CreateStoreShortcut",
+      "DiscoverLegacyInstallation",
+      "LaunchDiscoveredLegacyCleanup",
+      "RunDiscoveredLegacyCleanup",
+      "RecoverLegacyCleanupJournal",
       "EnsureLegacyCleanupBroker",
       "LegacyCleanupBroker",
       "StopLegacyCleanupBroker",
