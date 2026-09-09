@@ -34,7 +34,7 @@ import type { ConversationMessage, ScanProgress, SourceAdapter } from "./adapter
 import {
   isCompleteTurn,
   orderedTurns,
-  splitTurn,
+  renderTurnClipped,
   stableTurnIdentity,
   legacyTurnId,
   legacyTurnRequestId,
@@ -785,30 +785,25 @@ async function ingestStagedMessages(
     const selectedTurn = store.getTurnMeta(sourceId, turn.conversationId, stableTurnIdentity(turn));
     if (selectedTurn && !selectedTurn.selected) continue;
     let succeeded = true;
-    // Leave ample room for JSON escaping and the add-memory envelope while
-    // keeping every request below the 1 MiB wire limit.
-    const parts = splitTurn(turn, 4000, 512 * 1024);
-    for (const part of parts) {
-      const requestId = parts.length === 1
-        ? legacyTurnRequestId(turn)
-        : createHash("sha256").update([stableTurnIdentity(turn), String(part.partIndex), part.contentHash].join("\u0000")).digest("hex");
-      const turnId = parts.length === 1 ? legacyTurnId(turn) : `${sourceId}:${part.parentTurnId}:${part.partIndex}`;
-      try {
-        const added = service.addMemory({
-          requestId, adapterId: `agent-source:${sourceId}`, content: part.content, layer: "L1",
-          title: titleForTurn(sourceId, part.messages), tags: ["agent-source", sourceId], source: sourceId,
-          turnId, createdAt: part.messages[0]!.createdAt, deferProcessing: true
-        });
-        if (added.duplicate) store.saveResult({ sourceId, conversationId: turn.conversationId, memoryId: added.id });
-        else { store.saveResult({ sourceId, conversationId: turn.conversationId, memoryId: added.id }); memoryIds.push(added.id); written += 1; }
-      } catch (error) {
-        succeeded = false;
-        activeConversationFailed = true;
-        const reason = error instanceof Error ? error.message : String(error);
-        errorCount += 1;
-        if (errors.length < 1000) errors.push(`${turn.conversationId}: ${reason}`);
-        store.saveResult({ sourceId, conversationId: turn.conversationId, error: reason });
-      }
+    // One turn is one memory. Splitting an agentic turn fans a single exchange
+    // out into hundreds of near-empty tool-call fragments, so an oversized turn
+    // is clipped to the wire budget instead of being fanned out.
+    try {
+      const added = service.addMemory({
+        requestId: legacyTurnRequestId(turn), adapterId: `agent-source:${sourceId}`,
+        content: renderTurnClipped(turn.messages), layer: "L1",
+        title: titleForTurn(sourceId, turn.messages), tags: ["agent-source", sourceId], source: sourceId,
+        turnId: legacyTurnId(turn), createdAt: turn.messages[0]!.createdAt, deferProcessing: true
+      });
+      store.saveResult({ sourceId, conversationId: turn.conversationId, memoryId: added.id });
+      if (!added.duplicate) { memoryIds.push(added.id); written += 1; }
+    } catch (error) {
+      succeeded = false;
+      activeConversationFailed = true;
+      const reason = error instanceof Error ? error.message : String(error);
+      errorCount += 1;
+      if (errors.length < 1000) errors.push(`${turn.conversationId}: ${reason}`);
+      store.saveResult({ sourceId, conversationId: turn.conversationId, error: reason });
     }
     if (succeeded) {
       messageCount += turn.messages.length;
