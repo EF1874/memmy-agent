@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { EmbeddingConfig } from "../config/index.js";
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import { stableHash } from "../utils/id.js";
@@ -401,6 +402,12 @@ function candidateEmbeddedEmbeddingModelRoots(): string[] {
   if (resourcesPath) {
     roots.push(join(resourcesPath, EMBEDDED_EMBEDDING_MODEL_ROOT));
   }
+  // `pkg` exposes bundled files below /snapshot. In the normal compiled
+  // layout this resolves to the runtime root as well, so the same lookup
+  // works for the standalone executable and the unpacked runtime package.
+  const moduleDir = dirname(fileURLToPath(import.meta.url));
+  roots.push(resolve(moduleDir, "../../../", EMBEDDED_EMBEDDING_MODEL_ROOT));
+  roots.push(resolve(moduleDir, "../../", EMBEDDED_EMBEDDING_MODEL_ROOT));
   return roots;
 }
 
