@@ -65,7 +65,8 @@ jobs:
           YUNXIAO_PROJECT_NAME: ${{ vars.YUNXIAO_PROJECT_NAME || 'memmy' }}
           YUNXIAO_PARENT_ID: ${{ vars.YUNXIAO_PARENT_ID }}
           # Yunxiao calls the required iteration field "sprint".
-          YUNXIAO_SPRINT_ID: ${{ vars.YUNXIAO_SPRINT_ID }}
+          YUNXIAO_SPRINT_ID: ${{ vars.YUNXIAO_SPRINT_ID || '1b60d4a7ac4f79a141c76141c1' }}
+          YUNXIAO_PARTICIPANT_NAMES: ${{ vars.YUNXIAO_PARTICIPANT_NAMES || '徐之淇,贾澄臻' }}
           YUNXIAO_WORKITEM_CATEGORY: ${{ vars.YUNXIAO_WORKITEM_CATEGORY }}
           YUNXIAO_WORKITEM_TYPE_NAME: ${{ vars.YUNXIAO_WORKITEM_TYPE_NAME }}
           YUNXIAO_PRIORITY_NAME: ${{ vars.YUNXIAO_PRIORITY_NAME }}

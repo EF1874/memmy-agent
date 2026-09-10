@@ -34,6 +34,7 @@ describe("GitHub to Yunxiao sync workflow", () => {
     expect(runStep.env.YUNXIAO_PROJECT_ID).toContain("vars.YUNXIAO_PROJECT_ID");
     expect(runStep.env.YUNXIAO_PARENT_ID).toContain("vars.YUNXIAO_PARENT_ID");
     expect(runStep.env.YUNXIAO_SPRINT_ID).toContain("vars.YUNXIAO_SPRINT_ID");
+    expect(runStep.env.YUNXIAO_PARTICIPANT_NAMES).toContain("vars.YUNXIAO_PARTICIPANT_NAMES");
     expect(runStep.env.YUNXIAO_TOKEN).toContain("secrets.YUNXIAO_TOKEN");
     expect(runStep.run).toContain("python scripts/yunxiao_github_sync.py");
     expect(runStep.env.YUNXIAO_PROJECT_ID).toContain("1832b179386e24414d3891e244");

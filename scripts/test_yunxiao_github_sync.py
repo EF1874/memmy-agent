@@ -71,6 +71,7 @@ class YunxiaoSyncTests(unittest.TestCase):
             "priority_id": "priority",
             "parent_id": "directory",
             "sprint_id": "sprint",
+            "participant_ids": ["participant-a", "participant-b"],
             "statuses": {"待处理": "pending", "已取消": "cancelled"},
         }
         item = {
@@ -97,6 +98,7 @@ class YunxiaoSyncTests(unittest.TestCase):
         self.assertEqual(result, "created")
         self.assertEqual(calls[2][2]["parentId"], "directory")
         self.assertEqual(calls[2][2]["sprint"], "sprint")
+        self.assertEqual(calls[2][2]["participants"], ["participant-a", "participant-b"])
         self.assertIn("Details", calls[2][2]["description"])
 
     def test_reopened_item_updates_to_pending(self) -> None:
@@ -116,6 +118,7 @@ class YunxiaoSyncTests(unittest.TestCase):
             "priority_id": "priority",
             "parent_id": "",
             "sprint_id": "",
+            "participant_ids": ["participant-a", "participant-b"],
             "statuses": {"待处理": "pending", "已取消": "cancelled"},
         }
         result = MODULE.sync_one(
@@ -138,7 +141,14 @@ class YunxiaoSyncTests(unittest.TestCase):
             client=MODULE.YunxiaoClient(transport),
         )
         self.assertEqual(result, "updated-status")
-        self.assertEqual(calls[-1][2], {"status": "pending"})
+        self.assertEqual(
+            calls[-1][2],
+            {
+                "status": "pending",
+                "assignedTo": "assignee",
+                "participants": ["participant-a", "participant-b"],
+            },
+        )
 
     def test_all_state_backfill_can_create_closed_item(self) -> None:
         calls = []
@@ -157,6 +167,7 @@ class YunxiaoSyncTests(unittest.TestCase):
             "priority_id": "priority",
             "parent_id": "",
             "sprint_id": "",
+            "participant_ids": [],
             "statuses": {"待处理": "pending", "已取消": "cancelled"},
         }
         result = MODULE.sync_one(
