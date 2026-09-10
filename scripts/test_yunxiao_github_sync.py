@@ -54,7 +54,7 @@ class YunxiaoSyncTests(unittest.TestCase):
             },
         )
 
-    def test_create_payload_contains_parent(self) -> None:
+    def test_create_payload_contains_parent_and_sprint(self) -> None:
         calls = []
 
         def transport(method, path, body=None):
@@ -70,6 +70,7 @@ class YunxiaoSyncTests(unittest.TestCase):
             "assignee_id": "assignee",
             "priority_id": "priority",
             "parent_id": "directory",
+            "sprint_id": "sprint",
             "statuses": {"待处理": "pending", "已取消": "cancelled"},
         }
         item = {
@@ -95,6 +96,7 @@ class YunxiaoSyncTests(unittest.TestCase):
         )
         self.assertEqual(result, "created")
         self.assertEqual(calls[2][2]["parentId"], "directory")
+        self.assertEqual(calls[2][2]["sprint"], "sprint")
         self.assertIn("Details", calls[2][2]["description"])
 
     def test_reopened_item_updates_to_pending(self) -> None:
@@ -113,6 +115,7 @@ class YunxiaoSyncTests(unittest.TestCase):
             "assignee_id": "assignee",
             "priority_id": "priority",
             "parent_id": "",
+            "sprint_id": "",
             "statuses": {"待处理": "pending", "已取消": "cancelled"},
         }
         result = MODULE.sync_one(
@@ -153,6 +156,7 @@ class YunxiaoSyncTests(unittest.TestCase):
             "assignee_id": "assignee",
             "priority_id": "priority",
             "parent_id": "",
+            "sprint_id": "",
             "statuses": {"待处理": "pending", "已取消": "cancelled"},
         }
         result = MODULE.sync_one(

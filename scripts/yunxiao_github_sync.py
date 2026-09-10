@@ -197,6 +197,7 @@ def preflight(
     workitem_type_name: str = DEFAULT_WORKITEM_TYPE_NAME,
     priority_name: str = DEFAULT_PRIORITY_NAME,
     parent_id: str | None = None,
+    sprint_id: str | None = None,
 ) -> dict[str, Any]:
     organizations = list_or_extract(client.get("/oapi/v1/platform/organizations"), ())
     if not organizations:
@@ -294,6 +295,7 @@ def preflight(
         "priority_id": item_id(priority),
         "statuses": statuses,
         "parent_id": parent_id or "",
+        "sprint_id": sprint_id or "",
     }
 
 
@@ -485,6 +487,10 @@ def sync_one(
         payload.pop("assignedTo")
     if cfg.get("parent_id"):
         payload["parentId"] = cfg["parent_id"]
+    if cfg.get("sprint_id"):
+        # Yunxiao's CreateWorkitem API calls the required iteration field
+        # "sprint". The value is the Yunxiao sprint/iteration ID.
+        payload["sprint"] = cfg["sprint_id"]
 
     github_labels = [
         label["name"]
@@ -525,6 +531,7 @@ def configuration_from_environment(client: YunxiaoClient) -> dict[str, Any]:
         ).strip()
         or DEFAULT_PRIORITY_NAME,
         parent_id=os.environ.get("YUNXIAO_PARENT_ID", "").strip() or None,
+        sprint_id=os.environ.get("YUNXIAO_SPRINT_ID", "").strip() or None,
     )
 
 
@@ -714,6 +721,7 @@ def main() -> int:
                     "org": result["org"],
                     "project_id": result["project_id"],
                     "parent_id": result["parent_id"],
+                    "sprint_id": result["sprint_id"],
                     "workitem_category": result["workitem_category"],
                     "type_id": result["type_id"],
                     "type_name": result["type_name"],
