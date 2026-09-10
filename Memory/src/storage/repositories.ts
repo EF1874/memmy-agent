@@ -29,6 +29,7 @@ import type {
   MemoryStatsRow,
   MemoryStatus,
   RecallHit,
+  SourceTurnCompleteResponse,
   UserMemoryRecord,
   UserMemoryStatus,
   UserMemoryType
@@ -55,6 +56,7 @@ type SqlValue = string | number | Buffer | null;
 const BUNDLE_TABLES = [
   "memories",
   "memory_capture_claims",
+  "source_turn_captures",
   "l3_world_model_scopes",
   "user_memories",
   "sessions",
@@ -81,7 +83,7 @@ const BUNDLE_TABLES = [
   "audit_logs"
 ] as const;
 const CLEAR_MEMORY_TABLES = [
-  ...BUNDLE_TABLES,
+  ...BUNDLE_TABLES.filter((table) => table !== "source_turn_captures"),
   "memories_fts",
   "user_memories_fts",
   "memory_vector_entries",
@@ -1678,6 +1680,41 @@ export class MemoryProcessingRepository {
   }
 }
 
+export interface SourceTurnCaptureScope {
+  userId: string;
+  source: string;
+  profileId: string;
+  namespaceKey: string;
+  conversationId: string;
+}
+
+export interface SourceTurnCaptureRecord extends SourceTurnCaptureScope {
+  turnId: string;
+  contentHash: string;
+  sessionId?: string;
+  episodeId?: string;
+  rawTurnId?: string;
+  response: SourceTurnCompleteResponse;
+  startedAt: string;
+  completedAt: string;
+  sequence?: number;
+  createdAt: string;
+}
+
+function sourceTurnCaptureFromSql(row: Record<string, unknown>): SourceTurnCaptureRecord {
+  return {
+    userId: String(row.user_id), source: String(row.source), profileId: String(row.profile_id),
+    namespaceKey: String(row.namespace_key), conversationId: String(row.conversation_id), turnId: String(row.turn_id),
+    contentHash: String(row.content_hash), sessionId: typeof row.session_id === "string" ? row.session_id : undefined,
+    episodeId: typeof row.episode_id === "string" ? row.episode_id : undefined,
+    rawTurnId: typeof row.raw_turn_id === "string" ? row.raw_turn_id : undefined,
+    response: parseJson(String(row.response_json), { status: "pending", reason: "source_capture_response_missing" }),
+    startedAt: String(row.started_at), completedAt: String(row.completed_at),
+    sequence: typeof row.source_sequence === "number" ? row.source_sequence : undefined,
+    createdAt: String(row.created_at)
+  };
+}
+
 export class RuntimeRepository {
   private readonly scheduledLogPrunes = new Set<LogTableName>();
 
@@ -1717,6 +1754,90 @@ export class RuntimeRepository {
       value: parseJson(row.value_json, undefined),
       updatedAt: row.updated_at
     }));
+  }
+
+  getSourceTurnCapture(scope: SourceTurnCaptureScope, turnId: string): SourceTurnCaptureRecord | undefined {
+    const row = this.db.prepare(`SELECT * FROM source_turn_captures
+      WHERE user_id = @userId AND source = @source AND profile_id = @profileId
+        AND namespace_key = @namespaceKey AND conversation_id = @conversationId AND turn_id = @turnId`
+    ).get({ ...scope, turnId }) as Record<string, unknown> | undefined;
+    return row ? sourceTurnCaptureFromSql(row) : undefined;
+  }
+
+  latestSourceTurnCapture(scope: SourceTurnCaptureScope): SourceTurnCaptureRecord | undefined {
+    const row = this.db.prepare(`SELECT * FROM source_turn_captures
+      WHERE user_id = @userId AND source = @source AND profile_id = @profileId
+        AND namespace_key = @namespaceKey AND conversation_id = @conversationId AND session_id IS NOT NULL
+      ORDER BY completed_at DESC, source_sequence DESC LIMIT 1`
+    ).get(scope) as Record<string, unknown> | undefined;
+    return row ? sourceTurnCaptureFromSql(row) : undefined;
+  }
+
+  sourceTurnCaptureNeighbors(scope: SourceTurnCaptureScope, startedAt: string): {
+    before?: SourceTurnCaptureRecord;
+    after?: SourceTurnCaptureRecord;
+  } {
+    const prefix = `SELECT * FROM source_turn_captures
+      WHERE user_id = @userId AND source = @source AND profile_id = @profileId
+        AND namespace_key = @namespaceKey AND conversation_id = @conversationId AND session_id IS NOT NULL`;
+    const before = this.db.prepare(`${prefix} AND started_at < @startedAt ORDER BY started_at DESC LIMIT 1`)
+      .get({ ...scope, startedAt }) as Record<string, unknown> | undefined;
+    const after = this.db.prepare(`${prefix} AND started_at > @startedAt ORDER BY started_at ASC LIMIT 1`)
+      .get({ ...scope, startedAt }) as Record<string, unknown> | undefined;
+    return { before: before ? sourceTurnCaptureFromSql(before) : undefined,
+      after: after ? sourceTurnCaptureFromSql(after) : undefined };
+  }
+
+  insertSourceTurnCapture(capture: SourceTurnCaptureRecord): void {
+    this.db.prepare(`INSERT INTO source_turn_captures (
+      user_id, source, profile_id, namespace_key, conversation_id, turn_id, content_hash,
+      session_id, episode_id, raw_turn_id, response_json, started_at, completed_at, source_sequence, created_at
+    ) VALUES (@userId, @source, @profileId, @namespaceKey, @conversationId, @turnId, @contentHash,
+      @sessionId, @episodeId, @rawTurnId, @responseJson, @startedAt, @completedAt, @sequence, @createdAt)`
+    ).run({ ...capture, sessionId: capture.sessionId ?? null, episodeId: capture.episodeId ?? null,
+      rawTurnId: capture.rawTurnId ?? null, responseJson: toJson(capture.response), sequence: capture.sequence ?? null });
+  }
+
+  orderEpisodeTurnsBySourceTime(episodeId: string): void {
+    const episode = this.getEpisode(episodeId);
+    if (!episode) throw new Error(`episode not found: ${episodeId}`);
+    const rawTimes = new Map(episode.rawTurnIds.map((id) => [id, this.getRawTurn(id)?.createdAt ?? ""]));
+    const rawTurnIds = [...episode.rawTurnIds].sort((a, b) => rawTimes.get(a)!.localeCompare(rawTimes.get(b)!));
+    const memoryTime = this.db.prepare(`SELECT created_at,
+      COALESCE(json_extract(info_json, '$.raw_turn_id'), json_extract(properties_json, '$.internal_info.raw_turn_id')) AS raw_turn_id
+      FROM memories WHERE id = ?`);
+    const memoryTimes = new Map(episode.l1MemoryIds.map((id) => {
+      const row = memoryTime.get(id) as { created_at: string; raw_turn_id: string | null } | undefined;
+      return [id, rawTimes.get(row?.raw_turn_id ?? "") ?? row?.created_at ?? ""];
+    }));
+    const l1MemoryIds = [...episode.l1MemoryIds].sort((a, b) => memoryTimes.get(a)!.localeCompare(memoryTimes.get(b)!));
+    this.db.prepare(`UPDATE episodes SET raw_turn_ids_json = ?, l1_memory_ids_json = ? WHERE id = ?`)
+      .run(toJson(rawTurnIds), toJson(l1MemoryIds), episodeId);
+  }
+
+  sourceConversationSessions(input: { userId: string; source: string; profileId: string; conversationId: string }): SessionRecord[] {
+    return (this.db.prepare(`SELECT * FROM sessions WHERE user_id = @userId AND source = @source
+      AND profile_id = @profileId AND (host_session_key = @conversationId OR conversation_id = @conversationId
+        OR (@source = 'codex' AND host_session_key = 'codex-memory-' || @conversationId))
+      ORDER BY opened_at DESC`).all(input) as SqlSessionRow[]).map(sessionFromSql);
+  }
+
+  bindSessionSourceConversation(id: string, conversationId: string): boolean {
+    const result = this.db.prepare(`UPDATE sessions SET conversation_id = @conversationId
+      WHERE id = @id AND status = 'open' AND (conversation_id IS NULL OR conversation_id = '')`)
+      .run({ id, conversationId });
+    return result.changes === 1;
+  }
+
+  bindRawTurnSourceConversation(
+    scope: Pick<RawTurnRecord, "id" | "sessionId" | "userId" | "turnId">,
+    conversationId: string
+  ): boolean {
+    const result = this.db.prepare(`UPDATE raw_turns SET conversation_id = @conversationId
+      WHERE id = @id AND session_id = @sessionId AND user_id = @userId AND turn_id = @turnId
+        AND (conversation_id IS NULL OR conversation_id = '' OR conversation_id = @conversationId)`)
+      .run({ ...scope, conversationId });
+    return result.changes === 1;
   }
 
   createSession(session: SessionRecord): SessionRecord {
@@ -4046,6 +4167,10 @@ export class RuntimeRepository {
       }>
     };
     this.db.transaction(() => {
+      const hadRuntimeData = Boolean(this.db.prepare(`SELECT EXISTS(
+        SELECT 1 FROM memories UNION ALL SELECT 1 FROM sessions UNION ALL
+        SELECT 1 FROM raw_turns UNION ALL SELECT 1 FROM source_turn_captures
+      )`).pluck().get());
       for (const table of BUNDLE_TABLES) {
         const rows = Array.isArray(tables[table]) ? tables[table] as Array<Record<string, unknown>> : [];
         for (const row of rows) {
@@ -4055,6 +4180,12 @@ export class RuntimeRepository {
             recordMigrationMap(result.migrationMap, table, identity.sourceId, identity.sourceId);
           }
           const existed = identity !== undefined && this.rowExists(table, identity.columns, identity.values);
+          if (table === "runtime_kv" && normalized.key === "source_turn_capture_activated_at") {
+            const outcome = this.mergeSourceTurnActivation(normalized, hadRuntimeData);
+            const counts = result[outcome];
+            counts[table] = (counts[table] ?? 0) + 1;
+            continue;
+          }
           if (existed && conflictStrategy === "skip") {
             result.conflicts.push({
               table,
@@ -4104,6 +4235,30 @@ export class RuntimeRepository {
     })();
     this.scheduleLogTablesPrune();
     return result;
+  }
+
+  private mergeSourceTurnActivation(
+    row: Record<string, unknown>,
+    hadRuntimeData: boolean
+  ): "inserted" | "replaced" | "skipped" {
+    const imported = typeof row.value_json === "string" ? parseJson<unknown>(row.value_json, undefined) : undefined;
+    if (typeof imported !== "string" || !Number.isFinite(Date.parse(imported))) {
+      throw new Error("invalid source turn activation boundary in bundle");
+    }
+    const key = "source_turn_capture_activated_at";
+    const existing = this.getKv(key);
+    if (existing && (typeof existing.value !== "string" || !Number.isFinite(Date.parse(existing.value)))) {
+      throw new Error("invalid source turn activation boundary in target database");
+    }
+    // A new database contains only the automatically initialized boundary. A full restore
+    // inherits the backup's original start. Merging into existing data must never widen
+    // the historical capture window of either database; known identities remain reusable.
+    if (existing && (existing.value === imported ||
+        (hadRuntimeData && Date.parse(existing.value as string) >= Date.parse(imported)))) {
+      return "skipped";
+    }
+    this.setKv(key, imported, typeof row.updated_at === "string" ? row.updated_at : nowIso());
+    return existing ? "replaced" : "inserted";
   }
 
   private rowExists(table: BundleTableName, columns: string[], values: Array<string | number>): boolean {
@@ -5168,8 +5323,14 @@ export class Repositories {
       return this.db.transaction(() => {
         const cleared: Record<string, number> = {};
         for (const table of tables) {
-          cleared[table] = this.db.prepare(`DELETE FROM "${table}"`).run().changes;
+          if (table === "runtime_kv") {
+            cleared[table] = this.db.prepare(`DELETE FROM runtime_kv WHERE key != 'source_turn_capture_activated_at'`).run().changes;
+          } else {
+            cleared[table] = this.db.prepare(`DELETE FROM "${table}"`).run().changes;
+          }
         }
+        // Keep source tombstones, but a deleted Session must not block future turns.
+        this.db.prepare(`UPDATE source_turn_captures SET session_id = NULL, episode_id = NULL, raw_turn_id = NULL`).run();
         if (existing.has("sqlite_sequence")) {
           const sequenceTables = tables.filter((table) => !table.startsWith("memory_vec_"));
           if (sequenceTables.length) {
@@ -6890,6 +7051,7 @@ function bundleIdentity(
 ): BundleIdentity | undefined {
   const newTableIdentityColumns: Partial<Record<BundleTableName, string[]>> = {
     memory_capture_claims: ["user_id", "source", "qa_hash"],
+    source_turn_captures: ["user_id", "source", "profile_id", "namespace_key", "conversation_id", "turn_id"],
     l3_world_model_scopes: ["scope_key"],
     l3_world_model_session_cursors: ["session_id"],
     l3_world_model_input_traces: ["session_id", "trace_seq"],

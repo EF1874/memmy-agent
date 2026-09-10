@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 DESKTOP_DIR="$ROOT_DIR/App/shell/desktop"
 AGENT_DIR="$ROOT_DIR/App/memmy-agent"
 MEMORY_DIR="$ROOT_DIR/Memory"
+AGENT_SOURCE_CORE_DIR="$ROOT_DIR/AgentSourceCore"
 MIGRATIONS_DIR="$ROOT_DIR/Migrations"
 LOCAL_API_CONTRACTS_DIR="$ROOT_DIR/App/backend/local-api-contracts"
 RUNTIME_DIR="$DESKTOP_DIR/dist/runtime"
@@ -348,6 +349,8 @@ const memoryPackage = JSON.parse(await readFile(join(memoryDir, "package.json"),
 const runtimeVersion = memoryPackage.version;
 const rootLock = JSON.parse(await readFile(join(rootDir, "package-lock.json"), "utf8"));
 const dependencies = { ...(memoryPackage.dependencies ?? {}) };
+// Private workspace packages are copied into the runtime after npm installs public dependencies.
+delete dependencies["@memmy/agent-source-core"];
 const runtimePackage = {
   name: runtimeName,
   version: runtimeVersion,
@@ -675,6 +678,7 @@ verify_packaged_mac_unpacked_artifacts() {
   app_path="$(resolve_packaged_mac_app_path "$target_cpu")"
   local unpacked_runtime="$app_path/Contents/Resources/app.asar.unpacked/dist/runtime"
   local packaged_memory_runtime="$app_path/Contents/Resources/memory-runtime"
+  local packaged_agent_source_core="$packaged_memory_runtime/node_modules/@memmy/agent-source-core"
   local packaged_embedding_model="$app_path/Contents/Resources/embedding-models/$EMBEDDING_MODEL_ID"
 
   require_packaged_runtime_file "$app_path/Contents/Resources/app.asar"
@@ -684,6 +688,14 @@ verify_packaged_mac_unpacked_artifacts() {
   require_packaged_runtime_file "$packaged_memory_runtime/memory-runtime.json"
   require_packaged_runtime_file "$packaged_memory_runtime/dist/src/server/index.js"
   require_packaged_runtime_file "$packaged_memory_runtime/dist/src/cli/index.js"
+  require_packaged_runtime_file "$packaged_memory_runtime/dist/src/agent-source/integration/workspace-bridge/memmy-workspace-bridge.mjs"
+  require_packaged_runtime_file "$packaged_agent_source_core/package.json"
+  require_packaged_runtime_file "$packaged_agent_source_core/dist/src/index.js"
+  require_packaged_runtime_file "$packaged_agent_source_core/dist/src/codex-source-turn.js"
+  if [ -L "$packaged_agent_source_core" ]; then
+    echo "Packaged offline Memory agent source core must not be a symbolic link." >&2
+    exit 1
+  fi
   require_packaged_runtime_file "$packaged_memory_runtime/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
   require_packaged_runtime_glob "$packaged_memory_runtime/node_modules/sqlite-vec-darwin-$target_cpu/vec0.*"
   require_packaged_runtime_file "$packaged_memory_runtime/node_modules/onnxruntime-node/bin/napi-v3/darwin/$target_cpu/onnxruntime_binding.node"
@@ -881,6 +893,12 @@ package_step_start "Resolve Memory runtime lockfile"
 npm install --prefix "$RUNTIME_DIR/memory" --package-lock-only --ignore-scripts --os=darwin --cpu="$TARGET_CPU"
 package_step_start "Install Memory runtime production dependencies"
 npm ci --prefix "$RUNTIME_DIR/memory" --omit=dev --os=darwin --cpu="$TARGET_CPU"
+package_step_start "Stage Memory workspace runtime packages"
+RUNTIME_AGENT_SOURCE_CORE_DIR="$RUNTIME_DIR/memory/node_modules/@memmy/agent-source-core"
+rm -rf "$RUNTIME_AGENT_SOURCE_CORE_DIR"
+mkdir -p "$RUNTIME_AGENT_SOURCE_CORE_DIR"
+cp "$AGENT_SOURCE_CORE_DIR/package.json" "$RUNTIME_AGENT_SOURCE_CORE_DIR/package.json"
+cp -R "$AGENT_SOURCE_CORE_DIR/dist" "$RUNTIME_AGENT_SOURCE_CORE_DIR/dist"
 package_step_start "Rebuild Memory native modules for Electron"
 ELECTRON_VERSION="$(node -p "require('./App/shell/desktop/node_modules/electron/package.json').version")"
 node_modules/.bin/electron-rebuild \

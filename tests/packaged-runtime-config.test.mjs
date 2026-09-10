@@ -185,6 +185,68 @@ describe("packaged desktop runtime configuration", () => {
     });
   });
 
+  it("creates a standalone macOS Memory manifest and stages its private parser package", () => {
+    const root = fixtureRoot();
+    const memoryDir = join(root, "Memory");
+    const runtimeDir = join(root, "runtime");
+    const coreDir = join(root, "AgentSourceCore");
+    const buildScript = readFileSync(join(
+      dirname(fileURLToPath(import.meta.url)),
+      "..", "scripts", "internal", "mac", "build-dmg.sh",
+    ), "utf8");
+    writeFixtureJson(join(memoryDir, "package.json"), {
+      version: "2.1.1",
+      dependencies: { "@memmy/agent-source-core": "0.0.0", zod: "4.4.3" },
+    });
+    writeFixtureJson(join(root, "package-lock.json"), {
+      lockfileVersion: 3,
+      requires: true,
+      packages: {
+        "node_modules/@memmy/agent-source-core": { resolved: "AgentSourceCore", link: true },
+        AgentSourceCore: { name: "@memmy/agent-source-core", version: "0.0.0" },
+        "node_modules/zod": { version: "4.4.3" },
+      },
+    });
+    const manifestFunction = buildScript.slice(
+      buildScript.indexOf("create_memory_runtime_manifest() {"),
+      buildScript.indexOf("\nprune_better_sqlite3_build_artifacts()"),
+    );
+    const generated = spawnSync("bash", ["-c", `${manifestFunction}\ncreate_memory_runtime_manifest "$MEMORY_RUNTIME_DIR"`], {
+      encoding: "utf8",
+      env: { ...process.env, ROOT_DIR: root, MEMORY_DIR: memoryDir, MEMORY_RUNTIME_DIR: runtimeDir, TARGET_CPU: "arm64" },
+    });
+    expect(generated.status, generated.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(join(runtimeDir, "package.json"), "utf8")).dependencies).toEqual({ zod: "4.4.3" });
+    const lock = JSON.parse(readFileSync(join(runtimeDir, "package-lock.json"), "utf8"));
+    expect(lock.packages[""].dependencies).toEqual({ zod: "4.4.3" });
+    expect(lock.packages["node_modules/@memmy/agent-source-core"]).toBeUndefined();
+    expect(lock.packages["node_modules/zod"].version).toBe("4.4.3");
+
+    writeFixtureJson(join(coreDir, "package.json"), {
+      name: "@memmy/agent-source-core", version: "0.0.0", type: "module", main: "./dist/src/index.js",
+    });
+    mkdirSync(join(coreDir, "dist", "src"), { recursive: true });
+    writeFileSync(join(coreDir, "dist", "src", "index.js"), 'export { readCodexSourceTurn } from "./codex-source-turn.js";\n');
+    writeFileSync(join(coreDir, "dist", "src", "codex-source-turn.js"), 'export const readCodexSourceTurn = () => "packaged-parser";\n');
+    const stageStart = buildScript.indexOf('RUNTIME_AGENT_SOURCE_CORE_DIR="$RUNTIME_DIR/memory/node_modules/@memmy/agent-source-core"');
+    expect(stageStart).toBeGreaterThan(buildScript.indexOf('npm ci --prefix "$RUNTIME_DIR/memory"'));
+    const stageEnd = buildScript.indexOf('\npackage_step_start ', stageStart);
+    const staged = spawnSync("bash", ["-c", buildScript.slice(stageStart, stageEnd)], {
+      encoding: "utf8",
+      env: { ...process.env, RUNTIME_DIR: runtimeDir, AGENT_SOURCE_CORE_DIR: coreDir },
+    });
+    expect(staged.status, staged.stderr).toBe(0);
+    const loaded = spawnSync(process.execPath, ["--input-type=module", "--eval", 'import { readCodexSourceTurn } from "@memmy/agent-source-core"; console.log(readCodexSourceTurn());'], {
+      encoding: "utf8", cwd: join(runtimeDir, "memory"),
+    });
+    expect(loaded.status, loaded.stderr).toBe(0);
+    expect(loaded.stdout.trim()).toBe("packaged-parser");
+    expect(buildScript).toContain('require_packaged_runtime_file "$packaged_agent_source_core/dist/src/index.js"');
+    expect(buildScript).toContain('require_packaged_runtime_file "$packaged_agent_source_core/dist/src/codex-source-turn.js"');
+    expect(buildScript).toContain('require_packaged_runtime_file "$packaged_memory_runtime/dist/src/agent-source/integration/workspace-bridge/memmy-workspace-bridge.mjs"');
+    expect(buildScript).toContain('[ -L "$packaged_agent_source_core" ]');
+  });
+
   it("validates desktop and Memory ASAR versions against independent authorities", async () => {
     const root = fixtureRoot();
     const verifier = join(
