@@ -86,6 +86,9 @@ import type {
   ToolCallPayload,
   ToolObserveRequest,
   TurnCompleteRequest,
+  SourceTurnCompleteRequest,
+  SourceTurnCompleteResponse,
+  TurnCompletionResult,
   TurnStartRequest
 } from "../types.js";
 import { MemoryServiceError } from "../utils/error.js";
@@ -198,24 +201,8 @@ export interface MemoryServiceOptions {
   viewerEndpoint?: string;
 }
 
-export interface CompleteTurnResponse {
-  turnId: string;
-  sessionId: string;
-  episodeId: string;
-  rawTurnId: string;
-  userMemoryId: string;
-  userMemoryIds: string[];
-  l1MemoryId: string;
-  l1MemoryIds: string[];
-  closedEpisodeIds: string[];
-  scheduledEvolution: boolean;
-  jobs: JobRef[];
-  changeSeq: number;
-  syncCursor: string;
-  etag: string;
-  serverTime: string;
-  duplicate?: boolean;
-}
+export type CompleteTurnResponse = TurnCompletionResult;
+
 type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
 
 interface DecisionRepairSummary {
@@ -1063,6 +1050,35 @@ export class MemoryService {
     serverTime: string;
   }> {
     return this.withModelTaskContext(() => this.sessionTurns.startTurn(this.withTimeZone(request)));
+  }
+
+  completeSourceTurn(request: SourceTurnCompleteRequest): SourceTurnCompleteResponse {
+    // Native scans have no Hook envelope. Use the configured owner only when
+    // the request (including authenticated scope) did not provide one.
+    const response = this.sessionTurns.completeSourceTurn(this.withTimeZone({
+      ...request,
+      namespace: {
+        source: request.sourceTurn?.source,
+        profileId: request.sourceTurn?.profileId,
+        sessionKey: request.sourceTurn?.conversationId,
+        ...request.namespace,
+        userId: request.namespace?.userId ?? this.config.userId
+      }
+    }));
+    serviceLogger.info("source_turn.complete", {
+      source: request.sourceTurn?.source,
+      profileId: request.sourceTurn?.profileId,
+      conversationId: request.sourceTurn?.conversationId,
+      turnId: request.sourceTurn?.turnId,
+      channel: request.channel,
+      status: response.status,
+      reason: response.reason,
+      sessionId: response.result?.sessionId,
+      episodeId: response.result?.episodeId,
+      rawTurnId: response.result?.rawTurnId,
+      l1MemoryIds: response.result?.l1MemoryIds
+    });
+    return response;
   }
 
   completeTurn(turnId: string, request: TurnCompleteRequest & Record<string, unknown>): CompleteTurnResponse {
@@ -2685,9 +2701,12 @@ function sanitizeTraceToolCalls(toolCalls: ToolCallPayload[]): ToolCallPayload[]
   return toolCalls.map((call) => ({
     id: call.id,
     name: call.name,
+    input: call.input,
+    output: call.output,
+    status: call.status,
     success: call.success,
     errorCode: call.errorCode,
-    error: call.error ?? errorMessageFromUnknown(call.output),
+    error: call.error,
     startedAt: call.startedAt,
     endedAt: call.endedAt,
     thinkingBefore: call.thinkingBefore,
