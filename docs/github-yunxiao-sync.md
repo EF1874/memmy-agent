@@ -22,7 +22,9 @@ GitHub issues / pull_request_target
 | `YUNXIAO_PROJECT_ID` | Variable | 目标云效空间/项目 ID |
 | `YUNXIAO_PROJECT_NAME` | Variable | 目标空间/项目名称，用于预检 |
 | `YUNXIAO_PARENT_ID` | Variable | 目标目录对应的父工作项 ID；没有目录时留空 |
+| `YUNXIAO_SPRINT_ID` | Variable | 目标迭代 ID。云效 API 将迭代字段称为 `sprint`；默认使用 `待定`（`1b60d4a7ac4f79a141c76141c1`） |
 | `YUNXIAO_DEFAULT_ASSIGNEE_NAME` | Variable | 可选，默认负责人姓名；留空则不自动分配负责人 |
+| `YUNXIAO_PARTICIPANT_NAMES` | Variable | 参与者姓名，英文逗号分隔；默认 `徐之淇,贾澄臻` |
 | `YUNXIAO_WORKITEM_CATEGORY` | Variable | 工作项大类，默认 `Req` |
 | `YUNXIAO_WORKITEM_TYPE_NAME` | Variable | 工作项类型名称，默认 `需求` |
 | `YUNXIAO_PRIORITY_NAME` | Variable | 默认优先级，默认 `中` |
@@ -35,6 +37,10 @@ GitHub issues / pull_request_target
 
 `YUNXIAO_DEFAULT_ASSIGNEE_NAME` 可以暂时留空。这样工作项仍会进入
 `memmy` 需求空间，由云效用户后续人工分配负责人。
+
+`memmy` 空间的需求工作项要求填写迭代，默认使用“待定”。如需改用其他迭代，配置
+`YUNXIAO_SPRINT_ID`。迭代 ID 可以从云效迭代页面 URL 获取，例如
+`/sprint/<迭代 ID>`；迭代名称（如 `v1.1.5`）不是 API 接受的值。
 
 预检会按语义解析云效工作流状态：合并的 PR 优先使用“已完成”，如果目标项目
 使用“开发完成”则自动使用该名称；取消状态同理支持“已取消”“已关闭”“关闭”。
