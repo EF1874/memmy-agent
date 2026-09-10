@@ -36,6 +36,9 @@ GitHub issues / pull_request_target
 `YUNXIAO_DEFAULT_ASSIGNEE_NAME` 可以暂时留空。这样工作项仍会进入
 `memmy` 需求空间，由云效用户后续人工分配负责人。
 
+预检会按语义解析云效工作流状态：合并的 PR 优先使用“已完成”，如果目标项目
+使用“开发完成”则自动使用该名称；取消状态同理支持“已取消”“已关闭”“关闭”。
+
 每个源仓库可以使用不同的 `YUNXIAO_PROJECT_ID` 和 `YUNXIAO_PARENT_ID`。例如：
 
 | GitHub 仓库 | 云效空间 | 云效目录 |
