@@ -42,13 +42,6 @@ describe("vite workspace resolution", () => {
     expect(() => resolveConfig("development")).toThrow(/MEMMY_LEGAL_CN_BASE_URL/);
   });
 
-  it("accepts valid legal origins supplied by the build process", () => {
-    vi.stubEnv("MEMMY_LEGAL_CN_BASE_URL", "https://ci.memmy.cn");
-    vi.stubEnv("MEMMY_LEGAL_INTL_BASE_URL", "https://ci.memmy.bot");
-
-    expect(() => resolveConfig("production")).not.toThrow();
-  });
-
   it("exposes only the explicit public MEMMY allowlist to renderer code", () => {
     vi.stubEnv("MEMMY_PRIVATE_TOKEN", "must-not-be-rendered");
     const config = resolveConfig("test");

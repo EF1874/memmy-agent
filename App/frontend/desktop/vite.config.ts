@@ -39,20 +39,13 @@ export const validateLegalEnv = (env: Record<string, string | undefined>): void 
 /** Vite configuration. */
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, REPO_ROOT_DIR, "");
-  // CI and packaging wrappers provide the public legal origins through the
-  // process environment. Keep those values in the same validation path as
-  // Vite's file-based environment without widening the renderer allowlist.
-  const processEnv = Object.fromEntries(
-    LEGAL_BASE_URL_ENV_KEYS.map((key) => [key, process.env[key]]),
-  );
-  const validationEnv: Record<string, string | undefined> = mode === "test"
+  const validationEnv = mode === "test"
     ? {
         ...env,
-        ...processEnv,
         MEMMY_LEGAL_CN_BASE_URL: "https://test.memmy.cn",
         MEMMY_LEGAL_INTL_BASE_URL: "https://test.memmy.bot"
       }
-    : { ...env, ...processEnv };
+    : env;
   validateLegalEnv(validationEnv);
   const memmyAgentTarget = env.VITE_MEMMY_AGENT_WEBUI_URL?.trim() || DEFAULT_MEMMY_AGENT_WEBUI_BASE_URL;
   const memmyAgentWsTarget = memmyAgentTarget.replace(/^http/, "ws");
