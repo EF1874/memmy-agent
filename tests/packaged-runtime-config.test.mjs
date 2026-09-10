@@ -185,7 +185,7 @@ describe("packaged desktop runtime configuration", () => {
     });
   });
 
-  it("creates a standalone macOS Memory manifest and stages its private parser package", () => {
+  it("creates a standalone macOS Memory manifest and stages its workspace parser package", () => {
     const root = fixtureRoot();
     const memoryDir = join(root, "Memory");
     const runtimeDir = join(root, "runtime");
@@ -216,9 +216,15 @@ describe("packaged desktop runtime configuration", () => {
       env: { ...process.env, ROOT_DIR: root, MEMORY_DIR: memoryDir, MEMORY_RUNTIME_DIR: runtimeDir, TARGET_CPU: "arm64" },
     });
     expect(generated.status, generated.stderr).toBe(0);
-    expect(JSON.parse(readFileSync(join(runtimeDir, "package.json"), "utf8")).dependencies).toEqual({ zod: "4.4.3" });
+    expect(JSON.parse(readFileSync(join(runtimeDir, "package.json"), "utf8")).dependencies).toEqual({
+      "@memmy/agent-source-core": "file:../../../../../../AgentSourceCore",
+      zod: "4.4.3",
+    });
     const lock = JSON.parse(readFileSync(join(runtimeDir, "package-lock.json"), "utf8"));
-    expect(lock.packages[""].dependencies).toEqual({ zod: "4.4.3" });
+    expect(lock.packages[""].dependencies).toEqual({
+      "@memmy/agent-source-core": "file:../../../../../../AgentSourceCore",
+      zod: "4.4.3",
+    });
     expect(lock.packages["node_modules/@memmy/agent-source-core"]).toBeUndefined();
     expect(lock.packages["node_modules/zod"].version).toBe("4.4.3");
 
@@ -228,19 +234,21 @@ describe("packaged desktop runtime configuration", () => {
     mkdirSync(join(coreDir, "dist", "src"), { recursive: true });
     writeFileSync(join(coreDir, "dist", "src", "index.js"), 'export { readCodexSourceTurn } from "./codex-source-turn.js";\n');
     writeFileSync(join(coreDir, "dist", "src", "codex-source-turn.js"), 'export const readCodexSourceTurn = () => "packaged-parser";\n');
-    const stageStart = buildScript.indexOf('RUNTIME_AGENT_SOURCE_CORE_DIR="$RUNTIME_DIR/memory/node_modules/@memmy/agent-source-core"');
-    expect(stageStart).toBeGreaterThan(buildScript.indexOf('npm ci --prefix "$RUNTIME_DIR/memory"'));
-    const stageEnd = buildScript.indexOf('\npackage_step_start ', stageStart);
+    mkdirSync(join(memoryDir, "dist", "src"), { recursive: true });
+    mkdirSync(join(memoryDir, "dist", "viewer"), { recursive: true });
+    mkdirSync(join(memoryDir, "adapters"), { recursive: true });
+    mkdirSync(join(root, "App", "memmy-agent", "dist"), { recursive: true });
+    mkdirSync(join(runtimeDir, "memmy-agent"), { recursive: true });
+    const stageStart = buildScript.indexOf('mkdir -p "$RUNTIME_DIR/memory/dist"');
+    const stageEnd = buildScript.indexOf('\nverify_office_rendering_bundle', stageStart);
     const staged = spawnSync("bash", ["-c", buildScript.slice(stageStart, stageEnd)], {
       encoding: "utf8",
-      env: { ...process.env, RUNTIME_DIR: runtimeDir, AGENT_SOURCE_CORE_DIR: coreDir },
+      env: { ...process.env, ROOT_DIR: root, RUNTIME_DIR: runtimeDir, MEMORY_DIR: memoryDir, AGENT_DIR: join(root, "App", "memmy-agent") },
     });
     expect(staged.status, staged.stderr).toBe(0);
-    const loaded = spawnSync(process.execPath, ["--input-type=module", "--eval", 'import { readCodexSourceTurn } from "@memmy/agent-source-core"; console.log(readCodexSourceTurn());'], {
-      encoding: "utf8", cwd: join(runtimeDir, "memory"),
-    });
-    expect(loaded.status, loaded.stderr).toBe(0);
-    expect(loaded.stdout.trim()).toBe("packaged-parser");
+    expect(existsSync(join(runtimeDir, "memory", "AgentSourceCore", "package.json"))).toBe(true);
+    expect(existsSync(join(runtimeDir, "memory", "AgentSourceCore", "dist", "src", "index.js"))).toBe(true);
+    expect(buildScript).toContain('npm ci --prefix "$RUNTIME_DIR/memory" --omit=dev --install-links');
     expect(buildScript).toContain('require_packaged_runtime_file "$packaged_agent_source_core/dist/src/index.js"');
     expect(buildScript).toContain('require_packaged_runtime_file "$packaged_agent_source_core/dist/src/codex-source-turn.js"');
     expect(buildScript).toContain('require_packaged_runtime_file "$packaged_memory_runtime/dist/src/agent-source/integration/workspace-bridge/memmy-workspace-bridge.mjs"');
