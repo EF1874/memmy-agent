@@ -14,7 +14,14 @@ from urllib.request import Request, urlopen
 
 
 SOURCE_LABELS = {"issue": "Issue", "pr": "PR"}
-STATUS_LABELS = ("待处理", "设计中", "开发中", "已完成", "已取消")
+# Yunxiao projects can customize workflow names. Keep the canonical names used
+# by the sync state machine, then resolve them to the first matching name in
+# the target project's workflow.
+STATUS_ALIASES = {
+    "待处理": ("待处理", "未开始"),
+    "已完成": ("已完成", "开发完成", "完成"),
+    "已取消": ("已取消", "已关闭", "关闭"),
+}
 DEFAULT_PRIORITY_NAME = "中"
 DEFAULT_WORKITEM_CATEGORY = "Req"
 DEFAULT_WORKITEM_TYPE_NAME = "需求"
@@ -153,6 +160,25 @@ def find_by_name(items: list[dict[str, Any]], name: str, label: str) -> dict[str
     raise PreflightError(f"未在云效中找到{label}：{name}")
 
 
+def resolve_statuses(workflow: list[dict[str, Any]]) -> dict[str, str]:
+    names = {
+        name: item
+        for item in workflow
+        if (name := item_name(item))
+    }
+    statuses: dict[str, str] = {}
+    for canonical, aliases in STATUS_ALIASES.items():
+        matched_name = next((name for name in aliases if name in names), None)
+        if matched_name is None:
+            supported = "、".join(sorted(names)) or "（空）"
+            raise PreflightError(
+                f"未在云效中找到工作流状态：{canonical}；"
+                f"支持的别名：{'、'.join(aliases)}；当前状态：{supported}"
+            )
+        statuses[canonical] = item_id(names[matched_name])
+    return statuses
+
+
 class YunxiaoClient:
     def __init__(self, transport: Any) -> None:
         self.transport = transport
@@ -229,10 +255,7 @@ def preflight(
         ),
         ("statuses", "workflowStatuses"),
     )
-    statuses = {
-        name: item_id(find_by_name(workflow, name, "工作流状态"))
-        for name in STATUS_LABELS
-    }
+    statuses = resolve_statuses(workflow)
 
     fields = list_or_extract(
         client.get(

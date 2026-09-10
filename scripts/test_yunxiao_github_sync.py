@@ -38,6 +38,22 @@ class YunxiaoSyncTests(unittest.TestCase):
             "已取消",
         )
 
+    def test_resolve_statuses_accepts_memmy_workflow_names(self) -> None:
+        workflow = [
+            {"id": "pending", "name": "待处理"},
+            {"id": "developing", "name": "开发中"},
+            {"id": "developed", "name": "开发完成"},
+            {"id": "cancelled", "name": "已取消"},
+        ]
+        self.assertEqual(
+            MODULE.resolve_statuses(workflow),
+            {
+                "待处理": "pending",
+                "已完成": "developed",
+                "已取消": "cancelled",
+            },
+        )
+
     def test_create_payload_contains_parent(self) -> None:
         calls = []
 
