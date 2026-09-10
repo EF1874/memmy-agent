@@ -194,6 +194,8 @@ export interface MemoryServiceOptions {
   llm?: LlmClient;
   skillLlm?: LlmClient;
   embedder?: Embedder;
+  /** Actual HTTP endpoint used by the current server instance. */
+  viewerEndpoint?: string;
 }
 
 export interface CompleteTurnResponse {
@@ -272,8 +274,10 @@ export class MemoryService {
   private skillLlm: LlmClient;
   private embedder: Embedder;
   private readonly embeddingRetryWorkerId = `embedding-retry-${newId("worker")}`;
+  private viewerEndpoint?: string;
 
   constructor(private readonly options: MemoryServiceOptions) {
+    this.viewerEndpoint = options.viewerEndpoint;
     this.repos = options.backend?.repositories() ?? new Repositories(requireMemoryDb(options).db);
     this.l3WorldModelContextReadModel = new L3WorldModelContextReadModel(this.repos);
     this.mode = options.mode ?? "local";
@@ -660,6 +664,11 @@ export class MemoryService {
     return Math.max(1, retrieval.tier1TopK + retrieval.tier2TopK + retrieval.tier3TopK);
   }
 
+  /** Set after the HTTP server binds, including when an ephemeral port is used. */
+  setViewerEndpoint(endpoint: string): void {
+    this.viewerEndpoint = endpoint;
+  }
+
   health(routes: string[] = []): HealthResponse {
     const schema = this.schemaVersion();
     const backend = this.storageCapabilities();
@@ -668,7 +677,7 @@ export class MemoryService {
       serviceVersion: PROJECT_VERSION,
       protocolVersion: MEMORY_PROTOCOL_VERSION,
       viewerVersion: MEMORY_VIEWER_VERSION,
-      viewerUrl: viewerUrlFromEndpoint(this.config.storage.endpoint),
+      viewerUrl: viewerUrlFromEndpoint(this.viewerEndpoint ?? this.config.storage.endpoint),
       version: PROJECT_VERSION,
       uptimeMs: Date.now() - this.startedAt,
       mode: this.mode,
