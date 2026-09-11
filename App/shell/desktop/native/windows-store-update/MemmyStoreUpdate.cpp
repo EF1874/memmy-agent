@@ -39,6 +39,7 @@
 #include <winrt/Windows.Services.Store.h>
 #include <winrt/base.h>
 #include "LegacyProcessStop.h"
+#include "StoreInstallShutdown.h"
 
 using namespace winrt;
 using namespace Windows::ApplicationModel;
@@ -8139,7 +8140,9 @@ namespace
         }
     }
 
-    fire_and_forget execute_store_install_handoff(StoreInstallHandoffOptions options)
+    fire_and_forget execute_store_install_handoff(
+        StoreInstallHandoffOptions options,
+        std::shared_ptr<memmy::StoreInstallShutdown> shutdown)
     {
         try
         {
@@ -8154,6 +8157,7 @@ namespace
                     "; updateCount=" + std::to_string(updates.Size()));
             if (updates.Size() == 0)
             {
+                if (shutdown) shutdown->finish();
                 write_store_install_result(
                     options,
                     "no-update",
@@ -8171,13 +8175,19 @@ namespace
                 "baselinePackageVersion=" + utf8(options.baseline_package_version));
             auto operation = context.TrySilentDownloadAndInstallStorePackageUpdatesAsync(
                 copy_updates(updates));
-            operation.Progress([log_path = options.log_path](
+            operation.Progress([log_path = options.log_path, package_family = options.package_family_name, shutdown](
                 const auto&,
                 const StorePackageUpdateStatus& status)
             {
+                if (shutdown && status.PackageUpdateState == StorePackageUpdateState::Deploying &&
+                    status.PackageFamilyName == package_family)
+                {
+                    shutdown->deployment_started();
+                }
                 append_store_package_log(log_path, "install-progress", status);
             });
             const StorePackageUpdateResult result = co_await operation;
+            if (shutdown) shutdown->finish();
             const std::string state = update_state_name(result.OverallState());
             for (const auto& status : result.StorePackageUpdateStatuses())
             {
@@ -8195,6 +8205,7 @@ namespace
         }
         catch (const hresult_error& error)
         {
+            if (shutdown) shutdown->finish();
             const std::string code = hresult_text(error.code());
             const std::string reason = single_line(to_string(error.message()));
             try
@@ -8208,6 +8219,7 @@ namespace
         }
         catch (const std::exception& error)
         {
+            if (shutdown) shutdown->finish();
             const std::string reason = single_line(error.what());
             try
             {
@@ -8826,7 +8838,24 @@ int wmain(int argc, wchar_t* argv[])
                     single_line(to_string(error.message())));
                 return 2;
             }
-            execute_store_install_handoff(options);
+            std::shared_ptr<memmy::StoreInstallShutdown> shutdown;
+            try
+            {
+                shutdown = std::make_shared<memmy::StoreInstallShutdown>([options](const char* reason) {
+                    append_handoff_log(options.log_path, "installer-release-for-deployment", utf8(options.mode), "", reason);
+                });
+                append_handoff_log(
+                    options.log_path, "installer-shutdown-ready", utf8(options.mode),
+                    shutdown->window_error() ? hresult_text(HRESULT_FROM_WIN32(shutdown->window_error())) : "",
+                    shutdown->window() ? "window-and-deployment-timeout" : "deployment-timeout-only");
+            }
+            catch (const std::exception& error)
+            {
+                // Preserve the previous Store/OS shutdown path if the local
+                // watchdog cannot be started. The external finalizer is running.
+                append_handoff_log(options.log_path, "installer-shutdown-unavailable", "", "", error.what());
+            }
+            execute_store_install_handoff(options, shutdown);
             return run_message_loop();
         }
 

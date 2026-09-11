@@ -845,6 +845,42 @@ describe("packaged desktop runtime configuration", () => {
     expect(macBuild).not.toContain("--windows-store-publishing-config");
   });
 
+  it("stages complete Windows AgentSourceCore modules that import independently", () => {
+    const root = fixtureRoot();
+    const core = join(root, "AgentSourceCore");
+    const runtime = join(root, "runtime");
+    const materialized = join(runtime, "memory", "node_modules", "@memmy", "agent-source-core");
+    const workspace = join(runtime, "memory", "workspace-packages", "agent-source-core");
+    mkdirSync(join(core, "dist", "src"), { recursive: true });
+    writeFileSync(join(core, "dist", "src", "index.js"), 'export { value } from "./codex-source-turn.js";\n');
+    writeFileSync(join(core, "dist", "src", "codex-source-turn.js"), 'import { line } from "./jsonl-lines.js"; import { redact } from "./secret-redactor.js"; export const value = redact(line);\n');
+    writeFileSync(join(core, "dist", "src", "jsonl-lines.js"), 'export const line = "turn";\n');
+    writeFileSync(join(core, "dist", "src", "secret-redactor.js"), 'export const redact = value => `redacted:${value}`;\n');
+    for (const destination of [workspace, materialized]) {
+      mkdirSync(join(destination, "dist", "src"), { recursive: true });
+      writeFixtureJson(join(destination, "package.json"), { type: "module" });
+    }
+    const buildScript = readFileSync(new URL("../scripts/internal/win/build-nsis.sh", import.meta.url), "utf8");
+    const copies = buildScript.split(/\r?\n/).filter((line) => line.startsWith("cp ") && line.includes("$AGENT_SOURCE_CORE_DIR/dist/src"));
+    expect(copies).toHaveLength(2);
+    const staged = spawnSync("bash", ["-c", ["set -eu", ...copies].join("\n")], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        AGENT_SOURCE_CORE_DIR: core.replaceAll("\\", "/"),
+        RUNTIME_DIR: runtime.replaceAll("\\", "/"),
+        RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR: materialized.replaceAll("\\", "/"),
+      },
+    });
+    expect(staged.status, staged.stderr).toBe(0);
+    for (const destination of [workspace, materialized]) {
+      const imported = spawnSync(process.execPath, ["--input-type=module", "-e",
+        'import { pathToFileURL } from "node:url"; const core = await import(pathToFileURL(process.argv[1]).href); if (core.value !== "redacted:turn") process.exit(1);',
+        join(destination, "dist", "src", "index.js")], { cwd: root, encoding: "utf8" });
+      expect(imported.status, imported.stderr).toBe(0);
+    }
+  });
+
   it("stages the private AgentSourceCore package without resolving it from npm", () => {
     const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
     const buildScript = readFileSync(
@@ -871,13 +907,13 @@ describe("packaged desktop runtime configuration", () => {
       'dependencies[agentSourceCorePackage.name] = "file:./workspace-packages/agent-source-core"',
     );
     expect(buildScript).toContain(
-      'cp "$AGENT_SOURCE_CORE_DIR/dist/src/index.js" "$RUNTIME_DIR/memory/workspace-packages/agent-source-core/dist/src/index.js"',
+      'cp -R "$AGENT_SOURCE_CORE_DIR/dist/src/." "$RUNTIME_DIR/memory/workspace-packages/agent-source-core/dist/src/"',
     );
     expect(buildScript).toContain(
       'RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR="$RUNTIME_DIR/memory/node_modules/@memmy/agent-source-core"',
     );
     expect(buildScript).toContain(
-      'cp "$AGENT_SOURCE_CORE_DIR/dist/src/index.js" "$RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR/dist/src/index.js"',
+      'cp -R "$AGENT_SOURCE_CORE_DIR/dist/src/." "$RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR/dist/src/"',
     );
     const contentStamp = 'node "$ROOT_DIR/scripts/internal/win/stamp-memory-runtime-content-id.mjs" "$RUNTIME_DIR/memory"';
     expect(buildScript).toContain(contentStamp);
@@ -899,6 +935,8 @@ describe("packaged desktop runtime configuration", () => {
     expect(buildScript).toContain(
       'require_packaged_runtime_file "$packaged_agent_source_core/dist/src/index.js"',
     );
+    expect(buildScript).toContain('verify_windows_agent_source_core_runtime "$packaged_agent_source_core"');
+    expect(buildScript).toContain('verify_windows_agent_source_core_runtime "$RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR"');
   });
 });
 

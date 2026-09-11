@@ -197,22 +197,25 @@ describe("UpdateCoordinatorProvider", () => {
     expect(checkForUpdates).toHaveBeenCalledTimes(2);
   });
 
-  it("refreshes the manifest before download and skips an intermediate release", async () => {
+  it.each(["dialog", "inline"] as const)("refreshes the manifest before %s download and skips an intermediate release", async (action) => {
+    const refreshedOfferToken = "b".repeat(43) as DesktopUpdateOfferToken;
     const checkForUpdates = vi.fn()
       .mockResolvedValueOnce({
         status: "available" as const,
         currentVersion: "1.1.2",
         latestVersion: "1.1.3",
+        offerToken: OFFER_TOKEN,
         downloadUrl: "https://updates.example.com/Memmy-1.1.3.dmg"
       })
       .mockResolvedValueOnce({
         status: "available" as const,
         currentVersion: "1.1.2",
         latestVersion: "1.1.4",
+        offerToken: refreshedOfferToken,
         downloadUrl: "https://updates.example.com/Memmy-1.1.4.dmg"
       });
     const downloadUpdate = vi.fn(async () => ({
-      filePath: "/tmp/Memmy-1.1.4.dmg",
+      preparedUpdate: { kind: "installer-file" as const, filePath: "/tmp/Memmy-1.1.4.dmg" },
       opened: false
     }));
     setDesktopBridge({
@@ -248,7 +251,8 @@ describe("UpdateCoordinatorProvider", () => {
     expect(document.body.textContent).toContain("1.1.3");
 
     await act(async () => {
-      getButtonByText("下载更新").click();
+      if (action === "dialog") getButtonByText("下载更新").click();
+      else getButtonByLabel("inline-update-action").click();
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -256,10 +260,7 @@ describe("UpdateCoordinatorProvider", () => {
     expect(checkForUpdates).toHaveBeenCalledTimes(2);
     expect(downloadUpdate).toHaveBeenCalledTimes(1);
     expect(downloadUpdate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        latestVersion: "1.1.4",
-        downloadUrl: "https://updates.example.com/Memmy-1.1.4.dmg"
-      }),
+      refreshedOfferToken,
       { openInstaller: false }
     );
     expect(readOutput("prepared-path")).toBe("/tmp/Memmy-1.1.4.dmg");
@@ -556,6 +557,32 @@ describe("UpdateCoordinatorProvider", () => {
     expect(openUpdateInstaller).toHaveBeenCalledWith(preparedUpdate);
   });
 
+  it.each(["microsoft-store", "store-migration"] as const)("reuses a prepared %s handle returned by the download-time refresh", async (provider) => {
+    const preparedUpdate = provider === "microsoft-store"
+      ? { kind: provider, baselinePackageVersion: "1.1.100.0", baselinePackageFullName: "Memtensor.Memmy_1.1.100.0_x64__eyack96k521x2" }
+      : { kind: provider, offerToken: STORE_MIGRATION_TOKEN };
+    const available: DesktopUpdateCheckResult = provider === "store-migration"
+      ? createStoreMigrationResult()
+      : { status: "available", provider, currentVersion: "1.1.1", offerToken: OFFER_TOKEN };
+    const checkForUpdates = vi.fn()
+      .mockResolvedValueOnce(available)
+      .mockResolvedValueOnce({ ...available, preparedUpdate });
+    const downloadUpdate = vi.fn();
+    const openUpdateInstaller = vi.fn(async () => ({ preparedUpdate, opened: true, willQuit: true }));
+    setDesktopBridge({ platform: "win32", checkForUpdates, downloadUpdate, openUpdateInstaller });
+    await renderUpdateHarness(root);
+    await act(async () => getButtonByLabel("update-action").click());
+    await act(async () => getButtonByText("下载更新").click());
+    expect(checkForUpdates).toHaveBeenCalledTimes(2);
+    expect(downloadUpdate).not.toHaveBeenCalled();
+    expect(readOutput("phase")).toBe("prepared");
+    expect(readOutput("prepared-path")).toBe("");
+    expect(readOutput("feedback-key")).toBe("settings.about.storeUpdatePrepared");
+    expect(container.textContent).not.toContain("{version}");
+    await act(async () => getButtonByText("重启安装").click());
+    expect(openUpdateInstaller).toHaveBeenCalledExactlyOnceWith(preparedUpdate);
+  });
+
   it.each(["dialog", "inline"] as const)("downloads Store migration asynchronously via %s and opens only on restart-install", async (action) => {
     let resolveDownload!: (result: DesktopUpdateInstallResult) => void;
     let progressCallback!: (progress: DesktopUpdateDownloadProgress) => void;
@@ -635,7 +662,7 @@ describe("UpdateCoordinatorProvider", () => {
     expect(container.textContent).toContain("安装包已准备好");
     expect(container.textContent).not.toMatch(/Microsoft Store|Web Installer|迁移|\{version\}/);
     expect(container.textContent).toContain("当前版本 v1.1.1。安装包已准备好，是否重启并安装更新？");
-    expect(checkForUpdates).toHaveBeenCalledTimes(1);
+    expect(checkForUpdates).toHaveBeenCalledTimes(2);
     await act(async () => getButtonByText("重启安装").click());
     expect(openUpdateInstaller).toHaveBeenCalledExactlyOnceWith(preparedUpdate);
     expect(readOutput("phase")).toBe("installing");
@@ -651,7 +678,8 @@ describe("UpdateCoordinatorProvider", () => {
     const preparedUpdate = { kind: "store-migration" as const, offerToken: SECOND_STORE_MIGRATION_TOKEN };
     const checkForUpdates = vi.fn()
       .mockResolvedValueOnce(createStoreMigrationResult())
-      .mockResolvedValueOnce(createStoreMigrationResult({ offerToken: refreshedOfferToken, storeMigrationOffer: preparedUpdate }));
+      .mockResolvedValueOnce(createStoreMigrationResult())
+      .mockResolvedValue(createStoreMigrationResult({ offerToken: refreshedOfferToken, storeMigrationOffer: preparedUpdate }));
     const downloadUpdate = vi.fn()
       .mockReturnValueOnce(downloadPromise)
       .mockResolvedValueOnce({ preparedUpdate, opened: false });
@@ -676,9 +704,10 @@ describe("UpdateCoordinatorProvider", () => {
     expect(readOutput("feedback-key")).toBe("settings.about.updateInstallFailed");
     expect(container.textContent).not.toContain("重启安装");
     await act(async () => getButtonByLabel("update-action").click());
-    expect(checkForUpdates).toHaveBeenCalledTimes(2);
+    expect(checkForUpdates).toHaveBeenCalledTimes(3);
     expect(readOutput("phase")).toBe("available");
     await act(async () => getButtonByText("下载更新").click());
+    expect(checkForUpdates).toHaveBeenCalledTimes(4);
     expect(downloadUpdate).toHaveBeenNthCalledWith(1, OFFER_TOKEN, { openInstaller: false });
     expect(downloadUpdate).toHaveBeenNthCalledWith(2, refreshedOfferToken, { openInstaller: false });
     expect(readOutput("phase")).toBe("prepared");

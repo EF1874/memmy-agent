@@ -730,10 +730,27 @@ verify_windows_native_module() {
 verify_windows_memory_workspace_artifacts() {
   require_packaged_runtime_file "$RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR/package.json"
   require_packaged_runtime_file "$RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR/dist/src/index.js"
+  verify_windows_agent_source_core_runtime "$RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR"
   if [ -L "$RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR" ]; then
     echo "Packaged Memory AgentSourceCore must not be a symbolic link." >&2
     exit 1
   fi
+}
+
+verify_windows_agent_source_core_runtime() {
+  local package_dir="$1"
+  local compiled_entry
+  for compiled_entry in index codex-source-turn jsonl-lines secret-redactor; do
+    require_packaged_runtime_file "$package_dir/dist/src/$compiled_entry.js"
+  done
+  node --input-type=module - "$(to_node_readable_path "$package_dir/dist/src/index.js")" <<'NODE'
+import { pathToFileURL } from "node:url";
+const core = await import(pathToFileURL(process.argv[2]).href);
+if (typeof core.readCodexSourceTurn !== "function") {
+  throw new Error("Packaged AgentSourceCore does not export the Codex source-turn reader");
+}
+console.log("Verified independent AgentSourceCore runtime import");
+NODE
 }
 
 verify_windows_onnxruntime_module() {
@@ -839,6 +856,7 @@ verify_packaged_windows_unpacked_artifacts() {
   verify_packaged_runtime_config_boundary "$DESKTOP_DIR/release/win-unpacked/resources"
   require_packaged_runtime_file "$packaged_agent_source_core/package.json"
   require_packaged_runtime_file "$packaged_agent_source_core/dist/src/index.js"
+  verify_windows_agent_source_core_runtime "$packaged_agent_source_core"
   if [ -L "$packaged_agent_source_core" ]; then
     echo "Packaged offline Memory agent source core must not be a symbolic link." >&2
     exit 1
@@ -1007,7 +1025,7 @@ cp -R "$MEMORY_DIR/dist/viewer" "$RUNTIME_DIR/memory/dist/viewer"
 cp -R "$MEMORY_DIR/adapters" "$RUNTIME_DIR/memory/adapters"
 mkdir -p "$RUNTIME_DIR/memory/workspace-packages/agent-source-core/dist/src"
 cp "$AGENT_SOURCE_CORE_DIR/package.json" "$RUNTIME_DIR/memory/workspace-packages/agent-source-core/package.json"
-cp "$AGENT_SOURCE_CORE_DIR/dist/src/index.js" "$RUNTIME_DIR/memory/workspace-packages/agent-source-core/dist/src/index.js"
+cp -R "$AGENT_SOURCE_CORE_DIR/dist/src/." "$RUNTIME_DIR/memory/workspace-packages/agent-source-core/dist/src/"
 package_step_start "Create Windows Memory runtime manifest"
 create_memory_runtime_manifest
 
@@ -1019,7 +1037,7 @@ RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR="$RUNTIME_DIR/memory/node_modules/@memmy/ag
 rm -rf "$RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR"
 mkdir -p "$RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR/dist/src"
 cp "$AGENT_SOURCE_CORE_DIR/package.json" "$RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR/package.json"
-cp "$AGENT_SOURCE_CORE_DIR/dist/src/index.js" "$RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR/dist/src/index.js"
+cp -R "$AGENT_SOURCE_CORE_DIR/dist/src/." "$RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR/dist/src/"
 if [ -L "$RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR" ]; then
   echo "Packaged Memory AgentSourceCore must not be a symbolic link." >&2
   exit 1

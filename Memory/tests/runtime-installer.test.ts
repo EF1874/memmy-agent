@@ -669,27 +669,33 @@ describe("standalone Memory runtime installer", () => {
   });
 });
 
-describe("installer lock recovery", () => {
-  it("reclaims a lock abandoned by a crashed installer", async () => {
+describe("installer lock contention", () => {
+  it("times out without unlinking a lock whose recorded owner is no longer alive", async () => {
     const root = tempRoot();
     const home = join(root, "home");
     const runtimeDirectory = createRuntimeDirectory(root, "2.1.0");
     const lockPath = join(home, "memory-service", "install.lock");
     mkdirSync(join(home, "memory-service"), { recursive: true });
-    writeFileSync(lockPath, `${deadPid()}\n`);
+    const lockContents = `${deadPid()}\n`;
+    writeFileSync(lockPath, lockContents);
 
-    const result = await installMemoryRuntime({
-      home,
-      runtimeDirectory,
-      skipServiceRegistration: true,
-      skipHealthCheck: true
-    });
-
-    expect(result).toMatchObject({ ok: true, version: "2.1.0" });
-    expect(existsSync(lockPath)).toBe(false);
+    // A stale PID is not an atomic guarantee that another contender has not
+    // replaced the lock. Preserve exclusion and the existing bounded timeout.
+    const clock = vi.spyOn(Date, "now").mockReturnValueOnce(0).mockReturnValue(15_001);
+    try {
+      await expect(installMemoryRuntime({
+        home,
+        runtimeDirectory,
+        skipServiceRegistration: true,
+        skipHealthCheck: true
+      })).rejects.toThrow(/timed out waiting for installer lock/);
+      expect(readFileSync(lockPath, "utf8")).toBe(lockContents);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
-  it("reclaims an empty lock left behind before its owner was recorded", async () => {
+  it("times out without unlinking an old empty lock before its owner is recorded", async () => {
     const root = tempRoot();
     const home = join(root, "home");
     const runtimeDirectory = createRuntimeDirectory(root, "2.1.0");
@@ -699,14 +705,18 @@ describe("installer lock recovery", () => {
     const stale = new Date(Date.now() - 60_000);
     utimesSync(lockPath, stale, stale);
 
-    const result = await installMemoryRuntime({
-      home,
-      runtimeDirectory,
-      skipServiceRegistration: true,
-      skipHealthCheck: true
-    });
-
-    expect(result).toMatchObject({ ok: true, version: "2.1.0" });
+    const clock = vi.spyOn(Date, "now").mockReturnValueOnce(0).mockReturnValue(15_001);
+    try {
+      await expect(installMemoryRuntime({
+        home,
+        runtimeDirectory,
+        skipServiceRegistration: true,
+        skipHealthCheck: true
+      })).rejects.toThrow(/timed out waiting for installer lock/);
+      expect(readFileSync(lockPath, "utf8")).toBe("");
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it("waits for a lock still held by a live installer", async () => {

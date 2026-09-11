@@ -463,11 +463,13 @@ describe("desktop packaged runtime boundaries", () => {
       'dependencies[agentSourceCorePackage.name] = "file:./workspace-packages/agent-source-core"'
     );
     expect(source).toContain(
-      'cp "$AGENT_SOURCE_CORE_DIR/dist/src/index.js" "$RUNTIME_DIR/memory/workspace-packages/agent-source-core/dist/src/index.js"'
+      'cp -R "$AGENT_SOURCE_CORE_DIR/dist/src/." "$RUNTIME_DIR/memory/workspace-packages/agent-source-core/dist/src/"'
     );
     expect(source).toContain(
-      'cp "$AGENT_SOURCE_CORE_DIR/dist/src/index.js" "$RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR/dist/src/index.js"'
+      'cp -R "$AGENT_SOURCE_CORE_DIR/dist/src/." "$RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR/dist/src/"'
     );
+    expect(source).toContain('verify_windows_agent_source_core_runtime "$RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR"');
+    expect(source).toContain('verify_windows_agent_source_core_runtime "$packaged_agent_source_core"');
     expect(source).toContain(
       'if [ -L "$RUNTIME_MEMORY_AGENT_SOURCE_CORE_DIR" ]; then'
     );

@@ -145,6 +145,21 @@ describe("Memory SQLite assets in a pkg snapshot", () => {
     expect(fixture.writes).toEqual(firstWrites);
   });
 
+  it.each(["memory-package", "standalone-bundle"])("resolves the %s binding without losing content-addressed extraction", (layout) => {
+    const packageRoot = join(fixture.root, "snapshot", "standalone");
+    const moduleDirectory = layout === "memory-package"
+      ? join(packageRoot, "dist", "src", "storage")
+      : join(packageRoot, "bundle");
+    fixture.modulePath = join(moduleDirectory, "db.js");
+    const nativeRoot = layout === "memory-package" ? packageRoot : moduleDirectory;
+    const nativeSource = join(nativeRoot, "node_modules", "better-sqlite3", "build", "Release", "better_sqlite3.node");
+    mkdirSync(dirname(nativeSource), { recursive: true });
+    writeFileSync(nativeSource, bindingBytes);
+    openDatabase().close();
+    expect(fixture.bindings[0]?.bytes).toEqual(bindingBytes);
+    expect(fixture.bindings[0]?.path?.startsWith(join(fixture.temp, "memmy-memory-native"))).toBe(true);
+  });
+
   it("uses new source bytes after an upgrade without overwriting assets used by an older process", () => {
     openDatabase().close();
     const oldBinding = fixture.bindings[0]!.path!;
