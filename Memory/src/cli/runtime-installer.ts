@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { chmod, copyFile, cp, mkdir, open, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, open, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { loadMemmyConfig } from "../config/index.js";
 import { MEMORY_PROTOCOL_VERSION, MEMORY_SERVICE_VERSION } from "../version.js";
+import { copyBundledMemoryRuntime } from "./bundled-runtime-copy.js";
 
 const DEFAULT_RELEASES_URL = "https://github.com/MemTensor/memmy-agent/releases";
 const INSTALL_LOCK_TIMEOUT_MS = 15_000;
@@ -152,7 +153,7 @@ export async function installMemoryRuntime(options: MemoryRuntimeInstallOptions 
       await mkdir(stagedPath, { recursive: true });
       unpacked = join(stagedPath, "unpacked");
       if (options.runtimeDirectory) {
-        await cp(resolveHome(options.runtimeDirectory), unpacked, { recursive: true });
+        await copyBundledMemoryRuntime(resolveHome(options.runtimeDirectory), unpacked);
       } else {
         const archivePath = join(stagedPath, descriptor.name);
         await obtainRuntimeAsset(options, manifest, descriptor, archivePath);

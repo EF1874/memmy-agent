@@ -405,7 +405,7 @@ describe("UpdateCoordinatorProvider", () => {
     expect(readOutput("download-progress")).toBe("");
   });
 
-  it("does not send renderer-controlled provider or URL metadata without an opaque desktop offer token", async () => {
+  it.each(["token", "download URL"] as const)("does not download a legacy offer without its %s", async (missing) => {
     const downloadUpdate = vi.fn(async () => {
       throw new Error("must not be called");
     });
@@ -417,7 +417,9 @@ describe("UpdateCoordinatorProvider", () => {
         latestVersion: "9.9.9",
         provider: "legacy-installer" as const,
         force: true,
-        downloadUrl: "https://attacker.example/forged.exe"
+        ...(missing === "token"
+          ? { downloadUrl: "https://attacker.example/forged.exe" }
+          : { offerToken: OFFER_TOKEN })
       })),
       downloadUpdate
     });

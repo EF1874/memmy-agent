@@ -573,7 +573,7 @@ describe("packaged desktop runtime config", () => {
     ["an empty object", "{}\r\n"],
     ["other settings only", "gateway:\n  port: 18970\n"],
   ] as const)(
-    "uses the MEMMY_HOME workspace when the runtime config is %s",
+    "uses the Store MEMMY_HOME workspace when the runtime config is %s",
     async (_configState, configSource) => {
       const memmyHome = await makeTempRoot();
       const configPath = join(memmyHome, "config.yaml");
@@ -582,10 +582,24 @@ describe("packaged desktop runtime config", () => {
       expect(await resolvePackagedRuntimeMigrationTargets({
         MEMMY_HOME: memmyHome,
         MEMMY_CONFIG: configPath
-      })).toEqual({
+      }, true)).toEqual({
         configPath,
         agentWorkspace: join(memmyHome, "workspace")
       });
+    }
+  );
+
+  it.each([null, "# existing config\n", "gateway:\n  port: 18970\n"])(
+    "leaves a non-Store default workspace to upstream migrations (%s)",
+    async (configSource) => {
+      const memmyHome = await makeTempRoot();
+      const configPath = join(memmyHome, "config.yaml");
+      if (configSource !== null) await writeFile(configPath, configSource, "utf8");
+      expect(await resolvePackagedRuntimeMigrationTargets({
+        MEMMY_HOME: memmyHome,
+        MEMMY_CONFIG: configPath
+      })).toEqual({ configPath });
+      await expect(stat(join(memmyHome, "workspace"))).rejects.toMatchObject({ code: "ENOENT" });
     }
   );
 

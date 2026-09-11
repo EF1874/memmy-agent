@@ -168,7 +168,7 @@ export async function startManagedRuntimeServices(
   options: StartManagedRuntimeServicesOptions
 ): Promise<ManagedRuntimeServices> {
   const entries = resolveRuntimeEntryPaths(options);
-  const migrationTargets = await resolvePackagedRuntimeMigrationTargets();
+  const migrationTargets = await resolvePackagedRuntimeMigrationTargets(process.env, options.isWindowsStore === true);
   const memmyConfigPreexisting = existsSync(migrationTargets.configPath);
   await runPackagedMigrationCommand({
     agentEntry: entries.agentEntry,
@@ -445,11 +445,13 @@ export async function preparePackagedRuntimeConfig(
 }
 
 export async function resolvePackagedRuntimeMigrationTargets(
-  env: RuntimeEnv = process.env
+  env: RuntimeEnv = process.env,
+  isWindowsStore = false
 ): Promise<{ configPath: string; agentWorkspace?: string }> {
   const memmyHome = resolvePath(env.MEMMY_HOME ?? "~/.memmy");
   const configPath = resolvePath(env.MEMMY_CONFIG ?? join(memmyHome, "config.yaml"));
   const explicitWorkspace = stringValue(env.MEMMY_AGENT_WORKSPACE);
+  if (!explicitWorkspace && !isWindowsStore) return { configPath };
   if (!explicitWorkspace) {
     const configSource = await readFile(configPath, "utf8").catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") return "";

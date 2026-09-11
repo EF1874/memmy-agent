@@ -790,7 +790,10 @@ function canDownloadUpdate(update: DesktopUpdateCheckResult): boolean {
   if (isWindowsStoreMigration(update)) {
     return Boolean(bridge?.downloadUpdate && update.offerToken && update.storeMigrationOffer);
   }
-  return bridge?.downloadUpdate ? Boolean(update.offerToken) : Boolean(update.downloadUrl);
+  if (update.provider === "microsoft-store") {
+    return Boolean(bridge?.downloadUpdate && update.offerToken);
+  }
+  return Boolean(update.downloadUrl && (!bridge?.downloadUpdate || update.offerToken));
 }
 
 function isVersionlessUpdate(update: DesktopUpdateCheckResult): boolean {
