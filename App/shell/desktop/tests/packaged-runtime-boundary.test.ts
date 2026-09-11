@@ -1562,9 +1562,9 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).toContain('cp -R "$MEMORY_DIR/dist/viewer" "$RUNTIME_DIR/memory/dist/viewer"');
     expect(source).toContain('cp -R "$MEMORY_DIR/adapters" "$RUNTIME_DIR/memory/adapters"');
     expect(source).toContain(
-      'npm install --prefix "$RUNTIME_DIR/memory" --package-lock-only --ignore-scripts --os=darwin --cpu="$TARGET_CPU"'
+      'npm install --prefix "$RUNTIME_DIR/memory" --package-lock-only --ignore-scripts --install-links --os=darwin --cpu="$TARGET_CPU"'
     );
-    expect(source).toContain('npm ci --prefix "$RUNTIME_DIR/memory" --omit=dev --os=darwin --cpu="$TARGET_CPU"');
+    expect(source).toContain('npm ci --prefix "$RUNTIME_DIR/memory" --omit=dev --install-links --os=darwin --cpu="$TARGET_CPU"');
     expect(source).not.toContain('MEMORY_RUNTIME_CONTRACTS_DIR');
     expect(source).not.toContain('MEMORY_RUNTIME_MIGRATIONS_DIR');
     expect(source).toContain("node_modules/.bin/electron-rebuild");
