@@ -7864,6 +7864,18 @@ namespace
         append_handoff_log(options.log_path, "old-process-exited");
     }
 
+    void report_store_install_shutdown_unavailable(
+        const StoreInstallHandoffOptions& options,
+        const std::string& reason)
+    {
+        // Publishing the failure lets the external finalizer activate the app.
+        // First wait for the quitting instance, otherwise activation can be
+        // delivered to that instance just before it exits. If this bounded wait
+        // fails, leave recovery to the finalizer's existing overall timeout.
+        wait_for_old_application_exit(options);
+        write_store_install_result(options, "installer-shutdown-unavailable", "", reason);
+    }
+
     int finalize_store_update(const StoreInstallHandoffOptions& options)
     {
         if (current_process_has_package_identity())
@@ -8157,7 +8169,6 @@ namespace
                     "; updateCount=" + std::to_string(updates.Size()));
             if (updates.Size() == 0)
             {
-                if (shutdown) shutdown->finish();
                 write_store_install_result(
                     options,
                     "no-update",
@@ -8187,7 +8198,6 @@ namespace
                 append_store_package_log(log_path, "install-progress", status);
             });
             const StorePackageUpdateResult result = co_await operation;
-            if (shutdown) shutdown->finish();
             const std::string state = update_state_name(result.OverallState());
             for (const auto& status : result.StorePackageUpdateStatuses())
             {
@@ -8205,7 +8215,6 @@ namespace
         }
         catch (const hresult_error& error)
         {
-            if (shutdown) shutdown->finish();
             const std::string code = hresult_text(error.code());
             const std::string reason = single_line(to_string(error.message()));
             try
@@ -8219,7 +8228,6 @@ namespace
         }
         catch (const std::exception& error)
         {
-            if (shutdown) shutdown->finish();
             const std::string reason = single_line(error.what());
             try
             {
@@ -8789,13 +8797,6 @@ int wmain(int argc, wchar_t* argv[])
                     E_ACCESSDENIED,
                     L"Store update installer must retain application package identity");
             }
-            append_handoff_log(
-                options.log_path,
-                "handoff-installer-started",
-                utf8(options.mode),
-                "",
-                "baselinePackageVersion=" + utf8(options.baseline_package_version) +
-                    "; oldPid=" + std::to_string(options.old_process_id));
             try
             {
                 launch_store_update_finalizer_breakaway(options);
@@ -8825,6 +8826,32 @@ int wmain(int argc, wchar_t* argv[])
                 }
                 return 2;
             }
+            std::shared_ptr<memmy::StoreInstallShutdown> shutdown;
+            try
+            {
+                shutdown = std::make_shared<memmy::StoreInstallShutdown>([options](const char* reason) {
+                    append_handoff_log(options.log_path, "installer-release-for-deployment", utf8(options.mode), "", reason);
+                });
+                append_handoff_log(
+                    options.log_path, "installer-shutdown-ready", utf8(options.mode),
+                    shutdown->window_error() ? hresult_text(HRESULT_FROM_WIN32(shutdown->window_error())) : "",
+                    shutdown->window() ? "window-and-bounded-timeouts" : "bounded-timeouts-only");
+            }
+            catch (const std::exception& error)
+            {
+                // Do not start an unbounded Store operation without the timer.
+                // The external finalizer restores the retryable state and, for
+                // a manual update, reopens the currently installed application.
+                report_store_install_shutdown_unavailable(options, error.what());
+                return 2;
+            }
+            append_handoff_log(
+                options.log_path,
+                "handoff-installer-started",
+                utf8(options.mode),
+                "",
+                "baselinePackageVersion=" + utf8(options.baseline_package_version) +
+                    "; oldPid=" + std::to_string(options.old_process_id));
             try
             {
                 wait_for_old_application_exit(options);
@@ -8838,25 +8865,10 @@ int wmain(int argc, wchar_t* argv[])
                     single_line(to_string(error.message())));
                 return 2;
             }
-            std::shared_ptr<memmy::StoreInstallShutdown> shutdown;
-            try
-            {
-                shutdown = std::make_shared<memmy::StoreInstallShutdown>([options](const char* reason) {
-                    append_handoff_log(options.log_path, "installer-release-for-deployment", utf8(options.mode), "", reason);
-                });
-                append_handoff_log(
-                    options.log_path, "installer-shutdown-ready", utf8(options.mode),
-                    shutdown->window_error() ? hresult_text(HRESULT_FROM_WIN32(shutdown->window_error())) : "",
-                    shutdown->window() ? "window-and-deployment-timeout" : "deployment-timeout-only");
-            }
-            catch (const std::exception& error)
-            {
-                // Preserve the previous Store/OS shutdown path if the local
-                // watchdog cannot be started. The external finalizer is running.
-                append_handoff_log(options.log_path, "installer-shutdown-unavailable", "", "", error.what());
-            }
             execute_store_install_handoff(options, shutdown);
-            return run_message_loop();
+            const int exit_code = run_message_loop();
+            shutdown->finish();
+            return exit_code;
         }
 
         if (command == Command::LaunchStoreUpdateFinalizer)

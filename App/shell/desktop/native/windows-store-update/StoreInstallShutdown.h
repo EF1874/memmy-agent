@@ -18,12 +18,17 @@ namespace memmy
     public:
         static constexpr wchar_t window_class_name[] = L"Memmy.StoreInstallShutdown";
         static constexpr DWORD deployment_grace_ms = 5000;
+        // The external finalizer observes replacement for 15 minutes. Release
+        // this package at least a minute earlier even if Store sends no events.
+        static constexpr DWORD operation_timeout_ms = 14 * 60 * 1000;
         static constexpr DWORD diagnostic_grace_ms = 100;
 
         explicit StoreInstallShutdown(
             std::function<void(const char*)> before_exit,
-            DWORD grace_ms = deployment_grace_ms)
+            DWORD grace_ms = deployment_grace_ms,
+            DWORD timeout_ms = operation_timeout_ms)
             : before_exit_(std::move(before_exit)), grace_ms_(grace_ms),
+              operation_deadline_(std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms)),
               watchdog_([this] { watch(); })
         {
             WNDCLASSW window_class{};
@@ -120,13 +125,19 @@ namespace memmy
             while (!finished_)
             {
                 if (exit_reason_) break;
-                if (!deployment_deadline_) { wake_.wait(lock); continue; }
-                if (std::chrono::steady_clock::now() >= *deployment_deadline_)
+                const auto now = std::chrono::steady_clock::now();
+                if (now >= operation_deadline_)
+                {
+                    exit_reason_ = "operation-timeout";
+                    break;
+                }
+                if (deployment_deadline_ && now >= *deployment_deadline_)
                 {
                     exit_reason_ = "deployment-timeout";
                     break;
                 }
-                wake_.wait_until(lock, *deployment_deadline_);
+                wake_.wait_until(lock, deployment_deadline_ && *deployment_deadline_ < operation_deadline_
+                    ? *deployment_deadline_ : operation_deadline_);
             }
             if (finished_) return;
             const char* reason = exit_reason_;
@@ -152,6 +163,7 @@ namespace memmy
 
         std::function<void(const char*)> before_exit_;
         DWORD grace_ms_;
+        const std::chrono::steady_clock::time_point operation_deadline_;
         std::mutex mutex_;
         std::condition_variable wake_;
         bool finished_ = false;

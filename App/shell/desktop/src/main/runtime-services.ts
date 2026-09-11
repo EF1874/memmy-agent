@@ -62,6 +62,8 @@ export interface StartManagedRuntimeServicesOptions extends StartPackagedRuntime
   beforeStartServices?: (input: { databasePath: string; configPath: string }) => Promise<void>;
   /** Unpacked Memory runtime shipped as an offline Desktop resource. */
   offlineMemoryRuntimeDirectory?: string;
+  /** Reconcile equal-version bundled content only for a packaged Store app. */
+  isWindowsStore?: boolean;
 }
 
 export type PackagedRuntimeServices = ManagedRuntimeServices;
@@ -902,7 +904,7 @@ export async function ensureMemoryService(
   );
 }
 
-/** Only replace a runtime installed by this Desktop, after its migrations finish. */
+/** Only replace a runtime owned by this Desktop, after its migrations finish. */
 async function stopOlderBundledMemoryRuntime(
   runtimeConfig: PackagedRuntimeConfig,
   options: StartManagedRuntimeServicesOptions,
@@ -927,7 +929,7 @@ async function stopOlderBundledMemoryRuntime(
   const installedVersion = parseStableMemoryVersion(installed.version);
   if (!bundledVersion || !installedVersion) return false;
   const difference = bundledVersion.map((part, index) => part - installedVersion[index]!).find((delta) => delta !== 0) ?? 0;
-  if (difference <= 0 || bundled.protocolVersion !== SUPPORTED_MEMORY_PROTOCOL_VERSION
+  if (difference < 0 || bundled.protocolVersion !== SUPPORTED_MEMORY_PROTOCOL_VERSION
     || installed.protocolVersion !== SUPPORTED_MEMORY_PROTOCOL_VERSION) return false;
 
   // The standalone CLI records its own Node executable. Sharing a home or a
@@ -938,6 +940,25 @@ async function stopOlderBundledMemoryRuntime(
   const runtimeRelative = relative(join(serviceHome, "runtime"), installed.runtimeDir);
   if (!runtimeRelative || runtimeRelative.startsWith("..") || isAbsolute(runtimeRelative)
     || resolve(installed.entrypoint) !== resolve(installed.runtimeDir, "dist/src/server/index.js")) return false;
+  if (difference === 0) {
+    // A Store build can ship different bytes without changing Memory's business
+    // version. The installer already handles that replacement, but a healthy
+    // service must first release its database and runtime directory. Do not
+    // broaden this takeover to other channels or another executable's service.
+    if (!options.isWindowsStore || (options.platform ?? process.platform) !== "win32") return false;
+    const bundledContentId = parseMemoryRuntimeContentId(bundled.contentId);
+    if (!bundledContentId) return false;
+    let installedContentId: string | undefined;
+    try {
+      const metadata: unknown = JSON.parse(await readFile(join(installed.runtimeDir, "memory-runtime.json"), "utf8"));
+      if (!isRecord(metadata) || metadata.version !== installed.version
+        || metadata.protocolVersion !== SUPPORTED_MEMORY_PROTOCOL_VERSION) return false;
+      installedContentId = parseMemoryRuntimeContentId(metadata.contentId);
+    } catch {
+      return false;
+    }
+    if (installedContentId === bundledContentId) return false;
+  }
   const lock = readLiveMemoryServerLock(runtimeConfig.memoryDatabasePath);
   if (!lock || lock.pid === process.pid || running.pid !== lock.pid
     || typeof running.configPath !== "string" || resolve(running.configPath) !== resolve(runtimeConfig.configPath)
@@ -984,6 +1005,10 @@ function parseStableMemoryVersion(value: unknown): number[] | undefined {
   if (typeof value !== "string" || !/^\d+\.\d+\.\d+$/.test(value)) return undefined;
   const parts = value.split(".").map(Number);
   return parts.every(Number.isSafeInteger) ? parts : undefined;
+}
+
+function parseMemoryRuntimeContentId(value: unknown): string | undefined {
+  return typeof value === "string" && /^[a-f0-9]{64}$/iu.test(value) ? value.toLowerCase() : undefined;
 }
 
 function hasPreviousMemoryRuntimeMarker(configPath: string): boolean {

@@ -31,7 +31,7 @@ int main(int argc, char** argv)
 {
     if (argc != 2) return 2;
     const std::string scenario = argv[1];
-    if (scenario == "window-creation-failed")
+    if (scenario == "window-creation-failed" || scenario == "all-notifications-lost-window-creation-failed")
     {
         WNDCLASSW rejecting{};
         rejecting.hInstance = GetModuleHandleW(nullptr);
@@ -43,14 +43,16 @@ int main(int argc, char** argv)
     const auto before_exit = [&](const char* reason) {
         std::cout << "exit=" << reason << " elapsed=" << GetTickCount64() - start << std::endl;
         if (scenario == "logging-failed") throw std::runtime_error("diagnostic write failed");
-        if (scenario == "logging-blocked") Sleep(INFINITE);
+        if (scenario == "logging-blocked" || scenario == "all-notifications-lost-logging-blocked") Sleep(INFINITE);
     };
+    const bool total_timeout = scenario.starts_with("all-notifications-lost") || scenario == "deployment-after-total-deadline";
     const auto owner = scenario == "default-timeout"
         ? std::make_unique<memmy::StoreInstallShutdown>(before_exit)
-        : std::make_unique<memmy::StoreInstallShutdown>(before_exit, 250);
+        : std::make_unique<memmy::StoreInstallShutdown>(before_exit, total_timeout ? 1000 : 250,
+            total_timeout ? 250 : memmy::StoreInstallShutdown::operation_timeout_ms);
     auto& shutdown = *owner;
     const HWND window = shutdown.window();
-    if (scenario == "window-creation-failed")
+    if (scenario == "window-creation-failed" || scenario == "all-notifications-lost-window-creation-failed")
     {
         if (window || shutdown.window_error() == ERROR_SUCCESS) return 4;
     }
@@ -69,6 +71,25 @@ int main(int argc, char** argv)
         pump_for(400);
         std::cout << "survived=before-deployment" << std::endl;
         return 0;
+    }
+    if (total_timeout)
+    {
+        if (scenario == "all-notifications-lost-operation-finished")
+        {
+            shutdown.finish();
+            pump_for(400);
+            std::cout << "survived=" << scenario << std::endl;
+            return 0;
+        }
+        if (scenario == "deployment-after-total-deadline")
+        {
+            pump_for(100);
+            shutdown.deployment_started();
+        }
+        // No Store progress, no window messages, or even a completely blocked STA.
+        if (scenario == "all-notifications-lost-blocked-sta") Sleep(2000);
+        else pump_for(2000);
+        return 8;
     }
     if (scenario == "end-session") SendMessageW(window, WM_ENDSESSION, TRUE, ENDSESSION_CLOSEAPP);
     else if (scenario == "close") PostMessageW(window, WM_CLOSE, 0, 0);

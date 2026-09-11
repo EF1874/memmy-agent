@@ -456,6 +456,7 @@ async function boot(): Promise<void> {
       runtimeExecutable: app.isPackaged
         ? undefined
         : resolveDevelopmentRuntimeExecutable(),
+      isWindowsStore: app.isPackaged && isWindowsStoreApp(),
       offlineMemoryRuntimeDirectory: app.isPackaged
         ? join(process.resourcesPath, "memory-runtime")
         : undefined
