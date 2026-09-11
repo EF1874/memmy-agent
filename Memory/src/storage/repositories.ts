@@ -34,6 +34,7 @@ import type {
   UserMemoryType
 } from "../types.js";
 import { DEFAULT_NAMESPACE_SOURCE } from "../types.js";
+import { agentSourceFamilyRoots, normalizeAgentIdKey } from "../utils/agent-source-id.js";
 import { newId, stableHash } from "../utils/id.js";
 import { asStringArray, parseJson, toJson } from "../utils/json.js";
 import { nowIso } from "../utils/time.js";
@@ -3954,23 +3955,11 @@ export class RuntimeRepository {
     const tools = input.toolNames?.length ? input.toolNames : ["memory_add", "memory_search"] satisfies Array<ApiLogRecord["toolName"]>;
     const placeholders = tools.map(() => "?").join(", ");
     const sourceAgent = input.sourceAgent?.trim();
-    const excludedSourceAgents = Array.from(new Set(
-      (input.excludedSourceAgents ?? []).map(normalizeAgentIdKey).filter(Boolean)
-    ));
-    const excludedPlaceholders = excludedSourceAgents.map(() => "?").join(", ");
-    const sourceAgentFilter = sourceAgent
-      ? `AND lower(replace(replace(TRIM(source_agent), '-', '_'), ' ', '_')) = ?`
-      : excludedSourceAgents.length > 0
-        ? `AND (
-             NULLIF(TRIM(source_agent), '') IS NULL
-             OR lower(replace(replace(TRIM(source_agent), '-', '_'), ' ', '_')) NOT IN (${excludedPlaceholders})
-           )`
-        : "";
-    const parameters = sourceAgent
-      ? [...tools, normalizeAgentIdKey(sourceAgent)]
-      : excludedSourceAgents.length > 0
-        ? [...tools, ...excludedSourceAgents]
-        : tools;
+    const agentFilter = sourceAgent
+      ? agentIdMatchClause("source_agent", sourceAgent)
+      : agentIdExclusionClause("source_agent", input.excludedSourceAgents ?? []);
+    const sourceAgentFilter = agentFilter ? `AND ${agentFilter.sql}` : "";
+    const parameters = agentFilter ? [...tools, ...agentFilter.params] : tools;
     const total = this.db
       .prepare(`SELECT COUNT(*) AS n FROM api_logs WHERE tool_name IN (${placeholders}) ${sourceAgentFilter}`)
       .get(...parameters) as { n: number };
@@ -5517,6 +5506,7 @@ function userMemoryPanelFilter(input: {
   }
   const sourceAgent = input.sourceAgent?.trim();
   if (sourceAgent) {
+    const match = agentIdMatchClause("sessions.source", sourceAgent);
     clauses.push(`EXISTS (
       SELECT 1
       FROM raw_turns
@@ -5527,9 +5517,9 @@ function userMemoryPanelFilter(input: {
           SELECT CAST(value AS TEXT) FROM json_each(user_memories.source_turn_refs_json)
         )
       )
-      AND lower(replace(replace(TRIM(sessions.source), '-', '_'), ' ', '_')) = ?
+      AND ${match.sql}
     )`);
-    params.push(normalizeAgentIdKey(sourceAgent));
+    params.push(...match.params);
   }
   return { where: clauses.join(" AND "), params };
 }
@@ -5909,8 +5899,41 @@ function isShortAsciiTerm(term: string): boolean {
   return /^[\x20-\x7e]{1,2}$/.test(term);
 }
 
-function normalizeAgentIdKey(value: string): string {
-  return value.trim().toLowerCase().replace(/[\s-]+/gu, "_");
+function normalizedAgentIdSql(column: string): string {
+  return `lower(replace(replace(TRIM(${column}), '-', '_'), ' ', '_'))`;
+}
+
+/**
+ * Matches one Agent filter value against a source column. Known Agents also match the
+ * ids derived from them ("memmy-onboarding" under "memmy-agent"), because the panel
+ * shows all of them as the same Agent.
+ */
+function agentIdMatchClause(column: string, value: string): { sql: string; params: string[] } {
+  const normalizedColumn = normalizedAgentIdSql(column);
+  const roots = agentSourceFamilyRoots(value);
+  if (roots.length === 0) {
+    return { sql: `${normalizedColumn} = ?`, params: [normalizeAgentIdKey(value)] };
+  }
+  return {
+    sql: `(${roots.map(() => `${normalizedColumn} = ? OR ${normalizedColumn} LIKE ? ESCAPE '\\'`).join(" OR ")})`,
+    params: roots.flatMap((root) => [root, `${escapeLikePattern(root)}\\_%`])
+  };
+}
+
+/** True when the column matches none of the excluded Agents (the "other Agents" filter). */
+function agentIdExclusionClause(column: string, values: readonly string[]): { sql: string; params: string[] } | undefined {
+  const matches = Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)))
+    .map((value) => agentIdMatchClause(column, value));
+  if (matches.length === 0) {
+    return undefined;
+  }
+  return {
+    sql: `(
+      NULLIF(TRIM(${column}), '') IS NULL
+      OR NOT (${matches.map((match) => match.sql).join(" OR ")})
+    )`,
+    params: matches.flatMap((match) => match.params)
+  };
 }
 
 function layerWeight(layer: MemoryLayer): number {
@@ -5964,17 +5987,15 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
 
   function addAgentIdClause(value: string | undefined, excludedValues: string[] | undefined): void {
     if (value?.trim()) {
-      clauses.push("lower(replace(replace(trim(agent_id), '-', '_'), ' ', '_')) = ?");
-      params.push(normalizeAgentIdKey(value));
+      const match = agentIdMatchClause("agent_id", value);
+      clauses.push(match.sql);
+      params.push(...match.params);
       return;
     }
-    const excluded = Array.from(new Set((excludedValues ?? []).map(normalizeAgentIdKey).filter(Boolean)));
-    if (excluded.length > 0) {
-      clauses.push(`(
-        NULLIF(TRIM(agent_id), '') IS NULL
-        OR lower(replace(replace(trim(agent_id), '-', '_'), ' ', '_')) NOT IN (${excluded.map(() => "?").join(", ")})
-      )`);
-      params.push(...excluded);
+    const exclusion = agentIdExclusionClause("agent_id", excludedValues ?? []);
+    if (exclusion) {
+      clauses.push(exclusion.sql);
+      params.push(...exclusion.params);
     }
   }
 
@@ -6025,13 +6046,14 @@ function buildEpisodeWhere(userId?: string, query?: string, sourceAgent?: string
 
   const normalizedSourceAgent = sourceAgent?.trim();
   if (normalizedSourceAgent) {
+    const match = agentIdMatchClause("sessions.source", normalizedSourceAgent);
     clauses.push(`EXISTS (
       SELECT 1
       FROM sessions
       WHERE sessions.id = episodes.session_id
-        AND lower(replace(replace(TRIM(sessions.source), '-', '_'), ' ', '_')) = ?
+        AND ${match.sql}
     )`);
-    params.push(normalizeAgentIdKey(normalizedSourceAgent));
+    params.push(...match.params);
   }
 
   const normalizedQuery = query?.trim();

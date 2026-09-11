@@ -1526,7 +1526,8 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).toContain("InstallLocation is shared-looking or contains a protected path");
     expect(source).toContain("-IncludeMachineScope requires an already elevated PowerShell session");
     expect(source).toContain("This script can only run on Windows.");
-    expect(source).toContain("Type CLEAR MEMMY to continue");
+    expect(source).toContain("This permanently deletes Memmy application state and local data.");
+    expect(source).not.toContain("Read-Host");
   });
 
   it("keeps packaged CLI launchers on Memmy.app and ~/.memmy/config.yaml", () => {
