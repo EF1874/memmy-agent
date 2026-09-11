@@ -81,12 +81,20 @@ export class MemoryDb {
 
 function packagedNativeBindingPath(): string | undefined {
   if (!(process as NodeJS.Process & { pkg?: unknown }).pkg) return undefined;
-  const source = resolve(
-    dirname(fileURLToPath(import.meta.url)),
-    "../../../../node_modules/better-sqlite3/build/Release/better_sqlite3.node"
-  );
-  if (!existsSync(source)) return undefined;
-  return packagedNativeAssetPath(source);
+  const moduleDir = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    resolve(moduleDir, "../../../node_modules/better-sqlite3/build/Release/better_sqlite3.node"),
+    resolve(moduleDir, "node_modules/better-sqlite3/build/Release/better_sqlite3.node")
+  ];
+  const source = candidates.find((candidate) => existsSync(candidate));
+  if (!source) return undefined;
+  const targetDirectory = join(tmpdir(), "memmy-memory-native");
+  const target = join(targetDirectory, "better_sqlite3.node");
+  // Refresh on every start so an upgraded package cannot reuse a stale
+  // native addon left by a previous executable with the same temp path.
+  mkdirSync(targetDirectory, { recursive: true, mode: 0o700 });
+  copyFileSync(source, target);
+  return target;
 }
 
 function packagedNativeAssetPath(source: string): string {
