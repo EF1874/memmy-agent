@@ -1,3 +1,6 @@
+export * from "./codex-source-turn.js";
+export * from "./secret-redactor.js";
+export * from "./jsonl-lines.js";
 import { createHash } from "node:crypto";
 
 export interface ConversationMessage {
@@ -157,19 +160,32 @@ export async function* orderedTurns(messages: AsyncIterable<ConversationMessage>
   let turnIndex = 0;
   for await (const message of messages) {
     if (message.conversationId !== conversationId) {
-      if (isCompleteTurn(current)) yield { sourceId: current[0]!.sourceId, conversationId, turnIndex, messages: current };
+      if (shouldEmitTurn(current)) yield { sourceId: current[0]!.sourceId, conversationId, turnIndex, messages: current };
       current = [];
       conversationId = message.conversationId;
       turnIndex = 0;
     }
-    if (message.role === "user" && current.length > 0) {
-      if (isCompleteTurn(current)) yield { sourceId: current[0]!.sourceId, conversationId, turnIndex, messages: current };
+    if (current.length > 0 && beginsNextTurn(current, message)) {
+      if (shouldEmitTurn(current)) yield { sourceId: current[0]!.sourceId, conversationId, turnIndex, messages: current };
       turnIndex += 1;
       current = [];
     }
     current.push(message);
   }
-  if (isCompleteTurn(current)) yield { sourceId: current[0]!.sourceId, conversationId, turnIndex, messages: current };
+  if (shouldEmitTurn(current)) yield { sourceId: current[0]!.sourceId, conversationId, turnIndex, messages: current };
+}
+
+function shouldEmitTurn(messages: readonly ConversationMessage[]): boolean {
+  return messages.length > 0 && (messages[0]!.sourceId === "codex" || isCompleteTurn(messages));
+}
+
+function beginsNextTurn(current: readonly ConversationMessage[], next: ConversationMessage): boolean {
+  if (next.sourceId === "codex") {
+    const currentId = current[0]!.rawMeta.sourceTurnId;
+    const nextId = next.rawMeta.sourceTurnId;
+    if (currentId || nextId) return currentId !== nextId;
+  }
+  return next.role === "user";
 }
 
 export function isCompleteTurn(messages: readonly ConversationMessage[]): boolean {
@@ -212,6 +228,10 @@ export function conversationContentHash(messages: Iterable<ConversationMessage>)
 }
 
 export function stableTurnIdentity(turn: ImportedTurn): string {
+  const nativeId = turn.messages[0]?.rawMeta.sourceTurnId;
+  if (turn.sourceId === "codex") {
+    return `${turn.sourceId}::${turn.conversationId}::${typeof nativeId === "string" ? nativeId : turn.messages[0]?.messageId ?? "unresolved"}`;
+  }
   const firstUser = turn.messages.find((message) => message.role === "user");
   if (!firstUser) throw new Error("turn is missing user message");
   return `${turn.sourceId}::${turn.conversationId}::${firstUser.messageId}`;

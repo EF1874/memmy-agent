@@ -81,11 +81,14 @@ export class MemoryDb {
 
 function packagedNativeBindingPath(): string | undefined {
   if (!(process as NodeJS.Process & { pkg?: unknown }).pkg) return undefined;
-  const source = resolve(
-    dirname(fileURLToPath(import.meta.url)),
-    "../../../../node_modules/better-sqlite3/build/Release/better_sqlite3.node"
-  );
-  if (!existsSync(source)) return undefined;
+  const moduleDir = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    resolve(moduleDir, "../../../node_modules/better-sqlite3/build/Release/better_sqlite3.node"),
+    resolve(moduleDir, "node_modules/better-sqlite3/build/Release/better_sqlite3.node"),
+    resolve(moduleDir, "../../../../node_modules/better-sqlite3/build/Release/better_sqlite3.node")
+  ];
+  const source = candidates.find((candidate) => existsSync(candidate));
+  if (!source) return undefined;
   return packagedNativeAssetPath(source);
 }
 
