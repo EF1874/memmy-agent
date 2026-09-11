@@ -1052,7 +1052,7 @@ export class FeishuChannel extends BaseChannel {
     ) {
       contentParts.push(extractShareCardContent(contentJson, msgType));
     } else {
-      contentParts.push(MSG_TYPE_MAP[msgType] ?? `[${msgType}]`);
+      if (!mediaPaths.length) contentParts.push(MSG_TYPE_MAP[msgType] ?? `[${msgType}]`);
     }
     const parentId = message.parent_id ?? message.parentId ?? null;
     const rootId = message.root_id ?? message.rootId ?? null;

@@ -467,6 +467,31 @@ export const CompleteTurnOutputSchema = z.object({
 });
 export type CompleteTurnOutput = z.infer<typeof CompleteTurnOutputSchema>;
 
+/** Completed native Agent turn shared by Hook and automatic scanning. */
+export const SourceTurnCompleteInputSchema = CompleteTurnInputSchema.omit({ sessionId: true }).extend({
+  sessionId: NonEmptyStringSchema.optional(),
+  sourceTurn: z.object({
+    source: NonEmptyStringSchema,
+    profileId: NonEmptyStringSchema,
+    conversationId: NonEmptyStringSchema,
+    turnId: NonEmptyStringSchema,
+    startedAt: IsoTimeSchema,
+    completedAt: IsoTimeSchema,
+    sequence: z.number().int().nonnegative().optional(),
+    completionEvidence: NonEmptyStringSchema
+  }),
+  channel: z.enum(["hook", "agent_source_scan"]),
+  workspacePath: z.string().optional()
+});
+export type SourceTurnCompleteInput = z.infer<typeof SourceTurnCompleteInputSchema>;
+
+export const SourceTurnCompleteOutputSchema = z.object({
+  status: z.enum(["stored", "existing", "rejected", "pending", "conflict"]),
+  reason: z.string().optional(),
+  result: CompleteTurnOutputSchema.partial({ changeSeq: true }).optional()
+});
+export type SourceTurnCompleteOutput = z.infer<typeof SourceTurnCompleteOutputSchema>;
+
 /** Definition for search input. */
 export const SearchInputSchema = RuntimeRequestFieldsSchema.extend({
   query: NonEmptyStringSchema,

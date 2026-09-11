@@ -652,6 +652,7 @@ verify_packaged_mac_unpacked_artifacts() {
   app_path="$(resolve_packaged_mac_app_path "$target_cpu")"
   local unpacked_runtime="$app_path/Contents/Resources/app.asar.unpacked/dist/runtime"
   local packaged_memory_runtime="$app_path/Contents/Resources/memory-runtime"
+  local packaged_agent_source_core="$packaged_memory_runtime/node_modules/@memmy/agent-source-core"
   local packaged_embedding_model="$app_path/Contents/Resources/embedding-models/$EMBEDDING_MODEL_ID"
 
   require_packaged_runtime_file "$app_path/Contents/Resources/app.asar"
@@ -661,6 +662,14 @@ verify_packaged_mac_unpacked_artifacts() {
   require_packaged_runtime_file "$packaged_memory_runtime/memory-runtime.json"
   require_packaged_runtime_file "$packaged_memory_runtime/dist/src/server/index.js"
   require_packaged_runtime_file "$packaged_memory_runtime/dist/src/cli/index.js"
+  require_packaged_runtime_file "$packaged_memory_runtime/dist/src/agent-source/integration/workspace-bridge/memmy-workspace-bridge.mjs"
+  require_packaged_runtime_file "$packaged_agent_source_core/package.json"
+  require_packaged_runtime_file "$packaged_agent_source_core/dist/src/index.js"
+  require_packaged_runtime_file "$packaged_agent_source_core/dist/src/codex-source-turn.js"
+  if [ -L "$packaged_agent_source_core" ]; then
+    echo "Packaged offline Memory agent source core must not be a symbolic link." >&2
+    exit 1
+  fi
   require_packaged_runtime_file "$packaged_memory_runtime/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
   require_packaged_runtime_glob "$packaged_memory_runtime/node_modules/sqlite-vec-darwin-$target_cpu/vec0.*"
   require_packaged_runtime_file "$packaged_memory_runtime/node_modules/onnxruntime-node/bin/napi-v3/darwin/$target_cpu/onnxruntime_binding.node"
